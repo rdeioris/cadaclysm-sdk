@@ -425,6 +425,7 @@ function _lib() {
     schema: f('const char *cadaclysm_schema(const CadaclysmScene *scene)'),
     schema_read: f('const char *cadaclysm_schema_read(const CadaclysmScene *scene)'),
     metres_per_unit: f('double cadaclysm_metres_per_unit(const CadaclysmScene *scene)'),
+    tolerances: f('bool cadaclysm_tolerances(const CadaclysmScene *scene, _Out_ double *absolute, _Out_ double *angular)'),
     bounds: f('CadaclysmBounds cadaclysm_bounds(const CadaclysmScene *scene)'),
     node_parent: f('uint32_t cadaclysm_node_parent(const CadaclysmScene *scene, uint32_t node)'),
     node_child_count: f('uint32_t cadaclysm_node_child_count(const CadaclysmScene *scene, uint32_t node)'),
@@ -1627,6 +1628,8 @@ class TaskLink {
 class Task {
   constructor(schedule, index) { this.schedule = schedule; this.index = index; }
   equals(other) { return other instanceof Task && other.index === this.index && other.schedule.equals(this.schedule); }
+  /** The index of the work schedule this task belongs to (`scene.schedules()[i]`). */
+  get scheduleIndex() { return this.schedule.index; }
   get name() { return _text(_lib().task_name(this.schedule._scene._handle, this.schedule.index, this.index)); }
   /** Its identification, `''` where none. */
   get identification() { return _text(_lib().task_identification(this.schedule._scene._handle, this.schedule.index, this.index)); }
@@ -2123,6 +2126,20 @@ class Scene {
   /** The archive member this was read from (`open` on a `.zip` chose one), or null for a plain file. */
   get sourceName() { const raw = _lib().source_name(this._handle); return raw ? String(raw) : null; }
   get metresPerUnit() { return _lib().metres_per_unit(this._handle); }
+  /**
+   * What the file declares about its own precision, `{ absolute, angular }`: the absolute
+   * tolerance in the file's own unit (beside `metresPerUnit`, whatever convention the scene was
+   * opened into) and the angular one in radians, null for one it does not declare -- a 3dm's
+   * units and tolerances, STEP's uncertainty, SAT's `resabs`, IGES's resolution; other formats
+   * declare nothing. Each body read from the file carries a copy, which the kernel's verbs given
+   * a null tolerance work from.
+   */
+  get tolerances() {
+    const absolute = new Float64Array(1), angular = new Float64Array(1);
+    if (!_lib().tolerances(this._handle, absolute, angular)) throw new CadaclysmError('tolerances: the scene is closed');
+    const declared = (v) => (Number.isNaN(v) ? null : v);
+    return Object.freeze({ absolute: declared(absolute[0]), angular: declared(angular[0]) });
+  }
   /** The whole document's box, which meshes all of it. */
   get bounds() { const b = _lib().bounds(this._handle); return new Bounds(b.min, b.max); }
   /** `bounds` in `double`: the same union box, unnarrowed. **This meshes all of it.** */

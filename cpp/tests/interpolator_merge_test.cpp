@@ -319,7 +319,7 @@ static Result<void> merge_refusals() {
     refused(m.mass(), "mass_properties: the mass needs a manifold solid", "mass of a merge");
     refused_with(m.region_solid(0), "region_solid: region 0 is the infinite region", "region 0");
     refused_with(m.region_solid(4), "region_solid: region 4 is not below 4", "region 4");
-    refused(a.merge(a, 0.0), "merge: tolerance must be positive and finite", "tolerance 0");
+    refused(a.merge(a, -1.0), "merge: tolerance must be positive and finite", "tolerance -1");
     CADACLYSM_TRY(cell, m.region_solid(1));
     CADACLYSM_TRY(joined, cell.join(a, MERGE_TOL));
     check(joined.faces() > 0, "a cell is an ordinary solid again");

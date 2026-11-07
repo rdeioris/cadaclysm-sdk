@@ -11,6 +11,8 @@
 // cadaclysm.lic as the libraries look for it otherwise -- is loaded into
 // both modules.
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 
 /** The wrapper `name` beside this file (`node/`), beside a sibling `node/` (the SDK's `samples/`), or installed. */
 function load(name) {
@@ -79,6 +81,15 @@ function main() {
       const fem = body.femMesh();
       try { femCheck(fem, 'fem (reader)'); } finally { fem.free(); }
     }
+    // The scene saved as a Rhino .3dm (its meshes), read back to the same meshable nodes.
+    const sceneRhino = path.join(os.tmpdir(), `cadaclysm-smoke-node-${process.pid}.3dm`);
+    scene.save(sceneRhino, '3dm');
+    const savedRhino = cad.open(sceneRhino);
+    try {
+      const meshable = savedRhino.nodes().filter((n) => n.canMesh).length;
+      if (!meshable || meshable !== scene.nodes().filter((n) => n.canMesh).length) throw new Error(`save 3dm: the scene reads back with ${meshable} meshable nodes`);
+      console.log(`save 3dm: ${meshable} meshable node(s) read back`);
+    } finally { savedRhino.close(); fs.rmSync(sceneRhino, { force: true }); }
   } finally { scene.close(); }
   if (sample.endsWith('cube.scad')) {
     const cube = [0, 1, 2].every((i) => bounds.min[i] === 0 && bounds.max[i] === 20);
@@ -111,6 +122,34 @@ function main() {
     console.log(`fem (kernel): the frame turns and moves the cuboid into x ${got[0]}..${got[1]}, y ${got[2]}..${got[3]}`);
   } finally { fem.free(); placed.close(); }
 
+  // A Rhino .3dm, bytes and file, read back through the reader -- the file with
+  // `Solid.openAll`, the bytes with `openMemory` and `Solid.fromNode` -- to the box's six
+  // faces and its volume.
+  const rhino = box.rhino3dmBytes();
+  if (!rhino.subarray(0, 24).equals(Buffer.from('3D Geometry File Format '))) throw new Error('3dm: the bytes are not an openNURBS file');
+  const rhinoPath = path.join(os.tmpdir(), `cadaclysm-smoke-node-brick-${process.pid}.3dm`);
+  try {
+    box.write3dm(rhinoPath);
+    if (!fs.readFileSync(rhinoPath).equals(rhino)) throw new Error('3dm: the file is not the bytes');
+    const brick = (s, what) => {
+      const volume = s.mass().volume;
+      if (s.faces !== 6 || Math.abs(volume - 6000) > 6e-6) throw new Error(`3dm: ${what} reads back as ${s.faces} faces, volume ${volume}`);
+    };
+    const back = bs.Solid.openAll(rhinoPath);
+    if (back.length !== 1) throw new Error(`3dm: the file reads back as ${back.length} solids`);
+    brick(back[0], 'the file');
+    back[0].close();
+    const memory = cad.openMemory(rhino, '3dm', { name: 'brick.3dm' });
+    try {
+      const bodies = memory.nodes().filter((n) => n.canMesh);
+      if (bodies.length !== 1) throw new Error(`3dm: the bytes open as ${bodies.length} meshable nodes`);
+      const fromBytes = bs.Solid.fromNode(memory, bodies[0]);
+      brick(fromBytes, 'the bytes');
+      fromBytes.close();
+    } finally { memory.close(); }
+  } finally { fs.rmSync(rhinoPath, { force: true }); }
+  console.log(`3dm: ${rhino.length} bytes, read back to 6 faces and 6000 mm3`);
+
   // STEP out, with no schema: the kernel writes against its own built-in AP203.
   const text = box.stepText();
   console.log(`STEP: ${text.length} bytes with the built-in AP203`);
@@ -125,6 +164,39 @@ function main() {
     const size = b.size.map(Math.round);
     if (size.join() !== '10,20,30') throw new Error(`the cuboid did not come back 10 x 20 x 30, but ${size.join(' x ')}`);
   } finally { built.close(); }
+
+  // Tolerances: hole2.3dm (a root sample beside samples/, scripts/link-samples.py) declares an
+  // absolute 0.01 and one degree; a boolean given a null tolerance works at the inputs'
+  // effective one, declares nothing for built primitives, and is the explicit-effective boolean.
+  const hole2 = path.join(path.dirname(path.dirname(path.resolve(sample))), 'hole2.3dm');
+  if (require('node:fs').existsSync(hole2)) {
+    const declared = cad.open(hole2);
+    try {
+      const t = declared.tolerances;
+      if (t.absolute !== 0.01 || t.angular !== 0.017453292519943295) throw new Error(`hole2.3dm declares ${JSON.stringify(t)}`);
+    } finally { declared.close(); }
+  } else if (!process.env.CADACLYSM_SAMPLES_OPTIONAL) {
+    throw new Error(`${hole2} is missing: run scripts/link-samples.py`);
+  }
+  const block = bs.Solid.cuboid(10, 10, 10);
+  const pin = bs.Solid.cylinder(3, 20).translate(0, 0, -5);
+  const at = bs.effectiveTolerance(block, pin);
+  if (!(Math.abs(at - 1e-4 * 20) < 1e-3)) throw new Error(`effective_tolerance reads ${at}`);
+  const unset = block.cut(pin, null);
+  const explicit = block.cut(pin, at);
+  const none = unset.tolerances;
+  if (none.absolute !== null || none.angular !== null) throw new Error(`an unset cut declares ${JSON.stringify(none)}`);
+  if (unset.mass(1e-7).volume !== explicit.mass(1e-7).volume) throw new Error('an unset cut is not the explicit-effective one');
+  if (unset.mesh(null).indexCount !== explicit.mesh(bs.effectiveTolerance(explicit)).indexCount) throw new Error('an unset mesh is not the explicit-effective one');
+  const loose = block.withTolerances(0.1);
+  if (loose.tolerances.absolute !== 0.1 || loose.tolerances.angular !== null || bs.effectiveTolerance(loose, pin) !== 0.1) throw new Error('with_tolerances: 0.1 is not declared');
+  if (loose.cut(pin, 0).tolerances.absolute !== 0.1) throw new Error('a cut does not inherit the loosest declaration');
+  if (block.vertexTolerance([5, 5, 5]) !== null) throw new Error('a built cuboid records a vertex tolerance');
+  let refusedNegative = '';
+  try { block.withTolerances(-1); } catch (e) { refusedNegative = e.message; }
+  if (!refusedNegative.startsWith('solid_with_tolerances: ')) throw new Error(`with_tolerances: -1 reads '${refusedNegative}'`);
+  if (bs.effectiveTolerance() !== 0) throw new Error('effective_tolerance of nothing is not 0');
+  console.log(`tolerances: effective ${at}, an unset cut is the explicit one`);
 }
 
 try { main(); } catch (e) { console.error(e.message); process.exit(1); }

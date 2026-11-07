@@ -699,6 +699,9 @@ func test_a_file_reads_its_work_schedule():
 	eq(slab.kind_name, "")
 	eq(topping.milestone, true)
 	eq(slab.milestone, false)
+	for task in tasks:
+		eq(task.schedule_index, 0)
+	eq(fit.schedule_index, s.index)
 	eq(slab.identification, "T1")
 	eq(slab.status, "COMPLETED")
 	var time: CadaclysmTaskTime = slab.time

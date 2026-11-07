@@ -44,12 +44,14 @@ return function(t)
       { "job", function() return handle_of(bs.Job.new(stock, 20)) end },
       { "assembly", function() return handle_of(bs.Assembly.new("dropped")) end },
       { "subd", function() return handle_of(bs.Subd.cuboid()) end },
+      { "nurbs_curve", function() return handle_of(bs.NurbsCurve({ { 0, 0, 0 }, { 1, 1, 0 } }, 1)) end },
       { "sketch", function() return handle_of(bs.Sketch.new()) end },
       { "collider", function() return handle_of(bs.Collider.new({ a, b }, 0.05)) end },
       { "thickness_gauge", function() return handle_of(bs.ThicknessGauge.new({ a }, 0.05)) end },
       { "collisions", function() return collider:check({ IDENTITY, IDENTITY })[1]._collisions end },
       { "fem_mesh", function() return handle_of(a:fem_mesh(0.5)) end },
       { "tessellation", function() return (a:mesh(0.5))._held._ptr end },
+      { "document", function() return handle_of(bs.Document.new()) end },
     }
     for _, case in ipairs(cases) do dropped_are_freed(t, case[1], case[2]) end
     collider:close()

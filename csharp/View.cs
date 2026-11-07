@@ -18,7 +18,7 @@ using System.IO.Compression;
 using System.Runtime.InteropServices;
 using Cadaclysm.Blacksmith;
 
-namespace Cadaclysm.Viewing;
+namespace Cadaclysm.Viewer;
 
 /// <summary>What a view library refused, in its own words.</summary>
 public sealed class ViewException : Exception
@@ -446,13 +446,15 @@ public static unsafe class ViewLibrary
                 + $"-- reinstall cadaclysm, set {variable} to it, or ViewLibrary.UseTerminal()");
     }
 
-    /// <summary>Where a library named `name` is looked for from `here`: beside it, then every ancestor's
-    /// lib/, and only then every ancestor's target/release and target/debug (Node's, Java's and Lua's order).</summary>
+    /// <summary>Where a library named `name` is looked for from `here`: beside it, then where the NuGet package
+    /// puts it (Loader.PackageDirectories), then every ancestor's lib/, and only then every ancestor's
+    /// target/release and target/debug (Node's, Java's and Lua's order).</summary>
     internal static List<string> SearchOrder(string? here, string name)
     {
         var searched = new List<string>();
         if (string.IsNullOrEmpty(here)) return searched;
         searched.Add(System.IO.Path.Combine(here, name));
+        searched.AddRange(Loader.PackageDirectories(here).Select(d => System.IO.Path.Combine(d, name)));
         var ancestors = new List<string>();
         for (var dir = here; !string.IsNullOrEmpty(dir); dir = System.IO.Path.GetDirectoryName(dir)) ancestors.Add(dir);
         foreach (var dir in ancestors) searched.Add(System.IO.Path.Combine(dir, "lib", name));

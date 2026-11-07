@@ -15,6 +15,17 @@
  * `common` default `tolerance` to 0.05 (the tolerance the crate's own boolean
  * tests run at); `fillet`, `chamfer` and `shell` to 1e-6.
  *
+ * Tolerances: every default stays what it is -- `a.join(b)` still means 0.05. Passing
+ * `null` (or 0) as the `tolerance` of a verb that takes a distance tolerance -- a
+ * boolean, fillet, shell, split, section, hit test, mesh, curve fit or profile verb --
+ * opts into the model's own: `effectiveTolerance(...solids)`, the larger of the
+ * loosest absolute tolerance the inputs declare and the option `tolerance.relative`
+ * (default 1e-4) times their size. A solid declares what its file said
+ * (`Solid.tolerances`, null for what it did not say; the reader's `Scene.tolerances` is
+ * the file's), every verb's result inherits the loosest of its inputs', and
+ * `Solid.withTolerances` sets it. `tolerance.angular` (default one degree) stands in
+ * where nothing declares an angle.
+ *
  * In a browser the same file runs over the wasm build of the library
  * (crates/cadaclysm-wasm, as the site's notebook loads it): `globalThis.cadaclysm`
  * holds the module's exports, `require` is the page's and hands back null for
@@ -111,14 +122,17 @@ koffi.opaque('CadaclysmBlacksmithClashes');
 koffi.opaque('CadaclysmBlacksmithClassifier');
 koffi.opaque('CadaclysmBlacksmithCollider');
 koffi.opaque('CadaclysmBlacksmithCollisions');
+koffi.opaque('CadaclysmBlacksmithDocument');
 koffi.opaque('CadaclysmBlacksmithFemMesh');
 koffi.opaque('CadaclysmBlacksmithHeal');
 koffi.opaque('CadaclysmBlacksmithHealth');
+koffi.opaque('CadaclysmBlacksmithHistory');
 koffi.opaque('CadaclysmBlacksmithHits');
 koffi.opaque('CadaclysmBlacksmithInterpolator');
 koffi.opaque('CadaclysmBlacksmithIntersection');
 koffi.opaque('CadaclysmBlacksmithJob');
 koffi.opaque('CadaclysmBlacksmithMeshThicknesses');
+koffi.opaque('CadaclysmBlacksmithNurbsCurve');
 koffi.opaque('CadaclysmBlacksmithOperations');
 koffi.opaque('CadaclysmBlacksmithPath');
 koffi.opaque('CadaclysmBlacksmithProfile');
@@ -211,6 +225,52 @@ const CadaclysmBlacksmithAt = koffi.struct('CadaclysmBlacksmithAt', {
   segment: 'uint32_t',
   error: 'double',
   from_polyline: 'int32_t',
+});
+// A curve's bending at a parameter: kappa, the Frenet frame, the osculating circle's centre and a
+// bool (int32) for whether there is one.
+const CadaclysmBlacksmithCurvature = koffi.struct('CadaclysmBlacksmithCurvature', {
+  kappa: 'double',
+  tangent: koffi.array('double', 3),
+  normal: koffi.array('double', 3),
+  binormal: koffi.array('double', 3),
+  centre: koffi.array('double', 3),
+  has_centre: 'int32_t',
+});
+// How well two faces meet along their sides (`continuity`), one side of an N-sided patch's hole
+// (a sheet's side, or a curve where `sheet` is null), what the patch reports, and what a join
+// did; the C layout's own padding (a uint32_t before a double) is koffi's to place.
+const CadaclysmBlacksmithContinuity = koffi.struct('CadaclysmBlacksmithContinuity', {
+  gap: 'double',
+  gap_at: koffi.array('double', 3),
+  angle: 'double',
+  angle_at: koffi.array('double', 3),
+  curvature: 'double',
+  curvature_at: koffi.array('double', 3),
+  samples: 'uint32_t',
+});
+const CadaclysmBlacksmithPatchBoundary = koffi.struct('CadaclysmBlacksmithPatchBoundary', {
+  sheet: 'const CadaclysmBlacksmithSolid *',
+  face: 'uint32_t',
+  side: 'uint32_t',
+  from: 'double',
+  to: 'double',
+  level: 'uint32_t',
+  curve: 'const CadaclysmBlacksmithNurbsCurve *',
+});
+const CadaclysmBlacksmithPatchReport = koffi.struct('CadaclysmBlacksmithPatchReport', {
+  faces: 'uint32_t',
+  boundary: 'CadaclysmBlacksmithContinuity',
+  internal: 'CadaclysmBlacksmithContinuity',
+  corner_angle: 'double',
+});
+const CadaclysmBlacksmithJoinReport = koffi.struct('CadaclysmBlacksmithJoinReport', {
+  sewn: 'uint32_t',
+  naked_before: 'uint32_t',
+  naked_after: 'uint32_t',
+  refused: 'uint32_t',
+  turned: 'uint32_t',
+  worst_gap: 'double',
+  closed: 'int32_t',
 });
 // One R-tree hit (search, within, nearest): the entry's id and the distance from the query point
 // to its box, 0 for a search hit; and one overlapping pair of entry ids. Read out of an owned
@@ -611,6 +671,8 @@ function _wasmLibrary(w) {
     // `fs` as `step`/`sat`/`svg` do, so this is the shape a direct `_lib()` call
     // would still get right rather than a path this module takes.
     'fem_mesh_save_msh',
+    // `brep` the same: its export always throws ("the wasm writes no file"), C's false
+    'brep',
     // job_machine's CAM report: item `i`'s location, x/y/z, written to a `double *`
     // out-param natively, returned as a plain array by the wasm export (see OUT below).
     'report_at',
@@ -644,7 +706,28 @@ function _wasmLibrary(w) {
     'curve_value_closest_point', 'circle_through', 'arc_through', 'arc_from_start_tangent_end', 'ellipse_from_circle',
     'surface_value_point_at', 'surface_value_normal_at', 'surface_value_closest_point', 'surface_value_domain',
     'solid_value_area', 'solid_value_volume', 'cuboid_from_bounds', 'cuboid_around', 'cuboid_corners', 'cuboid_point_at',
-    'cuboid_closest_point', 'frame_fit']);
+    'cuboid_closest_point', 'frame_fit',
+    'rectangle_corners', 'rectangle_area', 'rectangle_closest_point', 'triangle_area', 'triangle_perimeter',
+    'triangle_centroid', 'triangle_circumcircle', 'triangle_point_at', 'triangle_barycentric',
+    'triangle_closest_point', 'triangle_edge', 'ray_point_at', 'ray_closest_point',
+    // identity: an origin C writes through two out-pointers (the export returns `[operand, id]`,
+    // see `back`), and the edge and vertex references' out-arrays (OUT)
+    'face_origin_at', 'edge_origin_at', 'edge_ref', 'vertex_ref',
+    // tolerances: the declaration's two out-doubles (the export returns them, see `back`)
+    'solid_tolerances',
+    // NurbsCurve's readers: a success flag, the answer in the out-array (OUT) or the record (`back`);
+    // `nurbs_curve_tween` writes its handles (`back`). `is_rational` and `is_closed` are absent, as
+    // `box_overlaps` is: their C return is the answer
+    'nurbs_curve_control_points', 'nurbs_curve_weights', 'nurbs_curve_knots', 'nurbs_curve_domain',
+    'nurbs_curve_point', 'nurbs_curve_derivatives', 'nurbs_curve_curvature', 'nurbs_curve_length',
+    'nurbs_curve_point_at_length', 'nurbs_curve_tween',
+    // the sheets' continuity: a success flag, the record in `back`
+    'continuity',
+    // the document: the four calls whose export returns nothing and C a success flag
+    'document_preview_begin', 'document_batch_begin', 'document_branch_rename', 'document_branch_delete']);
+  // C names whose wasm export is spelled otherwise, by short name: the wasm's IFC export has no
+  // `document_` in its name. Every other `bim_*` short is the wasm's `cadaclysm_bim_*` as it is.
+  const RENAMED = { bim_document_export_ifc: 'cadaclysm_bim_export_ifc' };
   // the sketch's lent `const uint32_t *` lists, by the position of their `size_t *count`: the
   // export returns the list itself (a `Uint32Array`), which `back` hands on as the "pointer"
   // (`_uint32s` passes a typed array through) with its length written into the count
@@ -655,11 +738,14 @@ function _wasmLibrary(w) {
     step: null, sat_text: null, svg_text: null, drawing_svg_text: null, silhouette_beziers: null, face_kind: null, brep_layout_id: null,
     fem_mesh_msh_text: null, solid_name: null, solid_material: null, solid_style_location: null,
     solid_style_identification: null, assembly_name: null, assembly_place_solid: null,
-    assembly_place_assembly: null, assembly_step: null,
+    assembly_place_assembly: null, assembly_step: null, '3dm_bytes': null, assembly_3dm_bytes: null,
     // the wasm lists an assembly's parts in one call (`Assembly.parts`): null when it threw
     assembly_parts: null,
     // the CAM getters: NONE and NaN are the C ABI's own refusals for them
     tool_number: NONE, tool_shape: null, tool_diameter: NaN, tool_flute_length: NaN, tool_angle: NaN, tool_corner_radius: NaN,
+    // the CAM lists' readers: C's UINT32_MAX for a refused count or tool, NaN for a refused figure
+    operations_count: NONE, operations_param_count: NONE, operations_tool: NONE, operations_param_value: NaN,
+    programs_count: NONE, programs_tool: NONE, report_count: NONE, report_bottom: NaN, report_top: NaN, report_size: NaN,
     // the sketch's ids start at 0, so a refused id-returning call must come back as C's NONE,
     // not the generic 0; its double readers as C's NaN; its lists as C's null
     sketch_add_point: NONE, sketch_add_line: NONE, sketch_add_circle: NONE, sketch_add_arc: NONE,
@@ -675,7 +761,15 @@ function _wasmLibrary(w) {
     transform_is_rigid: NONE, transform_is_similarity: NaN,
     // the values: containment's NONE; `value_size`'s export throws on an unknown kind, where
     // C answers 0
-    solid_value_contains: NONE, value_size: 0,
+    solid_value_contains: NONE, value_size: 0, rectangle_contains: NONE,
+    // identity: C's NONE for a refused count and for "no face has the id"; -2 for a malformed
+    // face, edge or vertex reference (-1, "gone", is an answer); null for a refused attribute read
+    face_with_id: NONE, edge_with_id: NONE, face_origin_count: NONE, edge_origin_count: NONE,
+    find_face: -2, find_edge: -2, find_vertex: -2, attribute: null, face_attribute: null,
+    // tolerances: C's NaN for a refusal, never the generic 0 (0 is an effective tolerance)
+    effective_tolerance: NaN, vertex_tolerance: NaN,
+    // a profile list's count: C reserves NONE for a node that is not one
+    document_result_profile_count: NONE,
     ...Object.fromEntries(Object.keys(LISTS).map((short) => [short, null])) };
   // results that C writes into an out-array of doubles at this position, and the
   // wasm returns as an array (`bounds` fills two, `edge` and `hit` a record: see `back`)
@@ -695,12 +789,28 @@ function _wasmLibrary(w) {
     curve_value_closest_point: 3, circle_through: 3, arc_through: 3, arc_from_start_tangent_end: 3,
     ellipse_from_circle: 1, surface_value_point_at: 4, surface_value_normal_at: 4, surface_value_closest_point: 3,
     surface_value_domain: 2, cuboid_from_bounds: 2, cuboid_around: 3, cuboid_corners: 1, cuboid_point_at: 4,
-    cuboid_closest_point: 2,
+    cuboid_closest_point: 2, rectangle_corners: 1, rectangle_closest_point: 3, triangle_centroid: 1,
+    triangle_circumcircle: 1, triangle_point_at: 4, triangle_barycentric: 2, triangle_closest_point: 2,
+    triangle_edge: 2, ray_point_at: 2, ray_closest_point: 2,
     // a swept clash's interval, `[start, end]`
-    swept_clashes_interval: 3 };
+    swept_clashes_interval: 3,
+    // the edge and vertex references
+    edge_ref: 2, vertex_ref: 2,
+    // a curve's reads: their one out-array, last
+    nurbs_curve_control_points: 1, nurbs_curve_weights: 1, nurbs_curve_knots: 1, nurbs_curve_domain: 1,
+    nurbs_curve_point: 2, nurbs_curve_derivatives: 3 };
   // the value calls whose export returns a plain number (not an array, as OUT's), written into
   // the one-double out-array at this position
-  const SCALARS = { curve_value_length: 2, solid_value_area: 2, solid_value_volume: 2 };
+  const SCALARS = { curve_value_length: 2, solid_value_area: 2, solid_value_volume: 2, rectangle_area: 1,
+    triangle_area: 1, triangle_perimeter: 1 };
+  // `uint64_t` arguments, by position: an id crosses into the wasm as a `BigInt` (the export's
+  // `u64` refuses a plain number)
+  const U64_ARGS = { face_with_id: [1], edge_with_id: [1] };
+  // optional vectors, by position among the arguments the export takes
+  const OPTIONAL_ARGS = { sweep_rail: [3], split_by_curve: [2], trim_by_curve: [2], extrude_to: [2] };
+  // `uint64_t` returns: the export's `BigInt`, handed back as a number, as koffi does (ids count
+  // up from 1 per solid, far below 2**53)
+  const U64_RETURNS = new Set(['face_id', 'edge_id']);
   // argument positions the C call has and the wasm call does not: an array's
   // count (a typed array knows its length), the progress `user` pointer, and
   // the out-arguments above
@@ -716,7 +826,9 @@ function _wasmLibrary(w) {
     job_stock: [1, 2],
     profile_round: [3], profile_spline: [1], profile_chain: [1], profile_from_loops: [1], profile_piece_count: [2], profile_piece: [2],
     profile_trim_count: [2], profile_trim_chain: [2], loft_through: [2], loft_through_open: [2], fillet: [2, 6], chamfer: [2], shell: [3, 6],
-    thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], split_by_profile: [5], step: [1], sat_text: [1], svg_text: [1], drawing_svg_text: [1, 3], profile_text: [4],
+    thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], split_by_profile: [5], step: [1], sat_text: [1], brep: [1], svg_text: [1], drawing_svg_text: [1, 3], profile_text: [4],
+    // a `.3dm`'s solids count and its `size_t *len`, which `back` fills from the bytes returned
+    '3dm_bytes': [1, 3], assembly_3dm_bytes: [2],
     // the count out-param: the export returns the curves' own array (see `back`)
     silhouette_beziers: [2],
     slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], box: [1, 2], edge: [2], colour: [2], profile_colour: [1], edges_coloured: [2], edge_colour: [2], parse_colour: [1], manifold: [1], hit: [2], edge_curve: [2],
@@ -784,6 +896,29 @@ function _wasmLibrary(w) {
     // the sketch: `add_nurbs`' point and knot counts, `constrain`'s ref count, `drag`'s count
     // and report, the other out-arrays (OUT) and every list's count (LISTS)
     sketch_add_nurbs: [4, 7], sketch_constrain: [3], sketch_drag: [3, 4],
+    // identity: an origin's two out-pointers (the export returns the pair) and the references'
+    // out-arrays
+    face_origin_at: [3, 4], edge_origin_at: [3, 4], edge_ref: [2], vertex_ref: [2],
+    // tolerances: the solids count (a typed array knows its length), the declaration's outs
+    effective_tolerance: [1], solid_tolerances: [1, 2],
+    // NurbsCurve: the point, weight, knot and curve counts (a typed array knows its length); a
+    // fitted curve's `error_out` and the tweens' `out`, which `back` fills from the exports'
+    // returns; the reads' out-arrays and records
+    nurbs_curve_new: [1, 5], nurbs_curve_through: [1], nurbs_curve_fit: [1, 4],
+    nurbs_curve_projected_to_face: [5], nurbs_curve_pulled_to_face: [4], nurbs_curve_joined: [1],
+    nurbs_curve_tween: [7], nurbs_curve_control_points: [1], nurbs_curve_weights: [1],
+    nurbs_curve_knots: [1], nurbs_curve_domain: [1], nurbs_curve_point: [2],
+    nurbs_curve_derivatives: [3], nurbs_curve_curvature: [2], nurbs_curve_length: [2],
+    nurbs_curve_point_at_length: [3],
+    // the sheets from curves, the surface fillets, trim and join: every curve, sheet and edge count
+    // (a typed array knows its length), and the error, rails and report C writes through an
+    // out-argument, which the exports return after the solid (`back`); `n_sided_patch`'s are the
+    // rewritten tuple's (see `call`)
+    loft_curves: [1], sweep_rail: [2, 6], sweep_two_rails: [3, 5], edge_surface: [1, 3],
+    network_surface: [1, 3, 5], continuity: [7], fillet_surfaces: [9, 10, 11], fillet_varying: [2],
+    join_sheets: [1, 3], n_sided_patch: [4], recess: [7],
+    // flange and extrude_to: the edges' count and the error out-argument
+    flange: [2, 6], extrude_to: [2, 7],
     ...Object.fromEntries(Object.entries(OUT).filter(([short]) => short.startsWith('sketch_') && short !== 'sketch_drag').map(([short, at]) => [short, [at]])),
     ...Object.fromEntries(Object.entries(LISTS).map(([short, at]) => [short, [at]])) };
   let error = null;
@@ -805,6 +940,13 @@ function _wasmLibrary(w) {
   );
   /** The wasm's return, as the C call's: written into the out-argument and `true` where C fills one, the arrays under the C struct's names, else as it is. */
   function back(short, args, result) {
+    if (short === '3dm_bytes' || short === 'assembly_3dm_bytes') {
+      // `{ bytes, notes }`: the bytes themselves as the "pointer" (their length into the dropped
+      // `size_t *len`), and what C leaves in `last_error` on success
+      args[args.length - 1][0] = result.bytes.length;
+      error = String(result.notes || '') || null;
+      return result.bytes;
+    }
     if (short in LISTS) {
       // the ids as the "pointer", their count into the dropped `size_t *count` slot
       const count = args[LISTS[short]];
@@ -890,7 +1032,7 @@ function _wasmLibrary(w) {
       raw.centre = v.slice(0, 3); raw.axes = v.slice(3, 12); raw.half = v.slice(12, 15);
       return true;
     }
-    if (short === 'edge_length' || short === 'profile_length') {
+    if (short === 'edge_length' || short === 'profile_length' || short === 'nurbs_curve_length') {
       // 4 numbers: length, error, accuracy_met and from_polyline as 1/0 -- into the out-struct
       // that is the C call's last argument.
       const v = Array.from(result);
@@ -899,11 +1041,80 @@ function _wasmLibrary(w) {
       [raw.length, raw.error, raw.accuracy_met, raw.from_polyline] = v;
       return true;
     }
-    if (short === 'edge_point_at_length' || short === 'profile_point_at_length') {
+    if (short === 'edge_point_at_length' || short === 'profile_point_at_length' || short === 'nurbs_curve_point_at_length') {
       // 10 numbers: point 3, tangent 3, parameter, segment (NONE as 4294967295), error, from_polyline 1/0
       // -- into the out-struct that is the C call's last argument.
       const raw = args[short === 'edge_point_at_length' ? 4 : 3];
       _atFromDoubles(raw, Array.from(result), short, 'not 10');
+      return true;
+    }
+    if (short === 'fillet_surfaces') {
+      // `[sheet, rail_a, rail_b, error]`: each into its out-array (args[9], args[10], args[11])
+      const v = Array.from(result, Number);
+      if (v.length !== 4) throw new Error(`${short}: the wasm returned ${v.length} figures, not 4`);
+      args[9][0] = v[1]; args[10][0] = v[2]; args[11][0] = v[3];
+      return v[0];
+    }
+    if (short === 'join_sheets') {
+      // `[solid, sewn, naked_before, naked_after, refused, turned, worst_gap, closed]`: the report into args[3]
+      const v = Array.from(result, Number);
+      if (v.length !== 8) throw new Error(`${short}: the wasm returned ${v.length} figures, not 8`);
+      const raw = args[3];
+      [raw.sewn, raw.naked_before, raw.naked_after, raw.refused, raw.turned, raw.worst_gap, raw.closed] = v.slice(1, 8);
+      return v[0];
+    }
+    if (short === 'recess') {
+      // `[solid, sheet, fillet, walls, pane]`: the four face counts into the `uint32_t *faces_out` at args[7]
+      const v = Array.from(result, Number);
+      if (v.length !== 5) throw new Error(`${short}: the wasm returned ${v.length} figures, not 5`);
+      for (let i = 0; i < 4; i++) args[7][i] = v[1 + i];
+      return v[0];
+    }
+    if (short === 'continuity') {
+      // 13 numbers in the struct's field order, into the out-record at args[7]
+      const v = Array.from(result, Number);
+      if (v.length !== 13) throw new Error(`${short}: the wasm returned ${v.length} figures, not 13`);
+      _continuityInto(args[7], v, 0);
+      return true;
+    }
+    if (short === 'n_sided_patch') {
+      // `[solid, faces, boundary (13), internal (13), corner_angle]`: the report into args[4]
+      const v = Array.from(result, Number);
+      if (v.length !== 29) throw new Error(`${short}: the wasm returned ${v.length} figures, not 29`);
+      const raw = args[4];
+      raw.faces = v[1]; raw.boundary = {}; raw.internal = {};
+      _continuityInto(raw.boundary, v, 2); _continuityInto(raw.internal, v, 15);
+      raw.corner_angle = v[28];
+      return v[0];
+    }
+    if (short === 'sweep_rail' || short === 'sweep_two_rails' || short === 'edge_surface' || short === 'network_surface'
+      || short === 'flange' || short === 'extrude_to') {
+      // `[sheet, error]`: the error into the one-double `error_out` array, last, the handle returned
+      const v = Array.from(result, Number);
+      if (v.length !== 2) throw new Error(`${short}: the wasm returned ${v.length} figures, not 2`);
+      args[args.length - 1][0] = v[1];
+      return v[0];
+    }
+    if (short === 'nurbs_curve_fit' || short === 'nurbs_curve_projected_to_face' || short === 'nurbs_curve_pulled_to_face') {
+      // `[curve, error]`: the error into the one-double `error_out` array, last, the handle returned
+      const v = Array.from(result, Number);
+      if (v.length !== 2) throw new Error(`${short}: the wasm returned ${v.length} figures, not 2`);
+      args[args.length - 1][0] = v[1];
+      return v[0];
+    }
+    if (short === 'nurbs_curve_tween') {
+      // the tweens' handles, into the caller's `out` array (args[7])
+      const handles = Array.from(result, Number);
+      for (let i = 0; i < handles.length; i++) args[7][i] = handles[i];
+      return true;
+    }
+    if (short === 'nurbs_curve_curvature') {
+      // 14 numbers: kappa, tangent, normal, binormal, centre, has_centre -- into the out-struct at args[2]
+      const v = Array.from(result, Number);
+      if (v.length !== 14) throw new Error(`${short}: the wasm returned ${v.length} figures, not 14`);
+      const raw = args[2];
+      raw.kappa = v[0]; raw.tangent = v.slice(1, 4); raw.normal = v.slice(4, 7);
+      raw.binormal = v.slice(7, 10); raw.centre = v.slice(10, 13); raw.has_centre = v[13];
       return true;
     }
     if (_DIVIDES.has(short)) {
@@ -1107,6 +1318,12 @@ function _wasmLibrary(w) {
     if (short === 'colour' || short === 'profile_colour' || short === 'edge_colour') { if (result == null) return false; args[short === 'profile_colour' ? 1 : 2].set(result); return true; }
     if (short === 'parse_colour') { if (result == null) return false; args[1].set(result); return true; }
     if (short === 'option_get') { args[1][0] = result; return true; }
+    if (short === 'solid_tolerances') {   // `[absolute, angular]`, into the two out-arrays
+      const v = Array.from(result, Number);
+      if (args[1] != null) args[1][0] = v[0];
+      if (args[2] != null) args[2][0] = v[1];
+      return true;
+    }
     if (short === 'manifold') { args[1].set(result); return true; }
     if (short === 'bounds' || short === 'bounds64') { args[2].set(result.slice(0, 3)); args[3].set(result.slice(3, 6)); return true; }
     if (short === 'box' || short === 'job_stock') { args[1].set(result.slice(0, 3)); args[2].set(result.slice(3, 6)); return true; }
@@ -1118,6 +1335,13 @@ function _wasmLibrary(w) {
       if (args[3] != null) args[3][0] = v[12];
       return true;
     }
+    if (short === 'face_origin_at' || short === 'edge_origin_at') {
+      const v = Array.from(result, Number);
+      if (v.length !== 2) throw new Error(`${short}: the wasm returned ${v.length} numbers, not 2`);
+      args[3][0] = v[0]; args[4][0] = v[1];
+      return true;
+    }
+    if (U64_RETURNS.has(short)) return Number(result);
     if (short in SCALARS) { args[SCALARS[short]][0] = Number(result); return true; }
     if (short in OUT) { args[OUT[short]].set(result); return true; }
     if (BOOLS.has(short)) return true;
@@ -1131,6 +1355,8 @@ function _wasmLibrary(w) {
     // the two the C side owns memory for, and the browser has none
     last_error: () => error,
     string_free: () => {},
+    // a `.3dm`'s bytes come back as a `Uint8Array` of the page's own, nothing to release
+    bytes_free: () => {},
     // the curves come back as a JS array; there is no C block to release
     silhouette_beziers_free: () => {},
     /** Every body a file draws, as solid handles -- the wasm reads the file itself, readers and kernel being one module. The wasm's own export, not a C entry point (named so `tests/bindings.rs` does not take it for one). */
@@ -1138,11 +1364,101 @@ function _wasmLibrary(w) {
       const read = w['cadaclysm_blacksmith_' + 'open_file'];
       try { return Array.from(read(bytes, extension), Number); } catch (e) { if (trapped(e)) throw e; throw new BuildError(e.message); }
     },
+    // -- identity: a history is one flat array over the wasm (`_wasmHistory`), not a handle, and
+    // C's readers are answered from it here; `history_free` has nothing to free (the wasm's own
+    // export of that name is the document undo history's, which this never reaches)
+    history: (out, inputs, count) => wasmHistoryOf('history', out, inputs, count),
+    edge_history: (out, inputs, count) => wasmHistoryOf('edge_history', out, inputs, count),
+    history_free: () => {},
+    history_kept_count: (h) => h.kept.length,
+    history_kept_at(h, i, operand, id, outId) {
+      const row = entry('history_kept_at', h.kept, i);
+      if (row === null) return false;
+      [[operand[0], id[0]], outId[0]] = row;
+      return true;
+    },
+    history_modified_count: (h) => h.modified.length,
+    history_modified_at(h, i, operand, id) {
+      const row = entry('history_modified_at', h.modified, i);
+      if (row === null) return false;
+      [operand[0], id[0]] = row[0];
+      return true;
+    },
+    history_modified_output_count(h, i) {
+      const row = entry('history_modified_output_count', h.modified, i);
+      return row === null ? NONE : row[1].length;
+    },
+    history_modified_output_at(h, i, j) {
+      const row = entry('history_modified_output_at', h.modified, i);
+      if (row === null) return 0;
+      if (!(j >= 0 && j < row[1].length)) { error = `history_modified_output_at: output ${j} of ${row[1].length}`; return 0; }
+      return row[1][j];
+    },
+    history_generated_count: (h) => h.generated.length,
+    history_generated_at(h, i) {
+      const row = entry('history_generated_at', h.generated, i);
+      return row === null ? 0 : row;
+    },
+    history_deleted_count: (h) => h.deleted.length,
+    history_deleted_at(h, i, operand, id) {
+      const row = entry('history_deleted_at', h.deleted, i);
+      if (row === null) return false;
+      [operand[0], id[0]] = row;
+      return true;
+    },
+    // -- attributes: the wasm hands a solid's (a face's) keys and values over as two whole
+    // lists; C's count and `_at` readers are answered from them, each refusal under its own C name
+    attribute_count(solid) {
+      const keys = texts('attribute_count', 'attribute_keys', solid);
+      return keys === null ? 0 : keys.length;
+    },
+    face_attribute_count(solid, face) {
+      const keys = texts('face_attribute_count', 'face_attribute_keys', solid, face);
+      return keys === null ? NONE : keys.length;
+    },
+    attribute_key_at: (solid, i) => textAt('attribute_key_at', texts('attribute_key_at', 'attribute_keys', solid), i),
+    attribute_value_at: (solid, i) => textAt('attribute_value_at', texts('attribute_value_at', 'attribute_values', solid), i),
+    face_attribute_key_at: (solid, face, i) => textAt('face_attribute_key_at', texts('face_attribute_key_at', 'face_attribute_keys', solid, face), i),
+    face_attribute_value_at: (solid, face, i) => textAt('face_attribute_value_at', texts('face_attribute_value_at', 'face_attribute_values', solid, face), i),
   };
-  return new Proxy(shim, {
+  /** One history export's flat array as a `_wasmHistory`, or 0 (C's null) with `last_error` set. */
+  function wasmHistoryOf(short, out, inputs, count) {
+    error = null;
+    const handles = Uint32Array.from(Array.from(inputs).slice(0, count), Number);
+    let flat;
+    try { flat = w['cadaclysm_blacksmith_' + short](out, handles); } catch (e) {
+      if (trapped(e)) throw e;
+      error = String(e && e.message ? e.message : e).replace(/^Error: /, '');
+      return 0;
+    }
+    return _wasmHistory(flat);
+  }
+  /** Row `i` of a history list, or null with `last_error` set under `what`. */
+  function entry(what, rows, i) {
+    error = null;
+    if (!(i >= 0 && i < rows.length)) { error = `${what}: entry ${i} of ${rows.length}`; return null; }
+    return rows[i];
+  }
+  /** A whole list export's texts, or null with its refusal renamed to the C reader `what`. */
+  function texts(what, short, ...args) {
+    const result = proxy[short](...args);
+    if (error !== null) {
+      const colon = error.indexOf(':');
+      if (colon >= 0) error = what + error.slice(colon);
+      return null;
+    }
+    return Array.from(result, String);
+  }
+  function textAt(what, list, i) {
+    if (list === null) return null;
+    if (!(i >= 0 && i < list.length)) { error = `${what}: attribute ${i} of ${list.length}`; return null; }
+    return list[i];
+  }
+  const proxy = new Proxy(shim, {
     get(target, short) {
       if (short in target || typeof short !== 'string') return target[short];
-      const name = `cadaclysm_blacksmith_${short}`;
+      // the building documents' entry points keep their own `cadaclysm_bim_` prefix in the wasm
+      const name = RENAMED[short] ?? (short.startsWith('bim_') ? `cadaclysm_${short}` : `cadaclysm_blacksmith_${short}`);
       const fn = w[name];
       if (typeof fn !== 'function') throw new BuildError(`the wasm module has no ${name}: rebuild it with \`sh web/build.sh\``);
       const dropped = DROP[short] ?? [];
@@ -1228,10 +1544,21 @@ function _wasmLibrary(w) {
         // cadaclysm_blacksmith_assembly_link/_state in crates/cadaclysm-wasm/src/blacksmith.rs
         // take a `Vec<String>`, so `arg`'s generic array rule (a JS array is a handle list,
         // turned into a `Uint32Array`) must not touch them.
+        if (short === 'n_sided_patch') {
+          // cadaclysm_blacksmith_n_sided_patch(ids, ranges, bulge, tolerance): the rows (args[0],
+          // args[1] of them) cross as their handles and indices, 5 a row (a null sheet or curve 0),
+          // and the range's two ends, 2 a row; the report (args[4]) is `back`'s
+          const rows = args[0].slice(0, args[1]);
+          args = [Uint32Array.from(rows.flatMap((b) => [b.sheet ?? 0, b.face, b.side, b.level, b.curve ?? 0]), Number),
+            Float64Array.from(rows.flatMap((b) => [b.from, b.to])), args[2], args[3], args[4]];
+        }
         const passed = args.filter((_, i) => !dropped.includes(i))
           .map((a, i) => (((short === 'assembly_link' || short === 'assembly_state') && i === 2)
             || ((short === 'assembly_posed' || short === 'assembly_swept_clash') && i === 1)
             || (short === 'assembly_sequence' && (i === 2 || i === 4)) ? Array.from(a, String) : arg(a)));
+        // the optional `up` / `direction`: NULL natively, undefined over the wasm -- never an empty array
+        if (short in OPTIONAL_ARGS) for (const i of OPTIONAL_ARGS[short]) if (passed[i] === null) passed[i] = undefined;
+        if (short in U64_ARGS) for (const i of U64_ARGS[short]) passed[i] = BigInt(passed[i]);
         let result;
         try { result = fn(...passed); } catch (e) {
           if (trapped(e)) throw e;   // not a refusal: the kernel is dead, and the page reboots it
@@ -1244,13 +1571,49 @@ function _wasmLibrary(w) {
       return call;
     },
   });
+  return proxy;
 }
 
-const _DIVIDES = new Set(['edge_divide_by_count', 'edge_divide_by_length', 'profile_divide_by_count', 'profile_divide_by_length']);
+/**
+ * A history over the wasm: the export's one flat `u64` array, parsed into the four lists
+ * `History` has -- `nk`, then `(operand, id, out)` each; `nm`, then `(operand, id, n, outs...)`
+ * each; `ng`, then the ids; `nd`, then `(operand, id)` each. `_wasmLibrary` answers C's
+ * `history_*` readers from it, so `Solid.history` reads one code path. Python's `_WasmHistory`.
+ */
+function _wasmHistory(flatIn) {
+  const flat = Array.from(flatIn, Number);
+  let at = 0;
+  const take = (n) => {
+    if (at + n > flat.length) throw new BuildError(`history: the wasm returned ${flat.length} numbers, cut short at ${at}`);
+    const out = flat.slice(at, at + n);
+    at += n;
+    return out;
+  };
+  const kept = [];
+  for (let k = take(1)[0]; k > 0; k--) { const [operand, id, out] = take(3); kept.push([[operand, id], out]); }
+  const modified = [];
+  for (let k = take(1)[0]; k > 0; k--) { const [operand, id, n] = take(3); modified.push([[operand, id], take(n)]); }
+  const generated = take(take(1)[0]);
+  const deleted = [];
+  for (let k = take(1)[0]; k > 0; k--) { const [operand, id] = take(2); deleted.push([operand, id]); }
+  if (at !== flat.length) throw new BuildError(`history: the wasm returned ${flat.length} numbers, ${flat.length - at} past the lists`);
+  return { kept, modified, generated, deleted };
+}
+
+const _DIVIDES = new Set(['edge_divide_by_count', 'edge_divide_by_length', 'profile_divide_by_count', 'profile_divide_by_length',
+  'nurbs_curve_divide_by_count', 'nurbs_curve_divide_by_length', 'nurbs_curve_plane_hits', 'nurbs_curve_face_hits']);
 // The R-tree's queries: C hands back an owned `RTreeHits *` / `RTreePairs *` read row by row and
 // freed, the wasm a flat array of 2 doubles a row with no list handle -- so `rtree_hits_*` /
 // `rtree_pairs_*` are native only.
 const _RTREE_QUERIES = new Set(['rtree_search', 'rtree_within', 'rtree_nearest', 'rtree_ray', 'rtree_overlaps', 'rtree_self_overlaps']);
+
+/** The wasm's thirteen figures from `at` (`CadaclysmBlacksmithContinuity`'s fields in order), into `raw`. */
+function _continuityInto(raw, v, at) {
+  raw.gap = v[at]; raw.gap_at = v.slice(at + 1, at + 4);
+  raw.angle = v[at + 4]; raw.angle_at = v.slice(at + 5, at + 8);
+  raw.curvature = v[at + 8]; raw.curvature_at = v.slice(at + 9, at + 12);
+  raw.samples = v[at + 12];
+}
 
 /** The wasm's ten figures for one sample, into an out-struct shaped like `CadaclysmBlacksmithAt`. */
 function _atFromDoubles(raw, v, what, notTen) {
@@ -1316,6 +1679,14 @@ function _lib() {
     step: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_step(const CadaclysmBlacksmithSolid **solids, size_t count, const char *schema, uint32_t unit)'),
     sat_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_sat_text(const CadaclysmBlacksmithSolid **solids, size_t count, uint32_t unit)'),
     sat: f('bool cadaclysm_blacksmith_sat(const CadaclysmBlacksmithSolid **solids, size_t count, const char *path, uint32_t unit)'),
+    // A `.3dm` is OWNED bytes, not a string: `*len` of them, freed by `bytes_free(bytes, len)`
+    // with that same length -- never `string_free`. On success a non-null `last_error` holds
+    // the writer's notes, one a line.
+    '3dm_bytes': f('uint8_t *cadaclysm_blacksmith_3dm_bytes(const CadaclysmBlacksmithSolid **solids, size_t count, uint32_t unit, _Out_ size_t *len)'),
+    '3dm': f('bool cadaclysm_blacksmith_3dm(const CadaclysmBlacksmithSolid **solids, size_t count, const char *path, uint32_t unit)'),
+    assembly_3dm_bytes: f('uint8_t *cadaclysm_blacksmith_assembly_3dm_bytes(const CadaclysmBlacksmithAssembly *assembly, uint32_t unit, _Out_ size_t *len)'),
+    assembly_3dm: f('bool cadaclysm_blacksmith_assembly_3dm(const CadaclysmBlacksmithAssembly *assembly, const char *path, uint32_t unit)'),
+    bytes_free: f('void cadaclysm_blacksmith_bytes_free(uint8_t *bytes, size_t len)'),
     brep_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_brep_text(const CadaclysmBlacksmithSolid **solids, size_t count)'),
     brep: f('bool cadaclysm_blacksmith_brep(const CadaclysmBlacksmithSolid **solids, size_t count, const char *path)'),
     svg_options_init: f('void cadaclysm_blacksmith_svg_options_init(_Out_ CadaclysmBlacksmithSvgOptions *options)'),
@@ -1411,6 +1782,67 @@ function _lib() {
     samples_free: f('void cadaclysm_blacksmith_samples_free(CadaclysmBlacksmithSamples *samples)'),
     edge_length: f('bool cadaclysm_blacksmith_edge_length(const CadaclysmBlacksmithSolid *solid, uint32_t edge, double accuracy, _Out_ CadaclysmBlacksmithLength *out)'),
     profile_length: f('bool cadaclysm_blacksmith_profile_length(const CadaclysmBlacksmithProfile *profile, double accuracy, _Out_ CadaclysmBlacksmithLength *out)'),
+    // NurbsCurve: curves in space. Every builder returns a new handle (freed with `nurbs_curve_free`)
+    // or null with `last_error`; the divides and hits return the arc-length `Samples` list above.
+    // Optional arrays (weights, knots, tangents, direction) are NULL when absent, never empty.
+    nurbs_curve_new: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_new(const double *xyz, size_t count, const double *weights, uint32_t degree, const double *knots, size_t knot_count)'),
+    nurbs_curve_through: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_through(const double *xyz, size_t count, uint32_t degree, bool closed, const double *start, const double *end)'),
+    nurbs_curve_fit: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_fit(const double *xyz, size_t count, uint32_t degree, double tolerance, _Out_ double *error_out)'),
+    nurbs_curve_from_edge: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_from_edge(const CadaclysmBlacksmithSolid *solid, uint32_t edge)'),
+    nurbs_curve_from_face_isocurve: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_from_face_isocurve(const CadaclysmBlacksmithSolid *solid, uint32_t face, bool along_u, double at)'),
+    nurbs_curve_blend: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_blend(const CadaclysmBlacksmithNurbsCurve *a, bool a_end, const CadaclysmBlacksmithNurbsCurve *b, bool b_end, uint32_t continuity, double bulge)'),
+    nurbs_curve_projected_to_plane: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_projected_to_plane(const CadaclysmBlacksmithNurbsCurve *curve, const double *origin, const double *normal, const double *direction)'),
+    nurbs_curve_projected_to_face: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_projected_to_face(const CadaclysmBlacksmithNurbsCurve *curve, const CadaclysmBlacksmithSolid *solid, uint32_t face, const double *direction, double tolerance, _Out_ double *error_out)'),
+    nurbs_curve_pulled_to_face: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_pulled_to_face(const CadaclysmBlacksmithNurbsCurve *curve, const CadaclysmBlacksmithSolid *solid, uint32_t face, double tolerance, _Out_ double *error_out)'),
+    nurbs_curve_reversed: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_reversed(const CadaclysmBlacksmithNurbsCurve *curve)'),
+    nurbs_curve_trimmed: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_trimmed(const CadaclysmBlacksmithNurbsCurve *curve, double t0, double t1)'),
+    nurbs_curve_extended: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_extended(const CadaclysmBlacksmithNurbsCurve *curve, bool at_start, double length)'),
+    nurbs_curve_elevated: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_elevated(const CadaclysmBlacksmithNurbsCurve *curve, uint32_t by)'),
+    nurbs_curve_joined: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_joined(const CadaclysmBlacksmithNurbsCurve **curves, size_t count, double tolerance)'),
+    // the tweens' handles are written into the caller's array of `count` pointers
+    nurbs_curve_tween: f('bool cadaclysm_blacksmith_nurbs_curve_tween(const CadaclysmBlacksmithNurbsCurve *a, const CadaclysmBlacksmithNurbsCurve *b, uint32_t count, uint32_t method, uint32_t samples, bool align, double tolerance, _Out_ CadaclysmBlacksmithNurbsCurve **out)'),
+    nurbs_curve_transformed: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_transformed(const CadaclysmBlacksmithNurbsCurve *curve, const double *matrix)'),
+    nurbs_curve_clone: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_clone(const CadaclysmBlacksmithNurbsCurve *curve)'),
+    nurbs_curve_free: f('void cadaclysm_blacksmith_nurbs_curve_free(CadaclysmBlacksmithNurbsCurve *curve)'),
+    nurbs_curve_degree: f('uint32_t cadaclysm_blacksmith_nurbs_curve_degree(const CadaclysmBlacksmithNurbsCurve *curve)'),
+    nurbs_curve_control_count: f('uint32_t cadaclysm_blacksmith_nurbs_curve_control_count(const CadaclysmBlacksmithNurbsCurve *curve)'),
+    nurbs_curve_knot_count: f('uint32_t cadaclysm_blacksmith_nurbs_curve_knot_count(const CadaclysmBlacksmithNurbsCurve *curve)'),
+    nurbs_curve_control_points: f('bool cadaclysm_blacksmith_nurbs_curve_control_points(const CadaclysmBlacksmithNurbsCurve *curve, _Out_ double *xyz)'),
+    nurbs_curve_weights: f('bool cadaclysm_blacksmith_nurbs_curve_weights(const CadaclysmBlacksmithNurbsCurve *curve, _Out_ double *weights)'),
+    nurbs_curve_knots: f('bool cadaclysm_blacksmith_nurbs_curve_knots(const CadaclysmBlacksmithNurbsCurve *curve, _Out_ double *knots)'),
+    // `is_rational` and `is_closed` return the answer, not a success flag
+    nurbs_curve_is_rational: f('bool cadaclysm_blacksmith_nurbs_curve_is_rational(const CadaclysmBlacksmithNurbsCurve *curve)'),
+    nurbs_curve_is_closed: f('bool cadaclysm_blacksmith_nurbs_curve_is_closed(const CadaclysmBlacksmithNurbsCurve *curve)'),
+    nurbs_curve_domain: f('bool cadaclysm_blacksmith_nurbs_curve_domain(const CadaclysmBlacksmithNurbsCurve *curve, _Out_ double *out)'),
+    nurbs_curve_point: f('bool cadaclysm_blacksmith_nurbs_curve_point(const CadaclysmBlacksmithNurbsCurve *curve, double t, _Out_ double *out)'),
+    nurbs_curve_derivatives: f('bool cadaclysm_blacksmith_nurbs_curve_derivatives(const CadaclysmBlacksmithNurbsCurve *curve, double t, uint32_t order, _Out_ double *out)'),
+    nurbs_curve_curvature: f('bool cadaclysm_blacksmith_nurbs_curve_curvature(const CadaclysmBlacksmithNurbsCurve *curve, double t, _Out_ CadaclysmBlacksmithCurvature *out)'),
+    nurbs_curve_length: f('bool cadaclysm_blacksmith_nurbs_curve_length(const CadaclysmBlacksmithNurbsCurve *curve, double accuracy, _Out_ CadaclysmBlacksmithLength *out)'),
+    nurbs_curve_point_at_length: f('bool cadaclysm_blacksmith_nurbs_curve_point_at_length(const CadaclysmBlacksmithNurbsCurve *curve, double s, double accuracy, _Out_ CadaclysmBlacksmithAt *out)'),
+    nurbs_curve_divide_by_count: f('CadaclysmBlacksmithSamples *cadaclysm_blacksmith_nurbs_curve_divide_by_count(const CadaclysmBlacksmithNurbsCurve *curve, uint32_t n, double accuracy)'),
+    nurbs_curve_divide_by_length: f('CadaclysmBlacksmithSamples *cadaclysm_blacksmith_nurbs_curve_divide_by_length(const CadaclysmBlacksmithNurbsCurve *curve, double step, double accuracy)'),
+    nurbs_curve_plane_hits: f('CadaclysmBlacksmithSamples *cadaclysm_blacksmith_nurbs_curve_plane_hits(const CadaclysmBlacksmithNurbsCurve *curve, const double *origin, const double *normal)'),
+    nurbs_curve_face_hits: f('CadaclysmBlacksmithSamples *cadaclysm_blacksmith_nurbs_curve_face_hits(const CadaclysmBlacksmithNurbsCurve *curve, const CadaclysmBlacksmithSolid *solid, uint32_t face, double tolerance)'),
+    curve_value_to_nurbs: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_curve_value_to_nurbs(uint32_t kind, const double *value)'),
+    // Sheets from curves, continuity, surface fillets, trim and join. The errors, the rails and
+    // the reports come back through out-arguments (an array of one, or a record).
+    loft_curves: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_curves(const CadaclysmBlacksmithNurbsCurve **sections, size_t count, uint32_t degree, bool loose, bool closed)'),
+    sweep_rail: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep_rail(const CadaclysmBlacksmithNurbsCurve *rail, const CadaclysmBlacksmithNurbsCurve **sections, size_t count, uint32_t frame, const double *up, double tolerance, _Out_ double *error_out)'),
+    sweep_two_rails: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep_two_rails(const CadaclysmBlacksmithNurbsCurve *rail_a, const CadaclysmBlacksmithNurbsCurve *rail_b, const CadaclysmBlacksmithNurbsCurve **sections, size_t count, double tolerance, _Out_ double *error_out)'),
+    edge_surface: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_edge_surface(const CadaclysmBlacksmithNurbsCurve **curves, size_t count, double tolerance, _Out_ double *error_out)'),
+    network_surface: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_network_surface(const CadaclysmBlacksmithNurbsCurve **u_curves, size_t u_count, const CadaclysmBlacksmithNurbsCurve **v_curves, size_t v_count, double tolerance, _Out_ double *error_out)'),
+    continuity: f('bool cadaclysm_blacksmith_continuity(const CadaclysmBlacksmithSolid *a, uint32_t face_a, uint32_t side_a, const CadaclysmBlacksmithSolid *b, uint32_t face_b, uint32_t side_b, uint32_t samples, _Out_ CadaclysmBlacksmithContinuity *out)'),
+    match_side: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_match_side(const CadaclysmBlacksmithSolid *a, uint32_t face_a, uint32_t side_a, const CadaclysmBlacksmithSolid *b, uint32_t face_b, uint32_t side_b, uint32_t level)'),
+    blend_sides: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_blend_sides(const CadaclysmBlacksmithSolid *a, uint32_t face_a, uint32_t side_a, const CadaclysmBlacksmithSolid *b, uint32_t face_b, uint32_t side_b, uint32_t level, double bulge)'),
+    n_sided_patch: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_n_sided_patch(const CadaclysmBlacksmithPatchBoundary *boundaries, size_t count, double bulge, double tolerance, _Out_ CadaclysmBlacksmithPatchReport *report_out)'),
+    fillet_surfaces: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_fillet_surfaces(const CadaclysmBlacksmithSolid *a, uint32_t face_a, const CadaclysmBlacksmithSolid *b, uint32_t face_b, double radius_start, double radius_end, bool flip_a, bool flip_b, double tolerance, _Out_ CadaclysmBlacksmithNurbsCurve **rail_a, _Out_ CadaclysmBlacksmithNurbsCurve **rail_b, _Out_ double *error_out)'),
+    fillet_varying: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_fillet_varying(const CadaclysmBlacksmithSolid *solid, const uint32_t *edges, size_t count, double radius_start, double radius_end, double tolerance)'),
+    split_by_curve: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_by_curve(const CadaclysmBlacksmithSolid *sheet, const CadaclysmBlacksmithNurbsCurve *curve, const double *direction, double tolerance)'),
+    trim_by_curve: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_trim_by_curve(const CadaclysmBlacksmithSolid *sheet, const CadaclysmBlacksmithNurbsCurve *curve, const double *direction, bool keep_inside, double tolerance)'),
+    flange: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_flange(const CadaclysmBlacksmithSolid *sheet, const uint32_t *edges, size_t count, const CadaclysmBlacksmithNurbsCurve *section, double tolerance, bool join, _Out_ double *error_out)'),
+    extrude_to: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_to(const CadaclysmBlacksmithSolid *sheet, const uint32_t *edges, size_t count, const double *direction, const CadaclysmBlacksmithSolid *target, double tolerance, bool join, _Out_ double *error_out)'),
+    join_sheets: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_join_sheets(const CadaclysmBlacksmithSolid **sheets, size_t count, double tolerance, _Out_ CadaclysmBlacksmithJoinReport *report)'),
+    recess: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_recess(const CadaclysmBlacksmithSolid *sheet, const CadaclysmBlacksmithNurbsCurve *outline, double depth, double draft, double fillet, bool pane, double tolerance, _Out_ uint32_t *faces_out)'),
     contains: f('bool cadaclysm_blacksmith_contains(const CadaclysmBlacksmithSolid *solid, const double *point, double tolerance, _Out_ uint32_t *out)'),
     classifier_new: f('CadaclysmBlacksmithClassifier *cadaclysm_blacksmith_classifier_new(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     classifier_contains: f('bool cadaclysm_blacksmith_classifier_contains(const CadaclysmBlacksmithClassifier *classifier, const double *point, _Out_ uint32_t *out)'),
@@ -1418,6 +1850,51 @@ function _lib() {
     closest: f('bool cadaclysm_blacksmith_closest(const CadaclysmBlacksmithSolid *a, const CadaclysmBlacksmithSolid *b, double tolerance, CadaclysmBlacksmithProgress *progress, void *user, _Out_ CadaclysmBlacksmithClosest *out)'),
     face_ref: f('bool cadaclysm_blacksmith_face_ref(const CadaclysmBlacksmithSolid *solid, uint32_t face, _Out_ double *out)'),
     find_face: f('int32_t cadaclysm_blacksmith_find_face(const CadaclysmBlacksmithSolid *solid, const double *face_ref, int32_t hint, double tolerance)'),
+    // identity and attributes (plan C2): ids, origins, attributes, history, edge and vertex
+    // references. The attribute texts are **borrowed** from the solid (`const char *`, as
+    // `solid_name`), copied by koffi and never freed; a history handle is read whole into a
+    // `History` and freed at once (`Solid._history`).
+    solid_tracked: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_solid_tracked(const CadaclysmBlacksmithSolid *solid)'),
+    solid_is_tracked: f('bool cadaclysm_blacksmith_solid_is_tracked(const CadaclysmBlacksmithSolid *solid)'),
+    face_id: f('uint64_t cadaclysm_blacksmith_face_id(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
+    face_with_id: f('uint32_t cadaclysm_blacksmith_face_with_id(const CadaclysmBlacksmithSolid *solid, uint64_t id)'),
+    face_origin_count: f('uint32_t cadaclysm_blacksmith_face_origin_count(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
+    face_origin_at: f('bool cadaclysm_blacksmith_face_origin_at(const CadaclysmBlacksmithSolid *solid, uint32_t face, uint32_t i, _Out_ uint32_t *operand, _Out_ uint64_t *id)'),
+    edge_id: f('uint64_t cadaclysm_blacksmith_edge_id(const CadaclysmBlacksmithSolid *solid, uint32_t edge)'),
+    edge_with_id: f('uint32_t cadaclysm_blacksmith_edge_with_id(const CadaclysmBlacksmithSolid *solid, uint64_t id)'),
+    edge_origin_count: f('uint32_t cadaclysm_blacksmith_edge_origin_count(const CadaclysmBlacksmithSolid *solid, uint32_t edge)'),
+    edge_origin_at: f('bool cadaclysm_blacksmith_edge_origin_at(const CadaclysmBlacksmithSolid *solid, uint32_t edge, uint32_t i, _Out_ uint32_t *operand, _Out_ uint64_t *id)'),
+    origins_through: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_origins_through(const CadaclysmBlacksmithSolid *out, const CadaclysmBlacksmithSolid *via)'),
+    with_attribute: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_with_attribute(const CadaclysmBlacksmithSolid *solid, const char *key, const char *value)'),
+    without_attribute: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_without_attribute(const CadaclysmBlacksmithSolid *solid, const char *key)'),
+    attribute: f('const char *cadaclysm_blacksmith_attribute(const CadaclysmBlacksmithSolid *solid, const char *key)'),
+    attribute_count: f('uint32_t cadaclysm_blacksmith_attribute_count(const CadaclysmBlacksmithSolid *solid)'),
+    attribute_key_at: f('const char *cadaclysm_blacksmith_attribute_key_at(const CadaclysmBlacksmithSolid *solid, uint32_t i)'),
+    attribute_value_at: f('const char *cadaclysm_blacksmith_attribute_value_at(const CadaclysmBlacksmithSolid *solid, uint32_t i)'),
+    with_face_attribute: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_with_face_attribute(const CadaclysmBlacksmithSolid *solid, uint32_t face, const char *key, const char *value)'),
+    without_face_attribute: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_without_face_attribute(const CadaclysmBlacksmithSolid *solid, uint32_t face, const char *key)'),
+    face_attribute: f('const char *cadaclysm_blacksmith_face_attribute(const CadaclysmBlacksmithSolid *solid, uint32_t face, const char *key)'),
+    face_attribute_count: f('uint32_t cadaclysm_blacksmith_face_attribute_count(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
+    face_attribute_key_at: f('const char *cadaclysm_blacksmith_face_attribute_key_at(const CadaclysmBlacksmithSolid *solid, uint32_t face, uint32_t i)'),
+    face_attribute_value_at: f('const char *cadaclysm_blacksmith_face_attribute_value_at(const CadaclysmBlacksmithSolid *solid, uint32_t face, uint32_t i)'),
+    history: f('CadaclysmBlacksmithHistory *cadaclysm_blacksmith_history(const CadaclysmBlacksmithSolid *out, const CadaclysmBlacksmithSolid **inputs, size_t count)'),
+    edge_history: f('CadaclysmBlacksmithHistory *cadaclysm_blacksmith_edge_history(const CadaclysmBlacksmithSolid *out, const CadaclysmBlacksmithSolid **inputs, size_t count)'),
+    history_free: f('void cadaclysm_blacksmith_history_free(CadaclysmBlacksmithHistory *history)'),
+    history_kept_count: f('uint32_t cadaclysm_blacksmith_history_kept_count(const CadaclysmBlacksmithHistory *history)'),
+    history_kept_at: f('bool cadaclysm_blacksmith_history_kept_at(const CadaclysmBlacksmithHistory *history, uint32_t i, _Out_ uint32_t *operand, _Out_ uint64_t *id, _Out_ uint64_t *out_id)'),
+    history_modified_count: f('uint32_t cadaclysm_blacksmith_history_modified_count(const CadaclysmBlacksmithHistory *history)'),
+    history_modified_at: f('bool cadaclysm_blacksmith_history_modified_at(const CadaclysmBlacksmithHistory *history, uint32_t i, _Out_ uint32_t *operand, _Out_ uint64_t *id)'),
+    history_modified_output_count: f('uint32_t cadaclysm_blacksmith_history_modified_output_count(const CadaclysmBlacksmithHistory *history, uint32_t i)'),
+    history_modified_output_at: f('uint64_t cadaclysm_blacksmith_history_modified_output_at(const CadaclysmBlacksmithHistory *history, uint32_t i, uint32_t j)'),
+    history_generated_count: f('uint32_t cadaclysm_blacksmith_history_generated_count(const CadaclysmBlacksmithHistory *history)'),
+    history_generated_at: f('uint64_t cadaclysm_blacksmith_history_generated_at(const CadaclysmBlacksmithHistory *history, uint32_t i)'),
+    history_deleted_count: f('uint32_t cadaclysm_blacksmith_history_deleted_count(const CadaclysmBlacksmithHistory *history)'),
+    history_deleted_at: f('bool cadaclysm_blacksmith_history_deleted_at(const CadaclysmBlacksmithHistory *history, uint32_t i, _Out_ uint32_t *operand, _Out_ uint64_t *id)'),
+    edge_ref: f('bool cadaclysm_blacksmith_edge_ref(const CadaclysmBlacksmithSolid *solid, uint32_t edge, _Out_ double *out)'),
+    find_edge: f('int32_t cadaclysm_blacksmith_find_edge(const CadaclysmBlacksmithSolid *solid, const double *edge_ref, double tolerance)'),
+    vertex_count: f('uint32_t cadaclysm_blacksmith_vertex_count(const CadaclysmBlacksmithSolid *solid)'),
+    vertex_ref: f('bool cadaclysm_blacksmith_vertex_ref(const CadaclysmBlacksmithSolid *solid, uint32_t vertex, _Out_ double *out)'),
+    find_vertex: f('int32_t cadaclysm_blacksmith_find_vertex(const CadaclysmBlacksmithSolid *solid, const double *vertex_ref, double tolerance)'),
     face_kind: f('const char *cadaclysm_blacksmith_face_kind(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
     coloured: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_coloured(const CadaclysmBlacksmithSolid *solid, uint32_t face, double r, double g, double b)'),
     colour: f('bool cadaclysm_blacksmith_colour(const CadaclysmBlacksmithSolid *solid, uint32_t face, _Out_ double *out)'),
@@ -1666,6 +2143,23 @@ function _lib() {
     cuboid_point_at: f('bool cadaclysm_blacksmith_cuboid_point_at(const double *value, double sx, double sy, double sz, _Out_ double *out)'),
     cuboid_closest_point: f('bool cadaclysm_blacksmith_cuboid_closest_point(const double *value, const double *point, _Out_ double *out)'),
     frame_fit: f('bool cadaclysm_blacksmith_frame_fit(const double *xyz, size_t count, _Out_ double *out, _Out_ double *deviation_out)'),
+    // the rectangle, the triangle and the ray (value kinds 9-11, plan B4)
+    rectangle_corners: f('bool cadaclysm_blacksmith_rectangle_corners(const double *value, _Out_ double *out)'),
+    rectangle_area: f('bool cadaclysm_blacksmith_rectangle_area(const double *value, _Out_ double *out)'),
+    rectangle_closest_point: f('bool cadaclysm_blacksmith_rectangle_closest_point(const double *value, const double *point, bool include_interior, _Out_ double *out)'),
+    rectangle_contains: f('uint32_t cadaclysm_blacksmith_rectangle_contains(const double *value, const double *point, double tolerance)'),
+    rectangle_to_sheet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_rectangle_to_sheet(const double *value)'),
+    triangle_area: f('bool cadaclysm_blacksmith_triangle_area(const double *value, _Out_ double *out)'),
+    triangle_perimeter: f('bool cadaclysm_blacksmith_triangle_perimeter(const double *value, _Out_ double *out)'),
+    triangle_centroid: f('bool cadaclysm_blacksmith_triangle_centroid(const double *value, _Out_ double *out)'),
+    triangle_circumcircle: f('bool cadaclysm_blacksmith_triangle_circumcircle(const double *value, _Out_ double *out)'),
+    triangle_point_at: f('bool cadaclysm_blacksmith_triangle_point_at(const double *value, double wa, double wb, double wc, _Out_ double *out)'),
+    triangle_barycentric: f('bool cadaclysm_blacksmith_triangle_barycentric(const double *value, const double *point, _Out_ double *out)'),
+    triangle_closest_point: f('bool cadaclysm_blacksmith_triangle_closest_point(const double *value, const double *point, _Out_ double *out)'),
+    triangle_edge: f('bool cadaclysm_blacksmith_triangle_edge(const double *value, uint32_t index, _Out_ double *out)'),
+    triangle_to_sheet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_triangle_to_sheet(const double *value)'),
+    ray_point_at: f('bool cadaclysm_blacksmith_ray_point_at(const double *value, double t, _Out_ double *out)'),
+    ray_closest_point: f('bool cadaclysm_blacksmith_ray_closest_point(const double *value, const double *point, _Out_ double *out)'),
     loft: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft(const CadaclysmBlacksmithProfile *a, const double *frame_a, const CadaclysmBlacksmithProfile *b, const double *frame_b)'),
     loft_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_open(const CadaclysmBlacksmithProfile *a, const double *frame_a, const CadaclysmBlacksmithProfile *b, const double *frame_b)'),
     loft_through: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_through(const CadaclysmBlacksmithProfile **profiles, const double *frames, size_t count)'),
@@ -1713,6 +2207,10 @@ function _lib() {
     heal_fixes: f('uint32_t cadaclysm_blacksmith_heal_fixes(const CadaclysmBlacksmithHeal *h, _Out_ uint32_t *items, _Out_ double *sizes)'),
     heal_refused: f('uint32_t cadaclysm_blacksmith_heal_refused(const CadaclysmBlacksmithHeal *h, _Out_ uint32_t *items, _Out_ double *sizes)'),
     edge_tolerance: f('double cadaclysm_blacksmith_edge_tolerance(const CadaclysmBlacksmithSolid *solid, uint32_t edge)'),
+    effective_tolerance: f('double cadaclysm_blacksmith_effective_tolerance(const CadaclysmBlacksmithSolid **solids, size_t count)'),
+    solid_tolerances: f('bool cadaclysm_blacksmith_solid_tolerances(const CadaclysmBlacksmithSolid *solid, _Out_ double *absolute, _Out_ double *angular)'),
+    solid_with_tolerances: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_solid_with_tolerances(const CadaclysmBlacksmithSolid *solid, double absolute, double angular)'),
+    vertex_tolerance: f('double cadaclysm_blacksmith_vertex_tolerance(const CadaclysmBlacksmithSolid *solid, double x, double y, double z)'),
     trim: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_trim(const CadaclysmBlacksmithSolid *sheet, const CadaclysmBlacksmithSolid *tool, bool keep_inside, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     translate: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_translate(const CadaclysmBlacksmithSolid *solid, double dx, double dy, double dz)'),
     scaled: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_scaled(const CadaclysmBlacksmithSolid *solid, double factor)'),
@@ -1849,6 +2347,47 @@ function _lib() {
     assembly_swept_clash: f('CadaclysmBlacksmithSweptClashes *cadaclysm_blacksmith_assembly_swept_clash(const CadaclysmBlacksmithAssembly *assembly, const char *const *joints, const uint32_t *counts, size_t joint_count, const double *values, uint32_t key_count, const char *ground, double tolerance, double clearance, double resolution, uint32_t max_steps, const uint32_t *allowed, uint32_t allowed_count, bool joined)'),
     assembly_base: f('bool cadaclysm_blacksmith_assembly_base(CadaclysmBlacksmithAssembly *assembly, const char *link)'),
     pair_freedom_count: f('uint32_t cadaclysm_blacksmith_pair_freedom_count(const char *kind)'),
+    // -- the document: every `char *` is owned text (decoded, then `string_free`d), a NULL one a
+    // refusal with `last_error`; `undo`/`redo`'s text `null` is "nothing to do", not a refusal.
+    document_new: f('CadaclysmBlacksmithDocument *cadaclysm_blacksmith_document_new(const char *units)'),
+    document_load: f('CadaclysmBlacksmithDocument *cadaclysm_blacksmith_document_load(const char *text)'),
+    document_free: f('void cadaclysm_blacksmith_document_free(CadaclysmBlacksmithDocument *doc)'),
+    document_save: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_save(const CadaclysmBlacksmithDocument *doc)'),
+    document_apply: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_apply(CadaclysmBlacksmithDocument *doc, const char *op, const char *message)'),
+    document_preview: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_preview(CadaclysmBlacksmithDocument *doc, const char *op)'),
+    document_preview_begin: f('bool cadaclysm_blacksmith_document_preview_begin(CadaclysmBlacksmithDocument *doc)'),
+    document_end_preview: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_end_preview(CadaclysmBlacksmithDocument *doc)'),
+    document_batch_begin: f('bool cadaclysm_blacksmith_document_batch_begin(CadaclysmBlacksmithDocument *doc, const char *message)'),
+    document_batch_end: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_batch_end(CadaclysmBlacksmithDocument *doc)'),
+    document_batch_abort: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_batch_abort(CadaclysmBlacksmithDocument *doc)'),
+    document_undo: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_undo(CadaclysmBlacksmithDocument *doc)'),
+    document_redo: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_redo(CadaclysmBlacksmithDocument *doc)'),
+    document_params: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_params(const CadaclysmBlacksmithDocument *doc)'),
+    document_evaluate: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_evaluate(CadaclysmBlacksmithDocument *doc, bool cheap_only)'),
+    document_result_kind: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_result_kind(const CadaclysmBlacksmithDocument *doc, const char *id)'),
+    document_result_solid: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_document_result_solid(const CadaclysmBlacksmithDocument *doc, const char *id)'),
+    document_result_profile: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_document_result_profile(const CadaclysmBlacksmithDocument *doc, const char *id)'),
+    document_result_profile_count: f('uint32_t cadaclysm_blacksmith_document_result_profile_count(const CadaclysmBlacksmithDocument *doc, const char *id)'),
+    document_result_profile_at: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_document_result_profile_at(const CadaclysmBlacksmithDocument *doc, const char *id, uint32_t i)'),
+    document_result_nurbs_curve: f('CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_document_result_nurbs_curve(const CadaclysmBlacksmithDocument *doc, const char *id)'),
+    document_result_subd: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_document_result_subd(const CadaclysmBlacksmithDocument *doc, const char *id)'),
+    document_value: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_value(const CadaclysmBlacksmithDocument *doc, const char *id)'),
+    document_errors: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_errors(const CadaclysmBlacksmithDocument *doc)'),
+    document_kinds: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_kinds(void)'),
+    document_solid_body: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_solid_body(const CadaclysmBlacksmithSolid *solid)'),
+    document_profile_path: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_profile_path(const CadaclysmBlacksmithProfile *profile)'),
+    document_branch_new: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_branch_new(CadaclysmBlacksmithDocument *doc, const char *name, const char *at)'),
+    document_branch_switch: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_branch_switch(CadaclysmBlacksmithDocument *doc, const char *name_or_commit_id)'),
+    document_tips: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_tips(const CadaclysmBlacksmithDocument *doc)'),
+    document_branch_rename: f('bool cadaclysm_blacksmith_document_branch_rename(CadaclysmBlacksmithDocument *doc, const char *old, const char *new_)'),
+    document_branch_delete: f('bool cadaclysm_blacksmith_document_branch_delete(CadaclysmBlacksmithDocument *doc, const char *name)'),
+    document_branch_list: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_branch_list(const CadaclysmBlacksmithDocument *doc)'),
+    document_log: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_document_log(const CadaclysmBlacksmithDocument *doc, const char *branch)'),
+    // -- the building documents: the same handle, `document_free`d; their own `cadaclysm_bim_` prefix
+    bim_document_new: f('CadaclysmBlacksmithDocument *cadaclysm_bim_document_new(const char *units)'),
+    bim_document_load: f('CadaclysmBlacksmithDocument *cadaclysm_bim_document_load(const char *text)'),
+    bim_kinds: f('CadaclysmBlacksmithOwnedString cadaclysm_bim_kinds(void)'),
+    bim_document_export_ifc: f('CadaclysmBlacksmithOwnedString cadaclysm_bim_document_export_ifc(CadaclysmBlacksmithDocument *doc, const char *options_json)'),
   };
   return library;
 }
@@ -2146,6 +2685,9 @@ function _frame(frame) { const a = Array.from(frame); return _doubles(a.length =
 /** Six numbers, or `[[px,py,pz],[dx,dy,dz]]`. */
 function _axis(axis) { const a = Array.from(axis); return _doubles(a.length === 2 ? a.flat() : a, 6, 'axis'); }
 function _flatPairs(points) { return Float64Array.from(Array.from(points).flat().map(Number)); }
+/** A verb's distance tolerance as the C ABI takes it: null is unset, NaN, which the library
+ * works at the inputs' `effectiveTolerance` (as it does 0). */
+function _tol(tolerance) { return tolerance === null ? NaN : tolerance; }
 /** A JS `(phase, done, total)` callback as the ABI's progress pointer, or null. */
 function _progress(callback) {
   if (callback == null) return null;
@@ -2269,12 +2811,30 @@ function buildDate() { return _text(_lib().build_date()); }
 function license(textOrPath) { if (!_lib().license_set(String(textOrPath))) throw new BuildError(_lastError() || 'license refused'); }
 /**
  * Set a kernel option, by its name, for the whole process from the next call on:
- * `boolean.mesh_budget`, `boolean.finest_tolerance`, `profile_boolean.point_budget` or
- * `measure.default_accuracy`. Throws -- and changes nothing -- for a name that is not an
- * option or a value it does not take, saying which and what it takes.
+ * `boolean.mesh_budget`, `boolean.finest_tolerance`, `profile_boolean.point_budget`,
+ * `measure.default_accuracy`, `step.validation_properties`, `step.validation_accuracy`,
+ * `tolerance.relative` or `tolerance.angular`.
+ * Throws -- and changes nothing -- for a name that is not an
+ * option or a value it does not take, saying which and what it takes. The last two stamp a
+ * written STEP part file with each body's measured area, volume and centroid, there for the
+ * kernel that reads the file to check the transfer against; off by default, since it
+ * measures every body in the file at `step.validation_accuracy` (1e-5).
  */
 function setOption(name, value) {
   if (!_lib().option_set(String(name), Number(value))) throw new BuildError(_lastError() || `option '${name}' refused`);
+}
+/**
+ * The tolerance a verb given a null (or 0) `tolerance` works at over `solids`: the larger of
+ * the loosest absolute tolerance they declare (`Solid.tolerances`) and
+ * `option('tolerance.relative')` times the largest of their sizes, never finer than their
+ * coordinates can represent. 0 for no solids, or solids with nothing to size by -- which a verb
+ * refuses.
+ */
+function effectiveTolerance(...solids) {
+  const handles = solids.map((s) => s._handle);
+  const t = _lib().effective_tolerance(handles, handles.length);
+  if (Number.isNaN(t)) _fail('effective_tolerance');
+  return t;
 }
 /**
  * A kernel option's value, by its name: what `setOption` last set, else its default.
@@ -2389,7 +2949,7 @@ class Profile {
    */
   static chain(pieces, tolerance = 1e-6) {
     const handles = Array.from(pieces, (p) => p._handle);
-    return new Profile(_lib().profile_chain(handles, handles.length, tolerance));
+    return new Profile(_lib().profile_chain(handles, handles.length, _tol(tolerance)));
   }
   /**
    * Closed loops, in any order, as one profile: the loop enclosing the most area is the boundary
@@ -2412,10 +2972,10 @@ class Profile {
    */
   pieces(cutters, tolerance = 1e-6) {
     const handles = Array.from(cutters, (p) => p._handle);
-    const n = _lib().profile_piece_count(this._handle, handles, handles.length, tolerance);
+    const n = _lib().profile_piece_count(this._handle, handles, handles.length, _tol(tolerance));
     if (n === 0) _fail('profile_piece_count');
     const found = [];
-    for (let i = 0; i < n; i++) found.push(new Profile(_lib().profile_piece(this._handle, handles, handles.length, i, tolerance)));
+    for (let i = 0; i < n; i++) found.push(new Profile(_lib().profile_piece(this._handle, handles, handles.length, i, _tol(tolerance))));
     return found;
   }
   /**
@@ -2426,10 +2986,10 @@ class Profile {
    */
   trim(cutters, piece, tolerance = 1e-6) {
     const handles = Array.from(cutters, (p) => p._handle);
-    const n = _lib().profile_trim_count(this._handle, handles, handles.length, piece, tolerance);
+    const n = _lib().profile_trim_count(this._handle, handles, handles.length, piece, _tol(tolerance));
     if (n === 0 && _lastError()) _fail('profile_trim_count');
     const found = [];
-    for (let i = 0; i < n; i++) found.push(new Profile(_lib().profile_trim_chain(this._handle, handles, handles.length, piece, i, tolerance)));
+    for (let i = 0; i < n; i++) found.push(new Profile(_lib().profile_trim_chain(this._handle, handles, handles.length, piece, i, _tol(tolerance))));
     return found;
   }
   withHole(hole) { return new Profile(_lib().profile_with_hole(this._handle, hole._handle)); }
@@ -2470,7 +3030,7 @@ class Profile {
    * at the end; an open chain (a profile ended open) stays open, the segments it has. Copies.
    */
   polylines(tolerance = 0.05) {
-    const p = _lib().profile_polylines(this._handle, tolerance);
+    const p = _lib().profile_polylines(this._handle, _tol(tolerance));
     if (p.offsets == null) _fail('profile_polylines');
     const points = _floats(p.points, p.point_count * 3) ?? new Float32Array(0);
     const offsets = _uint32s(p.offsets, p.polyline_count + 1);
@@ -2484,7 +3044,7 @@ class Profile {
    * they are, every loop closes on itself exactly, holes are converted the same way. Throws
    * `BuildError` for a `tolerance` not positive and finite, or a spline that does not evaluate.
    */
-  toArcs(tolerance = 0.01) { return new Profile(_lib().profile_to_arcs(this._handle, tolerance)); }
+  toArcs(tolerance = 0.01) { return new Profile(_lib().profile_to_arcs(this._handle, _tol(tolerance))); }
   /**
    * This profile grown by `distance` (shrunk where it is negative), as zero or more profiles, all
    * lines and arcs: outward corners rounded by `|distance|`, holes moving against the boundary (a
@@ -2494,7 +3054,7 @@ class Profile {
    * that cross or touch.
    */
   offset(distance, tolerance = 0.01) {
-    return _profileList(_lib().profile_offset(this._handle, distance, tolerance), 'profile_offset');
+    return _profileList(_lib().profile_offset(this._handle, distance, _tol(tolerance)), 'profile_offset');
   }
   /**
    * Where this profile's curves cross, touch or run along `other`'s, both read in one plane, as
@@ -2506,7 +3066,7 @@ class Profile {
    */
   hits(other, tolerance = 1e-6) {
     const l = _lib();
-    const h = _checked(l.profile_hits(this._handle, other._handle, tolerance), 'profile_hits');
+    const h = _checked(l.profile_hits(this._handle, other._handle, _tol(tolerance)), 'profile_hits');
     try {
       const n = l.hit_count(h);
       const out = [];
@@ -2527,7 +3087,7 @@ class Profile {
    * `tolerance` not positive and finite, or a profile open or crossing itself.
    */
   common(other, tolerance = 1e-6) {
-    return _profileList(_lib().profile_common(this._handle, other._handle, tolerance), 'profile_common');
+    return _profileList(_lib().profile_common(this._handle, other._handle, _tol(tolerance)), 'profile_common');
   }
   /**
    * `text` set in a font, one profile per closed shape -- a letter with its counters as
@@ -2585,6 +3145,12 @@ class Profile {
     if (_lastError()) _fail('profile_colour');
     return null;
   }
+  /**
+   * This profile as a `Document`'s `profile.path` node holds it, parsed: `{start, segments, holes,
+   * colour}`, its exact segments (lines, arcs, Beziers, conics, NURBS) never flattened. What
+   * `Document.addProfile` puts in a document.
+   */
+  documentPath() { return JSON.parse(_ownedText(_lib().document_profile_path(this._handle), 'document_profile_path')); }
   /**
    * Corners between two straight segments rounded by `radius`, with an exact tangent arc.
    * `corners` null rounds every one (the holes' too); otherwise it picks corners of the
@@ -2709,7 +3275,7 @@ class SweepPath {
    */
   static along(curve, frame, tolerance = 0.05, open = true) {
     const path = Object.create(SweepPath.prototype);
-    path._handle = _checked(_lib().sweep_path_along(curve._handle, _frame(frame), tolerance, !!open), 'sweep_path_along');
+    path._handle = _checked(_lib().sweep_path_along(curve._handle, _frame(frame), _tol(tolerance), !!open), 'sweep_path_along');
     if (_sweepPathFinalizer) _sweepPathFinalizer.register(path, path._handle, path);
     return path;
   }
@@ -2913,16 +3479,114 @@ const _solidFinalizer = typeof FinalizationRegistry === 'function'
   ? new FinalizationRegistry((h) => { try { _lib().solid_free(h); } catch (_) { /* exiting */ } }) : null;
 
 /** An exact B-rep solid (or open sheet). Immutable; every operation returns a new one. `close()` frees it. */
-// A boolean's result with its flush faces merged when `merge`; the unmerged one closed.
+// A boolean's result with its flush faces merged when `merge`; the unmerged one closed. One verb
+// to the caller: on a tracked result the merge's origins read back through the boolean's
+// (`origins_through`), so they name the boolean's operands, not the faces between the two steps.
 function _merged(solid, merge) {
   if (!merge) return solid;
-  try { return solid.mergeFlush(); } finally { solid.close(); }
+  try {
+    const merged = solid.mergeFlush();
+    if (!solid.isTracked) return merged;
+    try { return new Solid(_lib().origins_through(merged._handle, solid._handle)); } finally { merged.close(); }
+  } finally { solid.close(); }
+}
+
+/**
+ * What a verb did to its inputs' faces (or edges), read off the result's ids and origins alone
+ * (`Solid.history`, `Solid.edgeHistory`). An input is named `[operand, id]`: the operand its
+ * index in the inputs as passed (a boolean's target 0, its tool 1), the id its `faceId`. Every
+ * list is in `[operand, id]` order, `generated` in id order; frozen, as are its lists:
+ *
+ * - `kept`: an input that became exactly one output, keeping its id -- `[[operand, id], outId]`;
+ * - `modified`: an input split, merged or renumbered -- `[[operand, id], [outIds]]`, a split's
+ *   first piece, which keeps the id, first;
+ * - `generated`: the outputs with no origin (a fillet's round, the faces a split cuts);
+ * - `deleted`: the inputs no output names (a cut tool's caps), `[operand, id]` each.
+ */
+class History {
+  constructor(kept, modified, generated, deleted) {
+    const deep = (v) => (Array.isArray(v) ? Object.freeze(v.map(deep)) : v);
+    this.kept = deep(kept);
+    this.modified = deep(modified);
+    this.generated = deep(generated);
+    this.deleted = deep(deleted);
+    Object.freeze(this);
+  }
+  toString() {
+    return `History(kept=${this.kept.length}, modified=${this.modified.length}, generated=${this.generated.length}, deleted=${this.deleted.length})`;
+  }
+}
+
+/** The four lists of history handle `h` (the C handle, or the wasm shim's `_wasmHistory`), read through C's readers; the caller frees it. */
+function _readHistory(l, h) {
+  const operand = [0], id = [0], out = [0];
+  const kept = [], modified = [], generated = [], deleted = [];
+  for (let i = 0, n = l.history_kept_count(h); i < n; i++) {
+    if (!l.history_kept_at(h, i, operand, id, out)) _fail('history_kept_at');
+    kept.push([[Number(operand[0]), Number(id[0])], Number(out[0])]);
+  }
+  for (let i = 0, n = l.history_modified_count(h); i < n; i++) {
+    if (!l.history_modified_at(h, i, operand, id)) _fail('history_modified_at');
+    const m = l.history_modified_output_count(h, i);
+    if (m === NONE) _fail('history_modified_output_count');
+    const outs = [];
+    for (let j = 0; j < m; j++) outs.push(Number(l.history_modified_output_at(h, i, j)));
+    modified.push([[Number(operand[0]), Number(id[0])], outs]);
+  }
+  for (let i = 0, n = l.history_generated_count(h); i < n; i++) generated.push(Number(l.history_generated_at(h, i)));
+  for (let i = 0, n = l.history_deleted_count(h); i < n; i++) {
+    if (!l.history_deleted_at(h, i, operand, id)) _fail('history_deleted_at');
+    deleted.push([Number(operand[0]), Number(id[0])]);
+  }
+  return new History(kept, modified, generated, deleted);
+}
+
+/** An id argument: a whole number from 0 to 2**53 - 1 (a `number`), or a `bigint` below 2**64. */
+function _id(value, what) {
+  const ok = typeof value === 'bigint' ? value >= 0n && value < (1n << 64n) : Number.isSafeInteger(value) && value >= 0;
+  if (!ok) throw new BuildError(`${what}: ${String(value)} is not an id (a whole number from 0 to 2**64 - 1)`);
+  return typeof value === 'bigint' ? value : BigInt(value);
+}
+
+/** A key or value argument: a string (koffi would otherwise send a number's text or refuse late). */
+function _attributeText(text, what, kind) {
+  if (typeof text !== 'string') throw new TypeError(`${what}: a ${kind} is a string, not ${text === null ? 'null' : typeof text}`);
+  return text;
+}
+
+/** A read-only `Map` in the order given (key order): `set`, `delete` and `clear` throw. */
+function _frozenMap(entries) {
+  const map = new Map(entries);
+  const refuse = () => { throw new TypeError('attributes are read-only'); };
+  Object.defineProperties(map, { set: { value: refuse }, delete: { value: refuse }, clear: { value: refuse } });
+  return Object.freeze(map);
+}
+
+/** The attributes C lists by count and `_at`, in key order, as a `_frozenMap`. */
+function _attributeMap(count, keyAt, valueAt, ...args) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const k = keyAt(...args, i), v = valueAt(...args, i);
+    if (k == null || v == null) _fail('attributes');
+    out.push([String(k), String(v)]);
+  }
+  return _frozenMap(out);
+}
+
+/** `withAttributes`' argument: a `Map`, an iterable of `[key, value]` pairs, or a plain object, sorted by key. */
+function _attributeEntries(attributes, what) {
+  if (attributes == null) throw new TypeError(`${what}: attributes are a Map, [key, value] pairs or an object`);
+  const entries = attributes instanceof Map || typeof attributes[Symbol.iterator] === 'function'
+    ? Array.from(attributes, (pair) => [pair[0], pair[1]]) : Object.entries(attributes);
+  return entries.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
 
 class Solid {
   constructor(handle) {
     this._pointer = _checked(handle, 'solid');
     this._inexactTrims = 0;
+    this._sheetError = null;
+    this._patchReport = null;
     /** Locked by an in-flight async call: the call's name, or null. */
     this._busy = null;
     if (_solidFinalizer) _solidFinalizer.register(this, handle, this);
@@ -2954,6 +3618,132 @@ class Solid {
   static wedge(x, y, z, topX) { return new Solid(_lib().wedge(x, y, z, topX)); }
   /** A right pyramid of `sides` sides (at least 3): its base the regular polygon of circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`). */
   static pyramid(sides, r, h) { return new Solid(_lib().pyramid(Math.max(0, sides | 0), r, h)); }
+  // -- sheets from curves: one face on one NURBS surface
+  /**
+   * The sheet lofted through the section curves `sections` (`NurbsCurve`s), `degree` across them
+   * (lowered to fit); `loose` shapes it by them instead, through the first and last only;
+   * `closed` makes it periodic across them, the last section back to the first.
+   */
+  static loftCurves(sections, degree = 3, loose = false, closed = false) {
+    const list = _curveHandles(sections);
+    return new Solid(_lib().loft_curves(list, list.length, _curveU32(degree, 'loft_curves: degree'), Boolean(loose), Boolean(closed)));
+  }
+  /**
+   * `sections` swept along `rail`, each carried by the rail's frame from the rail point nearest its
+   * centre and blended between: `frame` `'rmf'` rotation-minimising, `'fixed'` keeping `up` upright.
+   * Fitted within `tolerance`; the sheet's `sheetError` says how close.
+   */
+  static sweepRail(rail, sections, frame = 'rmf', up = null, tolerance = 1e-3) {
+    if (frame !== 'rmf' && frame !== 'fixed') throw new BuildError(`sweep_rail: frame is 'rmf' or 'fixed', not '${String(frame)}'`);
+    const list = _curveHandles(sections);
+    const err = new Float64Array(1);
+    return _sheetWithError(_lib().sweep_rail(rail._handle, list, list.length, frame === 'rmf' ? 0 : 1, _curveVec3(up), _tol(tolerance), err), err);
+  }
+  /**
+   * `sections` swept between two rails: each section's first end on `railA` and last on `railB`,
+   * carried by the rotation and uniform scale that keep them there, the rails matched by arc
+   * length. Fitted within `tolerance` (`sheetError`).
+   */
+  static sweepTwoRails(railA, railB, sections, tolerance = 1e-3) {
+    const list = _curveHandles(sections);
+    const err = new Float64Array(1);
+    return _sheetWithError(_lib().sweep_two_rails(railA._handle, railB._handle, list, list.length, _tol(tolerance), err), err);
+  }
+  /**
+   * The Coons sheet of 2, 3 or 4 boundary curves meeting end to end within `tolerance` (in order
+   * round the boundary, each either way round): exact for non-rational boundaries, rational ones
+   * fitted first (`sheetError`).
+   */
+  static edgeSurface(curves, tolerance = 1e-3) {
+    const list = _curveHandles(curves);
+    const err = new Float64Array(1);
+    return _sheetWithError(_lib().edge_surface(list, list.length, _tol(tolerance), err), err);
+  }
+  /**
+   * The Gordon sheet of a curve network: `uCurves` (in order across the other way) and `vCurves`,
+   * every one of the first crossing every one of the second within `tolerance`. `sheetError` is the
+   * largest distance from the sheet to the curves given.
+   */
+  static networkSurface(uCurves, vCurves, tolerance = 1e-3) {
+    const u = _curveHandles(uCurves), v = _curveHandles(vCurves);
+    const err = new Float64Array(1);
+    return _sheetWithError(_lib().network_surface(u, u.length, v, v.length, _tol(tolerance), err), err);
+  }
+  /**
+   * The rolling-ball fillet between `a`'s face `faceA` and `b`'s face `faceB` (their whole NURBS
+   * surfaces): the ball on the side each face's normal points to (`flipA` / `flipB`: the other
+   * side), of `radius`, or running linearly from `radius` to `radiusEnd` along the fillet. Returns
+   * `[sheet, railA, railB]`: the fillet sheet (its `sheetError` set) and the contact curves on `a`
+   * and `b` (`NurbsCurve`s the caller owns), to trim them back with `trimByCurve` and join with
+   * `joinSheets`.
+   */
+  static filletSurfaces(a, b, radius, radiusEnd = null, flipA = false, flipB = false, tolerance = 1e-3, faceA = 0, faceB = 0) {
+    const end = radiusEnd == null ? radius : radiusEnd;
+    const ra = [null], rb = [null], err = new Float64Array(1);
+    const h = _lib().fillet_surfaces(a._handle, _curveU32(faceA, 'fillet_surfaces: face_a'), b._handle, _curveU32(faceB, 'fillet_surfaces: face_b'),
+      Number(radius), Number(end), Boolean(flipA), Boolean(flipB), _tol(tolerance), ra, rb, err);
+    if (!h) _fail('fillet_surfaces');
+    const railA = NurbsCurve._of(ra[0], 'fillet_surfaces'), railB = NurbsCurve._of(rb[0], 'fillet_surfaces');
+    return [_sheetWithError(h, err), railA, railB];
+  }
+  /** A sheet spanning from `a`'s side to `b`'s, meeting each at G`level` (1 or 2); `bulge` scales how far it leaves each edge along its neighbour's tangent. */
+  static blendSides(a, sideA, b, sideB, level = 2, bulge = 1, faceA = 0, faceB = 0) {
+    return new Solid(_lib().blend_sides(a._handle, _curveU32(faceA, 'blend_sides: face_a'), _sheetSide(sideA), b._handle,
+      _curveU32(faceB, 'blend_sides: face_b'), _sheetSide(sideB), _curveU32(level, 'blend_sides: level'), Number(bulge)));
+  }
+  /**
+   * The sheet filling a hole of 3 or more sides: N four-sided NURBS faces round a central point,
+   * G1 or G2 to each other. Each boundary, in order round the hole and either way round, is a
+   * `NurbsCurve` (met at G0), a sheet's side `[sheet, side]` or `[sheet, side, level]` (level 0, 1
+   * or 2; 2 by default), or an object `{ sheet, side, level = 2, face = 0, range = [0, 1] }`
+   * (`range` the part of the side's parameter, backwards `[1, 0]`). A side is `'u0'`, `'u1'`,
+   * `'v0'` or `'v1'`. The boundaries must meet end to end within `tolerance`; `bulge` scales how
+   * far the patch leaves each neighbour along its tangent.
+   *
+   * Face `i` meets boundary `i`'s second half along its `'v0'` side and boundary `i + 1`'s first
+   * half along its `'u1'`, so `continuity` measures each neighbour; the result's `patchReport`
+   * holds the worst of them, measured the same way.
+   */
+  static nSidedPatch(boundaries, bulge = 1, tolerance = 0.01) {
+    const rows = Array.from(boundaries, (b, i) => {
+      if (b instanceof NurbsCurve) return { sheet: null, face: 0, side: 0, from: 0, to: 1, level: 0, curve: b._handle };
+      let sheet, side, level = 2, face = 0, range = [0, 1];
+      if (Array.isArray(b)) {
+        if (b.length < 2 || b.length > 3) throw new BuildError(`n_sided_patch: boundary ${i} is [sheet, side] or [sheet, side, level]`);
+        [sheet, side] = b;
+        if (b.length === 3) level = b[2];
+      } else if (b !== null && typeof b === 'object') {
+        const unknown = Object.keys(b).filter((k) => !['sheet', 'side', 'level', 'face', 'range'].includes(k));
+        if (unknown.length) throw new BuildError(`n_sided_patch: boundary ${i}: unknown keys ${JSON.stringify(unknown.sort())}`);
+        ({ sheet, side } = b);
+        if (b.level !== undefined) level = b.level;
+        if (b.face !== undefined) face = b.face;
+        if (b.range !== undefined) range = b.range;
+      } else throw new BuildError(`n_sided_patch: boundary ${i} is a NurbsCurve, [sheet, side] or an object`);
+      if (!(sheet instanceof Solid)) throw new BuildError(`n_sided_patch: boundary ${i}: sheet is a Solid`);
+      return { sheet: sheet._handle, face: _curveU32(face, 'n_sided_patch: face'), side: _sheetSide(side), from: Number(range[0]),
+        to: Number(range[1]), level: _curveU32(level, 'n_sided_patch: level'), curve: null };
+    });
+    const out = {};
+    const solid = new Solid(_lib().n_sided_patch(rows, rows.length, Number(bulge), _tol(tolerance), out));
+    solid._patchReport = new PatchReport(out);
+    return solid;
+  }
+  /**
+   * `sheets` joined into one body, their faces in order: `[solid, report]`, a `JoinReport` of what
+   * was done. Every two naked edges whose ends and curves agree within `tolerance` (0: a rounding
+   * of the body's size) are sewn into one -- a gap closed is kept as that edge's own tolerance --
+   * the faces turned to agree, and a closed result turned to face out, a solid the booleans,
+   * `mass` and the writers take. Edges with exact curves are compared to the tolerance however
+   * coarsely each was sampled. At a tolerance above 0 a T-junction is sewn too: one sheet's edge
+   * along part of another's is first cut where the other's corner lies on it.
+   */
+  static joinSheets(sheets, tolerance = 0) {
+    const list = Array.from(sheets, (s) => s._handle);
+    const report = {};
+    const joined = new Solid(_lib().join_sheets(list, list.length, _tol(tolerance), report));
+    return [joined, new JoinReport(report)];
+  }
   static extrude(profile, frame, height) { return new Solid(_lib().extrude(profile._handle, _frame(frame), height)); }
   static extrudeOpen(profile, frame, height) { return new Solid(_lib().extrude_open(profile._handle, _frame(frame), height)); }
   static extrudeTapered(profile, frame, height, taper) { return new Solid(_lib().extrude_tapered(profile._handle, _frame(frame), height, taper)); }
@@ -3100,12 +3890,44 @@ class Solid {
     return Number.isNaN(t) ? null : t;
   }
   /**
+   * What this solid declares about its own precision, `{ absolute, angular }`: read from its
+   * file, inherited through every verb from the loosest of its inputs, or set by
+   * `withTolerances`; null in a field nothing declared. A verb given a null `tolerance` works at
+   * `effectiveTolerance`, which takes it into account.
+   */
+  get tolerances() {
+    const absolute = new Float64Array(1), angular = new Float64Array(1);
+    if (!_lib().solid_tolerances(this._handle, absolute, angular)) _fail('solid_tolerances');
+    const declared = (v) => (Number.isNaN(v) ? null : v);
+    return Object.freeze({ absolute: declared(absolute[0]), angular: declared(angular[0]) });
+  }
+  /**
+   * A new solid: this one declaring `absolute` (a length) and `angular` (radians) instead of
+   * what it declared, its name, paint and marks kept. null or undefined (or 0) declares nothing
+   * for that field; a negative or infinite value throws `BuildError`.
+   */
+  withTolerances(absolute = null, angular = null) {
+    const unset = (v) => (v == null ? NaN : Number(v));
+    return new Solid(_checked(_lib().solid_with_tolerances(this._handle, unset(absolute), unset(angular)), 'solid_with_tolerances'));
+  }
+  /**
+   * How loose this solid's vertex at `point` is, where its producer said (an OCCT `.brep`
+   * records one per vertex): the tolerance of the nearest recorded vertex within its own
+   * tolerance of `point`. null where none is recorded there.
+   */
+  vertexTolerance(point) {
+    const [x, y, z] = _doubles(point, 3, 'vertex_tolerance');
+    const t = _lib().vertex_tolerance(this._handle, x, y, z);
+    if (Number.isNaN(t) && _lastError()) _fail('vertex_tolerance');
+    return Number.isNaN(t) ? null : t;
+  }
+  /**
    * Cut along the closed `tool` and keep one side: `keep` 'outside' (a hole punched
    * through) or 'inside' (the sheet cut to the tool's outline).
    */
   trim(tool, keep = 'outside', tolerance = 0.05, progress = null) {
     Solid._keep(keep);
-    return new Solid(_lib().trim(this._handle, tool._handle, keep === 'inside', tolerance, _progress(progress), null));
+    return new Solid(_lib().trim(this._handle, tool._handle, keep === 'inside', _tol(tolerance), _progress(progress), null));
   }
   static _keep(keep) { if (keep !== 'outside' && keep !== 'inside') throw new BuildError(`trim: keep must be 'outside' or 'inside', not '${keep}'`); }
   // -- moving
@@ -3119,7 +3941,7 @@ class Solid {
    * close.
    */
   section(z, tolerance = 0.05) {
-    return _profileList(_lib().solid_section(this._handle, z, tolerance), 'solid_section');
+    return _profileList(_lib().solid_section(this._handle, z, _tol(tolerance)), 'solid_section');
   }
   translate(dx, dy, dz) { return new Solid(_lib().translate(this._handle, dx, dy, dz)); }
   /** This solid scaled by `factor` about the origin: every length times `factor`, exactly. */
@@ -3162,18 +3984,116 @@ class Solid {
    * for a rigid map or a similarity, and on every other solid.
    */
   get inexactTrims() { return this._inexactTrims; }
+  /** On a sheet from `sweepRail`, `sweepTwoRails`, `edgeSurface`, `networkSurface`, `filletSurfaces`, `flange` or `extrudeTo`, how far its fit is from what was asked (a distance); null on every other solid. */
+  get sheetError() { return this._sheetError; }
+  /** On the sheet from `nSidedPatch`, its `PatchReport`; null on every other solid. */
+  get patchReport() { return this._patchReport; }
+  /**
+   * How well face `face`'s side `side` (`'u0'`, `'u1'`, `'v0'`, `'v1'`: a boundary isocurve of its
+   * NURBS surface) meets `other`'s face `otherFace` along `otherSide`: a `Continuity`, the largest
+   * gap, angle between the normals and difference of curvature across the edge, with where each is.
+   */
+  continuity(side, other, otherSide, face = 0, otherFace = 0, samples = 64) {
+    const out = {};
+    if (!_lib().continuity(this._handle, _curveU32(face, 'continuity: face'), _sheetSide(side), other._handle,
+      _curveU32(otherFace, 'continuity: other_face'), _sheetSide(otherSide), _curveU32(samples, 'continuity: samples'), out)) _fail('continuity');
+    return new Continuity(out);
+  }
+  /** Face `face` as a sheet of its own, its side `side` bent to meet `other`'s `otherSide` at G`level`: 0 position, 1 tangent plane, 2 curvature. The opposite side stays where it was. */
+  matched(side, other, otherSide, level = 2, face = 0, otherFace = 0) {
+    return new Solid(_lib().match_side(this._handle, _curveU32(face, 'match_side: face'), _sheetSide(side), other._handle,
+      _curveU32(otherFace, 'match_side: other_face'), _sheetSide(otherSide), _curveU32(level, 'match_side: level')));
+  }
+  /**
+   * This sheet cut along `curve` -- one lying on it, say projected or pulled onto it -- and nothing
+   * removed: every face comes back in its pieces outside the cutter, then its pieces inside, each
+   * a face, as `splitSheet` orders them. The cutter is `curve` run along `direction` (null: the
+   * mean of the sheet's normals along the curve) through the whole sheet. A closed curve's inside
+   * is the island it bounds; an open curve's is the side left of its run, seen from where
+   * `direction` points, and an open curve is run on straight past both ends, so it should cross the
+   * sheet's boundary.
+   */
+  splitByCurve(curve, direction = null, tolerance = 0.05) {
+    return new Solid(_lib().split_by_curve(this._handle, curve._handle, _curveVec3(direction), _tol(tolerance)));
+  }
+  /**
+   * This sheet cut along `curve` and one side thrown away (see `splitByCurve`): `keep` `'inside'`
+   * keeps the island a closed curve bounds, `'outside'` the sheet with the hole; for an open curve
+   * `'left'` (the same as `'inside'`) keeps the side left of its run seen from where `direction`
+   * points, `'right'` the other. Throws `BuildError` where nothing of the sheet lies on the kept side.
+   */
+  trimByCurve(curve, keep = 'outside', direction = null, tolerance = 0.05) {
+    if (keep !== 'outside' && keep !== 'inside' && keep !== 'left' && keep !== 'right') {
+      throw new BuildError(`trim_by_curve: keep must be 'outside', 'inside', 'left' or 'right', not '${String(keep)}'`);
+    }
+    return new Solid(_lib().trim_by_curve(this._handle, curve._handle, _curveVec3(direction), keep === 'inside' || keep === 'left', _tol(tolerance)));
+  }
+  /**
+   * `section` swept along each of `edges` (naked edges of this sheet: `Edge` objects or their
+   * indices) on the face's own frame: at every point of the edge the section's `x` runs outward
+   * from the face -- square to the edge, in the face's tangent plane -- and its `y` along the face's
+   * normal, so a section from `(0, 0)` to `(0, -10)` turns the edge under by 10 all along it however
+   * the panel curves, `(0, 0)` to `(10, 0)` carries the face on, and a lip stands proud with `y > 0`.
+   * `section` is a `NurbsCurve` in the plane `z = 0` starting at the origin. With `join` the sweeps
+   * come back sewn to this sheet (its faces first, then one per edge), else alone, sewn to each
+   * other. Each sweep is fitted within `tolerance`; `sheetError` says how close. Throws
+   * `BuildError` for an edge bordered by two faces, a section not starting at the origin, and
+   * sweeps that did not sew on.
+   */
+  flange(edges, section, tolerance = 1e-3, join = true) {
+    const which = _indices(edges, 'flange', 'edges', true);
+    const err = new Float64Array(1);
+    return _sheetWithError(_lib().flange(this._handle, which, which.length, section._handle, _tol(tolerance), Boolean(join), err), err);
+  }
+  /**
+   * Each of `edges` (naked edges of this sheet: `Edge` objects or their indices) slid along
+   * `direction` until it meets `target`: every point of the edge travels along the direction to its
+   * first hit on `target`'s faces (trimmed, not their whole surfaces). One wall per edge -- the
+   * edge's own curve swept straight, bounded by the curve through the hits, fitted within
+   * `tolerance` of every hit (`sheetError`) -- so a wheel arch cut in a panel runs in to the well's
+   * inner wall as its liner. With `join` the walls come back sewn to this sheet (its faces first,
+   * then one per edge), else alone, sewn to each other. Throws `BuildError` naming the point whose
+   * line misses the target.
+   */
+  extrudeTo(edges, direction, target, tolerance = 1e-3, join = true) {
+    const which = _indices(edges, 'extrude_to', 'edges', true);
+    const err = new Float64Array(1);
+    return _sheetWithError(_lib().extrude_to(this._handle, which, which.length, _curveVec3(direction), target._handle,
+      _tol(tolerance), Boolean(join), err), err);
+  }
+  /**
+   * This sheet with an opening recessed into it along `outline` -- a window, a lamp, a grille or
+   * an air intake set into a panel: `[solid, [sheet, fillet, walls, pane]]`, how many of the
+   * result's faces are each part's, the faces in that order.
+   *
+   * `outline` is a closed curve on the sheet (one face or several joined); each of its points is
+   * found on the sheet, so it may stand a little off it. The walls run back `depth` along the
+   * sheet's own normal at every point of the rim -- not along one view -- behind the face
+   * (against its normal; negative: in front), leaning in toward the opening by `draft` radians
+   * (negative: out) and meeting on the mitre at the outline's corners. `fillet` above 0 rounds
+   * the rim between the sheet and the walls (the outline must then be smooth). `pane` closes the
+   * back with one patch whose four sides end where the outline turns most, so it does not twist.
+   * Every piece is sewn to the next: only the sheet's own boundary is left naked, and the walls'
+   * foot without a pane. Throws `BuildError` for an outline that is not closed, a corner with a
+   * fillet, or a fillet deeper than the walls.
+   */
+  recess(outline, depth, draft = 0, fillet = 0, pane = true, tolerance = 0.05) {
+    const faces = new Uint32Array(4);
+    const out = new Solid(_lib().recess(this._handle, outline._handle, Number(depth), Number(draft), Number(fillet), Boolean(pane), _tol(tolerance), faces));
+    return [out, [faces[0], faces[1], faces[2], faces[3]]];
+  }
   // -- combining
   /** This solid and `other` as one; `merge` merges the flush faces the join leaves (`mergeFlush`), off by default. */
-  join(other, tolerance = 0.05, progress = null, merge = false) { return _merged(new Solid(_lib().join(this._handle, other._handle, tolerance, _progress(progress), null)), merge); }
-  cut(other, tolerance = 0.05, progress = null, merge = false) { return _merged(new Solid(_lib().cut(this._handle, other._handle, tolerance, _progress(progress), null)), merge); }
-  common(other, tolerance = 0.05, progress = null, merge = false) { return _merged(new Solid(_lib().common(this._handle, other._handle, tolerance, _progress(progress), null)), merge); }
+  join(other, tolerance = 0.05, progress = null, merge = false) { return _merged(new Solid(_lib().join(this._handle, other._handle, _tol(tolerance), _progress(progress), null)), merge); }
+  cut(other, tolerance = 0.05, progress = null, merge = false) { return _merged(new Solid(_lib().cut(this._handle, other._handle, _tol(tolerance), _progress(progress), null)), merge); }
+  common(other, tolerance = 0.05, progress = null, merge = false) { return _merged(new Solid(_lib().common(this._handle, other._handle, _tol(tolerance), _progress(progress), null)), merge); }
   /**
    * This solid or sheet cut along `tool`'s boundary with nothing removed:
    * every face comes back as its pieces outside `tool` and then its pieces
    * inside, in this solid's own face order -- where a surface trim starts.
    * `tool` must be a closed solid.
    */
-  splitSheet(tool, tolerance = 0.05, progress = null) { return new Solid(_lib().split_sheet(this._handle, tool._handle, tolerance, _progress(progress), null)); }
+  splitSheet(tool, tolerance = 0.05, progress = null) { return new Solid(_lib().split_sheet(this._handle, tool._handle, _tol(tolerance), _progress(progress), null)); }
   /**
    * This solid and `other` as one body that keeps every piece -- a union that keeps the inside
    * pieces: its regions are this solid less `other`, the two together, and `other` less this one
@@ -3182,7 +4102,7 @@ class Solid {
    * chamfer, shell, thicken, the mass) refuse it; take its cells with `regions` and `regionSolid`.
    * Built exactly: both solids closed, every face a plane, cylinder, cone, sphere or torus.
    */
-  merge(other, tolerance = 0.05, progress = null) { return new Solid(_lib().merge(this._handle, other._handle, tolerance, _progress(progress), null)); }
+  merge(other, tolerance = 0.05, progress = null) { return new Solid(_lib().merge(this._handle, other._handle, _tol(tolerance), _progress(progress), null)); }
   /**
    * The regions of space this solid's faces bound, region 0 the infinite one, as plain
    * `{ index, finite, box, sides, shells }` objects: two for an ordinary solid (outside, inside),
@@ -3228,7 +4148,7 @@ class Solid {
    */
   intersect(other, tolerance = 0.05, progress = null) {
     const l = _lib();
-    return _intersectionOf(l, _checked(l.intersect(this._handle, other._handle, tolerance, _progress(progress), null), 'intersect'));
+    return _intersectionOf(l, _checked(l.intersect(this._handle, other._handle, _tol(tolerance), _progress(progress), null), 'intersect'));
   }
   /**
    * Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its loops cut
@@ -3257,7 +4177,7 @@ class Solid {
    */
   hits(profile, frame, tolerance = 0.05, progress = null) {
     const l = _lib();
-    const h = _checked(l.solid_profile_hits(this._handle, profile._handle, _frame(frame), tolerance, _progress(progress), null), 'solid_profile_hits');
+    const h = _checked(l.solid_profile_hits(this._handle, profile._handle, _frame(frame), _tol(tolerance), _progress(progress), null), 'solid_profile_hits');
     try {
       const hits = [];
       const n = l.hit_count(h);
@@ -3318,7 +4238,7 @@ class Solid {
    * share along a line does not count; a hole or a fold does.
    */
   leakedEdges(tolerance = 0.05) {
-    const n = _lib().leaked_edges(this._handle, tolerance);
+    const n = _lib().leaked_edges(this._handle, _tol(tolerance));
     if (n === NONE) _fail('leaked_edges');
     return n;
   }
@@ -3329,12 +4249,12 @@ class Solid {
    * way) and not a seam two solids share along a line.
    */
   unpairedEdges(tolerance = 0.05) {
-    const n = _lib().unpaired_edges(this._handle, tolerance);
+    const n = _lib().unpaired_edges(this._handle, _tol(tolerance));
     if (n === NONE) _fail('unpaired_edges');
     return n;
   }
   /** `leakedEdges(tolerance) === 0`. */
-  isWatertight(tolerance = 0.05) { return this.leakedEdges(tolerance) === 0; }
+  isWatertight(tolerance = 0.05) { return this.leakedEdges(_tol(tolerance)) === 0; }
   /**
    * Whether the faces make a manifold -- every edge bordered by one face or
    * two, the faces round every vertex one fan -- and whether it is closed:
@@ -3411,7 +4331,7 @@ class Solid {
    */
   contains(point, tolerance = 0.05) {
     const out = new Uint32Array([NONE]);
-    if (!_lib().contains(this._handle, _doubles(point, 3, 'contains'), tolerance, out)) _fail('contains');
+    if (!_lib().contains(this._handle, _doubles(point, 3, 'contains'), _tol(tolerance), out)) _fail('contains');
     return _containment(out[0], 'contains');
   }
   /**
@@ -3419,7 +4339,7 @@ class Solid {
    * meshed once, then asked point after point. It keeps its own reference to the body, so it
    * goes on answering after this solid is closed.
    */
-  classifier(tolerance = 0.05) { return new Classifier(this, tolerance); }
+  classifier(tolerance = 0.05) { return new Classifier(this, _tol(tolerance)); }
   /**
    * The closest points between this solid's boundary and `other`'s, to `tolerance` (absolute, in
    * model units), as `{ distance, onA, onB, kindA, indexA, edgeA, kindB, indexB, edgeB, refined }`;
@@ -3429,7 +4349,7 @@ class Solid {
    */
   closest(other, tolerance = 0.05, progress = null) {
     const out = {};
-    if (!_lib().closest(this._handle, other._handle, tolerance, _progress(progress), null, out)) _fail('closest');
+    if (!_lib().closest(this._handle, other._handle, _tol(tolerance), _progress(progress), null, out)) _fail('closest');
     return _closestOf(out);
   }
   /**
@@ -3450,13 +4370,13 @@ class Solid {
    *  broad phase's own bound (`Collider` builds one per part at construction). */
   boundsBox(tolerance = 0.05) {
     const out = {};
-    if (!_lib().solid_bounds_box(this._handle, tolerance, out)) _fail('solid_bounds_box');
+    if (!_lib().solid_bounds_box(this._handle, _tol(tolerance), out)) _fail('solid_bounds_box');
     return _boxOf(out);
   }
   // -- out
   /** `{ positions, normals, indices }` as fresh typed arrays at `tolerance`. */
   mesh(tolerance = 0.05) {
-    const m = _lib().mesh(this._handle, tolerance);
+    const m = _lib().mesh(this._handle, _tol(tolerance));
     if (m.positions == null) _fail('mesh');
     const n = m.vertex_count;
     return {
@@ -3475,7 +4395,7 @@ class Solid {
    * this copy, once returned, is unaffected.
    */
   mesh64(tolerance = 0.05) {
-    const m = _lib().mesh64(this._handle, tolerance);
+    const m = _lib().mesh64(this._handle, _tol(tolerance));
     if (m.positions == null) _fail('mesh64');
     const n = m.vertex_count;
     return {
@@ -3487,7 +4407,7 @@ class Solid {
   }
   /** The feature edges as an array of `Float32Array`s, three floats a point. */
   edgePolylines(tolerance = 0.05) {
-    const p = _lib().edge_polylines(this._handle, tolerance);
+    const p = _lib().edge_polylines(this._handle, _tol(tolerance));
     if (p.offsets == null) _fail('edge_polylines');
     const points = _floats(p.points, p.point_count * 3) ?? new Float32Array(0);
     const offsets = _uint32s(p.offsets, p.polyline_count + 1);
@@ -3546,7 +4466,7 @@ class Solid {
    *  on no coloured edge; an empty array where the solid has no edge paint at all. Copied out, but
    *  it fills the solid's cache at `tolerance` first, as `edgePolylines` does. */
   edgePolylineColours(tolerance = 0.05) {
-    const c = _lib().edge_polyline_colours(this._handle, tolerance);
+    const c = _lib().edge_polyline_colours(this._handle, _tol(tolerance));
     if (c.rgb == null) { if (_lastError()) _fail('edge_polyline_colours'); return []; }
     const values = _doublesAt(c.rgb, 3 * c.count);
     const out = [];
@@ -3559,6 +4479,10 @@ class Solid {
   satText(unit = 'mm') { return writeSatText([this], unit); }
   /** `satText` written to `filePath` by the library itself. */
   sat(filePath, unit = 'mm') { writeSat(filePath, [this], unit); }
+  /** The solid as a Rhino `.3dm`'s bytes: its exact brep, named and coloured as the solid is; see `rhino3dmBytes`. */
+  rhino3dmBytes(unit = 'mm') { return rhino3dmBytes([this], unit); }
+  /** `rhino3dmBytes` written to `filePath` by the library itself. */
+  write3dm(filePath, unit = 'mm') { write3dm(filePath, [this], unit); }
   /** This solid as OCCT `.brep` text: the exact surfaces and curves, with a
    *  curve in each face's own parameters for every edge, so OCCT's `BRepTools::Read`
    *  gives a shape `BRepCheck_Analyzer` finds valid. No unit is declared -- a `.brep`
@@ -3659,9 +4583,195 @@ class Solid {
   findFace(faceRef, hint = null, tolerance = 1e-3) {
     const ref = Float64Array.from(faceRef, Number);
     if (ref.length !== 8) throw new BuildError('find_face: a face reference is eight numbers');
-    const found = _lib().find_face(this._handle, ref, hint === null || hint === undefined ? -1 : hint, tolerance);
+    const found = _lib().find_face(this._handle, ref, hint === null || hint === undefined ? -1 : hint, _tol(tolerance));
     if (found === -2) _fail('find_face');
     return found < 0 ? null : found;
+  }
+  /** Edge `edge` (an index into `edges()`) by what it is, fifteen numbers: its kind (line 0,
+   * circle 1, ellipse 2, B-spline 3, other 4), its midpoint (x y z), its unit tangent there
+   * (x y z), its length, the outward normals there of the two faces meeting on it (x y z each;
+   * an open sheet's rim gives its one face's twice), and its span -- how far from the midpoint
+   * `findEdge` may look on a resized solid. `faceRef`'s twin. Throws for an edge past the table
+   * or one with no length. */
+  edgeRef(edge) {
+    const out = new Float64Array(15);
+    if (!_lib().edge_ref(this._handle, edge, out)) _fail('edge_ref');
+    return Array.from(out);
+  }
+  /** The edge `edgeRef` (from `edgeRef`) refers to: of the edges of that kind passing within
+   * `tolerance` of its midpoint and running the same way, the one of nearest length; where none
+   * does (the solid was resized), the edge of that kind running the same way between faces
+   * facing the same two ways, the only one or the one clearly nearest, no farther than the span.
+   * Null where the edge is gone; throws for a malformed reference or a tolerance not positive. */
+  findEdge(edgeRef, tolerance = 1e-3) {
+    const ref = Float64Array.from(edgeRef, Number);
+    if (ref.length !== 15) throw new BuildError('find_edge: an edge reference is fifteen finite numbers');
+    const found = _lib().find_edge(this._handle, ref, _tol(tolerance));
+    if (found === -2) _fail('find_edge');
+    return found < 0 ? null : found;
+  }
+  /** How many vertices this solid has: its edges' ends, welded, in the order `vertexRef` and `findVertex` index. */
+  get vertexCount() {
+    const n = _lib().vertex_count(this._handle);
+    if (n === 0 && _lastError()) _fail('vertex_count');
+    return n;
+  }
+  /** Vertex `vertex` by where it is: `[x, y, z]`. Throws for a vertex the solid does not have. */
+  vertexRef(vertex) {
+    const out = new Float64Array(3);
+    if (!_lib().vertex_ref(this._handle, vertex, out)) _fail('vertex_ref');
+    return Array.from(out);
+  }
+  /** The vertex nearest `vertexRef` (a `vertexRef`, or any point) within `tolerance`; null where
+   * no vertex is that near. Throws for a point that is not three finite numbers or a tolerance
+   * not positive. */
+  findVertex(vertexRef, tolerance = 1e-3) {
+    const ref = Float64Array.from(vertexRef, Number);
+    if (ref.length !== 3) throw new BuildError('find_vertex: a vertex reference is three finite numbers');
+    const found = _lib().find_vertex(this._handle, ref, _tol(tolerance));
+    if (found === -2) _fail('find_vertex');
+    return found < 0 ? null : found;
+  }
+  // -- identity: ids on faces and edges, where each came from, and a verb's history
+  /** This solid tracked: its faces numbered 1..n in face order and its edges 1..m in the edge
+   * table's order, each its own origin. Tracking is opt-in and rides on from here: a verb on a
+   * tracked solid gives a tracked result. A tracked solid comes back as it is. */
+  tracked() { return new Solid(_lib().solid_tracked(this._handle)); }
+  /** Whether this solid carries face and edge ids (`tracked`, made from a tracked solid, or given an attribute). */
+  get isTracked() {
+    const t = _lib().solid_is_tracked(this._handle);
+    if (!t && _lastError()) _fail('solid_is_tracked');
+    return Boolean(t);
+  }
+  _idOf(short, index) {
+    const id = Number(_lib()[short](this._handle, index));
+    if (id === 0) {
+      if (_lastError()) _fail(short);
+      return null;
+    }
+    return id;
+  }
+  _withId(short, id) {
+    const found = _lib()[short](this._handle, _id(id, short));
+    if (found === NONE) {
+      if (_lastError()) _fail(short);
+      return null;
+    }
+    return found;
+  }
+  _origins(what, index) {
+    const l = _lib();
+    const n = l[`${what}_origin_count`](this._handle, index);
+    if (n === NONE) _fail(`${what}_origin_count`);
+    const operand = [0], id = [0], out = [];
+    for (let i = 0; i < n; i++) {
+      if (!l[`${what}_origin_at`](this._handle, index, i, operand, id)) _fail(`${what}_origin_at`);
+      out.push(Object.freeze([Number(operand[0]), Number(id[0])]));
+    }
+    return out;
+  }
+  /** Face `face`'s id (a number), null where this solid is untracked. An id stays with its face
+   * through every verb that keeps the face; ids are not written to files (use `faceRef` there).
+   * Throws for a face the solid does not have. */
+  faceId(face) { return this._idOf('face_id', face); }
+  /** The face whose id is `id`, null where no face has it. */
+  faceWithId(id) { return this._withId('face_with_id', id); }
+  /** The input faces face `face` came from, as `[operand, id]` pairs (a boolean's target 0, its
+   * tool 1): the face it lies on most first; empty for a generated face or an untracked solid. */
+  faceOrigins(face) { return this._origins('face', face); }
+  /** Edge `edge`'s id (an index into `edges()`), as `faceId`. */
+  edgeId(edge) { return this._idOf('edge_id', edge); }
+  /** The edge whose id is `id`, null where no edge has it. */
+  edgeWithId(id) { return this._withId('edge_with_id', id); }
+  /** The input edge edge `edge` lies on, as `faceOrigins`: one `[operand, id]`, or none for a new edge. */
+  edgeOrigins(edge) { return this._origins('edge', edge); }
+  _history(short, inputs) {
+    const l = _lib();
+    const handles = inputs.map((s) => s._handle);
+    const h = l[short](this._handle, handles, handles.length);
+    if (!h) _fail(short);
+    try { return _readHistory(l, h); } finally { l.history_free(h); }
+  }
+  /** What the verb that made this solid did to the faces of `inputs` -- passed in its operand
+   * order (`a.cut(b).history(a, b)`) -- as a `History`. Throws where this solid or an input is
+   * untracked, or an origin names an operand past the inputs. */
+  history(...inputs) { return this._history('history', inputs); }
+  /** `history` for the edges, by edge id. */
+  edgeHistory(...inputs) { return this._history('edge_history', inputs); }
+  // -- attributes: text on a solid (written to STEP files) and on its faces (in memory)
+  /** This solid's attributes, a read-only `Map` in key order (built once per solid). A solid's
+   * attributes go with it through every verb (a verb's result takes its first operand's) and are
+   * written to STEP files as user-defined attributes. */
+  get attributes() {
+    if (this._attributes === undefined) {
+      const l = _lib(), h = this._handle;
+      const n = l.attribute_count(h);
+      if (n === 0 && _lastError()) _fail('attribute_count');
+      this._attributes = _attributeMap(n, l.attribute_key_at, l.attribute_value_at, h);
+    }
+    return this._attributes;
+  }
+  /** Attribute `key`, null where this solid has none. */
+  attribute(key) {
+    const raw = _lib().attribute(this._handle, _attributeText(key, 'attribute', 'key'));
+    if (raw == null) {
+      if (_lastError()) _fail('attribute');
+      return null;
+    }
+    return String(raw);
+  }
+  /** This solid with attribute `key` set to `value`, over any it had: a new solid, tracked if this one was not. An empty key is refused. */
+  withAttribute(key, value) {
+    return new Solid(_lib().with_attribute(this._handle, _attributeText(key, 'with_attribute', 'key'), _attributeText(value, 'with_attribute', 'value')));
+  }
+  /** This solid with every attribute given (a `Map`, `[key, value]` pairs or an object) set, in key order. */
+  withAttributes(attributes) {
+    let out = this;
+    for (const [key, value] of _attributeEntries(attributes, 'with_attributes')) {
+      const next = out.withAttribute(key, value);
+      if (out !== this) out.close();
+      out = next;
+    }
+    return out;
+  }
+  /** This solid without attribute `key`: a new solid, equal to this one where it had none. */
+  withoutAttribute(key) { return new Solid(_lib().without_attribute(this._handle, _attributeText(key, 'without_attribute', 'key'))); }
+  /** Face `face`'s attributes, a read-only `Map` in key order. They follow the face's id through
+   * verbs (each piece of a split face has its parent's) and stay in memory. Throws for a face the
+   * solid does not have. */
+  faceAttributes(face) {
+    const l = _lib(), h = this._handle;
+    const n = l.face_attribute_count(h, face);
+    if (n === NONE) _fail('face_attribute_count');
+    return _attributeMap(n, l.face_attribute_key_at, l.face_attribute_value_at, h, face);
+  }
+  /** Face `face`'s attribute `key`, null where it has none. Throws for a face the solid does not have. */
+  faceAttribute(face, key) {
+    const raw = _lib().face_attribute(this._handle, face, _attributeText(key, 'face_attribute', 'key'));
+    if (raw == null) {
+      if (_lastError()) _fail('face_attribute');
+      return null;
+    }
+    return String(raw);
+  }
+  /** This solid with face `face`'s attribute `key` set to `value`: a new solid, tracked if this one was not. */
+  withFaceAttribute(face, key, value) {
+    const what = 'with_face_attribute';
+    return new Solid(_lib().with_face_attribute(this._handle, face, _attributeText(key, what, 'key'), _attributeText(value, what, 'value')));
+  }
+  /** This solid with every attribute given set on face `face`, in key order. */
+  withFaceAttributes(face, attributes) {
+    let out = this;
+    for (const [key, value] of _attributeEntries(attributes, 'with_face_attributes')) {
+      const next = out.withFaceAttribute(face, key, value);
+      if (out !== this) out.close();
+      out = next;
+    }
+    return out;
+  }
+  /** This solid without face `face`'s attribute `key`: a new solid, equal to this one where the face had none. */
+  withoutFaceAttribute(face, key) {
+    return new Solid(_lib().without_face_attribute(this._handle, face, _attributeText(key, 'without_face_attribute', 'key')));
   }
   // -- naming
   /**
@@ -3748,6 +4858,12 @@ class Solid {
     if (_lastError()) _fail('edge_colour');
     return null;
   }
+  /**
+   * This solid as a `Document`'s `solid.body` node holds it, parsed: the kernel's own B-rep as a
+   * record of its tables, every number as it is, and its colours. What `Document.addSolid` puts in
+   * a document.
+   */
+  documentBody() { return JSON.parse(_ownedText(_lib().document_solid_body(this._handle), 'document_solid_body')); }
   /** The edges a fillet indexes, as `Edge` records (copied; safe to keep). */
   edges() {
     const l = _lib(); const h = this._handle;
@@ -3772,14 +4888,23 @@ class Solid {
     if (/has no exact curve/.test(_lastError())) return null;
     _fail('edge_curve');
   }
-  /** `edges`: `Edge` objects or their indices. */
-  fillet(edges, radius, tolerance = 1e-6, progress = null) {
+  /**
+   * `edges`: `Edge` objects or their indices. A spline edge -- the crease between two faces on NURBS
+   * surfaces, running from one free edge of the shell to another -- is rounded by a ball rolled along
+   * it, in a call of its own (not with straight or circular edges); `tolerance` is then the fillet
+   * surface's fit. `radiusEnd` (spline edges only) runs the radius linearly from `radius` to it in
+   * arc length along the edge, `radius` at the end where the edge's curve starts.
+   */
+  fillet(edges, radius, tolerance = 1e-6, progress = null, radiusEnd = null) {
     const which = _indices(edges, 'fillet', 'edges', true);
-    return new Solid(_lib().fillet(this._handle, which, which.length, radius, tolerance, _progress(progress), null));
+    if (radiusEnd != null && radiusEnd !== radius) {
+      return new Solid(_lib().fillet_varying(this._handle, which, which.length, radius, Number(radiusEnd), _tol(tolerance)));
+    }
+    return new Solid(_lib().fillet(this._handle, which, which.length, radius, _tol(tolerance), _progress(progress), null));
   }
   chamfer(edges, distance, tolerance = 1e-6) {
     const which = _indices(edges, 'chamfer', 'edges', true);
-    return new Solid(_lib().chamfer(this._handle, which, which.length, distance, tolerance));
+    return new Solid(_lib().chamfer(this._handle, which, which.length, distance, _tol(tolerance)));
   }
   /** `open`: face indices removed so the hollow is reachable. */
   /**
@@ -3797,7 +4922,7 @@ class Solid {
   pushPull(face, distance, tolerance = 0.05, progress = null) {
     if (typeof face === 'number') {
       if (Number.isInteger(face) && face >= 0 && face <= 0xffffffff) {
-        return new Solid(_lib().push_pull(this._handle, face, distance, tolerance, _progress(progress), null));
+        return new Solid(_lib().push_pull(this._handle, face, distance, _tol(tolerance), _progress(progress), null));
       }
       throw new TypeError(`pushPull: face must be a face index or a list of indices, not ${face}`);
     }
@@ -3806,7 +4931,7 @@ class Solid {
       throw new TypeError(`pushPull: face must be a face index or a list of indices, not ${described}`);
     }
     const which = _indices(face, 'pushPull', 'face');
-    return new Solid(_lib().push_pull_faces(this._handle, which, which.length, distance, tolerance, _progress(progress), null));
+    return new Solid(_lib().push_pull_faces(this._handle, which, which.length, distance, _tol(tolerance), _progress(progress), null));
   }
   /**
    * This solid split by `tool` into bodies: a closed `tool` gives the parts
@@ -3814,12 +4939,12 @@ class Solid {
    * connected part is a body of its own.
    */
   split(tool, tolerance = 0.05, progress = null) {
-    const all = new Solid(_lib().split(this._handle, tool._handle, tolerance, _progress(progress), null));
+    const all = new Solid(_lib().split(this._handle, tool._handle, _tol(tolerance), _progress(progress), null));
     try { return all.lumps(); } finally { all.close(); }
   }
   /** This solid split by the plane through `plane`'s origin, square to its z: the bodies in front of it first, then those behind. */
   splitByPlane(plane, tolerance = 0.05, progress = null) {
-    const all = new Solid(_lib().split_by_plane(this._handle, _frame(plane), tolerance, _progress(progress), null));
+    const all = new Solid(_lib().split_by_plane(this._handle, _frame(plane), _tol(tolerance), _progress(progress), null));
     try { return all.lumps(); } finally { all.close(); }
   }
   /**
@@ -3828,7 +4953,7 @@ class Solid {
    * Where the plane lies along z does not matter.
    */
   splitByProfile(profile, frame, tolerance = 0.05, progress = null) {
-    const all = new Solid(_lib().split_by_profile(this._handle, profile._handle, _frame(frame), tolerance, _progress(progress), null));
+    const all = new Solid(_lib().split_by_profile(this._handle, profile._handle, _frame(frame), _tol(tolerance), _progress(progress), null));
     try { return all.lumps(); } finally { all.close(); }
   }
   /** This solid's connected bodies, each a solid of its own -- faces sharing an edge are one body -- in the order of their first faces. */
@@ -3851,19 +4976,19 @@ class Solid {
    * made again at `radius`, as a press-pull on a fillet face: taken back to the sharp edges
    * it replaced, and those rounded again.
    */
-  refillet(face, radius, tolerance = 1e-6) { return new Solid(_lib().refillet(this._handle, face, radius, tolerance)); }
+  refillet(face, radius, tolerance = 1e-6) { return new Solid(_lib().refillet(this._handle, face, radius, _tol(tolerance))); }
   /** The round `face` belongs to taken off, the faces beside it sharp again -- the delete of a fillet face. */
   unfillet(face) { return new Solid(_lib().unfillet(this._handle, face)); }
   /**
    * The chamfer `face` belongs to -- its bevels, flat or round a rim, and the corner triangles
    * joined to that face -- cut again at `distance`, as a press-pull on a chamfer face.
    */
-  rechamfer(face, distance, tolerance = 1e-6) { return new Solid(_lib().rechamfer(this._handle, face, distance, tolerance)); }
+  rechamfer(face, distance, tolerance = 1e-6) { return new Solid(_lib().rechamfer(this._handle, face, distance, _tol(tolerance))); }
   /** The chamfer `face` belongs to taken off, the faces beside it sharp again -- the delete of a chamfer face. */
   unchamfer(face) { return new Solid(_lib().unchamfer(this._handle, face)); }
   shell(thickness, open = [], tolerance = 1e-6, progress = null) {
     const which = _indices(open, 'shell', 'open');
-    return new Solid(_lib().shell(this._handle, thickness, which, which.length, tolerance, _progress(progress), null));
+    return new Solid(_lib().shell(this._handle, thickness, which, which.length, _tol(tolerance), _progress(progress), null));
   }
   /**
    * This sheet made a solid `thickness` thick: its faces, their twins moved
@@ -3871,7 +4996,7 @@ class Solid {
    * every open edge. A closed sheet thickens to a hollow.
    */
   thicken(thickness, tolerance = 1e-6, progress = null) {
-    return new Solid(_lib().thicken(this._handle, thickness, tolerance, _progress(progress), null));
+    return new Solid(_lib().thicken(this._handle, thickness, _tol(tolerance), _progress(progress), null));
   }
   /** Run `message` on the worker with this solid (and `others`) locked as `name`. */
   async _async(name, message, others = [], progress = null) {
@@ -3884,19 +5009,19 @@ class Solid {
   }
   /** A newly built `Solid` from a worker reply's raw BigInt address; koffi accepts it as-is. */
   static _wrap(r) { return new Solid(r.address); }
-  async joinAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('joinAsync', { op: 'combine', which: 'join', b: _addressOf(other._handle), tolerance }, [other], progress)); }
-  async cutAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('cutAsync', { op: 'combine', which: 'cut', b: _addressOf(other._handle), tolerance }, [other], progress)); }
-  async commonAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('commonAsync', { op: 'combine', which: 'common', b: _addressOf(other._handle), tolerance }, [other], progress)); }
-  async splitSheetAsync(tool, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('splitSheetAsync', { op: 'combine', which: 'split_sheet', b: _addressOf(tool._handle), tolerance }, [tool], progress)); }
-  async filletAsync(edges, radius, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('filletAsync', { op: 'fillet', edges: _indices(edges, 'filletAsync', 'edges', true), radius, tolerance }, [], progress)); }
-  async chamferAsync(edges, distance, tolerance = 1e-6) { return Solid._wrap(await this._async('chamferAsync', { op: 'chamfer', edges: _indices(edges, 'chamferAsync', 'edges', true), distance, tolerance })); }
-  async shellAsync(thickness, open = [], tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('shellAsync', { op: 'shell', thickness, open: _indices(open, 'shellAsync', 'open'), tolerance }, [], progress)); }
-  async thickenAsync(thickness, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('thickenAsync', { op: 'thicken', thickness, tolerance }, [], progress)); }
+  async joinAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('joinAsync', { op: 'combine', which: 'join', b: _addressOf(other._handle), tolerance: _tol(tolerance) }, [other], progress)); }
+  async cutAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('cutAsync', { op: 'combine', which: 'cut', b: _addressOf(other._handle), tolerance: _tol(tolerance) }, [other], progress)); }
+  async commonAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('commonAsync', { op: 'combine', which: 'common', b: _addressOf(other._handle), tolerance: _tol(tolerance) }, [other], progress)); }
+  async splitSheetAsync(tool, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('splitSheetAsync', { op: 'combine', which: 'split_sheet', b: _addressOf(tool._handle), tolerance: _tol(tolerance) }, [tool], progress)); }
+  async filletAsync(edges, radius, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('filletAsync', { op: 'fillet', edges: _indices(edges, 'filletAsync', 'edges', true), radius, tolerance: _tol(tolerance) }, [], progress)); }
+  async chamferAsync(edges, distance, tolerance = 1e-6) { return Solid._wrap(await this._async('chamferAsync', { op: 'chamfer', edges: _indices(edges, 'chamferAsync', 'edges', true), distance, tolerance: _tol(tolerance) })); }
+  async shellAsync(thickness, open = [], tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('shellAsync', { op: 'shell', thickness, open: _indices(open, 'shellAsync', 'open'), tolerance: _tol(tolerance) }, [], progress)); }
+  async thickenAsync(thickness, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('thickenAsync', { op: 'thicken', thickness, tolerance: _tol(tolerance) }, [], progress)); }
   async trimAsync(tool, keep = 'outside', tolerance = 0.05, progress = null) {
     Solid._keep(keep);
-    return Solid._wrap(await this._async('trimAsync', { op: 'trim', b: _addressOf(tool._handle), keepInside: keep === 'inside', tolerance }, [tool], progress));
+    return Solid._wrap(await this._async('trimAsync', { op: 'trim', b: _addressOf(tool._handle), keepInside: keep === 'inside', tolerance: _tol(tolerance) }, [tool], progress));
   }
-  async meshAsync(tolerance = 0.05) { return this._async('meshAsync', { op: 'mesh', tolerance }); }
+  async meshAsync(tolerance = 0.05) { return this._async('meshAsync', { op: 'mesh', tolerance: _tol(tolerance) }); }
   /** `mesh64(tolerance)`, on the worker thread. */
   async meshAsync64(tolerance = 0.05) { return this._async('meshAsync64', { op: 'mesh64', tolerance }); }
   async stepAsync(schema = null, unit = 'mm') {
@@ -4687,7 +5812,7 @@ class Assembly {
     const allowedArr = _clashAllowed(allowed, 'swept_clash');
     const pad = (a) => (a.length || _wasm() ? a : new a.constructor(1));   // koffi passes an empty array as null; the count says 0
     const h = _lib().assembly_swept_clash(this._live, pad(keys), pad(Uint32Array.from(counts)), keys.length, pad(Float64Array.from(flat)),
-      rows.length, ground == null ? null : String(ground), tolerance, clearance, resolution, maxSteps, pad(allowedArr), allowedArr.length / 2, Boolean(joined));
+      rows.length, ground == null ? null : String(ground), _tol(tolerance), clearance, resolution, maxSteps, pad(allowedArr), allowedArr.length / 2, Boolean(joined));
     return _sweptClashesOf(_checked(h, 'assembly_swept_clash'));
   }
   /**
@@ -4732,6 +5857,26 @@ class Assembly {
   /** `stepText` written to `filePath`. */
   step(filePath, schema = null, unit = 'mm') { fs.writeFileSync(filePath, this.stepText(schema, unit), 'utf8'); }
   /** This assembly as a reader `Scene`, through STEP text and `cadaclysm.openMemory` -- `Solid.toScene`'s own door, over the whole tree instead of one solid. */
+  /**
+   * This assembly, and everything placed under it, as one Rhino `.3dm`: each distinct part (as
+   * `stepText` counts them) a block holding its body, each sub-assembly a block of references
+   * to what it places -- nested assemblies are nested blocks -- and this assembly's own
+   * placements references at the top of the file, on a layer named after it. Each reference
+   * is named as its placement was. `unit` and the warnings as `rhino3dmBytes`. Throws, as
+   * `stepText` does, for an assembly reachable from this one that places nothing.
+   */
+  rhino3dmBytes(unit = 'mm') {
+    if (!(unit in UNITS)) throw new BuildError(`unit must be one of ${Object.keys(UNITS).sort().join(', ')}`);
+    const len = _sizeSlot();
+    return _taken3dm(_lib().assembly_3dm_bytes(this._live, UNITS[unit], len), len, 'assembly_3dm_bytes');
+  }
+  /** `rhino3dmBytes` written to `filePath` by the library itself, which names the file in its refusal when it cannot. */
+  write3dm(filePath, unit = 'mm') {
+    if (_wasm()) { _write3dmBytes(filePath, this.rhino3dmBytes(unit), 'assembly_3dm'); return; }
+    if (!(unit in UNITS)) throw new BuildError(`unit must be one of ${Object.keys(UNITS).sort().join(', ')}`);
+    if (!_lib().assembly_3dm(this._live, String(filePath), UNITS[unit])) _fail('assembly_3dm');
+    _warn3dm();
+  }
   toScene(schema = null) {
     let cad;
     try { cad = require('./cadaclysm'); } catch (e) { throw new BuildError(`toScene needs the reader module beside this file: ${e.message}`); }
@@ -5513,7 +6658,7 @@ const _classifierFinalizer = typeof FinalizationRegistry === 'function'
  */
 class Classifier {
   constructor(solid, tolerance = 0.05) {
-    this._pointer = _checked(_lib().classifier_new(solid._handle, tolerance), 'classifier_new');
+    this._pointer = _checked(_lib().classifier_new(solid._handle, _tol(tolerance)), 'classifier_new');
     if (_classifierFinalizer) _classifierFinalizer.register(this, this._pointer, this);
   }
   get _handle() {
@@ -5556,7 +6701,7 @@ class Collider {
     }
     const groupsArr = groups == null ? null : Uint32Array.from(groups, Number);
     const allowedArr = Uint32Array.from(allowed, Number);
-    const h = _lib().collider_new(handles, handles.length, tolerance, groupsArr, allowedArr, allowedArr.length / 2);
+    const h = _lib().collider_new(handles, handles.length, _tol(tolerance), groupsArr, allowedArr, allowedArr.length / 2);
     this._pointer = _checked(h, 'collider_new');
     if (_colliderFinalizer) _colliderFinalizer.register(this, this._pointer, this);
   }
@@ -6025,7 +7170,7 @@ function clash(parts, others = null, clearance = 0, tolerance = 0.05, allowed = 
   // the wasm export reads an empty `b` as one set, and C refuses it: refused here for both
   if (second !== null && second.length === 0) throw new BuildError('clash: an empty set');
   const allowedArr = _clashAllowed(allowed, 'clash');
-  const h = _lib().clash(first, first.length, second, second === null ? 0 : second.length, tolerance, clearance, allowedArr, allowedArr.length / 2);
+  const h = _lib().clash(first, first.length, second, second === null ? 0 : second.length, _tol(tolerance), clearance, allowedArr, allowedArr.length / 2);
   return _clashesOf(_checked(h, 'clash'));
 }
 
@@ -6075,7 +7220,7 @@ function sweptClash(parts, poses, others = null, otherPoses = null, clearance = 
   if (second !== null && second.length === 0) throw new BuildError('swept_clash: an empty set');
   const allowedArr = _clashAllowed(allowed, 'swept_clash');
   const h = _lib().swept_clash(first, first.length, _sweptFlat(framesA), second, second === null ? 0 : second.length,
-    framesB === null ? null : _sweptFlat(framesB), framesA.length, tolerance, clearance, resolution, maxSteps, allowedArr, allowedArr.length / 2);
+    framesB === null ? null : _sweptFlat(framesB), framesA.length, _tol(tolerance), clearance, resolution, maxSteps, allowedArr, allowedArr.length / 2);
   return _sweptClashesOf(_checked(h, 'swept_clash'));
 }
 
@@ -6195,8 +7340,8 @@ const _thicknessGaugeFinalizer = typeof FinalizationRegistry === 'function'
 class ThicknessGauge {
   constructor(solids, tolerance = 0.01) {
     const handles = Array.from(solids, (s) => s._handle);
-    _thicknessNumber(tolerance, 'thickness_gauge_new', 'the tolerance must be positive and finite');
-    this._pointer = _checked(_lib().thickness_gauge_new(handles, handles.length, tolerance), 'thickness_gauge_new');
+    _thicknessNumber(_tol(tolerance), 'thickness_gauge_new', 'the tolerance must be positive and finite');
+    this._pointer = _checked(_lib().thickness_gauge_new(handles, handles.length, _tol(tolerance)), 'thickness_gauge_new');
     if (_thicknessGaugeFinalizer) _thicknessGaugeFinalizer.register(this, this._pointer, this);
   }
   get _handle() {
@@ -6275,7 +7420,7 @@ class ThicknessGauge {
 
 /** `new ThicknessGauge(solids, tolerance).thickness(maximum, sharpAngle)` on a gauge used once and freed: every reading within `maximum` on the solids, measured against each other. */
 function thickness(solids, maximum, sharpAngle = 0, tolerance = 0.01) {
-  const gauge = new ThicknessGauge(solids, tolerance);
+  const gauge = new ThicknessGauge(solids, _tol(tolerance));
   try {
     return gauge.thickness(maximum, sharpAngle);
   } finally {
@@ -6491,6 +7636,433 @@ class Interpolator {
   cubic(t) { return this.at(t, 'cubic'); }
   /** The Catmull-Rom spline over the four samples about `t`: through every sample, C1. */
   catmullRom(t) { return this.at(t, 'catmull_rom'); }
+}
+
+// ---- NurbsCurve: curves in space ------------------------------------------------------------
+
+/** `NurbsCurve.tween`'s methods, as `cadaclysm_blacksmith_nurbs_curve_tween` numbers them. */
+const _TWEEN_METHODS = Object.freeze({ plain: 0, matching: 1, sampling: 2 });
+
+/** `value` as a C `uint32_t`: a whole number from 0 to 4294967295, refused here, named, rather than wrapped by koffi. */
+function _curveU32(value, what) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+    throw new BuildError(`${what} must be a whole number from 0 to 4294967295, not ${String(value)}`);
+  }
+  return value;
+}
+
+/** Points as the flat array of three numbers each, and their count; an empty list padded for koffi, which passes a zero-length array as null. */
+function _curveXyz(points, what) {
+  const flat = [];
+  for (const p of points) {
+    const q = Array.from(p, Number);
+    if (q.length !== 3) throw new BuildError(`${what}: a point has three coordinates, not ${q.length}`);
+    flat.push(...q);
+  }
+  const n = flat.length / 3;
+  return [n || _wasm() ? Float64Array.from(flat) : new Float64Array(3), n];
+}
+
+/** A direction as three numbers, or null for the C ABI's NULL (never an empty array). */
+function _curveVec3(v) {
+  if (v == null) return null;
+  const q = Array.from(v, Number);
+  if (q.length !== 3) throw new BuildError(`a vector has three coordinates, not ${q.length}`);
+  return Float64Array.from(q);
+}
+
+/** An optional list of numbers as an array, or null for none -- an empty list is not none. */
+function _curveNumbers(v) {
+  if (v == null) return null;
+  const q = Float64Array.from(Array.from(v, Number));
+  return q.length || _wasm() ? q : null;
+}
+
+/** Curves as the list of their handles. */
+function _curveHandles(curves) { return Array.from(curves, (c) => c._handle); }
+
+const _SHEET_SIDES = Object.freeze({ u0: 0, u1: 1, v0: 2, v1: 3 });
+/** A sheet's side name as the C ABI's number. */
+function _sheetSide(side) {
+  if (typeof side !== 'string' || !Object.hasOwn(_SHEET_SIDES, side)) throw new BuildError(`a side is 'u0', 'u1', 'v0' or 'v1', not '${String(side)}'`);
+  return _SHEET_SIDES[side];
+}
+
+/** A fitted sheet's handle as a `Solid` carrying the error its fit reached. */
+function _sheetWithError(handle, err) {
+  const s = new Solid(handle);
+  s._sheetError = err[0];
+  return s;
+}
+
+/**
+ * How well two faces meet along their sides (`Solid.continuity`): the largest `gap` between the
+ * sides (G0), the largest `angle` between their normals in radians (G1), the largest difference of
+ * normal `curvature` across the edge (G2), each with where it was found (`gapAt`, `angleAt`,
+ * `curvatureAt`, points), and how many points were asked (`samples`). Frozen.
+ */
+class Continuity {
+  constructor(raw) {
+    this.gap = raw.gap;
+    this.gapAt = Array.from(raw.gap_at);
+    this.angle = raw.angle;
+    this.angleAt = Array.from(raw.angle_at);
+    this.curvature = raw.curvature;
+    this.curvatureAt = Array.from(raw.curvature_at);
+    this.samples = raw.samples;
+    Object.freeze(this);
+  }
+}
+
+/**
+ * How well an N-sided patch (`Solid.nSidedPatch`) meets: `faces` sub-patches, the worst `boundary`
+ * `Continuity` against the neighbours (the gap over every side, the angle over those met at G1 or
+ * G2, the curvature jump over those at G2), the worst `internal` one across the patch's own spokes,
+ * and `cornerAngle` (radians), the most a corner of the hole leaves no patch able to meet: zero
+ * where the neighbours meet each other at G1. Frozen.
+ */
+class PatchReport {
+  constructor(raw) {
+    this.faces = raw.faces;
+    this.boundary = new Continuity(raw.boundary);
+    this.internal = new Continuity(raw.internal);
+    this.cornerAngle = raw.corner_angle;
+    Object.freeze(this);
+  }
+}
+
+/**
+ * What `Solid.joinSheets` did: `sewn` edges (each two naked edges become one shared edge), the
+ * widest `worstGap` between two sewn edges (0 where all met exactly), the naked edges -- bordered
+ * by one face -- `nakedBefore` (once the T-junctions are cut) and `nakedAfter`, `refused` groups of
+ * naked edges that share both ends but were left apart (too far apart, or three or more), faces
+ * `turned`, and whether the result is `closed`: a solid. Frozen.
+ */
+class JoinReport {
+  constructor(raw) {
+    this.sewn = raw.sewn;
+    this.worstGap = raw.worst_gap;
+    this.nakedBefore = raw.naked_before;
+    this.nakedAfter = raw.naked_after;
+    this.refused = raw.refused;
+    this.turned = raw.turned;
+    this.closed = Boolean(raw.closed);
+    Object.freeze(this);
+  }
+}
+
+const _nurbsCurveFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().nurbs_curve_free(h); } catch (_) { /* exiting */ } }) : null;
+
+/**
+ * A curve's bending at a parameter (`NurbsCurve.curvature`): `kappa` (1 / radius), the unit
+ * `tangent`, the unit `normal` toward the centre, the `binormal` (`tangent x normal`) and the
+ * `centre` of the osculating circle -- null on a straight piece, where `kappa` is 0 and `normal`
+ * and `binormal` are zero. Frozen.
+ */
+class Curvature {
+  constructor(raw) {
+    this.kappa = raw.kappa;
+    this.tangent = Array.from(raw.tangent);
+    this.normal = Array.from(raw.normal);
+    this.binormal = Array.from(raw.binormal);
+    this.centre = raw.has_centre ? Array.from(raw.centre) : null;
+    Object.freeze(this);
+  }
+}
+
+/**
+ * A curve in space -- always a NURBS, so a line, an arc or a conic is an exact rational one --
+ * to model with: built through points, read off an edge or a face, projected onto a plane or a
+ * face, trimmed, extended and blended; asked for its points, derivatives, curvature, length and
+ * crossings. Immutable; every edit returns a new curve. `close()` frees it; so does leaving a
+ * `using` block or the garbage collector.
+ *
+ * Not `Curve`, which is the plain data an edge's curve is copied out as; `NurbsCurve.fromEdge`
+ * turns an edge into one of these. A face here is its whole surface: projecting onto, pulling to
+ * and crossing a face ignore its trims.
+ */
+class NurbsCurve {
+  /**
+   * The curve with control points `points`, of `degree` (1 to 7), `weights` one per point
+   * (positive) or null, and the full knot vector `knots` (`points.length + degree + 1` values,
+   * non-decreasing) or null for clamped and uniform.
+   */
+  constructor(points, degree = 3, weights = null, knots = null) {
+    this._pointer = null;
+    this.fitError = null;
+    const [xyz, n] = _curveXyz(points, 'nurbs_curve_new');
+    const w = weights == null ? null : Array.from(weights, Number);
+    const k = knots == null ? null : Array.from(knots, Number);
+    if (w !== null && w.length !== n) throw new BuildError(`nurbs_curve_new: ${w.length} weights for ${n} points; give one per point`);
+    this._adopt(_lib().nurbs_curve_new(
+      xyz, n, _curveNumbers(w), _curveU32(degree, 'nurbs_curve_new: degree'), _curveNumbers(k), k === null ? 0 : k.length), 'nurbs_curve_new');
+  }
+  _adopt(handle, what, fitError = null) {
+    this._pointer = _checked(handle, what);
+    this.fitError = fitError;
+    if (_nurbsCurveFinalizer) _nurbsCurveFinalizer.register(this, this._pointer, this);
+  }
+  static _of(handle, what, fitError = null) {
+    const c = Object.create(NurbsCurve.prototype);
+    c._pointer = null;
+    c.fitError = null;
+    c._adopt(handle, what, fitError);
+    return c;
+  }
+  get _handle() {
+    if (!this._pointer) throw new BuildError('nurbs_curve: closed');
+    return this._pointer;
+  }
+  get closed() { return this._pointer === null; }
+  close() {
+    if (this._pointer === null) return;
+    const h = this._pointer; this._pointer = null;
+    if (_nurbsCurveFinalizer) _nurbsCurveFinalizer.unregister(this);
+    _lib().nurbs_curve_free(h);
+  }
+  [Symbol.for('nodejs.dispose')]() { this.close(); }
+
+  // ---- building -----------------------------------------------------------------------
+
+  /**
+   * The curve of `degree` (1 to 7) through `points` in order, chord-length parametrised.
+   * `closed` closes it back to the first point, smooth across the seam; an open curve may leave
+   * along `startTangent` and arrive along `endTangent` (directions; their length does not matter).
+   */
+  static through(points, degree = 3, closed = false, startTangent = null, endTangent = null) {
+    const [xyz, n] = _curveXyz(points, 'nurbs_curve_through');
+    return NurbsCurve._of(_lib().nurbs_curve_through(
+      xyz, n, _curveU32(degree, 'nurbs_curve_through: degree'), Boolean(closed), _curveVec3(startTangent), _curveVec3(endTangent)), 'nurbs_curve_through');
+  }
+  /**
+   * A curve of `degree` within `tolerance` of every point, through the first and the last (least
+   * squares); its `fitError` is the largest distance from a point to it. A null `tolerance` asks
+   * for the inputs' effective tolerance.
+   */
+  static fit(points, degree = 3, tolerance = 1e-3) {
+    const [xyz, n] = _curveXyz(points, 'nurbs_curve_fit');
+    const err = new Float64Array(1);
+    const h = _lib().nurbs_curve_fit(xyz, n, _curveU32(degree, 'nurbs_curve_fit: degree'), _tol(tolerance), err);
+    return NurbsCurve._of(h, 'nurbs_curve_fit', err[0]);
+  }
+  /** Edge `edge` (an `Edge` or its index) of `solid` as an exact NURBS over the edge's own span of its curve, running the way the edge runs. */
+  static fromEdge(solid, edge) {
+    const e = edge instanceof Edge ? edge.index : edge;
+    return NurbsCurve._of(_lib().nurbs_curve_from_edge(solid._handle, _curveU32(e, 'nurbs_curve_from_edge: edge')), 'nurbs_curve_from_edge');
+  }
+  /** The isocurve of face `face` of `solid`'s surface: along `u` at `v = at` when `alongU`, else along `v` at `u = at`. NURBS faces only. */
+  static isocurve(solid, face, alongU, at) {
+    return NurbsCurve._of(_lib().nurbs_curve_from_face_isocurve(
+      solid._handle, _curveU32(face, 'nurbs_curve_from_face_isocurve: face'), Boolean(alongU), Number(at)), 'nurbs_curve_from_face_isocurve');
+  }
+  /**
+   * The curve bridging `a` (at its end when `aEnd`, else its start) to `b` (at its end when
+   * `bEnd`, else its start): `continuity` 1 matches position and tangent (a cubic), 2 also the
+   * curvature (a quintic); `bulge` (positive) scales how far the tangents reach.
+   */
+  static blend(a, aEnd, b, bEnd, continuity = 2, bulge = 1) {
+    return NurbsCurve._of(_lib().nurbs_curve_blend(
+      a._handle, Boolean(aEnd), b._handle, Boolean(bEnd), _curveU32(continuity, 'nurbs_curve_blend: continuity'), Number(bulge)), 'nurbs_curve_blend');
+  }
+  /**
+   * `curves` joined end to end into one curve (Rhino's JoinCurves): in the order given, each
+   * turned where needed so its start meets the previous one's end within `tolerance` (the joint
+   * placed at the midpoint of the two ends). All are raised to the highest degree among them and
+   * each runs over `k..k + 1`, joined C0 -- a corner stays a corner; a rational curve keeps its
+   * points. One curve gives a copy; none, or a gap past `tolerance`, throws `BuildError` naming
+   * the two curves.
+   */
+  static joined(curves, tolerance = 1e-6) {
+    const list = Array.from(curves);
+    const handles = list.map((c) => c._handle);
+    const joined = _lib().nurbs_curve_joined(handles, handles.length, Number(tolerance));
+    return NurbsCurve._of(joined, 'nurbs_curve_joined');
+  }
+  /**
+   * `count` curves blending evenly from this curve to `other` (Rhino's CreateTweenCurves family),
+   * tween `i` at the fraction `(i + 1) / (count + 1)`. `method`:
+   *
+   * - `'plain'`: control point by control point; the curves must already share one structure
+   *   (degree, control-point count, knots), as Rhino's CreateTweenCurves needs.
+   * - `'matching'`: the curves made compatible exactly (degree elevation, knot merging), then
+   *   blended in homogeneous coordinates -- rational curves stay rational.
+   * - `'sampling'`: both divided by arc length into `samples` pieces (required here, refused
+   *   otherwise), and a cubic interpolated through the blended samples.
+   *
+   * `align` turns `other`, and moves a closed curve's seam, to line it up with this one first.
+   * A null `tolerance` asks for the inputs' effective tolerance. A count of 0, one curve closed
+   * and the other open, plain on curves that are not compatible, or too few samples throws
+   * `BuildError`.
+   */
+  tween(other, count, method = 'matching', samples = null, align = true, tolerance = null) {
+    if (!Object.hasOwn(_TWEEN_METHODS, method)) {
+      throw new BuildError(`nurbs_curve_tween: method must be one of ${Object.keys(_TWEEN_METHODS).join(', ')}, not ${JSON.stringify(method)}`);
+    }
+    if (method === 'sampling') {
+      if (samples == null) throw new BuildError('nurbs_curve_tween: sampling needs samples');
+    } else if (samples != null) {
+      throw new BuildError(`nurbs_curve_tween: samples is read only by sampling, not ${method}`);
+    }
+    const n = _curveU32(count, 'nurbs_curve_tween: count');
+    const s = samples == null ? 0 : _curveU32(samples, 'nurbs_curve_tween: samples');
+    const out = new Array(n).fill(null);
+    if (!_lib().nurbs_curve_tween(this._handle, other._handle, n, _TWEEN_METHODS[method], s, Boolean(align), _tol(tolerance), out)) _fail('nurbs_curve_tween');
+    // every handle is adopted before any can throw, so a refusal frees the rest through their owners
+    return out.map((h) => NurbsCurve._of(h, 'nurbs_curve_tween'));
+  }
+
+  // ---- edits ----------------------------------------------------------------------------
+
+  /** This curve projected onto the plane through `origin` with `normal`, along `direction` (null: the normal). Exact. */
+  projectedToPlane(origin, normal, direction = null) {
+    return NurbsCurve._of(_lib().nurbs_curve_projected_to_plane(
+      this._handle, _curveVec3(origin), _curveVec3(normal), _curveVec3(direction)), 'nurbs_curve_projected_to_plane');
+  }
+  /**
+   * This curve projected along `direction` onto face `face` of `solid` (its whole surface),
+   * fitted within `tolerance`; the result's `fitError` is the largest distance between it and the
+   * surface. Throws `BuildError` where a point's ray misses.
+   */
+  projectedToFace(solid, face, direction, tolerance = 1e-3) {
+    const err = new Float64Array(1);
+    const h = _lib().nurbs_curve_projected_to_face(
+      this._handle, solid._handle, _curveU32(face, 'nurbs_curve_projected_to_face: face'), _curveVec3(direction), _tol(tolerance), err);
+    return NurbsCurve._of(h, 'nurbs_curve_projected_to_face', err[0]);
+  }
+  /** This curve pulled onto face `face` of `solid` (its whole surface): every point to its nearest surface point, fitted within `tolerance` (`fitError` as for the projection). */
+  pulledToFace(solid, face, tolerance = 1e-3) {
+    const err = new Float64Array(1);
+    const h = _lib().nurbs_curve_pulled_to_face(
+      this._handle, solid._handle, _curveU32(face, 'nurbs_curve_pulled_to_face: face'), _tol(tolerance), err);
+    return NurbsCurve._of(h, 'nurbs_curve_pulled_to_face', err[0]);
+  }
+  /** The same curve run the other way over the same domain. */
+  reversed() { return NurbsCurve._of(_lib().nurbs_curve_reversed(this._handle), 'nurbs_curve_reversed'); }
+  /** The part from `t0` to `t1` (`t0 < t1`, inside the domain), over `t0..t1`. */
+  trimmed(t0, t1) { return NurbsCurve._of(_lib().nurbs_curve_trimmed(this._handle, Number(t0), Number(t1)), 'nurbs_curve_trimmed'); }
+  /** This curve continued `length` past its end (or start) along its own end polynomial -- position, tangent and curvature there unchanged, every old parameter its old point. */
+  extended(length, atStart = false) {
+    return NurbsCurve._of(_lib().nurbs_curve_extended(this._handle, Boolean(atStart), Number(length)), 'nurbs_curve_extended');
+  }
+  /** The same curve at degree `degree + by` (at most 12). */
+  elevated(by = 1) { return NurbsCurve._of(_lib().nurbs_curve_elevated(this._handle, _curveU32(by, 'nurbs_curve_elevated: by')), 'nurbs_curve_elevated'); }
+  /** This curve through the affine map `t` (a `Transform`, or 16 numbers): its control points mapped, weights and knots kept -- exact. A singular map (a projection) is allowed. */
+  transformed(t) {
+    return NurbsCurve._of(_lib().nurbs_curve_transformed(this._handle, _matrix(t, 'nurbs_curve_transformed')), 'nurbs_curve_transformed');
+  }
+  /** A copy: the same curve, a handle of its own. */
+  clone() { return NurbsCurve._of(_lib().nurbs_curve_clone(this._handle), 'nurbs_curve_clone'); }
+
+  // ---- reading --------------------------------------------------------------------------
+
+  /** The degree. */
+  get degree() { return _lib().nurbs_curve_degree(this._handle); }
+  /** The control points, as `[x, y, z]` arrays. */
+  get controlPoints() {
+    const l = _lib(), h = this._handle;
+    const n = l.nurbs_curve_control_count(h);
+    const out = new Float64Array(3 * n);
+    if (!l.nurbs_curve_control_points(h, out)) _fail('nurbs_curve_control_points');
+    return Array.from({ length: n }, (_, i) => [out[3 * i], out[3 * i + 1], out[3 * i + 2]]);
+  }
+  /** The weights, one per control point (all 1 for a curve that is not rational). */
+  get weights() {
+    const l = _lib(), h = this._handle;
+    const out = new Float64Array(l.nurbs_curve_control_count(h));
+    if (!l.nurbs_curve_weights(h, out)) _fail('nurbs_curve_weights');
+    return Array.from(out);
+  }
+  /** The full knot vector. */
+  get knots() {
+    const l = _lib(), h = this._handle;
+    const out = new Float64Array(l.nurbs_curve_knot_count(h));
+    if (!l.nurbs_curve_knots(h, out)) _fail('nurbs_curve_knots');
+    return Array.from(out);
+  }
+  /** The parameter range, `[start, end]`. */
+  get domain() {
+    const out = new Float64Array(2);
+    if (!_lib().nurbs_curve_domain(this._handle, out)) _fail('nurbs_curve_domain');
+    return [out[0], out[1]];
+  }
+  /** Whether any weight differs from the others. */
+  get isRational() { return Boolean(_lib().nurbs_curve_is_rational(this._handle)); }
+  /** Whether the curve ends where it starts. */
+  get isClosed() { return Boolean(_lib().nurbs_curve_is_closed(this._handle)); }
+  /** The point at parameter `t`, inside the domain. */
+  point(t) {
+    const out = new Float64Array(3);
+    if (!_lib().nurbs_curve_point(this._handle, Number(t), out)) _fail('nurbs_curve_point');
+    return Array.from(out);
+  }
+  /** The point and its derivatives at `t` up to `order` (at most 8): `[C, C', C'', ...]`, `order + 1` points. */
+  derivatives(t, order = 2) {
+    const k = _curveU32(order, 'nurbs_curve_derivatives: order');
+    const out = new Float64Array(3 * (Math.min(k, 8) + 1));
+    if (!_lib().nurbs_curve_derivatives(this._handle, Number(t), k, out)) _fail('nurbs_curve_derivatives');
+    return Array.from({ length: k + 1 }, (_, i) => [out[3 * i], out[3 * i + 1], out[3 * i + 2]]);
+  }
+  /** The curvature and Frenet frame at `t`, as a `Curvature`. */
+  curvature(t) {
+    const out = {};
+    if (!_lib().nurbs_curve_curvature(this._handle, Number(t), out)) _fail('nurbs_curve_curvature');
+    return new Curvature(out);
+  }
+  /** The curve's length (a `Length` record), to the relative `accuracy` (0 asks for the default). */
+  length(accuracy = 0) {
+    const out = {};
+    if (!_lib().nurbs_curve_length(this._handle, accuracy, out)) _fail('nurbs_curve_length');
+    return _lengthOf(out);
+  }
+  /** The point at arc length `s` from the curve's start, as an `At` record. */
+  pointAtLength(s, accuracy = 0) {
+    const out = {};
+    if (!_lib().nurbs_curve_point_at_length(this._handle, s, accuracy, out)) _fail('nurbs_curve_point_at_length');
+    return _atOf(out);
+  }
+  /** The curve in `n` pieces of equal arc length, as `At` records: `n + 1` samples, `n` for a closed curve. */
+  divideByCount(n, accuracy = 0) {
+    return _samples(_checked(_lib().nurbs_curve_divide_by_count(this._handle, _count(n, 'nurbs_curve_divide_by_count'), accuracy), 'nurbs_curve_divide_by_count'), 'nurbs_curve_divide_by_count');
+  }
+  /** Samples every `step` of arc length from the start, as `At` records; a closed curve never repeats it. */
+  divideByLength(step, accuracy = 0) {
+    return _samples(_checked(_lib().nurbs_curve_divide_by_length(this._handle, step, accuracy), 'nurbs_curve_divide_by_length'), 'nurbs_curve_divide_by_length');
+  }
+  /**
+   * Where the curve crosses the plane through `origin` with `normal`, in parameter order, as `At`
+   * records (`error` each point's distance from the plane). Throws `BuildError` for a curve lying
+   * in the plane; a touch that does not cross is not listed.
+   */
+  planeHits(origin, normal) {
+    return _samples(_checked(_lib().nurbs_curve_plane_hits(this._handle, _curveVec3(origin), _curveVec3(normal)), 'nurbs_curve_plane_hits'), 'nurbs_curve_plane_hits');
+  }
+  /** Where the curve crosses face `face` of `solid` (its whole surface), within `tolerance` of it, in parameter order, as `At` records (`error` each point's distance from the surface). */
+  faceHits(solid, face, tolerance = 1e-3) {
+    return _samples(_checked(_lib().nurbs_curve_face_hits(
+      this._handle, solid._handle, _curveU32(face, 'nurbs_curve_face_hits: face'), _tol(tolerance)), 'nurbs_curve_face_hits'), 'nurbs_curve_face_hits');
+  }
+  /**
+   * A curvature comb to draw: at `n + 1` even parameters, the curve point and that point moved by
+   * `-scale * kappa * normal` (out of the bend), as `[point, tooth]` pairs. Straight stretches
+   * give zero teeth.
+   */
+  comb(n = 64, scale = 1) {
+    const [lo, hi] = this.domain;
+    const steps = Math.max(Math.trunc(n), 1);
+    const out = [];
+    for (let i = 0; i <= steps; i++) {
+      const t = lo + (hi - lo) * i / steps;
+      const k = this.curvature(t);
+      const p = this.point(t);
+      out.push([p, [p[0] - scale * k.kappa * k.normal[0], p[1] - scale * k.kappa * k.normal[1], p[2] - scale * k.kappa * k.normal[2]]]);
+    }
+    return out;
+  }
+  toString() {
+    const [lo, hi] = this.domain;
+    return `NurbsCurve(degree=${this.degree}, controls=${this.controlPoints.length}, rational=${this.isRational}, domain=(${lo}, ${hi}))`;
+  }
 }
 
 // ---- the Kiln: the SubD cage --------------------------------------------------------------
@@ -7738,8 +9310,10 @@ class SurfaceFoot {
 // CADACLYSM_BLACKSMITH_VALUE_*: the kind each value array is tagged with.
 const _VALUE_LINE = 0, _VALUE_CIRCLE = 1, _VALUE_ARC = 2, _VALUE_ELLIPSE = 3, _VALUE_SPHERE = 4;
 const _VALUE_CYLINDER = 5, _VALUE_CONE = 6, _VALUE_TORUS = 7, _VALUE_CUBOID = 8;
+const _VALUE_RECTANGLE = 9, _VALUE_TRIANGLE = 10, _VALUE_RAY = 11;
 /** Each kind's name, as the library's own refusals spell it. */
-const _VALUE_NAMES = Object.freeze(['line', 'circle', 'arc', 'ellipse', 'sphere', 'cylinder', 'cone', 'torus', 'cuboid']);
+const _VALUE_NAMES = Object.freeze(['line', 'circle', 'arc', 'ellipse', 'sphere', 'cylinder', 'cone', 'torus', 'cuboid',
+  'rectangle', 'triangle', 'ray']);
 
 /** A point as the value calls take it: three numbers, or `"<call>: a point is 3 numbers, got N"`. */
 function _valuePoint(point, what) { return _thicknessPoint(point, what); }
@@ -7844,6 +9418,10 @@ class _CurveValue extends _Value {
     const foot = this.closestPoint(q);
     return Math.hypot(foot.point[0] - q[0], foot.point[1] - q[1], foot.point[2] - q[2]);
   }
+  /** The exact NURBS form, as a `NurbsCurve`. */
+  toNurbs() {
+    return NurbsCurve._of(_lib().curve_value_to_nurbs(this.constructor._KIND, Float64Array.from(this._v)), 'curve_value_to_nurbs');
+  }
 }
 
 /** The segment from `start` to `end`; its parameter runs 0..1. */
@@ -7914,7 +9492,10 @@ Ellipse._KIND = _VALUE_ELLIPSE;
 class _SolidValue extends _Value {
   /** The frame the shape is placed on: its origin and axes. */
   get frame() { return Frame.of(this._v.slice(0, 12)); }
-  /** Whether `p` lies inside the closed shape or within `tolerance` of it. */
+  /**
+   * Whether `p` lies inside the closed shape or within `tolerance` of it. NaN is unset: the
+   * shape's own effective tolerance (`tolerance.relative` times its diagonal); 0 is exact.
+   */
   contains(p, tolerance = 1e-9) {
     const what = 'solid_value_contains';
     const r = _lib().solid_value_contains(this.constructor._KIND, Float64Array.from(this._v), _valuePoint(p, what), Number(tolerance));
@@ -8030,6 +9611,116 @@ class Cuboid extends _SolidValue {
 }
 Cuboid._KIND = _VALUE_CUBOID;
 
+/**
+ * The rectangle over `x` and `y` (increasing `Interval`s, or pairs) in its frame's x-y plane. As a
+ * curve it is its boundary: `t` runs 0..4, one unit a side from corner `(x0, y0)` counter-clockwise
+ * about the frame's z, clamped outside that range; `closestPoint` is the boundary's, not unique on a
+ * tie (the centre).
+ */
+class Rectangle extends _CurveValue {
+  constructor(frame, x, y) {
+    super();
+    const [a, b] = [Interval.of(x), Interval.of(y)];
+    this._init([..._frame(frame), a.t0, a.t1, b.t0, b.t1]);
+  }
+  /** The frame the rectangle lies on: its ranges run along the frame's x and y. */
+  get frame() { return Frame.of(this._v.slice(0, 12)); }
+  get x() { return new Interval(this._v[12], this._v[13]); }
+  get y() { return new Interval(this._v[14], this._v[15]); }
+  /** The four corners: `(x0, y0)`, `(x1, y0)`, `(x1, y1)`, `(x0, y1)`. */
+  corners() {
+    const c = _valueCall('rectangle_corners', null, this._v, [], 12);
+    const out = [];
+    for (let k = 0; k < 12; k += 3) out.push(c.slice(k, k + 3));
+    return out;
+  }
+  /** The filled rectangle's area. */
+  area() { return _valueCall('rectangle_area', null, this._v, [], 1)[0]; }
+  /** `p` projected onto the plane and clamped into the filled rectangle with the interior, else the boundary's closest point. */
+  closestPointIn(p, includeInterior = true) {
+    const what = 'rectangle_closest_point';
+    return _valueCall(what, null, this._v, [_valuePoint(p, what), Boolean(includeInterior)], 3);
+  }
+  /**
+   * Where `p`, projected onto the plane, lies: `'inside'`, `'outside'`, or `'on'` within
+   * `tolerance` of the boundary. Null (the default) or NaN is unset: the rectangle's own effective
+   * tolerance (`tolerance.relative` times its diagonal); 0 is exact.
+   */
+  contains(p, tolerance = null) {
+    const what = 'rectangle_contains';
+    const tol = tolerance == null ? NaN : Number(tolerance);
+    const r = _lib().rectangle_contains(Float64Array.from(this._v), _valuePoint(p, what), tol);
+    if (r === NONE) _fail(what);
+    return _containment(r, what);
+  }
+  /** The filled rectangle as a one-face planar sheet facing the frame's z. */
+  toSheet() { return new Solid(_checked(_lib().rectangle_to_sheet(Float64Array.from(this._v)), 'rectangle_to_sheet')); }
+}
+Rectangle._KIND = _VALUE_RECTANGLE;
+
+/** The triangle `a`, `b`, `c`; a degenerate one (collinear or coincident points) is refused. */
+class Triangle extends _Value {
+  constructor(a, b, c) { super(); this._init([..._valuePoint(a, 'Triangle'), ..._valuePoint(b, 'Triangle'), ..._valuePoint(c, 'Triangle')]); }
+  get a() { return this._v.slice(0, 3); }
+  get b() { return this._v.slice(3, 6); }
+  get c() { return this._v.slice(6, 9); }
+  area() { return _valueCall('triangle_area', null, this._v, [], 1)[0]; }
+  /** The sum of the three sides. */
+  perimeter() { return _valueCall('triangle_perimeter', null, this._v, [], 1)[0]; }
+  /** The area centroid, the vertices' mean. */
+  centroid() { return _valueCall('triangle_centroid', null, this._v, [], 3); }
+  /** The `Circle` through `a`, `b`, `c`: its x toward `a`, turning them counter-clockwise. */
+  circumcircle() { return Circle._of(_valueCall('triangle_circumcircle', null, this._v, [], 13)); }
+  /** The point of barycentric weights `wa`, `wb`, `wc`, used as given. */
+  pointAt(wa, wb, wc) { return _valueCall('triangle_point_at', null, this._v, [Number(wa), Number(wb), Number(wc)], 3); }
+  /** The weights `[wa, wb, wc]`, summing to 1, of `p` projected onto the plane. */
+  barycentric(p) {
+    const what = 'triangle_barycentric';
+    return _valueCall(what, null, this._v, [_valuePoint(p, what)], 3);
+  }
+  /** The closest point of the filled triangle to `p`, exact. */
+  closestPoint(p) {
+    const what = 'triangle_closest_point';
+    return _valueCall(what, null, this._v, [_valuePoint(p, what)], 3);
+  }
+  /** How far `p` lies from the filled triangle. */
+  distanceTo(p) {
+    const q = Array.from(_valuePoint(p, 'triangle_closest_point'));
+    const c = this.closestPoint(q);
+    return Math.hypot(c[0] - q[0], c[1] - q[1], c[2] - q[2]);
+  }
+  /** Edge `i` as a `Line`: 0 `a` to `b`, 1 `b` to `c`, 2 `c` to `a`. */
+  edge(i) { return Line._of(_valueCall('triangle_edge', null, this._v, [Number(i)], 6)); }
+  /** The filled triangle as a one-face planar sheet, its normal turning `a`, `b`, `c` counter-clockwise. */
+  toSheet() { return new Solid(_checked(_lib().triangle_to_sheet(Float64Array.from(this._v)), 'triangle_to_sheet')); }
+}
+Triangle._KIND = _VALUE_TRIANGLE;
+
+/**
+ * The half-line from `position` along `direction`. The direction is kept as given, not unitised,
+ * so `t` counts lengths of it. A ray has no `bounds`: the library refuses it.
+ */
+class Ray extends _Value {
+  constructor(position, direction) { super(); this._init([..._valuePoint(position, 'Ray'), ..._valuePoint(direction, 'Ray')]); }
+  get position() { return this._v.slice(0, 3); }
+  get direction() { return this._v.slice(3, 6); }
+  /** `position + t * direction`, any `t` (behind the start too). */
+  pointAt(t) { return _valueCall('ray_point_at', null, this._v, [Number(t)], 3); }
+  /** The `CurveFoot` on the ray nearest `p`: `t` clamped at 0 (behind the start: the start). Always unique. */
+  closestPoint(p) {
+    const what = 'ray_closest_point';
+    const f = _valueCall(what, null, this._v, [_valuePoint(p, what)], 4);
+    return new CurveFoot(f[0], f.slice(1, 4), true);
+  }
+  /** How far `p` lies from the ray. */
+  distanceTo(p) {
+    const q = Array.from(_valuePoint(p, 'ray_closest_point'));
+    const foot = this.closestPoint(q);
+    return Math.hypot(foot.point[0] - q[0], foot.point[1] - q[1], foot.point[2] - q[2]);
+  }
+}
+Ray._KIND = _VALUE_RAY;
+
 /** The fluent chain mirroring the Rust `Workplane`: a frame, the solid so far, the face last picked. A build call replaces the solid. */
 class Workplane {
   constructor(frame, solid = null) { this.frame = Array.from(_frame(frame)); this._solid = solid; this._selected = null; }
@@ -8060,6 +9751,353 @@ class Workplane {
   /** Adopt the frame on the face last picked; a no-op if none is. */
   workplane() { if (this._solid !== null && this._selected !== null) this.frame = this._solid.faceFrame(this._selected); return this; }
   solid() { if (this._solid === null) throw new BuildError('solid: nothing was built (BuildError::Empty)'); return this._solid; }
+}
+
+// ---- the document: a node graph of constructive verbs, with parameters and a history ----
+
+/** Owned text a `document_*` call returned (koffi decoded and freed it; the wasm returns the string itself); null (or the wasm's 0) raises the library's reason. */
+function _ownedText(raw, what) {
+  if (raw == null || raw === 0) _fail(what);
+  return String(raw);
+}
+
+/** An optional commit message as C takes it: empty or none is null. */
+function _documentMessage(message) { return message ? String(message) : null; }
+
+/**
+ * One commit of a `Document`'s history: its `id` (`c0` is the root), its `parents` (ids), the
+ * `message` it was recorded with, its `author` and `time` (null when not set), and the `ops` it
+ * applied, each as the JSON record that was sent. Frozen.
+ */
+class Commit {
+  constructor(row) {
+    this.id = String(row.id);
+    this.parents = Object.freeze(Array.from(row.parents ?? [], String));
+    this.message = row.message ?? null;
+    this.author = row.author ?? null;
+    this.time = row.time ?? null;
+    this.ops = Object.freeze(Array.from(row.ops ?? []));
+    Object.freeze(this);
+  }
+}
+
+/**
+ * `Document.params`: the document's parameters, name to value (a number, or an `"=expression"`),
+ * shaped like a `Map`. Reading asks the document every time; `set` sends a `param` op (one
+ * commit), `delete` one with a null value.
+ */
+class DocumentParams {
+  constructor(document) { this._document = document; }
+  _read() { return JSON.parse(this._document._text('params', (l, h) => l.document_params(h))); }
+  /** The parameter's value, or undefined when there is none of that name. */
+  get(name) { const p = this._read(); return Object.prototype.hasOwnProperty.call(p, name) ? p[name] : undefined; }
+  has(name) { return Object.prototype.hasOwnProperty.call(this._read(), name); }
+  /** Sets (or adds) a parameter: a `param` op, one commit. Null is refused: `delete` it instead. Returns this. */
+  set(name, value) {
+    if (value == null) throw new BuildError('document_params: a parameter cannot be null: delete it instead');
+    this._document.apply({ op: 'param', name: String(name), value });
+    return this;
+  }
+  /** Removes a parameter, one commit: false when there was none of that name; a parameter a node reads is refused. */
+  delete(name) {
+    if (!this.has(name)) return false;
+    this._document.apply({ op: 'param', name: String(name), value: null });
+    return true;
+  }
+  keys() { return Object.keys(this._read()); }
+  get size() { return this.keys().length; }
+  /** Every parameter as a plain object, name to value. */
+  toObject() { return this._read(); }
+}
+
+const _documentFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().document_free(h); } catch (_) { /* exiting */ } }) : null;
+
+/**
+ * A model as data: a graph of nodes (`profile.rect`, `solid.extrude`, `measure.mass`, ...), each
+ * a blacksmith verb reading other nodes by id, with named parameters any number can be an
+ * `"=expression"` of, evaluated incrementally, and edited by ops that are undoable and branch.
+ * Every edit is one commit; the whole thing -- nodes, parameters, history, branches -- saves as
+ * JSON text and loads back to the same document. `Document.kinds()` lists the node kinds.
+ *
+ *     const doc = new Document('mm');
+ *     doc.params.set('w', 200);
+ *     const r = doc.add('profile.rect', { w: '=w', h: 100 });
+ *     const x = doc.add('solid.extrude', { profile: r, frame: 'xy', distance: 10 });
+ *     const solid = doc.result(x);        // a Solid
+ *     doc.set(x, { distance: 80, message: 'taller' });
+ *     doc.undo();
+ *
+ * A refused op throws `BuildError` with the reason, and the document is unchanged. `result`,
+ * `value`, `errors` and `evaluate` bring the nodes up to date first. `close()` frees the
+ * document; so does leaving a `using` block or the garbage collector. One thread at a time.
+ */
+class Document {
+  /** An empty document counting lengths in `units` (`mm`, `cm`, `m`, `in` or `ft`). */
+  constructor(units = 'mm') {
+    this._pointer = null;
+    this._adopt(_lib().document_new(String(units)), 'document_new');
+  }
+  _adopt(handle, what) {
+    this._pointer = _checked(handle, what);
+    if (_documentFinalizer) _documentFinalizer.register(this, this._pointer, this);
+  }
+  static _of(handle, what) {
+    const d = Object.create(Document.prototype);
+    d._pointer = null;
+    d._adopt(handle, what);
+    return d;
+  }
+  /** The document `save` wrote as `text`: its nodes, parameters, history and branches. */
+  static load(text) { return Document._of(_lib().document_load(String(text)), 'document_load'); }
+  /** The document saved in the file `filePath`. */
+  static open(filePath) { return Document.load(fs.readFileSync(filePath, 'utf8')); }
+  /** Every node kind the library knows, one record a kind (`name`, `inputs`, `output`, `cost`, `help`). */
+  static kinds() { return JSON.parse(_ownedText(_lib().document_kinds(), 'document_kinds')); }
+
+  // -- building documents
+  /**
+   * An empty building document: the blacksmith kinds and the `bim.*` ones, with a hidden
+   * `bim.project` node whose guid seeds every IFC GlobalId it exports.
+   */
+  static newBim(units = 'mm') {
+    const doc = Document._of(_lib().bim_document_new(String(units)), 'bim_document_new');
+    if (_wasm()) {
+      // The wasm's `_new` is the editor's, whose starter batch adds the project; the C one adds
+      // it itself. Here it is added as C adds it: hidden, one commit (Python's, under Pyodide).
+      const guid = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : require('node:crypto').randomUUID();
+      doc.apply({ op: 'add', node: { id: 'project', kind: 'bim.project', hidden: true, guid } }, 'ifc project');
+    }
+    return doc;
+  }
+  /** A saved building document, opened with the `bim.*` kinds. */
+  static loadBim(text) { return Document._of(_lib().bim_document_load(String(text)), 'bim_document_load'); }
+  /** The building document saved in the file `filePath`. */
+  static openBim(filePath) { return Document.loadBim(fs.readFileSync(filePath, 'utf8')); }
+  /** Every node kind a building document knows: the blacksmith's and the `bim.*` ones. */
+  static bimKinds() { return JSON.parse(_ownedText(_lib().bim_kinds(), 'bim_kinds')); }
+  /**
+   * The building as IFC text (`schema` `IFC4` or `IFC2X3`, `geometry` `parametric` or `exact`);
+   * with `filePath`, also written to that file. `timestamp` (Unix seconds) defaults to now. A
+   * refused export throws `BuildError` with one reason a line (`node: reason`); its `refusals` is
+   * a list of `[node, reason]`, `node` null for a reason on the whole document. A refusal writes
+   * no file.
+   */
+  exportIfc(filePath = null, { schema = 'IFC4', geometry = 'parametric', timestamp = null, name = '' } = {}) {
+    const options = JSON.stringify({ schema, geometry, timestamp: timestamp == null ? Math.floor(Date.now() / 1000) : timestamp, name });
+    let text;
+    try {
+      text = _ownedText(_lib().bim_document_export_ifc(this._handle, options), 'bim_document_export_ifc');
+    } catch (e) {
+      const message = e instanceof BuildError ? e.message : '';
+      const start = message.indexOf('{"refusals"');
+      if (start < 0) throw e;
+      const refusals = JSON.parse(message.slice(start)).refusals.map((r) => [r.node ?? null, r.reason]);
+      const err = new BuildError(refusals.map(([n, r]) => (n ? `${n}: ${r}` : r)).join('\n'));
+      err.refusals = refusals;
+      throw err;
+    }
+    if (filePath != null) fs.writeFileSync(filePath, text, 'utf8');
+    return text;
+  }
+
+  get _handle() {
+    if (!this._pointer) throw new BuildError('document: closed');
+    return this._pointer;
+  }
+  get closed() { return this._pointer === null; }
+  close() {
+    if (this._pointer === null) return;
+    const h = this._pointer; this._pointer = null;
+    if (_documentFinalizer) _documentFinalizer.unregister(this);
+    _lib().document_free(h);
+  }
+  [DISPOSE]() { this.close(); }
+  /** `call(lib, handle)`'s owned text (a null one raises the library's reason under `document_<what>`). */
+  _text(what, call) { return _ownedText(call(_lib(), this._handle), 'document_' + what); }
+  _json(what, call) { return JSON.parse(this._text(what, call)); }
+  toString() { return this._pointer === null ? 'Document(closed)' : `Document(branch=${JSON.stringify(this.branch)}, head=${JSON.stringify(this.head.id)})`; }
+
+  // -- saving
+  /** The document as JSON text; with `filePath`, also written to that file. */
+  save(filePath = null) {
+    const text = this._text('save', (l, h) => l.document_save(h));
+    if (filePath != null) fs.writeFileSync(filePath, text, 'utf8');
+    return text;
+  }
+
+  // -- editing
+  /**
+   * Applies one op (a record, or its JSON text: `{op: 'add', node: {...}}`, `set`, `remove`,
+   * `rename`, `param`) and records it as one commit with `message`. The changed set,
+   * `{added: [ids], changed: [ids], removed: [ids], params: [names]}`.
+   */
+  apply(op, message = null) {
+    const text = typeof op === 'string' ? op : JSON.stringify(op);
+    return this._json('apply', (l, h) => l.document_apply(h, text, _documentMessage(message)));
+  }
+  /**
+   * A new node of `kind` (`'profile.rect'`) with `fields` (`{w: 10, h: '=w', profile: 'r1'}`),
+   * one commit. Its id is made up unless `fields.id` gives one; it is returned. `fields.message`
+   * is the commit's message, not a field.
+   */
+  add(kind, fields = {}) {
+    const { message = null, ...rest } = fields;
+    return this.apply({ op: 'add', node: { kind, ...rest } }, message).added[0];
+  }
+  /**
+   * A node holding `solid` exactly as it is: a `solid.body` (a `sheet.body` with `sheet: true`)
+   * carrying the kernel's own B-rep (`Solid.documentBody()`), its colours kept. Its id is
+   * returned; `id`, `name` and `message` as for `add`.
+   */
+  addSolid(solid, { sheet = false, ...fields } = {}) {
+    return this.add(sheet ? 'sheet.body' : 'solid.body', { body: solid.documentBody(), ...fields });
+  }
+  /** A `profile.path` node holding `profile` exactly (`Profile.documentPath()`). Its id is returned; `id`, `name` and `message` as for `add`. */
+  addProfile(profile, fields = {}) { return this.add('profile.path', { path: profile.documentPath(), ...fields }); }
+  /** Sets `fields` of node `id`, one commit; the changed set. `fields.message` is the commit's message, not a field. */
+  set(id, fields = {}) {
+    const { message = null, ...rest } = fields;
+    return this.apply({ op: 'set', id, fields: rest }, message);
+  }
+  /** Removes node `id`. Refused while another node reads it, unless `cascade` takes those with it. */
+  remove(id, { cascade = false, message = null } = {}) {
+    const op = { op: 'remove', id };
+    if (cascade) op.cascade = true;
+    return this.apply(op, message);
+  }
+  /** Gives node `id` the display name `name` (null clears it). */
+  rename(id, name, message = null) { return this.apply({ op: 'rename', id, name: name ?? null }, message); }
+  /** The parameters: `get`, `set` (a `param` op), `delete`, `has`, `keys()`, `size`, `toObject()`. */
+  get params() { return new DocumentParams(this); }
+  /**
+   * `doc.batch('slot and fillet', () => { ... })`: the ops `body` applies are applied live and
+   * recorded as one commit with `message` (which may be left out). An error thrown by `body`
+   * rolls every op of the batch back and is thrown on. `body` runs synchronously; its result is
+   * returned.
+   */
+  batch(message, body) {
+    if (typeof message === 'function') { body = message; message = null; }
+    if (!_lib().document_batch_begin(this._handle, _documentMessage(message))) _fail('document_batch_begin');
+    const out = this._scoped(body, 'batch', 'batch_abort', (l, h) => l.document_batch_abort(h));
+    this._text('batch_end', (l, h) => l.document_batch_end(h));
+    return out;
+  }
+  /**
+   * `doc.preview(() => { ... })`: the ops `body` applies are applied (and evaluate) but never
+   * recorded, and are taken back on leaving, normally or by an error: a drag, a what-if.
+   */
+  preview(body) {
+    if (!_lib().document_preview_begin(this._handle)) _fail('document_preview_begin');
+    const out = this._scoped(body, 'preview', 'end_preview', (l, h) => l.document_end_preview(h));
+    this._text('end_preview', (l, h) => l.document_end_preview(h));
+    return out;
+  }
+  /** `body()`, cleaned up by `undo` when it throws: a refused clean-up never hides the body's own error. */
+  _scoped(body, scope, what, undo) {
+    let out;
+    try {
+      out = body();
+      if (out && typeof out.then === 'function') throw new BuildError(`document_${scope}: the body must be synchronous`);
+    } catch (e) {
+      try { this._text(what, undo); } catch (cleanup) { if (!(cleanup instanceof BuildError)) throw cleanup; }
+      throw e;
+    }
+    return out;
+  }
+  /**
+   * One drag frame: applies `op` without recording it, after taking back the last frame. The
+   * changed set, relative to the state before the drag. Needs no `preview` scope; `endPreview()`
+   * takes the drag back.
+   */
+  previewFrame(op) {
+    const text = typeof op === 'string' ? op : JSON.stringify(op);
+    return this._json('preview', (l, h) => l.document_preview(h, text));
+  }
+  /** Takes back an open drag (or preview); the changed set of doing so. */
+  endPreview() { return this._json('end_preview', (l, h) => l.document_end_preview(h)); }
+
+  // -- history
+  /** Takes back the head commit. False when there was nothing to take back. */
+  undo() { return this._text('undo', (l, h) => l.document_undo(h)).trim() !== 'null'; }
+  /** Puts back the commit `undo` took back. False when there was nothing to put back. */
+  redo() { return this._text('redo', (l, h) => l.document_redo(h)).trim() !== 'null'; }
+  _branchList() { return this._json('branch_list', (l, h) => l.document_branch_list(h)); }
+  /** Whether `undo` has a commit to take back. */
+  get canUndo() { return Boolean(this._branchList().can_undo); }
+  /** Whether `redo` has a commit to put back. */
+  get canRedo() { return Boolean(this._branchList().can_redo); }
+  /** The current branch's name, or null when the head is detached (switched to a commit id). */
+  get branch() { return this._branchList().branch ?? null; }
+  /** Every branch, name to the id of its tip commit. */
+  get branches() { return { ...this._branchList().branches }; }
+  /** A new branch `name`. Without `at` it starts at the head and the document switches onto it; with `at` (a commit id) it starts there. */
+  branchNew(name, at = null) {
+    this._text('branch_new', (l, h) => l.document_branch_new(h, String(name), at ? String(at) : null));
+  }
+  /** Moves the head to the branch of that name, else to the commit of that id (which detaches the head: `branch` is then null). */
+  switch(nameOrCommitId) { this._text('branch_switch', (l, h) => l.document_branch_switch(h, String(nameOrCommitId))); }
+  /** Renames branch `old` to `name`; refused when `old` is missing or `name` is taken. */
+  branchRename(old, name) {
+    if (!_lib().document_branch_rename(this._handle, String(old), String(name))) _fail('document_branch_rename');
+  }
+  /** Deletes branch `name`; the current branch is refused. Its commits stay, as tips. */
+  branchDelete(name) {
+    if (!_lib().document_branch_delete(this._handle, String(name))) _fail('document_branch_delete');
+  }
+  /** The tips of the lines no branch names -- what an undo followed by an edit leaves behind -- each a whole `Commit`. */
+  tips() { return this._json('tips', (l, h) => l.document_tips(h)).map((row) => new Commit(row)); }
+  /** The commits of `branch`'s line, newest first, the root `c0` last; null is the line from the head back to the root. */
+  log(branch = null) {
+    return this._json('log', (l, h) => l.document_log(h, branch ? String(branch) : null)).map((row) => new Commit(row));
+  }
+  /** The commit the document is at. */
+  get head() { return this.log()[0]; }
+
+  // -- evaluating and reading back
+  /** Evaluates the stale nodes (only the cheap kinds with `cheapOnly`); the status of every node, `{id, state: 'ok'|'error'|'blocked'|'pending', ...}`. */
+  evaluate({ cheapOnly = false } = {}) { return this._json('evaluate', (l, h) => l.document_evaluate(h, Boolean(cheapOnly))); }
+  /** The nodes the evaluation left in error or blocked, `{id, state, message}`. */
+  errors() {
+    this.evaluate();
+    return this._json('errors', (l, h) => l.document_errors(h));
+  }
+  /** Node `id`'s value, parsed: a number, a list (a point), a record, text. Throws `BuildError` for a node with none. */
+  value(id) {
+    this.evaluate();
+    return this._value(String(id));
+  }
+  _value(key) { return this._json('value', (l, h) => l.document_value(h, key)); }
+  /** Node `key`'s profile list, a new `Profile` each; refused (C's NONE) for a node that is not one. */
+  _profiles(key) {
+    const l = _lib(), h = this._handle;
+    const count = l.document_result_profile_count(h, key);
+    if (count === NONE) _fail('document_result_profile_count');
+    return Array.from({ length: count }, (_, i) => new Profile(l.document_result_profile_at(h, key, i)));
+  }
+  /**
+   * What node `id` evaluated to, by its kind: a `Solid` (solids and sheets), a `Profile`, an array
+   * of `Profile`, a `NurbsCurve`, a `Subd`, an array of these (a node laced over a list, each item
+   * also readable as `id#i`), or the `value` of a number, point, record, list and the like; null
+   * for no such node or one that failed. Each handle is the caller's own and outlives the document.
+   */
+  result(id) {
+    this.evaluate();
+    const key = String(id);
+    const l = _lib(), h = this._handle;
+    const kind = this._text('result_kind', () => l.document_result_kind(h, key));
+    if (kind === 'solid' || kind === 'sheet') return new Solid(l.document_result_solid(h, key));
+    if (kind === 'profile') return new Profile(l.document_result_profile(h, key));
+    if (kind === 'profiles') return this._profiles(key);
+    if (kind === 'nurbs') return NurbsCurve._of(l.document_result_nurbs_curve(h, key), 'document_result_nurbs_curve');
+    if (kind === 'subd') return new Subd(l.document_result_subd(h, key));
+    if (kind === 'value' || kind === 'curve') return this._value(key);   // a plane curve has no handle: its value
+    if (kind === 'list') {   // a laced node's: each item read as its own result, `id#0`, `id#1`, ...
+      const count = this._value(key).length;
+      return Array.from({ length: count }, (_, i) => this.result(`${key}#${i}`));
+    }
+    return null;
+  }
 }
 
 // ---- STEP -------------------------------------------------------------------------
@@ -8121,6 +10159,58 @@ function writeSat(filePath, solids, unit = 'mm') {
   if (!_lib().sat(handles, handles.length, String(filePath), UNITS[unit])) _fail('sat');
 }
 
+/**
+ * What a `.3dm` write did not write as itself -- `last_error` on a success, a line each --
+ * said as one `process.emitWarning` per line (`console.warn` where there is no `process`).
+ */
+function _warn3dm() {
+  for (const line of (_lastError() || '').split('\n').filter(Boolean)) {
+    if (typeof process !== 'undefined' && typeof process.emitWarning === 'function') process.emitWarning(`3dm: ${line}`);
+    else console.warn(`3dm: ${line}`);
+  }
+}
+
+/** The bytes a `.3dm` call handed over, copied out into a `Buffer` and released with `bytes_free` (never `string_free`), its notes warned; null is the failure `last_error` names. */
+function _taken3dm(ptr, len, what) {
+  if (ptr == null) _fail(what);
+  _warn3dm();
+  const n = Number(len[0]);
+  if (ArrayBuffer.isView(ptr)) return Buffer.from(ptr);   // the wasm's own bytes
+  try {
+    return Buffer.from(koffi.decode(ptr, 'uint8_t', n));
+  } finally {
+    _lib().bytes_free(ptr, n);
+  }
+}
+
+/** The wasm's file form: the bytes written through the page's own `fs`, refused in the C writer's words. */
+function _write3dmBytes(filePath, data, what) {
+  try { fs.writeFileSync(filePath, data); } catch (e) { throw new BuildError(`${what}: ${filePath}: ${e.message}`); }
+}
+
+/**
+ * Several solids as one Rhino `.3dm` (version 8, which Rhino 8 and 9 open), one object each:
+ * its exact brep, or -- where a body has no exact form there -- its mesh, with a warning
+ * saying so (`process.emitWarning`, each starting "3dm: "). Each object is named as its solid
+ * is, coloured with the solid's own colour (a face's or an edge's own is left out) and carries
+ * the solid's attributes as user text. `unit` is the file's: the numbers written are the
+ * numbers held. A `Buffer`.
+ */
+function rhino3dmBytes(solids, unit = 'mm') {
+  if (!(unit in UNITS)) throw new BuildError(`unit must be one of ${Object.keys(UNITS).sort().join(', ')}`);
+  const handles = Array.from(solids, (s) => s._handle);
+  const len = _sizeSlot();
+  return _taken3dm(_lib()['3dm_bytes'](handles, handles.length, UNITS[unit], len), len, '3dm_bytes');
+}
+
+/** `rhino3dmBytes` written to `filePath` by the library itself, which names the file in its refusal when it cannot. */
+function write3dm(filePath, solids, unit = 'mm') {
+  if (_wasm()) { _write3dmBytes(filePath, rhino3dmBytes(solids, unit), '3dm'); return; }
+  if (!(unit in UNITS)) throw new BuildError(`unit must be one of ${Object.keys(UNITS).sort().join(', ')}`);
+  const handles = Array.from(solids, (s) => s._handle);
+  if (!_lib()['3dm'](handles, handles.length, String(filePath), UNITS[unit])) _fail('3dm');
+  _warn3dm();
+}
 /** Several solids as one `.brep`, each its own solid under one compound (one solid is
  *  the file's root). */
 function writeBrepText(solids) {
@@ -8187,20 +10277,22 @@ function writeSvg(filePath, things, options = {}) {
 module.exports = {
   BuildError, NONE, UNITS, Axis, SvgView,
   libraryPath, defaultSchema, version, buildDate, license, licenseInfo, licenseNoticeCount, brepLayoutId, pairFreedomCount,
-  setOption, option,
+  setOption, option, effectiveTolerance,
   svgOptionsDefaults,
-  Frame, Transform, Quaternion, Interval, CurveFoot, SurfaceFoot, Line, Circle, Arc, Ellipse, Sphere, Cylinder, Cone, Torus, Cuboid, Profile, Path, SweepPath, Slant, Solid, Assembly, Selector, Edge, Curve, Intersection, Chain, Overlap, Hit, Spot, SolidHits, Piece, Workplane, writeStep, writeStepText, writeSat, writeSatText, writeBrep, writeBrepText, writeSvg, writeSvgText,
+  Frame, Transform, Quaternion, Interval, CurveFoot, SurfaceFoot, Line, Circle, Arc, Ellipse, Sphere, Cylinder, Cone, Torus, Cuboid, Rectangle, Triangle, Ray, Profile, Path, SweepPath, Slant, Solid, History, Assembly, Selector, Edge, Curve, Intersection, Chain, Overlap, Hit, Spot, SolidHits, Piece, Workplane, writeStep, writeStepText, writeSat, writeSatText, write3dm, rhino3dmBytes, writeBrep, writeBrepText, writeSvg, writeSvgText,
   FemMesh, FemEdge, FemVertex,
   Box, boxesApart, Collider, CollisionHit, Clash, clash, SweptClash, sweptClash,
   Thickness, FaceThickness, ThicknessMesh, MeshThickness, ThicknessGauge, thickness, meshThickness,
   Classifier,
   RTree, closestPoints, kNeighbors,
   Interpolator,
+  NurbsCurve, Curvature, Continuity, PatchReport, JoinReport,
   Subd, SubdMesh, SubdReport,
   HealthReport, FreeEdge, FreeWire, SmallFeature, Cracks, HealReport, HealFix, HealRefusal,
   Sketch, SolveReport, Dof, PartDof,
   Tool, Stock, Job, Program, Operation, ReportItem,
-  _lib, _wasmLibrary, _lastError, _frame, _axis, _progress, _searchedPaths, _notFoundMessage, _floats, _uint32s, _doublesAt, _svgOptions,
+  Document, Commit, DocumentParams,
+  _lib, _wasmLibrary, _wasmHistory, _readHistory, _lastError, _frame, _axis, _progress, _searchedPaths, _notFoundMessage, _floats, _uint32s, _doublesAt, _svgOptions,
   _femEdgeOf, _femVertexOf, _censusRows, _femOptions, _containment,
   _healthReport, _healReport, _healFlags,
 };

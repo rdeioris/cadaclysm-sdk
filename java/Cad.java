@@ -425,7 +425,7 @@ public final class Cad {
 
     private static final MethodHandle LAST_ERROR, VERSION, LICENSE_SET, LICENSE_INFO,
             LICENSE_NOTICE_COUNT, BUILD_DATE, OPEN, OPEN_MEMORY, OPEN_OPTIONS_INIT, CLOSE,
-            SOURCE_NAME, NODE_COUNT, ROOT_COUNT, ROOT, SCHEMA, SCHEMA_READ, METRES_PER_UNIT,
+            SOURCE_NAME, NODE_COUNT, ROOT_COUNT, ROOT, SCHEMA, SCHEMA_READ, METRES_PER_UNIT, TOLERANCES,
             BOUNDS_OF, NODE_PARENT, NODE_CHILD_COUNT, NODE_CHILD, NODE_DEPTH, NODE_NAME,
             NODE_KIND, NODE_VISIBLE, NODE_SAVE_MESH, SCENE_SAVE, MESH_FORMAT_COUNT,
             MESH_FORMAT, MESH_FORMAT_EXTENSION, QUERY, PICK_FILE, NODE_ID, NODE_COLOR,
@@ -491,6 +491,7 @@ public final class Cad {
         SCHEMA = bind(linker, lib, "cadaclysm_schema", FunctionDescriptor.of(A, A));
         SCHEMA_READ = bind(linker, lib, "cadaclysm_schema_read", FunctionDescriptor.of(A, A));
         METRES_PER_UNIT = bind(linker, lib, "cadaclysm_metres_per_unit", FunctionDescriptor.of(D, A));
+        TOLERANCES = bind(linker, lib, "cadaclysm_tolerances", FunctionDescriptor.of(B, A, A, A));
         BOUNDS_OF = bind(linker, lib, "cadaclysm_bounds", FunctionDescriptor.of(BOUNDS, A));
         NODE_PARENT = bind(linker, lib, "cadaclysm_node_parent", FunctionDescriptor.of(I, A, I));
         NODE_CHILD_COUNT = bind(linker, lib, "cadaclysm_node_child_count", FunctionDescriptor.of(I, A, I));
@@ -802,6 +803,12 @@ public final class Cad {
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
+    }
+
+    /** What a file declares about its own precision ({@link Scene#tolerances}): {@code absolute},
+     *  a length in the file's own unit, and {@code angular}, in radians -- each null where the
+     *  file said nothing. */
+    public record Tolerances(Double absolute, Double angular) {
     }
 
     /** One format {@link Node#saveMesh} writes: its bare name, its file extension, and a
@@ -3819,6 +3826,11 @@ public final class Cad {
      *  {@link WorkSchedule#tasks()}. */
     public record Task(int schedule, int index, String name, String identification, String kind, String kindName,
                        String status, boolean milestone, Task parent, TaskTime time, Scene scene) {
+        /** The index of the work schedule this task belongs to ({@code scene.schedules().get(i)}). */
+        public int scheduleIndex() {
+            return schedule;
+        }
+
         /** The nodes this task builds or removes, in node order. */
         public List<Node> nodes() {
             int count = invokeIntAt(TASK_NODE_COUNT, scene.handle(), schedule, index);
@@ -5171,6 +5183,27 @@ public final class Cad {
         public double metresPerUnit() {
             try {
                 return (double) METRES_PER_UNIT.invokeExact(handle());
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** What the file declares about its own precision, as {@link Tolerances}: the absolute
+         *  tolerance in the file's own unit (beside {@link #metresPerUnit}, whatever convention
+         *  the scene was opened into) and the angular one in radians, null for one it does not
+         *  declare -- a 3dm's units and tolerances, STEP's uncertainty, SAT's {@code resabs},
+         *  IGES's resolution; other formats declare nothing. Each body read from the file
+         *  carries a copy, which the kernel's verbs given a tolerance of 0 work from. */
+        public Tolerances tolerances() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment absolute = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                MemorySegment angular = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                boolean ok = (boolean) TOLERANCES.invokeExact(handle(), absolute, angular);
+                if (!ok) throw new CadaclysmException("tolerances: the scene is closed");
+                double a = absolute.get(ValueLayout.JAVA_DOUBLE, 0), g = angular.get(ValueLayout.JAVA_DOUBLE, 0);
+                return new Tolerances(Double.isNaN(a) ? null : a, Double.isNaN(g) ? null : g);
+            } catch (CadaclysmException e) {
+                throw e;
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }

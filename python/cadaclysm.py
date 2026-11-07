@@ -65,7 +65,7 @@ import sys
 from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_uint64, c_void_p
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Tuple, Union, cast, overload
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, NamedTuple, Tuple, Union, cast, overload
 
 if TYPE_CHECKING:
     # Never imported at run time: numpy stays a lazy import (see `_numpy`), and these
@@ -161,6 +161,7 @@ __all__ = [
     "Task",
     "TaskLink",
     "TaskTime",
+    "Tolerances",
     "UV_WORLD",
     "ValueKind",
     "WorkSchedule",
@@ -724,6 +725,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_schema", c_char_p, [c_void_p]),
     ("cadaclysm_schema_read", c_char_p, [c_void_p]),
     ("cadaclysm_metres_per_unit", c_double, [c_void_p]),
+    ("cadaclysm_tolerances", c_bool, [c_void_p, POINTER(c_double), POINTER(c_double)]),
     ("cadaclysm_bounds", _Bounds, [c_void_p]),
     ("cadaclysm_bounds64", _Bounds64, [c_void_p]),
     ("cadaclysm_node_parent", c_uint32, [c_void_p, c_uint32]),
@@ -1137,7 +1139,7 @@ def license_info() -> str:
     """One line about the license the library is running under.
 
     Never null: the license line, e.g. ``"customer=Acme Ltd
-    expiry=2027-09-15 entitlements=import,kernel"``, or, without one,
+    expiry=2027-09-15 scope=server"``, or, without one,
     ``"unlicensed"`` (``"unlicensed -- <reason>"`` when a license was found
     but did not verify).
     """
@@ -1276,6 +1278,14 @@ def _view(owner: object, pointer: Any, shape: tuple[int, ...], dtype: str) -> ND
 
 
 # ---- the values the ABI hands over ----------------------------------------
+
+
+class Tolerances(NamedTuple):
+    """What a file declares about its own precision (`Scene.tolerances`): `absolute`, a length
+    in the file's own unit, and `angular`, in radians -- each None where the file said nothing."""
+
+    absolute: float | None
+    angular: float | None
 
 
 class Bounds:
@@ -2437,6 +2447,11 @@ class Task:
 
     def _args(self):
         return _lib(), self.schedule._scene._handle, self.schedule.index, self.index
+
+    @property
+    def schedule_index(self) -> int:
+        """The index of the work schedule this task belongs to (`scene.schedules[i]`)."""
+        return self.schedule.index
 
     @property
     def name(self) -> str:
@@ -4503,6 +4518,20 @@ class Scene:
     def metres_per_unit(self) -> float:
         """What one length in the file is worth in metres, or 1 where it did not say."""
         return _lib().cadaclysm_metres_per_unit(self._handle)
+
+    @property
+    def tolerances(self) -> Tolerances:
+        """What the file declares about its own precision: `Tolerances(absolute, angular)`,
+        the absolute tolerance in the file's own unit (beside `metres_per_unit`, whatever
+        convention the scene was opened into) and the angular one in radians, None for one it
+        does not declare -- a 3dm's units and tolerances, STEP's uncertainty, SAT's `resabs`,
+        IGES's resolution; other formats declare nothing. Each body read from the file carries
+        a copy, which the kernel's verbs given `tolerance=None` work from."""
+        absolute, angular = c_double(), c_double()
+        if not _lib().cadaclysm_tolerances(self._handle, ctypes.byref(absolute), ctypes.byref(angular)):
+            raise CadaclysmError("tolerances: the scene is closed")
+        nan = lambda v: None if math.isnan(v) else float(v)
+        return Tolerances(nan(absolute.value), nan(angular.value))
 
     @property
     def bounds(self) -> Bounds:

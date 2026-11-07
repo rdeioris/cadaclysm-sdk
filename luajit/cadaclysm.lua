@@ -214,7 +214,7 @@ local ENTRY_POINTS = {
   "cadaclysm_license_set", "cadaclysm_license_info", "cadaclysm_license_notice_count",
   "cadaclysm_open", "cadaclysm_open_memory", "cadaclysm_open_options_init", "cadaclysm_close",
   "cadaclysm_source_name", "cadaclysm_schema", "cadaclysm_schema_read",
-  "cadaclysm_metres_per_unit", "cadaclysm_bounds", "cadaclysm_bounds64", "cadaclysm_diagnostic_count",
+  "cadaclysm_metres_per_unit", "cadaclysm_tolerances", "cadaclysm_bounds", "cadaclysm_bounds64", "cadaclysm_diagnostic_count",
   "cadaclysm_diagnostic", "cadaclysm_node_count", "cadaclysm_root_count", "cadaclysm_root",
   "cadaclysm_query", "cadaclysm_realize_all", "cadaclysm_realized", "cadaclysm_realize_total",
   "cadaclysm_cancel", "cadaclysm_scene_save", "cadaclysm_surface_matrix",
@@ -2705,6 +2705,7 @@ local Task_get = {}
 ---@class Task
 ---@field index integer  its position in the schedule's tasks
 ---@field schedule WorkSchedule
+---@field schedule_index integer  the index of the work schedule this task belongs to (`scene.schedules[i]`)
 ---@field name string
 ---@field identification string  `""` where none
 ---@field kind string
@@ -2722,6 +2723,8 @@ local function read_task(schedule, index)
 end
 Task.__tostring = function(self) return ("<Task %d %s>"):format(self.index, self.name) end
 local function task_args(self) return self.schedule._scene:handle(), self.schedule.index, self.index end
+--- The index of the work schedule this task belongs to (`scene.schedules[i]`).
+function Task_get.schedule_index(self) return self.schedule.index end
 function Task_get.name(self) return text(lib().cadaclysm_task_name(task_args(self))) end
 function Task_get.identification(self) return text(lib().cadaclysm_task_identification(task_args(self))) end
 function Task_get.kind(self) return TASK_KINDS[lib().cadaclysm_task_kind(task_args(self))] or "notdefined" end
@@ -2910,6 +2913,15 @@ function copy_pose(scene, ptr)
   return result
 end
 
+--- What a file declares about its own precision (`Scene.tolerances`): `absolute`, a length in
+--- the file's own unit, and `angular`, in radians -- each nil where the file said nothing.
+---@class Tolerances
+---@field absolute number|nil
+---@field angular number|nil
+local Tolerances = {}
+Tolerances.__index = Tolerances
+M.Tolerances = Tolerances
+
 -- ---- the scene ---------------------------------------------------------------------
 
 --- An open document: `path`, `schema_path` (the `.exp` used, or nil) and
@@ -2986,6 +2998,18 @@ function Scene_get.substituted(self)
 end
 --- What one length in the file is worth in metres, or 1 where it did not say.
 function Scene_get.metres_per_unit(self) return lib().cadaclysm_metres_per_unit(self:handle()) end
+--- What the file declares about its own precision, as `Tolerances`: the absolute tolerance in
+--- the file's own unit (beside `metres_per_unit`, whatever convention the scene was opened into)
+--- and the angular one in radians, nil for one it does not declare -- a 3dm's units and
+--- tolerances, STEP's uncertainty, SAT's `resabs`, IGES's resolution; other formats declare
+--- nothing. Each body read from the file carries a copy, which the kernel's verbs given a
+--- tolerance of 0 work from.
+function Scene_get.tolerances(self)
+  local absolute, angular = ffi.new("double[1]"), ffi.new("double[1]")
+  lib().cadaclysm_tolerances(self:handle(), absolute, angular)
+  local declared = function(v) if v ~= v then return nil end return v end
+  return setmetatable({ absolute = declared(absolute[0]), angular = declared(angular[0]) }, M.Tolerances)
+end
 --- Everything the model covers, in world coordinates. **Meshes all of it.**
 function Scene_get.bounds(self) return bounds(lib().cadaclysm_bounds(self:handle())) end
 --- `bounds` in `double`: the same union box, unnarrowed. **Meshes all of it**, as `bounds` does.

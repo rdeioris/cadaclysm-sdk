@@ -429,6 +429,16 @@ inline Result<std::uint32_t> svg_colour_packed(const SvgColour& colour, const ch
 
 // ---- values -----------------------------------------------------------------------
 
+// What a file (Scene::tolerances) or a kernel solid (blacksmith::Solid::tolerances) declares
+// about its own precision: `absolute`, a length in the model's own units, and `angular`, in
+// radians -- each nullopt where the source said nothing.
+struct Tolerances {
+    std::optional<double> absolute;
+    std::optional<double> angular;
+};
+inline bool operator==(const Tolerances& l, const Tolerances& r) { return l.absolute == r.absolute && l.angular == r.angular; }
+inline bool operator!=(const Tolerances& l, const Tolerances& r) { return !(l == r); }
+
 // An axis-aligned box, or all zeros where there was nothing to bound.
 struct Bounds {
     std::array<float, 3> min{};
@@ -2949,6 +2959,9 @@ struct Task {
     // Every date pair it gives.
     TaskTime time;
 
+    // The index of the work schedule this task belongs to (scene.schedules()[i]).
+    std::uint32_t schedule_index() const { return schedule_; }
+
     // The summary task nesting it, nothing at the top.
     std::optional<Task> parent() const {
         const CadaclysmScene* handle = scene_.get("Task").handle;
@@ -3169,6 +3182,21 @@ public:
     }
 
     double metres_per_unit() const { return ::cadaclysm_metres_per_unit(h()); }
+    // What the file declares about its own precision, as Tolerances: the absolute tolerance in
+    // the file's own unit (beside metres_per_unit(), whatever convention the scene was opened
+    // into) and the angular one in radians, nullopt for one it does not declare -- a 3dm's units
+    // and tolerances, STEP's uncertainty, SAT's resabs, IGES's resolution; other formats declare
+    // nothing. Each body read from the file carries a copy, which the kernel's verbs given a
+    // nullopt tolerance work from.
+    Tolerances tolerances() const {
+        double absolute = std::nan("");
+        double angular = std::nan("");
+        ::cadaclysm_tolerances(h(), &absolute, &angular);
+        Tolerances out;
+        if (!std::isnan(absolute)) out.absolute = absolute;
+        if (!std::isnan(angular)) out.angular = angular;
+        return out;
+    }
 
     // Draw every visible placement through the view library in use: on a window library
     // show() blocks until the window is closed; the terminal prints a still. view()

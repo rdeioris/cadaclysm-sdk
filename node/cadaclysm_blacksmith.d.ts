@@ -90,13 +90,22 @@ export function licenseInfo(): string;
 export function licenseNoticeCount(): number;
 /**
  * Set a kernel option, by its name, for the whole process from the next call on:
- * `boolean.mesh_budget`, `boolean.finest_tolerance`, `profile_boolean.point_budget` or
- * `measure.default_accuracy`. Throws `BuildError` -- and changes nothing -- for a name that
- * is not an option or a value it does not take.
+ * `boolean.mesh_budget`, `boolean.finest_tolerance`, `profile_boolean.point_budget`,
+ * `measure.default_accuracy`, `step.validation_properties`, `step.validation_accuracy`,
+ * `tolerance.relative` or `tolerance.angular`.
+ * Throws `BuildError` -- and changes nothing -- for a name that
+ * is not an option or a value it does not take. The last two stamp a written STEP part file
+ * with each body's measured area, volume and centroid, there for the kernel that reads the
+ * file to check the transfer against; off by default, since it measures every body in the
+ * file at `step.validation_accuracy` (1e-5).
  */
 export function setOption(name: string, value: number): void;
 /** A kernel option's value, by its name: what `setOption` last set, else its default. Throws `BuildError` for a name that is not an option. */
 export function option(name: string): number;
+/** What a solid declares about its own precision: `absolute`, a length, and `angular`, radians -- null where nothing declared it. */
+export interface Tolerances { readonly absolute: number | null; readonly angular: number | null }
+/** The tolerance a verb given a null (or 0) `tolerance` works at over `solids` (0 for none). */
+export function effectiveTolerance(...solids: Solid[]): number;
 
 export class Profile {
   private constructor();
@@ -115,13 +124,13 @@ export class Profile {
   static spline(points: Point2[], degree?: number, weights?: ArrayLike<number> | null, closed?: boolean): Profile;
   static path(start: Point2): Path;
   static parabola(vertex: Point2, axis: Point2, focal: number, from: number, to: number): Path;
-  static chain(pieces: Iterable<Profile>, tolerance?: number): Profile;
+  static chain(pieces: Iterable<Profile>, tolerance?: number | null): Profile;
   static fromLoops(loops: Iterable<Profile>): Profile;
   closeLoop(): Profile;
   /** This curve cut where the cutters cross it -- the sketch trim's pieces, in order along the curve. */
-  pieces(cutters: Iterable<Profile>, tolerance?: number): Profile[];
+  pieces(cutters: Iterable<Profile>, tolerance?: number | null): Profile[];
   /** This curve with piece `piece` of `pieces` taken away: what is left, as open profiles. */
-  trim(cutters: Iterable<Profile>, piece: number, tolerance?: number): Profile[];
+  trim(cutters: Iterable<Profile>, piece: number, tolerance?: number | null): Profile[];
   withHole(hole: Profile): Profile;
   /** The perimeter of the outer loop -- holes are not counted -- measured to the relative `accuracy` (0: the default). */
   length(accuracy?: number): Length;
@@ -132,13 +141,13 @@ export class Profile {
   /** The outer loop every `step` of arc length; the short last piece is kept. */
   divideByLength(step: number, accuracy?: number): At[];
   /** The outline, then each hole, as x, y, z runs at z = 0 within `tolerance` (0.05 by default). */
-  polylines(tolerance?: number): Float32Array[];
+  polylines(tolerance?: number | null): Float32Array[];
   /** Every free-form side as lines and arcs within `tolerance` (0.01 by default). */
-  toArcs(tolerance?: number): Profile;
+  toArcs(tolerance?: number | null): Profile;
   /** Grown by `distance` (shrunk where negative), as zero or more line-and-arc profiles. */
-  offset(distance: number, tolerance?: number): Profile[];
-  hits(other: Profile, tolerance?: number): Hit[];
-  common(other: Profile, tolerance?: number): Profile[];
+  offset(distance: number, tolerance?: number | null): Profile[];
+  hits(other: Profile, tolerance?: number | null): Hit[];
+  common(other: Profile, tolerance?: number | null): Profile[];
   static text(text: string, size?: number, font?: string, halign?: 'left' | 'center' | 'right', valign?: 'baseline' | 'bottom' | 'center' | 'top', spacing?: number, direction?: 'ltr' | 'rtl', fontBytes?: Uint8Array | ArrayBuffer | null): Profile[];
   translate(dx: number, dy: number): Profile;
   /** This outline turned `radians` (counter-clockwise) about `centre`. */
@@ -153,6 +162,8 @@ export class Profile {
    *  The verbs that make a profile from one carry it; a solid made from it takes nothing. */
   coloured(colour: string | Iterable<number>): Profile;
   readonly colour: [number, number, number] | null;
+  /** This profile as a `Document`'s `profile.path` node holds it, parsed: `{start, segments, holes, colour}`, its exact segments never flattened. What `Document.addProfile` puts in a document. */
+  documentPath(): { [key: string]: any };
   round(radius: number, corners?: Iterable<number> | null, open?: boolean): Profile;
   /** This profile's own loops as SVG text, from directly above by default (`view: 'top'`) -- a sketch lies in z = 0, so its own plane already is the page. */
   svgText(options?: SvgOptions): string;
@@ -177,7 +188,7 @@ export class Path {
 export class SweepPath {
   constructor(at: Point3);
   static at(point: Point3): SweepPath;
-  static along(curve: Profile, frame: FrameLike, tolerance?: number, open?: boolean): SweepPath;
+  static along(curve: Profile, frame: FrameLike, tolerance?: number | null, open?: boolean): SweepPath;
   lineTo(point: Point3): this;
   arc(centre: Point3, axis: Point3, angle: number): this;
   close(): void;
@@ -344,6 +355,8 @@ export class Line implements Iterable<number> {
   /** `[min, max]`. */
   bounds(): [number[], number[]];
   transform(t: Transform | MatrixLike): Line;
+  /** The exact NURBS form. */
+  toNurbs(): NurbsCurve;
   equals(other: unknown): boolean;
   [Symbol.iterator](): Iterator<number>;
 }
@@ -363,6 +376,8 @@ export class Circle implements Iterable<number> {
   distanceTo(p: Point3): number;
   bounds(): [number[], number[]];
   transform(t: Transform | MatrixLike): Circle;
+  /** The exact NURBS form. */
+  toNurbs(): NurbsCurve;
   equals(other: unknown): boolean;
   [Symbol.iterator](): Iterator<number>;
 }
@@ -387,6 +402,8 @@ export class Arc implements Iterable<number> {
   distanceTo(p: Point3): number;
   bounds(): [number[], number[]];
   transform(t: Transform | MatrixLike): Arc;
+  /** The exact NURBS form. */
+  toNurbs(): NurbsCurve;
   equals(other: unknown): boolean;
   [Symbol.iterator](): Iterator<number>;
 }
@@ -407,6 +424,8 @@ export class Ellipse implements Iterable<number> {
   distanceTo(p: Point3): number;
   bounds(): [number[], number[]];
   transform(t: Transform | MatrixLike): Ellipse;
+  /** The exact NURBS form. */
+  toNurbs(): NurbsCurve;
   equals(other: unknown): boolean;
   [Symbol.iterator](): Iterator<number>;
 }
@@ -527,6 +546,79 @@ export class Cuboid implements Iterable<number> {
   toSolid(): Solid;
   bounds(): [number[], number[]];
   transform(t: Transform | MatrixLike): Cuboid;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/**
+ * The rectangle over `x` and `y` in its frame's x-y plane. As a curve it is its boundary: `t` runs
+ * 0..4, one unit a side from corner `(x0, y0)` counter-clockwise about the frame's z. Immutable,
+ * nothing to free.
+ */
+export class Rectangle implements Iterable<number> {
+  constructor(frame: FrameLike, x: IntervalLike, y: IntervalLike);
+  static fromValues(values: ArrayLike<number>): Rectangle;
+  readonly frame: Frame;
+  readonly x: Interval;
+  readonly y: Interval;
+  readonly values: number[];
+  /** The four corners: `(x0, y0)`, `(x1, y0)`, `(x1, y1)`, `(x0, y1)`. */
+  corners(): number[][];
+  area(): number;
+  pointAt(t: number): number[];
+  tangentAt(t: number): number[];
+  length(): number;
+  closestPoint(p: Point3): CurveFoot;
+  distanceTo(p: Point3): number;
+  closestPointIn(p: Point3, includeInterior?: boolean): number[];
+  /** `'inside'`, `'outside'` or `'on'`; a null (or NaN) tolerance is the rectangle's own effective one, 0 exact. */
+  contains(p: Point3, tolerance?: number | null): 'inside' | 'outside' | 'on';
+  toSheet(): Solid;
+  /** The boundary as its exact closed degree-1 curve, a knot at each corner, so its parameter is `t`. */
+  toNurbs(): NurbsCurve;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Rectangle;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The triangle `a`, `b`, `c`. Immutable, nothing to free. */
+export class Triangle implements Iterable<number> {
+  constructor(a: Point3, b: Point3, c: Point3);
+  static fromValues(values: ArrayLike<number>): Triangle;
+  readonly a: number[];
+  readonly b: number[];
+  readonly c: number[];
+  readonly values: number[];
+  area(): number;
+  perimeter(): number;
+  centroid(): number[];
+  circumcircle(): Circle;
+  pointAt(wa: number, wb: number, wc: number): number[];
+  barycentric(p: Point3): number[];
+  closestPoint(p: Point3): number[];
+  distanceTo(p: Point3): number;
+  edge(i: number): Line;
+  toSheet(): Solid;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Triangle;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The half-line from `position` along `direction` (kept as given). Immutable, nothing to free. */
+export class Ray implements Iterable<number> {
+  constructor(position: Point3, direction: Point3);
+  static fromValues(values: ArrayLike<number>): Ray;
+  readonly position: number[];
+  readonly direction: number[];
+  readonly values: number[];
+  pointAt(t: number): number[];
+  closestPoint(p: Point3): CurveFoot;
+  distanceTo(p: Point3): number;
+  /** A ray has no box: this throws. */
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Ray;
   equals(other: unknown): boolean;
   [Symbol.iterator](): Iterator<number>;
 }
@@ -747,6 +839,24 @@ export class Solid {
   static wedge(x: number, y: number, z: number, topX: number): Solid;
   /** A right pyramid of `sides` sides (at least 3): its base the regular polygon of circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`). */
   static pyramid(sides: number, r: number, h: number): Solid;
+  /** The sheet lofted through the section curves, `degree` across them; `loose` shapes it by them, `closed` makes it periodic across them. */
+  static loftCurves(sections: Iterable<NurbsCurve>, degree?: number, loose?: boolean, closed?: boolean): Solid;
+  /** `sections` swept along `rail`; `frame` `'rmf'` rotation-minimising or `'fixed'` keeping `up` upright. The sheet's `sheetError` says how close the fit is. */
+  static sweepRail(rail: NurbsCurve, sections: Iterable<NurbsCurve>, frame?: SweepFrame, up?: Point3 | null, tolerance?: number | null): Solid;
+  /** `sections` swept between two rails. */
+  static sweepTwoRails(railA: NurbsCurve, railB: NurbsCurve, sections: Iterable<NurbsCurve>, tolerance?: number | null): Solid;
+  /** The Coons sheet of 2, 3 or 4 boundary curves meeting end to end. */
+  static edgeSurface(curves: Iterable<NurbsCurve>, tolerance?: number | null): Solid;
+  /** The Gordon sheet of a curve network. */
+  static networkSurface(uCurves: Iterable<NurbsCurve>, vCurves: Iterable<NurbsCurve>, tolerance?: number | null): Solid;
+  /** The rolling-ball fillet between two faces: `[sheet, railA, railB]`, the rails `NurbsCurve`s the caller owns. */
+  static filletSurfaces(a: Solid, b: Solid, radius: number, radiusEnd?: number | null, flipA?: boolean, flipB?: boolean, tolerance?: number | null, faceA?: number, faceB?: number): [Solid, NurbsCurve, NurbsCurve];
+  /** A sheet spanning from `a`'s side to `b`'s, meeting each at G`level` (1 or 2). */
+  static blendSides(a: Solid, sideA: SheetSide, b: Solid, sideB: SheetSide, level?: number, bulge?: number, faceA?: number, faceB?: number): Solid;
+  /** The sheet filling a hole of 3 or more sides; its `patchReport` holds the worst continuity. */
+  static nSidedPatch(boundaries: Iterable<PatchBoundary>, bulge?: number, tolerance?: number | null): Solid;
+  /** The sheets joined into one body, and what the join did. */
+  static joinSheets(sheets: Iterable<Solid>, tolerance?: number | null): [Solid, JoinReport];
   static extrude(profile: Profile, frame: FrameLike, height: number): Solid;
   static extrudeOpen(profile: Profile, frame: FrameLike, height: number): Solid;
   static extrudeTapered(profile: Profile, frame: FrameLike, height: number, taper: number): Solid;
@@ -775,11 +885,17 @@ export class Solid {
   healed(options?: HealOptions): { solid: Solid; report: HealReport };
   /** How far brep edge `edge` may lie off its curve: 0 exact, the distance healing or sewing moved it, null when no trim names the id. */
   edgeTolerance(edge: number): number | null;
-  trim(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Solid;
-  trimAsync(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Promise<Solid>;
+  /** What this solid declares about its own precision; null in a field nothing declared. */
+  readonly tolerances: Tolerances;
+  /** This solid declaring `absolute` and `angular` (radians); null (or 0) declares nothing. */
+  withTolerances(absolute?: number | null, angular?: number | null): Solid;
+  /** The recorded tolerance of the vertex at `point`, or null. */
+  vertexTolerance(point: ArrayLike<number>): number | null;
+  trim(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number | null, progress?: Progress | null): Solid;
+  trimAsync(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number | null, progress?: Progress | null): Promise<Solid>;
   place(frame: FrameLike): Solid;
   /** The closed outlines where the plane `Z = z` cuts this solid, as profiles with holes. */
-  section(z: number, tolerance?: number): Profile[];
+  section(z: number, tolerance?: number | null): Profile[];
   translate(dx: number, dy: number, dz: number): Solid;
   /** This solid scaled by `factor` about the origin: every length times `factor`, exactly. */
   scaled(factor: number): Solid;
@@ -791,19 +907,37 @@ export class Solid {
   convertToNurbs(level?: NurbsLevel): Solid;
   /** The trims the `transform` / `convertToNurbs` call that made this solid lost; 0 otherwise. */
   readonly inexactTrims: number;
-  join(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
-  cut(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
-  common(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
-  joinAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
-  cutAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
-  commonAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
-  splitSheet(tool: Solid, tolerance?: number, progress?: Progress | null): Solid;
+  /** On a fitted sheet (`sweepRail`, `sweepTwoRails`, `edgeSurface`, `networkSurface`, `filletSurfaces`, `flange`, `extrudeTo`) how far its fit is from what was asked; null elsewhere. */
+  readonly sheetError: number | null;
+  /** On the sheet from `nSidedPatch`, its report; null elsewhere. */
+  readonly patchReport: PatchReport | null;
+  /** How well this face's side meets `other`'s along `otherSide`. */
+  continuity(side: SheetSide, other: Solid, otherSide: SheetSide, face?: number, otherFace?: number, samples?: number): Continuity;
+  /** The face as a sheet of its own, its side bent to meet `other`'s at G`level` (0, 1 or 2). */
+  matched(side: SheetSide, other: Solid, otherSide: SheetSide, level?: number, face?: number, otherFace?: number): Solid;
+  /** This sheet cut along `curve`, nothing removed. */
+  splitByCurve(curve: NurbsCurve, direction?: Point3 | null, tolerance?: number | null): Solid;
+  /** This sheet cut along `curve` and one side thrown away. */
+  trimByCurve(curve: NurbsCurve, keep?: TrimKeep, direction?: Point3 | null, tolerance?: number | null): Solid;
+  /** `section` (a curve in z = 0 from the origin) swept along naked `edges` on the face's frame: x outward, y along the normal; sewn on with `join`. */
+  flange(edges: Iterable<Edge | number>, section: NurbsCurve, tolerance?: number | null, join?: boolean): Solid;
+  /** Naked `edges` slid along `direction` to their first hits on `target`: one wall per edge, sewn on with `join`. */
+  extrudeTo(edges: Iterable<Edge | number>, direction: Point3, target: Solid, tolerance?: number | null, join?: boolean): Solid;
+  /** This sheet with an opening recessed into it along the closed `outline`, and its face counts `[sheet, fillet, walls, pane]`. */
+  recess(outline: NurbsCurve, depth: number, draft?: number, fillet?: number, pane?: boolean, tolerance?: number | null): [Solid, [number, number, number, number]];
+  join(other: Solid, tolerance?: number | null, progress?: Progress | null, merge?: boolean): Solid;
+  cut(other: Solid, tolerance?: number | null, progress?: Progress | null, merge?: boolean): Solid;
+  common(other: Solid, tolerance?: number | null, progress?: Progress | null, merge?: boolean): Solid;
+  joinAsync(other: Solid, tolerance?: number | null, progress?: Progress | null): Promise<Solid>;
+  cutAsync(other: Solid, tolerance?: number | null, progress?: Progress | null): Promise<Solid>;
+  commonAsync(other: Solid, tolerance?: number | null, progress?: Progress | null): Promise<Solid>;
+  splitSheet(tool: Solid, tolerance?: number | null, progress?: Progress | null): Solid;
   /**
    * This solid and `other` as one non-manifold body that keeps every piece: its regions are this
    * solid less `other`, the two together and `other` less this one. The manifold verbs refuse it;
    * take its cells with `regions` and `regionSolid`.
    */
-  merge(other: Solid, tolerance?: number, progress?: Progress | null): Solid;
+  merge(other: Solid, tolerance?: number | null, progress?: Progress | null): Solid;
   /** The regions of space this solid's faces bound, region 0 the infinite one. */
   regions(): Region[];
   /** Finite region `region` (an index into `regions()`, a whole number from 0 to 4294967295) as a closed solid of its own. */
@@ -813,7 +947,7 @@ export class Solid {
    * meet on (one per face pair per branch -- join them by matching ends) and overlaps where a face
    * pair coincides. Neither solid is changed; no crossing is an empty result.
    */
-  intersect(other: Solid, tolerance?: number, progress?: Progress | null): Intersection;
+  intersect(other: Solid, tolerance?: number | null, progress?: Progress | null): Intersection;
   /**
    * Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its loops cut
    * into, as a `SolidHits`. Neither is changed.
@@ -839,8 +973,8 @@ export class Solid {
    * to nothing, a profile with no segments, or a free-form segment that is not an evaluable
    * NURBS curve.
    */
-  hits(profile: Profile, frame: FrameLike, tolerance?: number, progress?: Progress | null): SolidHits;
-  splitSheetAsync(tool: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
+  hits(profile: Profile, frame: FrameLike, tolerance?: number | null, progress?: Progress | null): SolidHits;
+  splitSheetAsync(tool: Solid, tolerance?: number | null, progress?: Progress | null): Promise<Solid>;
   readonly faces: number;
   faceKind(face: number): string;
   /** The solid's box at a thousandth of its own extent, in `double`: the same cost at any size. */
@@ -850,9 +984,9 @@ export class Solid {
   boundsAt(tolerance: number): [number[], number[]];
   /** `boundsAt` in `double`, from the same tessellation's own unnarrowed positions. */
   boundsAt64(tolerance: number): [number[], number[]];
-  leakedEdges(tolerance?: number): number;
-  unpairedEdges(tolerance?: number): number;
-  isWatertight(tolerance?: number): boolean;
+  leakedEdges(tolerance?: number | null): number;
+  unpairedEdges(tolerance?: number | null): number;
+  isWatertight(tolerance?: number | null): boolean;
   readonly manifold: Manifold;
   /**
    * What this solid measures, per unit density, each figure beside a bound on its own error.
@@ -870,26 +1004,26 @@ export class Solid {
   /** Edge `edge` every `step` of arc length; the short last piece is kept. */
   edgeDivideByLength(edge: number, step: number, accuracy?: number): At[];
   /** Where `point` is: inside, outside, or on within `tolerance` (0.05 by default) of the boundary. Meshes every call. */
-  contains(point: Point3, tolerance?: number): Containment;
+  contains(point: Point3, tolerance?: number | null): Containment;
   /** A `Classifier` for this closed solid at `tolerance` (0.05 by default): meshed once, asked point after point. */
-  classifier(tolerance?: number): Classifier;
+  classifier(tolerance?: number | null): Classifier;
   /** The closest points between this solid's boundary and `other`'s, to `tolerance` (0.05 by default); this solid is side `a`. `progress` hears 'meshing', 'pruning' and 'refining'; over the wasm it is never called. */
-  closest(other: Solid, tolerance?: number, progress?: Progress | null): Closest;
+  closest(other: Solid, tolerance?: number | null, progress?: Progress | null): Closest;
   /** This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the
    *  broad phase's own bound (`Collider` builds one per part at construction). */
-  boundsBox(tolerance?: number): Box;
+  boundsBox(tolerance?: number | null): Box;
   /** One thickness for face `face` of this solid alone, on a `ThicknessGauge` meshed at `tolerance` (0.01 by default), used once and freed; null where nothing is found. `maximum` has no default. */
-  thicknessAtFace(face: number, options: ThicknessAtFaceOptions & { tolerance?: number }): FaceThickness | null;
-  mesh(tolerance?: number): SolidMesh;
+  thicknessAtFace(face: number, options: ThicknessAtFaceOptions & { tolerance?: number | null }): FaceThickness | null;
+  mesh(tolerance?: number | null): SolidMesh;
   /** `mesh` in `double`, from the same tessellation cache -- unnarrowed positions/normals. */
-  mesh64(tolerance?: number): SolidMesh64;
-  meshAsync(tolerance?: number): Promise<SolidMesh>;
-  meshAsync64(tolerance?: number): Promise<SolidMesh64>;
-  edgePolylines(tolerance?: number): Float32Array[];
+  mesh64(tolerance?: number | null): SolidMesh64;
+  meshAsync(tolerance?: number | null): Promise<SolidMesh>;
+  meshAsync64(tolerance?: number | null): Promise<SolidMesh64>;
+  edgePolylines(tolerance?: number | null): Float32Array[];
   /** A colour per polyline of `edgePolylines(tolerance)`, as drawn: [r, g, b], or null for a polyline
    *  on no coloured edge; an empty array where the solid has no edge paint at all. Fills the solid's
    *  cache at `tolerance`, as `edgePolylines` does. */
-  edgePolylineColours(tolerance?: number): Array<[number, number, number] | null>;
+  edgePolylineColours(tolerance?: number | null): Array<[number, number, number] | null>;
   /**
    * This solid meshed for a solver, as a `FemMesh` **owned by the caller**: `free()`
    * it, or `using` it. `tolerance` and `maxSize` default to `FemOptions::default()`'s
@@ -914,6 +1048,10 @@ export class Solid {
   satAsync(unit?: Unit): Promise<string>;
   /** `satText` written to `path` by the library itself. */
   sat(path: string, unit?: Unit): void;
+  /** The solid as a Rhino `.3dm`'s bytes: its exact brep, named and coloured as the solid is; see `rhino3dmBytes`. */
+  rhino3dmBytes(unit?: Unit): Buffer;
+  /** `rhino3dmBytes` written to `path` by the library itself. */
+  write3dm(path: string, unit?: Unit): void;
   /** This solid as OCCT `.brep` text: exact surfaces and curves, a curve in
    *  each face's own parameters for every edge, no unit declared. */
   brepText(): string;
@@ -939,7 +1077,57 @@ export class Solid {
   /** Face `face` by what it is, eight numbers (kind, point x y z, normal x y z, extent): what a feature made on the face keeps, to find the face again with `findFace` on a rebuilt solid. */
   faceRef(face: number): number[];
   /** The face `faceRef` refers to, `hint` the index it had; null where it is gone. */
-  findFace(faceRef: Iterable<number>, hint?: number | null, tolerance?: number): number | null;
+  findFace(faceRef: Iterable<number>, hint?: number | null, tolerance?: number | null): number | null;
+  /** Edge `edge` by what it is, fifteen numbers (kind, midpoint x y z, tangent x y z, length, the two faces' normals, span): `faceRef`'s twin, found again with `findEdge`. */
+  edgeRef(edge: number): number[];
+  /** The edge `edgeRef` refers to; null where it is gone. Throws for a reference that is not fifteen finite numbers. */
+  findEdge(edgeRef: Iterable<number>, tolerance?: number | null): number | null;
+  /** How many vertices this solid has: its edges' ends, welded. */
+  readonly vertexCount: number;
+  /** Vertex `vertex` by where it is: `[x, y, z]`. */
+  vertexRef(vertex: number): number[];
+  /** The vertex nearest `vertexRef` within `tolerance`; null where none is that near. */
+  findVertex(vertexRef: Iterable<number>, tolerance?: number | null): number | null;
+  /** This solid tracked: faces numbered 1..n, edges 1..m, each its own origin; tracking rides on through every verb. */
+  tracked(): Solid;
+  /** Whether this solid carries face and edge ids. */
+  readonly isTracked: boolean;
+  /** Face `face`'s id, null where this solid is untracked. Ids are numbers (they count up from 1 per solid). */
+  faceId(face: number): number | null;
+  /** The face whose id is `id`, null where no face has it. */
+  faceWithId(id: number | bigint): number | null;
+  /** The input faces face `face` came from, as `[operand, id]` pairs; empty for a generated face or an untracked solid. */
+  faceOrigins(face: number): Origin[];
+  /** Edge `edge`'s id, as `faceId`. */
+  edgeId(edge: number): number | null;
+  /** The edge whose id is `id`, null where no edge has it. */
+  edgeWithId(id: number | bigint): number | null;
+  /** The input edge edge `edge` lies on: one `[operand, id]`, or none for a new edge. */
+  edgeOrigins(edge: number): Origin[];
+  /** What the verb that made this solid did to the faces of `inputs`, passed in its operand order. */
+  history(...inputs: Solid[]): History;
+  /** `history` for the edges, by edge id. */
+  edgeHistory(...inputs: Solid[]): History;
+  /** This solid's attributes, read-only, in key order; written to STEP as user-defined attributes. */
+  readonly attributes: ReadonlyMap<string, string>;
+  /** Attribute `key`, null where this solid has none. */
+  attribute(key: string): string | null;
+  /** This solid with attribute `key` set to `value`: a new solid, tracked if this one was not. */
+  withAttribute(key: string, value: string): Solid;
+  /** This solid with every attribute given set, in key order. */
+  withAttributes(attributes: Attributes): Solid;
+  /** This solid without attribute `key`. */
+  withoutAttribute(key: string): Solid;
+  /** Face `face`'s attributes, read-only, in key order; they stay in memory. */
+  faceAttributes(face: number): ReadonlyMap<string, string>;
+  /** Face `face`'s attribute `key`, null where it has none. */
+  faceAttribute(face: number, key: string): string | null;
+  /** This solid with face `face`'s attribute `key` set to `value`. */
+  withFaceAttribute(face: number, key: string, value: string): Solid;
+  /** This solid with every attribute given set on face `face`, in key order. */
+  withFaceAttributes(face: number, attributes: Attributes): Solid;
+  /** This solid without face `face`'s attribute `key`. */
+  withoutFaceAttribute(face: number, key: string): Solid;
   /** This solid, named `name`. The name rides through a one-source operation (`place`, `coloured`, ...),
    *  dropped by a two-source one (`join`, `cut`, `common`, ...) or a fresh primitive; see `name`. */
   named(name: string): Solid;
@@ -968,25 +1156,28 @@ export class Solid {
   edgesColoured(colour: string | Iterable<number>, edges?: Iterable<Edge | number> | null): Solid;
   /** Edge `edge`'s (an `Edge` or its index) colour as drawn -- its own, else the solid's edge colour -- or null. */
   edgeColour(edge: Edge | number): [number, number, number] | null;
+  /** This solid as a `Document`'s `solid.body` node holds it, parsed: the kernel's own B-rep as a record of its tables, and its colours. What `Document.addSolid` puts in a document. */
+  documentBody(): { [key: string]: any };
   edges(): Edge[];
-  fillet(edges: Iterable<Edge | number>, radius: number, tolerance?: number, progress?: Progress | null): Solid;
-  chamfer(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Solid;
-  pushPull(face: number | Iterable<number>, distance: number, tolerance?: number, progress?: Progress | null): Solid;
+  /** A `radiusEnd` other than `radius` runs the radius along a spline edge (the varying fillet). */
+  fillet(edges: Iterable<Edge | number>, radius: number, tolerance?: number | null, progress?: Progress | null, radiusEnd?: number | null): Solid;
+  chamfer(edges: Iterable<Edge | number>, distance: number, tolerance?: number | null): Solid;
+  pushPull(face: number | Iterable<number>, distance: number, tolerance?: number | null, progress?: Progress | null): Solid;
   mergeFlush(): Solid;
-  refillet(face: number, radius: number, tolerance?: number): Solid;
+  refillet(face: number, radius: number, tolerance?: number | null): Solid;
   unfillet(face: number): Solid;
-  rechamfer(face: number, distance: number, tolerance?: number): Solid;
+  rechamfer(face: number, distance: number, tolerance?: number | null): Solid;
   unchamfer(face: number): Solid;
-  split(tool: Solid, tolerance?: number, progress?: Progress | null): Solid[];
-  splitByPlane(plane: FrameLike, tolerance?: number, progress?: Progress | null): Solid[];
-  splitByProfile(profile: Profile, frame: FrameLike, tolerance?: number, progress?: Progress | null): Solid[];
+  split(tool: Solid, tolerance?: number | null, progress?: Progress | null): Solid[];
+  splitByPlane(plane: FrameLike, tolerance?: number | null, progress?: Progress | null): Solid[];
+  splitByProfile(profile: Profile, frame: FrameLike, tolerance?: number | null, progress?: Progress | null): Solid[];
   lumps(): Solid[];
-  shell(thickness: number, open?: Iterable<number>, tolerance?: number, progress?: Progress | null): Solid;
-  thicken(thickness: number, tolerance?: number, progress?: Progress | null): Solid;
-  filletAsync(edges: Iterable<Edge | number>, radius: number, tolerance?: number, progress?: Progress | null): Promise<Solid>;
-  chamferAsync(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Promise<Solid>;
-  shellAsync(thickness: number, open?: Iterable<number>, tolerance?: number, progress?: Progress | null): Promise<Solid>;
-  thickenAsync(thickness: number, tolerance?: number, progress?: Progress | null): Promise<Solid>;
+  shell(thickness: number, open?: Iterable<number>, tolerance?: number | null, progress?: Progress | null): Solid;
+  thicken(thickness: number, tolerance?: number | null, progress?: Progress | null): Solid;
+  filletAsync(edges: Iterable<Edge | number>, radius: number, tolerance?: number | null, progress?: Progress | null): Promise<Solid>;
+  chamferAsync(edges: Iterable<Edge | number>, distance: number, tolerance?: number | null): Promise<Solid>;
+  shellAsync(thickness: number, open?: Iterable<number>, tolerance?: number | null, progress?: Progress | null): Promise<Solid>;
+  thickenAsync(thickness: number, tolerance?: number | null, progress?: Progress | null): Promise<Solid>;
   /**
    * `schema` as `stepText` takes it; the reader is given the schema's path only when
    * it names an existing file, since it carries every built-in schema itself.
@@ -1134,6 +1325,16 @@ export class Assembly {
   base(link: string): void;
   stepText(schema?: string | null, unit?: Unit): string;
   step(path: string, schema?: string | null, unit?: Unit): void;
+  /**
+   * This assembly, and everything placed under it, as one Rhino `.3dm`: each distinct part a
+   * block holding its body, each sub-assembly a block of references to what it places, and
+   * this assembly's own placements references at the top of the file, on a layer named after
+   * it. `unit` and the warnings as `rhino3dmBytes`; throws, as `stepText` does, for an
+   * assembly reachable from this one that places nothing.
+   */
+  rhino3dmBytes(unit?: Unit): Buffer;
+  /** `rhino3dmBytes` written to `path` by the library itself. */
+  write3dm(path: string, unit?: Unit): void;
   /** This assembly as a reader `Scene`, through STEP text; see `Solid.toScene`. */
   toScene(schema?: string | null): Scene;
 }
@@ -1166,6 +1367,24 @@ export class Curve {
   degree: number; knots: number[]; poles: number[][]; weights: number[] | null;
   /** This curve as a value: a `Line`, a `Circle` (a full turn), an `Arc` or an `Ellipse`; null for any other kind. */
   readonly value: CurveValue | null;
+}
+/** An input face (or edge) a result's face came from: `[operand, id]`, the operand its input's index in the verb's operand order. */
+export type Origin = readonly [number, number];
+/** Attributes to set: a `Map`, `[key, value]` pairs, or an object. */
+export type Attributes = ReadonlyMap<string, string> | Iterable<readonly [string, string]> | Readonly<Record<string, string>>;
+/** What a verb did to its inputs' faces (or edges): `Solid.history`, `Solid.edgeHistory`. Frozen. */
+export class History {
+  private constructor();
+  /** The inputs that became exactly one output and kept their id: `[input, outId]`. */
+  readonly kept: readonly (readonly [Origin, number])[];
+  /** The inputs split, merged or renumbered: `[input, outIds]`, a split's id-keeping piece first. */
+  readonly modified: readonly (readonly [Origin, readonly number[]])[];
+  /** The outputs with no origin, in id order. */
+  readonly generated: readonly number[];
+  /** The inputs no output names. */
+  readonly deleted: readonly Origin[];
+  /** `History(kept=6, modified=1, generated=0, deleted=2)`. */
+  toString(): string;
 }
 /** What `Solid.hits` found: `hits` (a on the profile, b on the solid's faces) and `pieces` (empty for an open body). */
 export class SolidHits {
@@ -1332,7 +1551,7 @@ export class SweptClash {
  * handle; so does leaving a `using` block or the garbage collector.
  */
 export class Classifier {
-  constructor(solid: Solid, tolerance?: number);
+  constructor(solid: Solid, tolerance?: number | null);
   close(): void;
   readonly closed: boolean;
   [Symbol.dispose](): void;
@@ -1349,7 +1568,7 @@ export class Collider {
    * solid its own group -- `check` then takes one frame per solid), `allowed` pairs of part
    * indices never tested (designed contacts, flattened: `[a0, b0, a1, b1, ...]`).
    */
-  constructor(solids: Solid[], tolerance?: number, groups?: ArrayLike<number> | null, allowed?: ArrayLike<number>);
+  constructor(solids: Solid[], tolerance?: number | null, groups?: ArrayLike<number> | null, allowed?: ArrayLike<number>);
   close(): void;
   readonly closed: boolean;
   [Symbol.dispose](): void;
@@ -1442,7 +1661,7 @@ export function kNeighbors(hay: Iterable<Point3>, needles: Iterable<Point3>, k: 
  * with an entry that is not a whole number from 0 to 4294967295 or out of range, a bad
  * `clearance` or `tolerance`, or a part that is not a closed solid.
  */
-export function clash(parts: Iterable<Solid>, others?: Iterable<Solid> | null, clearance?: number, tolerance?: number, allowed?: ArrayLike<number>): Clash[];
+export function clash(parts: Iterable<Solid>, others?: Iterable<Solid> | null, clearance?: number, tolerance?: number | null, allowed?: ArrayLike<number>): Clash[];
 /**
  * Every pair of `parts` -- or, with `others`, every part of `parts` against every part of
  * `others` -- that penetrates, touches or comes within `clearance` (0 by default) of the other
@@ -1454,7 +1673,7 @@ export function clash(parts: Iterable<Solid>, others?: Iterable<Solid> | null, c
  * other way round), pose counts that differ, a pose with the wrong number of frames, an empty
  * `others`, an `allowed` `clash` refuses, or a part that is not a closed solid.
  */
-export function sweptClash(parts: Iterable<Solid>, poses: Iterable<Iterable<FrameLike>>, others?: Iterable<Solid> | null, otherPoses?: Iterable<Iterable<FrameLike>> | null, clearance?: number, tolerance?: number, resolution?: number, maxSteps?: number, allowed?: ArrayLike<number>): SweptClash[];
+export function sweptClash(parts: Iterable<Solid>, poses: Iterable<Iterable<FrameLike>>, others?: Iterable<Solid> | null, otherPoses?: Iterable<Iterable<FrameLike>> | null, clearance?: number, tolerance?: number | null, resolution?: number, maxSteps?: number, allowed?: ArrayLike<number>): SweptClash[];
 /**
  * One wall-thickness reading on a solid (`ThicknessGauge.thickness` / `.thicknessAt`, `thickness`).
  * `point` lies on face `face` of body `body` (the body's index in the gauge): at vertex `vertex` of
@@ -1520,7 +1739,7 @@ export interface ThicknessAtFaceOptions { at?: Point3 | null; maximum: number }
  * positive and finite.
  */
 export class ThicknessGauge {
-  constructor(solids: Iterable<Solid>, tolerance?: number);
+  constructor(solids: Iterable<Solid>, tolerance?: number | null);
   close(): void;
   readonly closed: boolean;
   [Symbol.dispose](): void;
@@ -1538,7 +1757,7 @@ export class ThicknessGauge {
   mesh(body: number): ThicknessMesh;
 }
 /** `new ThicknessGauge(solids, tolerance).thickness(maximum, sharpAngle)` on a gauge used once and freed: every reading within `maximum` on the solids, measured against each other. */
-export function thickness(solids: Iterable<Solid>, maximum: number, sharpAngle?: number, tolerance?: number): Thickness[];
+export function thickness(solids: Iterable<Solid>, maximum: number, sharpAngle?: number, tolerance?: number | null): Thickness[];
 /** A plain mesh for `meshThickness`: `{ positions, triangles }` or a `[positions, triangles]` pair, `[x, y, z]` points and triples of indices into its own points. */
 export type ThicknessMeshInput = { positions: Iterable<ArrayLike<number>>; triangles: Iterable<ArrayLike<number>> } | [Iterable<ArrayLike<number>>, Iterable<ArrayLike<number>>];
 /** The nearest-opposing-wall rule on plain meshes measured against each other: one reading per vertex that has one within `maximum`, by mesh then vertex. `sharpAngle` as for `ThicknessGauge.thickness`. */
@@ -1585,6 +1804,108 @@ export class Interpolator {
   cosine(t: number): number | number[];
   cubic(t: number): number | number[];
   catmullRom(t: number): number | number[];
+}
+/** A curve's bending at a parameter (`NurbsCurve.curvature`). Frozen. */
+export class Curvature {
+  private constructor();
+  /** 1 / radius. */
+  readonly kappa: number;
+  readonly tangent: number[];
+  /** The unit normal toward the centre; zero on a straight piece. */
+  readonly normal: number[];
+  /** `tangent x normal`; zero on a straight piece. */
+  readonly binormal: number[];
+  /** The centre of the osculating circle; null on a straight piece. */
+  readonly centre: number[] | null;
+}
+/** A side of a sheet's face: a boundary isocurve of its NURBS surface. */
+export type SheetSide = 'u0' | 'u1' | 'v0' | 'v1';
+export type SweepFrame = 'rmf' | 'fixed';
+export type TrimKeep = 'outside' | 'inside' | 'left' | 'right';
+/** One side of an N-sided patch's hole: a curve (met at G0), `[sheet, side, level?]` or an object. */
+export type PatchBoundary = NurbsCurve | [Solid, SheetSide] | [Solid, SheetSide, number]
+  | { sheet: Solid; side: SheetSide; level?: number; face?: number; range?: [number, number] };
+/** How well two faces meet along their sides (`Solid.continuity`). Frozen. */
+export class Continuity {
+  private constructor();
+  readonly gap: number;
+  readonly gapAt: number[];
+  readonly angle: number;
+  readonly angleAt: number[];
+  readonly curvature: number;
+  readonly curvatureAt: number[];
+  readonly samples: number;
+}
+/** How well an N-sided patch meets (`Solid.patchReport`). Frozen. */
+export class PatchReport {
+  private constructor();
+  readonly faces: number;
+  readonly boundary: Continuity;
+  readonly internal: Continuity;
+  readonly cornerAngle: number;
+}
+/** What `Solid.joinSheets` did. Frozen. */
+export class JoinReport {
+  private constructor();
+  readonly sewn: number;
+  readonly worstGap: number;
+  readonly nakedBefore: number;
+  readonly nakedAfter: number;
+  readonly refused: number;
+  readonly turned: number;
+  readonly closed: boolean;
+}
+/** How `NurbsCurve.tween` blends: control point by control point, after making the curves compatible, or through arc-length samples. */
+export type TweenMethod = 'plain' | 'matching' | 'sampling';
+/**
+ * A curve in space -- always a NURBS, so a line, an arc or a conic is an exact rational one.
+ * Immutable; every edit returns a new curve. `close()` frees it, so does leaving a `using` block
+ * or the garbage collector. A face here is its whole surface: its trims are ignored.
+ */
+export class NurbsCurve {
+  /** Control points of `degree` (1 to 7), `weights` one per point or null, the full `knots` vector or null for clamped and uniform. */
+  constructor(points: Iterable<Point3>, degree?: number, weights?: Iterable<number> | null, knots?: Iterable<number> | null);
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** The largest distance from the fitted points; null unless made by `fit`, `projectedToFace` or `pulledToFace`. */
+  readonly fitError: number | null;
+  static through(points: Iterable<Point3>, degree?: number, closed?: boolean, startTangent?: Point3 | null, endTangent?: Point3 | null): NurbsCurve;
+  static fit(points: Iterable<Point3>, degree?: number, tolerance?: number | null): NurbsCurve;
+  static fromEdge(solid: Solid, edge: Edge | number): NurbsCurve;
+  static isocurve(solid: Solid, face: number, alongU: boolean, at: number): NurbsCurve;
+  static blend(a: NurbsCurve, aEnd: boolean, b: NurbsCurve, bEnd: boolean, continuity?: number, bulge?: number): NurbsCurve;
+  static joined(curves: Iterable<NurbsCurve>, tolerance?: number): NurbsCurve;
+  /** `count` curves blending from this one to `other`; `samples` is required by `'sampling'` and refused otherwise. */
+  tween(other: NurbsCurve, count: number, method?: TweenMethod, samples?: number | null, align?: boolean, tolerance?: number | null): NurbsCurve[];
+  projectedToPlane(origin: Point3, normal: Point3, direction?: Point3 | null): NurbsCurve;
+  projectedToFace(solid: Solid, face: number, direction: Point3, tolerance?: number | null): NurbsCurve;
+  pulledToFace(solid: Solid, face: number, tolerance?: number | null): NurbsCurve;
+  reversed(): NurbsCurve;
+  trimmed(t0: number, t1: number): NurbsCurve;
+  extended(length: number, atStart?: boolean): NurbsCurve;
+  elevated(by?: number): NurbsCurve;
+  transformed(t: Transform | MatrixLike): NurbsCurve;
+  clone(): NurbsCurve;
+  readonly degree: number;
+  readonly controlPoints: number[][];
+  readonly weights: number[];
+  readonly knots: number[];
+  readonly domain: [number, number];
+  readonly isRational: boolean;
+  readonly isClosed: boolean;
+  point(t: number): number[];
+  /** The point and its derivatives up to `order` (at most 8): `order + 1` points. */
+  derivatives(t: number, order?: number): number[][];
+  curvature(t: number): Curvature;
+  length(accuracy?: number): Length;
+  pointAtLength(s: number, accuracy?: number): At;
+  divideByCount(n: number, accuracy?: number): At[];
+  divideByLength(step: number, accuracy?: number): At[];
+  planeHits(origin: Point3, normal: Point3): At[];
+  faceHits(solid: Solid, face: number, tolerance?: number | null): At[];
+  /** `n + 1` pairs `[point, point - scale * kappa * normal]` along the domain. */
+  comb(n?: number, scale?: number): [number[], number[]][];
 }
 export class Edge {
   private constructor();
@@ -1812,6 +2133,142 @@ export class Workplane {
   solid(): Solid;
 }
 
+// ---- the document: a node graph of constructive verbs, with parameters and a history --------
+
+/** What an edit changed: the ids added, changed and removed, and the parameter names touched. */
+export interface ChangedSet { added: string[]; changed: string[]; removed: string[]; params: string[]; [key: string]: any }
+/** One node's status after an evaluation. */
+export interface NodeStatus { id: string; state: 'ok' | 'error' | 'blocked' | 'pending'; [key: string]: any }
+/** A node the evaluation left in error or blocked. */
+export interface NodeError { id: string; state: string; message: string; [key: string]: any }
+/** One node kind: its `name`, `inputs`, `output`, `cost` and `help`. */
+export interface NodeKind { name: string; [key: string]: any }
+/** A node's fields for `Document.add`/`set`: numbers, `"=expressions"`, other nodes' ids, lists and records; `id`, `name` and `message` (the commit's, not a field) as the methods say. */
+export type NodeFields = { [field: string]: any };
+/** The synchronous body of `Document.batch`/`preview`: the ops it applies are the scope's; what it returns is returned. */
+export type DocumentBody = () => any;
+
+/** One commit of a `Document`'s history. Frozen. */
+export class Commit {
+  private constructor();
+  /** Its id; `c0` is the root. */
+  readonly id: string;
+  /** The ids of the commits it follows. */
+  readonly parents: readonly string[];
+  /** The message it was recorded with; null when not set. */
+  readonly message: string | null;
+  /** Who recorded it; null when not set. */
+  readonly author: string | null;
+  /** When it was recorded; null when not set. */
+  readonly time: string | null;
+  /** The ops it applied, each as the record that was sent. */
+  readonly ops: readonly { [key: string]: any }[];
+}
+
+/** `Document.params`: the parameters, name to value (a number, or an `"=expression"`), shaped like a `Map`. Each read asks the document. */
+export class DocumentParams {
+  private constructor();
+  /** The parameter's value, or undefined when there is none of that name. */
+  get(name: string): number | string | undefined;
+  has(name: string): boolean;
+  /** Sets (or adds) a parameter: a `param` op, one commit. Null is refused: `delete` it instead. */
+  set(name: string, value: number | string): this;
+  /** Removes a parameter, one commit: false when there was none; a parameter a node reads is refused. */
+  delete(name: string): boolean;
+  keys(): string[];
+  readonly size: number;
+  /** Every parameter as a plain object, name to value. */
+  toObject(): { [name: string]: number | string };
+}
+
+/**
+ * A model as data: a graph of nodes, each a blacksmith verb reading other nodes by id, with
+ * named parameters, evaluated incrementally, and edited by ops that are undoable and branch.
+ * Saves as JSON text and loads back to the same document. A refused op throws `BuildError` with
+ * the reason, and the document is unchanged. `close()` frees it; so does leaving a `using` block
+ * or the garbage collector. One thread at a time.
+ */
+export class Document {
+  /** An empty document counting lengths in `units` (`mm`, `cm`, `m`, `in` or `ft`). */
+  constructor(units?: string);
+  /** The document `save` wrote as `text`. */
+  static load(text: string): Document;
+  /** The document saved in the file at `path`. */
+  static open(path: string): Document;
+  /** Every node kind the library knows. */
+  static kinds(): NodeKind[];
+  /** An empty building document: the blacksmith kinds and the `bim.*` ones, with a hidden `bim.project` node. */
+  static newBim(units?: string): Document;
+  /** A saved building document, opened with the `bim.*` kinds. */
+  static loadBim(text: string): Document;
+  /** The building document saved in the file at `path`. */
+  static openBim(path: string): Document;
+  /** Every node kind a building document knows. */
+  static bimKinds(): NodeKind[];
+  /**
+   * The building as IFC text; with `path`, also written to that file. `timestamp` (Unix seconds)
+   * defaults to now. A refusal throws `BuildError` (one `node: reason` a line) with `refusals`,
+   * `[node | null, reason]` pairs, and writes no file.
+   */
+  exportIfc(path?: string | null, options?: { schema?: string; geometry?: string; timestamp?: number | null; name?: string }): string;
+  readonly closed: boolean;
+  close(): void;
+  [Symbol.dispose](): void;
+  /** `Document(closed)`, or the branch and head. */
+  toString(): string;
+  /** The document as JSON text; with `path`, also written to that file. */
+  save(path?: string | null): string;
+  /** Applies one op (a record or its JSON text), one commit with `message`; the changed set. */
+  apply(op: string | { [key: string]: any }, message?: string | null): ChangedSet;
+  /** A new node of `kind` with `fields`, one commit; its id. */
+  add(kind: string, fields?: NodeFields): string;
+  /** A `solid.body` (`sheet.body` with `sheet`) node holding `solid` exactly; its id. */
+  addSolid(solid: Solid, fields?: NodeFields & { sheet?: boolean }): string;
+  /** A `profile.path` node holding `profile` exactly; its id. */
+  addProfile(profile: Profile, fields?: NodeFields): string;
+  /** Sets `fields` of node `id`, one commit (`message` is the commit's); the changed set. */
+  set(id: string, fields: NodeFields): ChangedSet;
+  /** Removes node `id`; refused while another node reads it, unless `cascade`. */
+  remove(id: string, options?: { cascade?: boolean; message?: string | null }): ChangedSet;
+  /** Gives node `id` the display name `name` (null clears it). */
+  rename(id: string, name: string | null, message?: string | null): ChangedSet;
+  readonly params: DocumentParams;
+  /** The ops `body` applies are recorded as one commit; an error rolls them back and is thrown on. `body` is synchronous; its result is returned. */
+  batch(message: string | null | undefined, body: DocumentBody): any;
+  batch(body: DocumentBody): any;
+  /** The ops `body` applies evaluate but are never recorded, and are taken back on leaving. */
+  preview(body: DocumentBody): any;
+  /** One drag frame: `op` applied unrecorded after taking back the last frame; the changed set relative to before the drag. */
+  previewFrame(op: string | { [key: string]: any }): ChangedSet;
+  /** Takes back an open drag (or preview); the changed set of doing so. */
+  endPreview(): ChangedSet;
+  /** Takes back the head commit; false when there was nothing to take back. */
+  undo(): boolean;
+  /** Puts back the commit `undo` took back; false when there was nothing to put back. */
+  redo(): boolean;
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
+  /** The current branch's name, or null when the head is detached. */
+  readonly branch: string | null;
+  /** Every branch, name to the id of its tip commit. */
+  readonly branches: { [name: string]: string };
+  /** A new branch; without `at` it starts at the head and the document switches onto it. */
+  branchNew(name: string, at?: string | null): void;
+  /** Moves the head to the branch of that name, else to the commit of that id. */
+  switch(nameOrCommitId: string): void;
+  branchRename(old: string, name: string): void;
+  branchDelete(name: string): void;
+  tips(): Commit[];
+  log(branch?: string | null): Commit[];
+  readonly head: Commit;
+  evaluate(options?: { cheapOnly?: boolean }): NodeStatus[];
+  errors(): NodeError[];
+  /** Node `id`'s value, parsed; throws `BuildError` for a node with none. */
+  value(id: string): any;
+  /** What node `id` evaluated to, by its kind: a `Solid`, a `Profile`, an array of `Profile`, a `NurbsCurve`, a `Subd`, an array of these, or a value; null for no such node or one that failed. */
+  result(id: string): any;
+}
+
 // ---- CAM: tools, stock and a job -------------------------------------------------------
 
 /** A cutter: Grbl tool `number` (1 to 255, the `T` word), `diameter` and `fluteLength` in
@@ -1964,6 +2421,13 @@ export function writeStep(path: string, solids: Iterable<Solid>, schema?: string
 /** Several solids as one ACIS SAT file, each its own body. */
 export function writeSatText(solids: Iterable<Solid>, unit?: Unit): string;
 export function writeSat(path: string, solids: Iterable<Solid>, unit?: Unit): void;
+/**
+ * Several solids as one Rhino `.3dm` (version 8), one object each: its exact brep, or its
+ * mesh where a body has no exact form there, with a `process.emitWarning` ("3dm: ...") saying
+ * so. Named, coloured and with the solid's attributes as user text.
+ */
+export function rhino3dmBytes(solids: Iterable<Solid>, unit?: Unit): Buffer;
+export function write3dm(path: string, solids: Iterable<Solid>, unit?: Unit): void;
 /** Several solids as one `.brep`, each its own solid under one compound. */
 export function writeBrepText(solids: Iterable<Solid>): string;
 export function writeBrep(path: string, solids: Iterable<Solid>): void;

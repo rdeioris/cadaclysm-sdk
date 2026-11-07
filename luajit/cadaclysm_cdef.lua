@@ -583,6 +583,8 @@ const char *cadaclysm_schema_read(const struct CadaclysmScene *scene);
 
 double cadaclysm_metres_per_unit(const struct CadaclysmScene *scene);
 
+bool cadaclysm_tolerances(const struct CadaclysmScene *scene, double *absolute, double *angular);
+
 struct CadaclysmBounds cadaclysm_bounds(const struct CadaclysmScene *scene);
 
 struct CadaclysmBounds64 cadaclysm_bounds64(const struct CadaclysmScene *scene);

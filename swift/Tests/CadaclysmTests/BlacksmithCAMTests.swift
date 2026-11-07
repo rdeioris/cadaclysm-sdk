@@ -65,7 +65,7 @@ final class BlacksmithCAMTests: XCTestCase {
                                         degree: 3, weights: nil, closed: true)
         let fitted = try spline.toArcs(0.01)
         try assertFootprint(fitted, try footprint(spline), tolerance: 0.011)
-        XCTAssertEqual(refusal { _ = try spline.toArcs(0) },
+        XCTAssertEqual(refusal { _ = try spline.toArcs(-1) },
                        "profile_to_arcs: tolerance must be positive and finite")
     }
 

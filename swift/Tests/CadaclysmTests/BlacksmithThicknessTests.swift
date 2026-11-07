@@ -216,7 +216,7 @@ final class BlacksmithThicknessTests: XCTestCase {
 
     func testRefusalsCarryTheCallsPrefix() throws {
         let plate = try Solid.cuboid(10, 10, 2)
-        XCTAssertTrue(refusal { _ = try ThicknessGauge([plate], tolerance: 0) }?
+        XCTAssertTrue(refusal { _ = try ThicknessGauge([plate], tolerance: -1) }?
             .hasPrefix("thickness_gauge_new: the tolerance must be positive and finite") ?? false)
         let g = try ThicknessGauge([plate])
         XCTAssertTrue(refusal { _ = try g.thickness(maximum: 0) }?
@@ -249,7 +249,7 @@ final class BlacksmithThicknessTests: XCTestCase {
         // the conveniences refuse with the gauge call's own prefix
         XCTAssertTrue(refusal { _ = try thickness([plate], maximum: -1) }?
             .hasPrefix("thickness_gauge_measure: the maximum must be positive and finite") ?? false)
-        XCTAssertTrue(refusal { _ = try thickness([plate], maximum: 10, tolerance: .nan) }?
+        XCTAssertTrue(refusal { _ = try thickness([plate], maximum: 10, tolerance: .infinity) }?
             .hasPrefix("thickness_gauge_new: the tolerance must be positive and finite") ?? false)
         XCTAssertTrue(refusal { _ = try plate.thicknessAtFace(99, maximum: 10) }?
             .hasPrefix("thickness_gauge_face: no face 99") ?? false)

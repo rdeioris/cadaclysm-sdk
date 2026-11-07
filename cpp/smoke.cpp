@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS  // std::getenv under Windows clang -Werror
 // Open one file through the C++ wrapper and check what comes back, then build a part
 // through the kernel, write it as STEP and read it back through the reader -- the
 // scenario every other wrapper's smoke runs. The exit code is the verdict; the
@@ -750,6 +751,80 @@ static Result<void> save_checks(const cadaclysm::Scene& scene) {
     return {};
 }
 
+// The meshable nodes of a scene.
+static std::size_t meshable_nodes(const cadaclysm::Scene& scene) {
+    std::size_t n = 0;
+    for (const cadaclysm::Node& node : scene.walk()) {
+        if (node.can_mesh()) n++;
+    }
+    return n;
+}
+
+// A box's six faces and its volume, as a .3dm read it back.
+static Result<void> brick_check(const bs::Solid& solid, const std::string& what) {
+    CADACLYSM_TRY(mass, solid.mass());
+    EXPECT(solid.faces() == 6 && std::fabs(mass.volume - 6000) <= 6e-6,
+           "3dm: " + what + " reads back as " + std::to_string(solid.faces()) + " faces, volume " + std::to_string(mass.volume));
+    return {};
+}
+
+// A box as a Rhino .3dm, bytes and file, read back through the reader -- the file with
+// Solid::open_all, the bytes with open_memory and Solid::from_node -- to its six faces and
+// its volume; then two solids in metres and a nested assembly.
+static Result<void> rhino3dm_checks() {
+    const std::string magic = "3D Geometry File Format ";
+    CADACLYSM_TRY(brick, bs::Solid::cuboid(10, 20, 30));
+    CADACLYSM_TRY(rhino, brick.rhino3dm_bytes());
+    EXPECT(rhino.size() >= magic.size() && std::equal(magic.begin(), magic.end(), rhino.begin()), "3dm: the bytes are not an openNURBS file");
+    std::string rhino_path = temp_file("cadaclysm-smoke-cpp-brick.3dm");
+    CADACLYSM_TRY_VOID(brick.write_3dm(rhino_path));
+    CADACLYSM_TRY(written, read_file(rhino_path));
+    EXPECT(written.size() == rhino.size() && std::equal(written.begin(), written.end(), rhino.begin(),
+                                                        [](char a, std::uint8_t b) { return static_cast<std::uint8_t>(a) == b; }),
+           "3dm: the file is not the bytes");
+    CADACLYSM_TRY(back, bs::Solid::open_all(rhino_path));
+    EXPECT(back.size() == 1, "3dm: the file reads back as " + std::to_string(back.size()) + " solids");
+    CADACLYSM_TRY_VOID(brick_check(back[0], "the file"));
+    {
+        cadaclysm::OpenOptions named;
+        named.name = "brick.3dm";
+        CADACLYSM_TRY(memory, cadaclysm::open_memory(rhino.data(), rhino.size(), "3dm", named));
+        std::vector<cadaclysm::Node> bodies;
+        for (const cadaclysm::Node& node : memory.walk()) {
+            if (node.can_mesh()) bodies.push_back(node);
+        }
+        EXPECT(bodies.size() == 1, "3dm: the bytes open as " + std::to_string(bodies.size()) + " meshable nodes");
+        CADACLYSM_TRY(from_bytes, bs::Solid::from_node(bodies[0]));
+        CADACLYSM_TRY_VOID(brick_check(from_bytes, "the bytes"));
+    }
+    CADACLYSM_TRY(can, bs::Solid::cylinder(4, 10));
+    CADACLYSM_TRY(moved, can.translate(40, 0, 0));
+    CADACLYSM_TRY_VOID(bs::write_3dm(rhino_path, {brick, moved}, bs::Unit::metre));
+    CADACLYSM_TRY(two, bs::Solid::open_all(rhino_path));
+    EXPECT(two.size() == 2 && two[0].faces() == 6 && two[1].faces() == 3, "3dm: two solids did not read back with 6 and 3 faces");
+    CADACLYSM_TRY(inches, bs::rhino3dm_bytes({brick, moved}, bs::Unit::inch));
+    EXPECT(inches.size() >= magic.size() && std::equal(magic.begin(), magic.end(), inches.begin()), "3dm: the module bytes are not an openNURBS file");
+
+    CADACLYSM_TRY(bolt, bs::Solid::cuboid(1, 1, 1));
+    CADACLYSM_TRY(arm, bs::Assembly::create("arm"));
+    CADACLYSM_TRY(rig, bs::Assembly::create("rig"));
+    CADACLYSM_TRY(at_origin, bs::Frame::xy());
+    CADACLYSM_TRY(at_2, bs::Frame::xy({2, 0, 0}));
+    CADACLYSM_TRY(at_10, bs::Frame::xy({10, 0, 0}));
+    CADACLYSM_TRY_VOID(arm.place_solid(bolt, at_origin));
+    CADACLYSM_TRY_VOID(arm.place_solid(bolt, at_2));
+    CADACLYSM_TRY_VOID(rig.place_assembly(arm, at_origin));
+    CADACLYSM_TRY_VOID(rig.place_solid(bolt, at_10));
+    CADACLYSM_TRY(rig_bytes, rig.rhino3dm_bytes());
+    EXPECT(rig_bytes.size() >= magic.size() && std::equal(magic.begin(), magic.end(), rig_bytes.begin()), "3dm: the assembly bytes are not an openNURBS file");
+    CADACLYSM_TRY_VOID(rig.write_3dm(rhino_path));
+    CADACLYSM_TRY(placed, bs::Solid::open_all(rhino_path));
+    EXPECT(placed.size() == 3 && std::all_of(placed.begin(), placed.end(), [](const bs::Solid& s) { return s.faces() == 6; }),
+           "3dm: the assembly reads back as " + std::to_string(placed.size()) + " solids");
+    std::remove(rhino_path.c_str());
+    std::printf("3dm: %zu bytes, read back to 6 faces and 6000 mm3; an assembly of 3 placements\n", rhino.size());
+    return {};
+}
 static Result<void> reader(const std::string& path) {
     CADACLYSM_TRY(scene, cadaclysm::open(path));
     cadaclysm::Bounds bounds = scene.bounds();
@@ -761,6 +836,16 @@ static Result<void> reader(const std::string& path) {
         if (node.can_mesh()) triangles += node.mesh().triangle_count();
     }
     std::printf("triangles=%zu\n", triangles);
+
+    // The scene saved as a Rhino .3dm (its meshes), read back to the same meshable nodes.
+    {
+        std::string scene_rhino = temp_file("cadaclysm-smoke-cpp.3dm");
+        CADACLYSM_TRY_VOID(scene.save(scene_rhino, "3dm"));
+        CADACLYSM_TRY(saved_rhino, cadaclysm::open(scene_rhino));
+        std::size_t meshable = meshable_nodes(saved_rhino);
+        EXPECT(meshable > 0 && meshable == meshable_nodes(scene), "save 3dm: the scene reads back with " + std::to_string(meshable) + " meshable nodes");
+        std::printf("save 3dm: %zu meshable node(s) read back\n", meshable);
+    }
 
     bool is_cube = cadaclysm::detail::file_name(path) == "cube.scad";
     if (is_cube) {
@@ -1396,7 +1481,7 @@ static Result<void> lofts() {
 }
 
 // A profile's outline then its holes as polylines at z = 0 -- a closed loop ends on its
-// first point, an open chain does not -- and a zero tolerance refused: what Python's test
+// first point, an open chain does not -- and a negative tolerance refused: what Python's test
 // and the C ABI's check.
 static Result<void> outlines() {
     CADACLYSM_TRY(rect, bs::Profile::rect(4, 2));
@@ -1429,10 +1514,10 @@ static Result<void> outlines() {
     std::vector<std::vector<float>> owned = rings.copy();
     EXPECT(owned.size() == 2 && owned[0].size() == outline.size() && std::equal(owned[1].begin(), owned[1].end(), hole.begin()),
            "copy() is not the rows it copied");
-    auto refused = holed.polylines(0);
+    auto refused = holed.polylines(-1);
     EXPECT(!refused && refused.error().message.find("profile_polylines") != std::string::npos &&
                refused.error().origin == cadaclysm::Origin::kernel,
-           "Profile::polylines at a zero tolerance: " + (refused ? std::string("accepted") : refused.error().message));
+           "Profile::polylines at a negative tolerance: " + (refused ? std::string("accepted") : refused.error().message));
     // An open chain stays open: its start, one point per line, and no way back.
     CADACLYSM_TRY(elbow, bs::Profile::path({0, 0}).line_to(10, 0).line_to(10, 5).end_open());
     CADACLYSM_TRY(chain, elbow.polylines(0.01));
@@ -1465,9 +1550,9 @@ static Result<void> outlines() {
     CADACLYSM_TRY(far, circle_b.translate(100, 0));
     CADACLYSM_TRY(none, circle_a.hits(far));
     EXPECT(none.empty(), "two circles apart still hit");
-    auto bad_tolerance = circle_a.hits(circle_b, 0);
+    auto bad_tolerance = circle_a.hits(circle_b, -1);
     EXPECT(!bad_tolerance && bad_tolerance.error().message.find("profile_hits: tolerance must be positive and finite") != std::string::npos,
-           "Profile::hits at a zero tolerance: " + (bad_tolerance ? std::string("accepted") : bad_tolerance.error().message));
+           "Profile::hits at a negative tolerance: " + (bad_tolerance ? std::string("accepted") : bad_tolerance.error().message));
 
     // Edge curves: a cylinder's rims are circles of its radius about a cap centre in a
     // unit frame, a whole turn each; a cuboid's edges are lines whose origin + x is the far
@@ -1524,7 +1609,7 @@ static Result<void> outlines() {
     }
 
     // Intersect: two equal pipes crossing at right angles meet on ellipse chains whose
-    // points lie on both pipes; apart, nothing; a zero tolerance refused in the kernel's
+    // points lie on both pipes; apart, nothing; a negative tolerance refused in the kernel's
     // words. Two coaxial pipes overlapping in height share a wall band: an overlap whose
     // rings lie on that wall.
     {
@@ -1555,9 +1640,9 @@ static Result<void> outlines() {
         CADACLYSM_TRY(far_pipe, pipe_b.translate(10, 0, 0));
         CADACLYSM_TRY(apart, pipe_a.intersect(far_pipe));
         EXPECT(apart.chains.empty() && apart.overlaps.empty(), "pipes apart still meet");
-        auto zero = pipe_a.intersect(pipe_b, 0.0);
+        auto zero = pipe_a.intersect(pipe_b, -1.0);
         EXPECT(!zero && zero.error().message.find("intersect: tolerance must be positive and finite") != std::string::npos,
-               "Solid::intersect at a zero tolerance: " + (zero ? std::string("accepted") : zero.error().message));
+               "Solid::intersect at a negative tolerance: " + (zero ? std::string("accepted") : zero.error().message));
         CADACLYSM_TRY(lower, bs::Solid::cylinder(1, 4));
         CADACLYSM_TRY(base, bs::Solid::cylinder(1, 4));
         CADACLYSM_TRY(upper, base.translate(0, 0, 2));
@@ -1605,7 +1690,7 @@ static Result<void> outlines() {
 
     // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
     // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no
-    // hit cuts is one piece; an open sheet has no pieces; a zero tolerance refused verbatim.
+    // hit cuts is one piece; an open sheet has no pieces; a negative tolerance refused verbatim.
     {
         CADACLYSM_TRY(xy0, bs::Frame::xy());
         CADACLYSM_TRY(box, bs::Solid::cuboid(10, 20, 30));
@@ -1645,9 +1730,9 @@ static Result<void> outlines() {
         CADACLYSM_TRY(xz0, bs::Frame::xz());
         CADACLYSM_TRY(across, sheet20.hits(upright_line, xz0));
         EXPECT(!across.hits.empty() && across.pieces.empty(), "a line across a sheet does not read hits and no pieces");
-        auto zero = box.hits(line, xy0, 0.0);
+        auto zero = box.hits(line, xy0, -1.0);
         EXPECT(!zero && zero.error().message == "solid_profile_hits: tolerance must be positive and finite",
-               "Solid::hits at a zero tolerance: " + (zero ? std::string("accepted") : zero.error().message));
+               "Solid::hits at a negative tolerance: " + (zero ? std::string("accepted") : zero.error().message));
     }
 
     // Common: the two circles share one lens (a 4-arc profile that extrudes to a solid);
@@ -1658,9 +1743,9 @@ static Result<void> outlines() {
     EXPECT(lens_solid.faces() == 6, "the lens extrudes to " + std::to_string(lens_solid.faces()) + " faces, not 6");
     CADACLYSM_TRY(no_share, circle_a.common(far));
     EXPECT(no_share.empty(), "two circles 100 apart share a region");
-    auto bad_common = circle_a.common(circle_b, 0);
+    auto bad_common = circle_a.common(circle_b, -1);
     EXPECT(!bad_common && bad_common.error().message.find("profile_common: tolerance must be positive and finite") != std::string::npos,
-           "Profile::common at a zero tolerance: " + (bad_common ? std::string("accepted") : bad_common.error().message));
+           "Profile::common at a negative tolerance: " + (bad_common ? std::string("accepted") : bad_common.error().message));
 #if CADACLYSM_CHECKED
     // C++ only: the rows borrow the profile's cache. Asking again at another tolerance
     // replaces it; moving the profile keeps it; destroying the profile ends it.
@@ -1873,9 +1958,9 @@ static Result<std::pair<bs::Solid, std::uint32_t>> solids() {
     // mesh(0) fails through cadaclysm_blacksmith_tessellation, which reports its own name
     // ("tessellation: ..."); the wrapper rewrites that back to mesh's own name, as before
     // the held tessellation existed.
-    auto zero_tolerance = rounded.mesh(0.0);
+    auto zero_tolerance = rounded.mesh(-1.0);
     EXPECT(!zero_tolerance && zero_tolerance.error().message == "mesh: tolerance must be positive and finite",
-           "mesh(0): " + (zero_tolerance ? std::string("accepted") : zero_tolerance.error().message));
+           "mesh(-1): " + (zero_tolerance ? std::string("accepted") : zero_tolerance.error().message));
 
 #if CADACLYSM_CHECKED
     // C++ only: a moved-from view traps too -- its held tessellation went with the move,
@@ -1982,6 +2067,7 @@ static Result<void> round_trip(bs::Solid rounded, std::uint32_t faces) {
         EXPECT(std::fabs(sb.max[0] - 40) < 0.01 && std::fabs(sb.max[1] - 20) < 0.01 && std::fabs(sb.max[2] - 16) < 0.01,
                "the SAT did not read back as the plate with its pin");
     }
+    CADACLYSM_TRY_VOID(rhino3dm_checks());
 
     // And as an OCCT .brep, written by the library itself, read back the same way.
     std::string brep_path = temp_file("cadaclysm-smoke-cpp.brep");
@@ -2054,6 +2140,60 @@ static Result<void> round_trip(bs::Solid rounded, std::uint32_t faces) {
     return {};
 }
 
+// Tolerances: hole2.3dm (a root sample beside samples/, scripts/link-samples.py) declares an
+// absolute 0.01 and one degree; a boolean given a nullopt tolerance works at the inputs'
+// effective one, declares nothing for built primitives, and is the explicit-effective boolean.
+static Result<void> tolerances(const std::string& path) {
+    std::filesystem::path root = std::filesystem::absolute(std::filesystem::path(path)).parent_path().parent_path();
+    std::filesystem::path hole2 = root / "hole2.3dm";
+    if (std::filesystem::exists(hole2)) {
+        Result<cadaclysm::Scene> declared = cadaclysm::open(utf8(hole2));
+        if (!declared) return declared.error();
+        cadaclysm::Tolerances want{0.01, 0.017453292519943295};
+        EXPECT(declared.value().tolerances() == want, "hole2.3dm does not declare 0.01 and one degree");
+    } else {
+        const char* optional = std::getenv("CADACLYSM_SAMPLES_OPTIONAL");
+        EXPECT(optional != nullptr && *optional != '\0', utf8(hole2) + " is missing: run scripts/link-samples.py");
+    }
+    if (std::filesystem::path(path).filename() == "cube.scad") {
+        Result<cadaclysm::Scene> cube = cadaclysm::open(path);
+        if (!cube) return cube.error();
+        EXPECT(cube.value().tolerances() == cadaclysm::Tolerances{}, "cube.scad declares a tolerance");
+    }
+    CADACLYSM_TRY(block, bs::Solid::cuboid(10, 10, 10));
+    CADACLYSM_TRY(pin0, bs::Solid::cylinder(3, 20));
+    CADACLYSM_TRY(pin, pin0.translate(0, 0, -5));
+    CADACLYSM_TRY(at, bs::effective_tolerance(bs::Solids{block, pin}));
+    EXPECT(std::fabs(at - 1e-4 * 20) < 1e-3, "effective_tolerance reads " + std::to_string(at));
+    CADACLYSM_TRY(unset, block.cut(pin, std::nullopt));
+    CADACLYSM_TRY(explicitly, block.cut(pin, at));
+    CADACLYSM_TRY(unset_declares, unset.tolerances());
+    EXPECT(unset_declares == bs::Tolerances{}, "an unset cut declares a tolerance");
+    CADACLYSM_TRY(unset_mass, unset.mass(1e-7));
+    CADACLYSM_TRY(explicit_mass, explicitly.mass(1e-7));
+    EXPECT(unset_mass.volume == explicit_mass.volume, "an unset cut's volume is not the explicit one's");
+    CADACLYSM_TRY(mesh_at, bs::effective_tolerance(bs::Solids{explicitly}));
+    CADACLYSM_TRY(unset_mesh, unset.mesh(std::nullopt));
+    CADACLYSM_TRY(explicit_mesh, explicitly.mesh(mesh_at));
+    EXPECT(unset_mesh.triangle_count() == explicit_mesh.triangle_count(), "an unset mesh is not the explicit-effective one");
+    CADACLYSM_TRY(loose, block.with_tolerances(0.1));
+    CADACLYSM_TRY(loose_declares, loose.tolerances());
+    EXPECT(loose_declares == (bs::Tolerances{0.1, std::nullopt}), "with_tolerances: 0.1 is not declared");
+    CADACLYSM_TRY(loose_at, bs::effective_tolerance(bs::Solids{loose, pin}));
+    EXPECT(loose_at == 0.1, "effective_tolerance over a 0.1 declaration");
+    CADACLYSM_TRY(loose_cut, loose.cut(pin, 0.0));
+    CADACLYSM_TRY(loose_cut_declares, loose_cut.tolerances());
+    EXPECT(loose_cut_declares.absolute == std::optional<double>(0.1), "a cut does not inherit the loosest declaration");
+    CADACLYSM_TRY(corner, block.vertex_tolerance(bs::Vec3{5, 5, 5}));
+    EXPECT(!corner, "a built cuboid records a vertex tolerance");
+    Result<bs::Solid> negative = block.with_tolerances(-1.0);
+    EXPECT(!negative && negative.error().message.rfind("solid_with_tolerances: ", 0) == 0, "with_tolerances: -1 is not refused");
+    CADACLYSM_TRY(nothing, bs::effective_tolerance(bs::Solids{}));
+    EXPECT(nothing == 0.0, "effective_tolerance of nothing is not 0");
+    std::printf("tolerances: effective %g, an unset cut is the explicit one\n", at);
+    return {};
+}
+
 static Result<void> run(int argc, char** argv) {
     std::string path = argc > 1 ? argv[1] : "samples/cube.scad";
     std::optional<std::string> license;
@@ -2076,6 +2216,7 @@ static Result<void> run(int argc, char** argv) {
     CADACLYSM_TRY_VOID(kernel_values());
     CADACLYSM_TRY(built, solids());
     CADACLYSM_TRY_VOID(round_trip(std::move(built.first), built.second));
+    CADACLYSM_TRY_VOID(tolerances(path));
     std::puts("kernel: OK");
     return {};
 }

@@ -103,6 +103,17 @@
 // take 1e-6, for cost: a boolean meshes both solids at its tolerance, and a curved solid
 // at 1e-6 is hundreds of thousands of triangles. 0.05 is what the crate's own boolean
 // tests run at; a tighter one is as correct, only slower.
+//
+// # Tolerances
+//
+// A tolerance of 0 (or NaN) given to a verb that takes a distance tolerance -- a boolean,
+// fillet, shell, split, section, hit test, mesh, curve fit or profile verb -- opts into the
+// model's own: EffectiveTolerance(solids...), the larger of the loosest absolute tolerance the
+// inputs declare and the option tolerance.relative (default 1e-4) times their size. A solid
+// declares what its file said (Solid.Tolerances, nil for what it did not say;
+// cadaclysm.Scene.Tolerances is the file's), every verb's result inherits the loosest of its
+// inputs', and Solid.WithTolerances sets it. tolerance.angular (default one degree) stands in
+// where nothing declares an angle.
 package blacksmith
 
 // The first -I/-L pair is the SDK checkout's own layout: go/blacksmith/ sits beside
@@ -136,8 +147,10 @@ package blacksmith
 import "C"
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -289,9 +302,14 @@ func License(textOrPath string) error {
 }
 
 // SetOption sets a kernel option, by its name, for the whole process from the next call
-// on: "boolean.mesh_budget", "boolean.finest_tolerance", "profile_boolean.point_budget"
-// or "measure.default_accuracy". Returns the library's reason -- and changes nothing --
-// for a name that is not an option or a value it does not take.
+// on: "boolean.mesh_budget", "boolean.finest_tolerance", "profile_boolean.point_budget",
+// "measure.default_accuracy", "step.validation_properties",
+// "step.validation_accuracy", "tolerance.relative" or
+// "tolerance.angular". Returns the library's reason -- and changes nothing --
+// for a name that is not an option or a value it does not take. The last two stamp a
+// written STEP part file with each body's measured area, volume and centroid, there for
+// the kernel that reads the file to check the transfer against; off by default, since it
+// measures every body in the file at "step.validation_accuracy" (1e-5).
 func SetOption(name string, value float64) error {
 	defer pin()()
 	c := C.CString(name)
@@ -314,6 +332,44 @@ func Option(name string) (float64, error) {
 		return 0, failure(fmt.Sprintf("no option %q", name))
 	}
 	return float64(out), nil
+}
+
+// Tolerances is what a solid declares about its own precision: Absolute, a length in the
+// model's own units, and Angular, in radians -- each nil where nothing declared it. What
+// Solid.Tolerances returns.
+type Tolerances struct {
+	Absolute *float64
+	Angular  *float64
+}
+
+func declared(v float64) *float64 {
+	if math.IsNaN(v) {
+		return nil
+	}
+	return &v
+}
+
+// EffectiveTolerance is the tolerance a verb given a tolerance of 0 (or NaN) works at over
+// solids: the larger of the loosest absolute tolerance they declare (Solid.Tolerances) and
+// Option("tolerance.relative") times the largest of their sizes, never finer than their
+// coordinates can represent. 0 for no solids, or solids with nothing to size by -- which a
+// verb refuses.
+func EffectiveTolerance(solids ...*Solid) (float64, error) {
+	defer pin()()
+	handles, err := solidHandles(solids)
+	if err != nil {
+		return 0, err
+	}
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	t := float64(C.cadaclysm_blacksmith_effective_tolerance(first, C.size_t(len(handles))))
+	runtime.KeepAlive(solids)
+	if math.IsNaN(t) {
+		return 0, failure("effective_tolerance")
+	}
+	return t, nil
 }
 
 // LicenseInfo is one line about the license the library is running under. Never empty:
@@ -547,6 +603,77 @@ func WriteSat(path string, solids []*Solid, unit string) error {
 	return nil
 }
 
+// Rhino3dmBytes is several solids as one Rhino .3dm (version 8, which Rhino 8 and 9
+// open), one object each: its exact brep, or — where a body has no exact form there —
+// its mesh, with a warning saying so. Each object is named as its solid is, coloured
+// with the solid's own colour (a face's or an edge's own is left out) and carries the
+// solid's attributes as user text. unit is the file's, "m", "mm" or "in": the numbers
+// written are the numbers held. The warnings — one a line of what was not written as
+// itself — go to the standard logger (package log), each starting "3dm: ".
+func Rhino3dmBytes(solids []*Solid, unit string) ([]byte, error) {
+	defer pin()()
+	code, handles, err := satHandles(solids, unit)
+	if err != nil {
+		return nil, err
+	}
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	var n C.size_t
+	raw := C.cadaclysm_blacksmith_3dm_bytes(first, C.size_t(len(handles)), code, &n)
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	return taken3dm(raw, n, "3dm_bytes")
+}
+
+// Write3dm is Rhino3dmBytes written to path by the library itself, which names the
+// file in its refusal when it cannot.
+func Write3dm(path string, solids []*Solid, unit string) error {
+	defer pin()()
+	code, handles, err := satHandles(solids, unit)
+	if err != nil {
+		return err
+	}
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	cs := C.CString(path)
+	defer C.free(unsafe.Pointer(cs))
+	ok := C.cadaclysm_blacksmith_3dm(first, C.size_t(len(handles)), cs, code)
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	if !ok {
+		return failure("3dm")
+	}
+	warn3dm()
+	return nil
+}
+
+// warn3dm logs what a .3dm write did not write as itself — last_error on a success, a
+// line each — through the standard logger. The caller holds pin().
+func warn3dm() {
+	for _, line := range strings.Split(lastError(), "\n") {
+		if line != "" {
+			log.Print("3dm: " + line)
+		}
+	}
+}
+
+// taken3dm copies out the bytes a .3dm call handed over and releases them with
+// bytes_free (never string_free), its notes logged; nil is the failure last_error names.
+// The caller holds pin().
+func taken3dm(raw *C.uint8_t, n C.size_t, what string) ([]byte, error) {
+	if raw == nil {
+		return nil, failure(what)
+	}
+	defer C.cadaclysm_blacksmith_bytes_free(raw, n)
+	warn3dm()
+	return C.GoBytes(unsafe.Pointer(raw), C.int(n)), nil
+}
 // WriteBrepText is several solids as one OCCT .brep, each its own solid under one
 // compound (one solid is the file's root): the exact surfaces and curves, with a curve in
 // each face's own parameters for every edge, so OCCT's BRepTools::Read gives a shape
@@ -1756,8 +1883,8 @@ type SurfaceFoot struct {
 	Unique bool
 }
 
-// CurveValue is what LineValue, CircleValue, ArcValue and EllipseValue share: Curve.Value
-// answers one. Compare two with ==: values of different kinds never compare equal, even
+// CurveValue is what LineValue, CircleValue, ArcValue, EllipseValue and RectangleValue (its
+// boundary) share: Curve.Value answers one of the first four. Compare two with ==: values of different kinds never compare equal, even
 // where their numbers coincide.
 type CurveValue interface {
 	PointAt(t float64) ([3]float64, error)
@@ -1766,6 +1893,7 @@ type CurveValue interface {
 	ClosestPoint(p [3]float64) (CurveFoot, error)
 	DistanceTo(p [3]float64) (float64, error)
 	Bounds() (min, max [3]float64, err error)
+	ToNurbs() (*NurbsCurve, error)
 	curveValue()
 }
 
@@ -1780,10 +1908,14 @@ const (
 	valueCone     = uint32(C.CADACLYSM_BLACKSMITH_VALUE_CONE)
 	valueTorus    = uint32(C.CADACLYSM_BLACKSMITH_VALUE_TORUS)
 	valueCuboid   = uint32(C.CADACLYSM_BLACKSMITH_VALUE_CUBOID)
+	valueRectangle = uint32(C.CADACLYSM_BLACKSMITH_VALUE_RECTANGLE)
+	valueTriangle  = uint32(C.CADACLYSM_BLACKSMITH_VALUE_TRIANGLE)
+	valueRay       = uint32(C.CADACLYSM_BLACKSMITH_VALUE_RAY)
 )
 
 // valueNames is each kind's lower-case name, as the library's own sentences spell it.
-var valueNames = [...]string{"line", "circle", "arc", "ellipse", "sphere", "cylinder", "cone", "torus", "cuboid"}
+var valueNames = [...]string{"line", "circle", "arc", "ellipse", "sphere", "cylinder", "cone", "torus", "cuboid",
+	"rectangle", "triangle", "ray"}
 
 // valueCheck is values squared up by the library's value_check: the canonical array every
 // value holds. A count other than value_size's is refused here, in the library's sentence.
@@ -2587,7 +2719,8 @@ func (s SphereValue) Domain() (u, v Interval, err error) { return surfaceDomain(
 func (s SphereValue) ToNurbsSheet() (*Solid, error) { return surfaceNurbsSheet(valueSphere, s.v[:]) }
 
 // Contains is whether p lies inside the closed shape or within tolerance of it. Go has no
-// default arguments: Python's tolerance defaults to 1e-9.
+// default arguments: Python's tolerance defaults to 1e-9. math.NaN() is unset, the shape's own
+// effective tolerance (tolerance.relative times its diagonal); 0 is exact.
 func (s SphereValue) Contains(p [3]float64, tolerance float64) (bool, error) {
 	return solidContains(valueSphere, s.v[:], p, tolerance)
 }
@@ -2692,7 +2825,8 @@ func (c CylinderValue) ToNurbsSheet() (*Solid, error) {
 }
 
 // Contains is whether p lies inside the closed shape or within tolerance of it. Go has no
-// default arguments: Python's tolerance defaults to 1e-9.
+// default arguments: Python's tolerance defaults to 1e-9. math.NaN() is unset, the shape's own
+// effective tolerance (tolerance.relative times its diagonal); 0 is exact.
 func (c CylinderValue) Contains(p [3]float64, tolerance float64) (bool, error) {
 	return solidContains(valueCylinder, c.v[:], p, tolerance)
 }
@@ -2791,7 +2925,8 @@ func (c ConeValue) Domain() (u, v Interval, err error) { return surfaceDomain(va
 func (c ConeValue) ToNurbsSheet() (*Solid, error) { return surfaceNurbsSheet(valueCone, c.v[:]) }
 
 // Contains is whether p lies inside the closed shape or within tolerance of it. Go has no
-// default arguments: Python's tolerance defaults to 1e-9.
+// default arguments: Python's tolerance defaults to 1e-9. math.NaN() is unset, the shape's own
+// effective tolerance (tolerance.relative times its diagonal); 0 is exact.
 func (c ConeValue) Contains(p [3]float64, tolerance float64) (bool, error) {
 	return solidContains(valueCone, c.v[:], p, tolerance)
 }
@@ -2890,7 +3025,8 @@ func (o TorusValue) Domain() (u, v Interval, err error) { return surfaceDomain(v
 func (o TorusValue) ToNurbsSheet() (*Solid, error) { return surfaceNurbsSheet(valueTorus, o.v[:]) }
 
 // Contains is whether p lies inside the closed shape or within tolerance of it. Go has no
-// default arguments: Python's tolerance defaults to 1e-9.
+// default arguments: Python's tolerance defaults to 1e-9. math.NaN() is unset, the shape's own
+// effective tolerance (tolerance.relative times its diagonal); 0 is exact.
 func (o TorusValue) Contains(p [3]float64, tolerance float64) (bool, error) {
 	return solidContains(valueTorus, o.v[:], p, tolerance)
 }
@@ -2967,7 +3103,8 @@ func (b CuboidValue) String() string {
 }
 
 // Contains is whether p lies inside the closed shape or within tolerance of it. Go has no
-// default arguments: Python's tolerance defaults to 1e-9.
+// default arguments: Python's tolerance defaults to 1e-9. math.NaN() is unset, the shape's own
+// effective tolerance (tolerance.relative times its diagonal); 0 is exact.
 func (b CuboidValue) Contains(p [3]float64, tolerance float64) (bool, error) {
 	return solidContains(valueCuboid, b.v[:], p, tolerance)
 }
@@ -2980,6 +3117,420 @@ func (b CuboidValue) Volume() (float64, error) { return solidVolume(valueCuboid,
 
 // ToSolid is the closed B-rep solid.
 func (b CuboidValue) ToSolid() (*Solid, error) { return solidToSolid(valueCuboid, b.v[:]) }
+
+// ---- the rectangle, the triangle and the ray (plan B4) ----------------------------------
+
+// RectangleValue is the rectangle over X and Y (increasing) in its frame's x-y plane, as a
+// value — Python's Rectangle. As a curve it is its boundary: t runs 0..4, one unit a side from
+// corner (x0, y0) counter-clockwise about the frame's z, clamped outside that range;
+// ClosestPoint is the boundary's, not Unique on a tie (the centre). An immutable value with
+// nothing to free, holding the 16 numbers the library's value_check squared up; compare two
+// with ==.
+type RectangleValue struct {
+	v [16]float64
+}
+
+// NewRectangleValue is the rectangle over x and y (each increasing) on frame — Python's
+// Rectangle.
+func NewRectangleValue(frame Frame, x, y Interval) (RectangleValue, error) {
+	return RectangleValueFromArray(frameAnd(frame, x.t0, x.t1, y.t0, y.t1))
+}
+
+// RectangleValueFromArray is the rectangle its 16 numbers state, checked and squared up by
+// the library's value_check; any other count is a *BuildError in the library's sentence.
+func RectangleValueFromArray(values []float64) (RectangleValue, error) {
+	v, err := valueCheck(valueRectangle, values)
+	if err != nil {
+		return RectangleValue{}, err
+	}
+	var x RectangleValue
+	copy(x.v[:], v)
+	return x, nil
+}
+
+// Values is the 16 numbers.
+func (r RectangleValue) Values() [16]float64 { return r.v }
+
+// Frame is the frame the rectangle lies on: its ranges run along the frame's x and y.
+func (r RectangleValue) Frame() Frame {
+	var f Frame
+	copy(f[:], r.v[0:12])
+	return f
+}
+
+// X is the range along the frame's x.
+func (r RectangleValue) X() Interval { return Interval{r.v[12], r.v[13]} }
+
+// Y is the range along the frame's y.
+func (r RectangleValue) Y() Interval { return Interval{r.v[14], r.v[15]} }
+
+// Bounds is the world box of the four corners, min then max.
+func (r RectangleValue) Bounds() (min, max [3]float64, err error) {
+	return valueBounds(valueRectangle, r.v[:])
+}
+
+// Transform is this rectangle under m: any map keeping its sides square (no shear in its
+// plane).
+func (r RectangleValue) Transform(m Transform) (RectangleValue, error) {
+	v, err := valueTransform(valueRectangle, r.v[:], m)
+	if err != nil {
+		return RectangleValue{}, err
+	}
+	var x RectangleValue
+	copy(x.v[:], v)
+	return x, nil
+}
+
+// String is Python's repr.
+func (r RectangleValue) String() string {
+	return fmt.Sprintf("RectangleValue(frame=%v, x=%v, y=%v)", r.Frame(), r.X(), r.Y())
+}
+
+func (RectangleValue) curveValue() {}
+
+// PointAt is the boundary's point at t: side k for t in k..k+1, clamped outside 0..4.
+func (r RectangleValue) PointAt(t float64) ([3]float64, error) {
+	return curvePointAt(valueRectangle, r.v[:], t)
+}
+
+// TangentAt is the unit direction of t's side.
+func (r RectangleValue) TangentAt(t float64) ([3]float64, error) {
+	return curveTangentAt(valueRectangle, r.v[:], t)
+}
+
+// Length is the boundary's length, the circumference.
+func (r RectangleValue) Length() (float64, error) { return curveLength(valueRectangle, r.v[:]) }
+
+// ClosestPoint is the CurveFoot on the boundary nearest p (projected onto the plane first).
+func (r RectangleValue) ClosestPoint(p [3]float64) (CurveFoot, error) {
+	return curveClosest(valueRectangle, r.v[:], p)
+}
+
+// DistanceTo is how far p lies from the boundary.
+func (r RectangleValue) DistanceTo(p [3]float64) (float64, error) {
+	return curveDistance(valueRectangle, r.v[:], p)
+}
+
+// Corners is the four corners: (x0, y0), (x1, y0), (x1, y1), (x0, y1).
+func (r RectangleValue) Corners() ([4][3]float64, error) {
+	var corners [4][3]float64
+	v := r.v
+	c, err := valueOut(12, "rectangle_corners", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_rectangle_corners(doubles(&v[0]), out)
+	})
+	if err != nil {
+		return corners, err
+	}
+	for k := range corners {
+		corners[k] = triple(c[3*k : 3*k+3])
+	}
+	return corners, nil
+}
+
+// Area is the filled rectangle's area.
+func (r RectangleValue) Area() (float64, error) {
+	v := r.v
+	a, err := valueOut(1, "rectangle_area", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_rectangle_area(doubles(&v[0]), out)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return a[0], nil
+}
+
+// ClosestPointIn is p projected onto the plane and clamped into the filled rectangle when
+// includeInterior, else the boundary's closest point. Go has no default arguments: Python's
+// includeInterior defaults to true.
+func (r RectangleValue) ClosestPointIn(p [3]float64, includeInterior bool) ([3]float64, error) {
+	v := r.v
+	q, err := valueOut(3, "rectangle_closest_point", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_rectangle_closest_point(doubles(&v[0]), doubles(&p[0]), C.bool(includeInterior), out)
+	})
+	if err != nil {
+		return [3]float64{}, err
+	}
+	return triple(q), nil
+}
+
+// Contains is where p, projected onto the plane, lies: "inside", "outside", or "on" within
+// tolerance of the boundary. Go has no default arguments: math.NaN() is unset (Python's
+// default None), the rectangle's own effective tolerance (tolerance.relative times its
+// diagonal); 0 is exact.
+func (r RectangleValue) Contains(p [3]float64, tolerance float64) (string, error) {
+	defer pin()()
+	v := r.v
+	code := uint32(C.cadaclysm_blacksmith_rectangle_contains(doubles(&v[0]), doubles(&p[0]), C.double(tolerance)))
+	if code == none {
+		return "", failure("rectangle_contains")
+	}
+	return containment("rectangle_contains", code)
+}
+
+// ToSheet is the filled rectangle as a one-face planar sheet facing the frame's z.
+func (r RectangleValue) ToSheet() (*Solid, error) {
+	defer pin()()
+	v := r.v
+	return newSolid(C.cadaclysm_blacksmith_rectangle_to_sheet(doubles(&v[0])), "rectangle_to_sheet")
+}
+
+// TriangleValue is the triangle A, B, C, as a value — Python's Triangle. A degenerate one
+// (collinear or coincident points) is refused. An immutable value with nothing to free,
+// holding the 9 numbers the library's value_check squared up; compare two with ==.
+type TriangleValue struct {
+	v [9]float64
+}
+
+// NewTriangleValue is the triangle a, b, c — Python's Triangle.
+func NewTriangleValue(a, b, c [3]float64) (TriangleValue, error) {
+	return TriangleValueFromArray([]float64{a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]})
+}
+
+// TriangleValueFromArray is the triangle its 9 numbers state, checked by the library's
+// value_check; any other count is a *BuildError in the library's sentence.
+func TriangleValueFromArray(values []float64) (TriangleValue, error) {
+	v, err := valueCheck(valueTriangle, values)
+	if err != nil {
+		return TriangleValue{}, err
+	}
+	var x TriangleValue
+	copy(x.v[:], v)
+	return x, nil
+}
+
+// Values is the 9 numbers.
+func (t TriangleValue) Values() [9]float64 { return t.v }
+
+// A is the first vertex.
+func (t TriangleValue) A() [3]float64 { return triple(t.v[0:3]) }
+
+// B is the second vertex.
+func (t TriangleValue) B() [3]float64 { return triple(t.v[3:6]) }
+
+// C is the third vertex.
+func (t TriangleValue) C() [3]float64 { return triple(t.v[6:9]) }
+
+// Bounds is the world box of the three vertices, min then max.
+func (t TriangleValue) Bounds() (min, max [3]float64, err error) {
+	return valueBounds(valueTriangle, t.v[:])
+}
+
+// Transform is this triangle under m: any affine map keeping it a triangle.
+func (t TriangleValue) Transform(m Transform) (TriangleValue, error) {
+	v, err := valueTransform(valueTriangle, t.v[:], m)
+	if err != nil {
+		return TriangleValue{}, err
+	}
+	var x TriangleValue
+	copy(x.v[:], v)
+	return x, nil
+}
+
+// String is Python's repr.
+func (t TriangleValue) String() string {
+	return fmt.Sprintf("TriangleValue(a=%v, b=%v, c=%v)", t.A(), t.B(), t.C())
+}
+
+// scalar is a triangle call writing one number.
+func (t TriangleValue) scalar(what string, call func(v, out *C.double) C.bool) (float64, error) {
+	v := t.v
+	a, err := valueOut(1, what, func(out *C.double) C.bool { return call(doubles(&v[0]), out) })
+	if err != nil {
+		return 0, err
+	}
+	return a[0], nil
+}
+
+// Area is the area.
+func (t TriangleValue) Area() (float64, error) {
+	return t.scalar("triangle_area", func(v, out *C.double) C.bool { return C.cadaclysm_blacksmith_triangle_area(v, out) })
+}
+
+// Perimeter is the sum of the three sides.
+func (t TriangleValue) Perimeter() (float64, error) {
+	return t.scalar("triangle_perimeter", func(v, out *C.double) C.bool { return C.cadaclysm_blacksmith_triangle_perimeter(v, out) })
+}
+
+// Centroid is the area centroid, the vertices' mean.
+func (t TriangleValue) Centroid() ([3]float64, error) {
+	v := t.v
+	p, err := valueOut(3, "triangle_centroid", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_triangle_centroid(doubles(&v[0]), out)
+	})
+	if err != nil {
+		return [3]float64{}, err
+	}
+	return triple(p), nil
+}
+
+// Circumcircle is the circle through A, B and C: its x toward A, turning them
+// counter-clockwise.
+func (t TriangleValue) Circumcircle() (CircleValue, error) {
+	v := t.v
+	c, err := valueOut(13, "triangle_circumcircle", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_triangle_circumcircle(doubles(&v[0]), out)
+	})
+	if err != nil {
+		return CircleValue{}, err
+	}
+	var x CircleValue
+	copy(x.v[:], c)
+	return x, nil
+}
+
+// PointAt is the point of barycentric weights wa, wb, wc, used as given.
+func (t TriangleValue) PointAt(wa, wb, wc float64) ([3]float64, error) {
+	v := t.v
+	p, err := valueOut(3, "triangle_point_at", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_triangle_point_at(doubles(&v[0]), C.double(wa), C.double(wb), C.double(wc), out)
+	})
+	if err != nil {
+		return [3]float64{}, err
+	}
+	return triple(p), nil
+}
+
+// Barycentric is the weights (wa, wb, wc), summing to 1, of p projected onto the plane.
+func (t TriangleValue) Barycentric(p [3]float64) ([3]float64, error) {
+	v := t.v
+	w, err := valueOut(3, "triangle_barycentric", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_triangle_barycentric(doubles(&v[0]), doubles(&p[0]), out)
+	})
+	if err != nil {
+		return [3]float64{}, err
+	}
+	return triple(w), nil
+}
+
+// ClosestPoint is the closest point of the filled triangle to p, exact.
+func (t TriangleValue) ClosestPoint(p [3]float64) ([3]float64, error) {
+	v := t.v
+	q, err := valueOut(3, "triangle_closest_point", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_triangle_closest_point(doubles(&v[0]), doubles(&p[0]), out)
+	})
+	if err != nil {
+		return [3]float64{}, err
+	}
+	return triple(q), nil
+}
+
+// DistanceTo is how far p lies from the filled triangle.
+func (t TriangleValue) DistanceTo(p [3]float64) (float64, error) {
+	q, err := t.ClosestPoint(p)
+	if err != nil {
+		return 0, err
+	}
+	return dist3(q, p), nil
+}
+
+// Edge is edge i as a line: 0 A to B, 1 B to C, 2 C to A.
+func (t TriangleValue) Edge(i uint32) (LineValue, error) {
+	v := t.v
+	l, err := valueOut(6, "triangle_edge", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_triangle_edge(doubles(&v[0]), C.uint32_t(i), out)
+	})
+	if err != nil {
+		return LineValue{}, err
+	}
+	var x LineValue
+	copy(x.v[:], l)
+	return x, nil
+}
+
+// ToSheet is the filled triangle as a one-face planar sheet, its normal turning A, B, C
+// counter-clockwise.
+func (t TriangleValue) ToSheet() (*Solid, error) {
+	defer pin()()
+	v := t.v
+	return newSolid(C.cadaclysm_blacksmith_triangle_to_sheet(doubles(&v[0])), "triangle_to_sheet")
+}
+
+// RayValue is the half-line from Position along Direction, as a value — Python's Ray. The
+// direction is kept as given, not unitised, so t counts lengths of it. A ray has no box:
+// Bounds is the library's refusal. An immutable value with nothing to free, holding the 6
+// numbers the library's value_check squared up; compare two with ==.
+type RayValue struct {
+	v [6]float64
+}
+
+// NewRayValue is the ray from position along direction — Python's Ray.
+func NewRayValue(position, direction [3]float64) (RayValue, error) {
+	return RayValueFromArray([]float64{position[0], position[1], position[2], direction[0], direction[1], direction[2]})
+}
+
+// RayValueFromArray is the ray its 6 numbers state, checked by the library's value_check;
+// any other count is a *BuildError in the library's sentence.
+func RayValueFromArray(values []float64) (RayValue, error) {
+	v, err := valueCheck(valueRay, values)
+	if err != nil {
+		return RayValue{}, err
+	}
+	var x RayValue
+	copy(x.v[:], v)
+	return x, nil
+}
+
+// Values is the 6 numbers.
+func (r RayValue) Values() [6]float64 { return r.v }
+
+// Position is the start.
+func (r RayValue) Position() [3]float64 { return triple(r.v[0:3]) }
+
+// Direction is the direction, as given.
+func (r RayValue) Direction() [3]float64 { return triple(r.v[3:6]) }
+
+// Bounds is the library's refusal: a ray has no box.
+func (r RayValue) Bounds() (min, max [3]float64, err error) { return valueBounds(valueRay, r.v[:]) }
+
+// Transform is this ray under m: any affine map keeping its direction.
+func (r RayValue) Transform(m Transform) (RayValue, error) {
+	v, err := valueTransform(valueRay, r.v[:], m)
+	if err != nil {
+		return RayValue{}, err
+	}
+	var x RayValue
+	copy(x.v[:], v)
+	return x, nil
+}
+
+// String is Python's repr.
+func (r RayValue) String() string {
+	return fmt.Sprintf("RayValue(position=%v, direction=%v)", r.Position(), r.Direction())
+}
+
+// PointAt is Position + t * Direction, any t (behind the start too).
+func (r RayValue) PointAt(t float64) ([3]float64, error) {
+	v := r.v
+	p, err := valueOut(3, "ray_point_at", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_ray_point_at(doubles(&v[0]), C.double(t), out)
+	})
+	if err != nil {
+		return [3]float64{}, err
+	}
+	return triple(p), nil
+}
+
+// ClosestPoint is the CurveFoot on the ray nearest p: T clamped at 0, so a point behind the
+// start answers the start. Always Unique.
+func (r RayValue) ClosestPoint(p [3]float64) (CurveFoot, error) {
+	v := r.v
+	f, err := valueOut(4, "ray_closest_point", func(out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_ray_closest_point(doubles(&v[0]), doubles(&p[0]), out)
+	})
+	if err != nil {
+		return CurveFoot{}, err
+	}
+	return CurveFoot{T: f[0], Point: triple(f[1:4]), Unique: true}, nil
+}
+
+// DistanceTo is how far p lies from the ray.
+func (r RayValue) DistanceTo(p [3]float64) (float64, error) {
+	f, err := r.ClosestPoint(p)
+	if err != nil {
+		return 0, err
+	}
+	return dist3(f.Point, p), nil
+}
 
 // ---- boxes --------------------------------------------------------------------------
 
@@ -5111,9 +5662,11 @@ func (m *FemMesh) String() string {
 // Solid is an exact B-rep solid (or open sheet). Immutable; every operation returns a new
 // one. Close it to free it; the finalizer does so otherwise.
 type Solid struct {
-	handle  *C.CadaclysmBlacksmithSolid
-	inexact uint32 // the trims the call that made it lost: InexactTrims
-	_       noTiny // see noTiny
+	handle      *C.CadaclysmBlacksmithSolid
+	inexact     uint32       // the trims the call that made it lost: InexactTrims
+	sheetError  *float64     // the fit of a sheet from curves: SheetError
+	patchReport *PatchReport // what NSidedPatch measured: PatchReport
+	_           noTiny       // see noTiny
 }
 
 // newSolid wraps a handle the library just returned, or reports why it returned none.
@@ -6936,6 +7489,59 @@ func (s *Solid) EdgeTolerance(edge uint32) (*float64, error) {
 	return &t, nil
 }
 
+// Tolerances is what this solid declares about its own precision: read from its file,
+// inherited through every verb from the loosest of its inputs, or set by WithTolerances; nil
+// in a field nothing declared. A verb given a tolerance of 0 works at EffectiveTolerance,
+// which takes it into account.
+func (s *Solid) Tolerances() (Tolerances, error) {
+	defer pin()()
+	sh, err := s.h()
+	if err != nil {
+		return Tolerances{}, err
+	}
+	var absolute, angular C.double
+	ok := bool(C.cadaclysm_blacksmith_solid_tolerances(sh, &absolute, &angular))
+	runtime.KeepAlive(s)
+	if !ok {
+		return Tolerances{}, failure("solid_tolerances")
+	}
+	return Tolerances{Absolute: declared(float64(absolute)), Angular: declared(float64(angular))}, nil
+}
+
+// WithTolerances is a new solid: this one declaring absolute (a length) and angular (radians)
+// instead of what it declared, its name, paint and marks kept. 0 (or NaN) declares nothing for
+// that field; a negative or infinite value is the library's refusal.
+func (s *Solid) WithTolerances(absolute, angular float64) (*Solid, error) {
+	defer pin()()
+	sh, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_solid_with_tolerances(sh, C.double(absolute), C.double(angular)), "solid_with_tolerances")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// VertexTolerance is how loose this solid's vertex at point is, where its producer said (an
+// OCCT .brep records one per vertex): the tolerance of the nearest recorded vertex within its
+// own tolerance of point. nil where none is recorded there.
+func (s *Solid) VertexTolerance(point [3]float64) (*float64, error) {
+	defer pin()()
+	sh, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	t := float64(C.cadaclysm_blacksmith_vertex_tolerance(sh, C.double(point[0]), C.double(point[1]), C.double(point[2])))
+	runtime.KeepAlive(s)
+	if math.IsNaN(t) {
+		if reason := lastError(); reason != "" {
+			return nil, &BuildError{Message: reason}
+		}
+		return nil, nil
+	}
+	return &t, nil
+}
+
 // HealthReport is what is wrong with a body, as plain data ([Solid.Health]): the Tolerance and
 // Rounding it judged at and the body's Extent; the free edges, their wires, the features below
 // the tolerance; the loose edges (WorstLoose the farthest from any face); what sewing would do
@@ -7328,6 +7934,17 @@ func (s *Solid) Sat(path, unit string) error {
 	return WriteSat(path, []*Solid{s}, unit)
 }
 
+// Rhino3dmBytes is this solid as a Rhino .3dm's bytes: its exact brep, named and
+// coloured as the solid is; see the package's Rhino3dmBytes for unit and the warnings.
+func (s *Solid) Rhino3dmBytes(unit string) ([]byte, error) {
+	return Rhino3dmBytes([]*Solid{s}, unit)
+}
+
+// Write3dm writes Rhino3dmBytes to path, by the library itself.
+func (s *Solid) Write3dm(path, unit string) error {
+	return Write3dm(path, []*Solid{s}, unit)
+}
+
 // BrepText is this solid as OCCT .brep text; see WriteBrepText.
 func (s *Solid) BrepText() (string, error) {
 	return WriteBrepText([]*Solid{s})
@@ -7471,6 +8088,661 @@ func (s *Solid) FindFace(ref [8]float64, hint int, tolerance float64) (int, erro
 		return -1, nil
 	}
 	return found, nil
+}
+
+// EdgeRef is edge (an index into Edges) by what it is, fifteen numbers: its kind (line 0,
+// circle 1, ellipse 2, parabola 3, hyperbola 4, NURBS 5, other 6), its midpoint (x y z),
+// its unit tangent there (x y z), its length, the outward normals there of the two faces
+// meeting on it (x y z each; an open sheet's rim gives the one face's twice), and its
+// span -- how far from the midpoint FindEdge may find it on a resized solid. FaceRef's
+// twin: a reference to find the edge again with FindEdge once the solid has been rebuilt.
+// A BuildError for an edge past the table or one with no length to measure.
+func (s *Solid) EdgeRef(edge int) ([15]float64, error) {
+	defer pin()()
+	var out [15]float64
+	h, err := s.h()
+	if err != nil {
+		return out, err
+	}
+	i, err := index(edge)
+	if err != nil {
+		return out, err
+	}
+	ok := bool(C.cadaclysm_blacksmith_edge_ref(h, i, doubles(&out[0])))
+	runtime.KeepAlive(s)
+	if !ok {
+		return out, failure("edge_ref")
+	}
+	return out, nil
+}
+
+// FindEdge is the edge ref (from EdgeRef) refers to: of the edges of that kind passing
+// within tolerance of its midpoint and running the same way, the one of nearest length;
+// where none does (the solid was resized), the edge of that kind running the same way
+// between faces facing the same two ways, the only one or the one clearly nearest, no
+// farther than the span. -1 and no error where the edge is gone; a BuildError for a
+// malformed reference or a tolerance not positive. Python's tolerance default is 1e-3.
+// The reference is a [15]float64, so a reference of another length does not compile.
+func (s *Solid) FindEdge(ref [15]float64, tolerance float64) (int, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return -1, err
+	}
+	found := int(C.cadaclysm_blacksmith_find_edge(h, doubles(&ref[0]), C.double(tolerance)))
+	runtime.KeepAlive(s)
+	if found == -2 {
+		return -1, failure("find_edge")
+	}
+	if found < 0 {
+		return -1, nil
+	}
+	return found, nil
+}
+
+// VertexCount is how many vertices this solid has: its edges' ends, welded, in the order
+// VertexRef and FindVertex index.
+func (s *Solid) VertexCount() (int, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return 0, err
+	}
+	n := uint32(C.cadaclysm_blacksmith_vertex_count(h))
+	runtime.KeepAlive(s)
+	if n == 0 && lastError() != "" {
+		return 0, failure("vertex_count")
+	}
+	return int(n), nil
+}
+
+// VertexRef is vertex by where it is: x, y, z. A BuildError for a vertex the solid does
+// not have.
+func (s *Solid) VertexRef(vertex int) ([3]float64, error) {
+	defer pin()()
+	var out [3]float64
+	h, err := s.h()
+	if err != nil {
+		return out, err
+	}
+	i, err := index(vertex)
+	if err != nil {
+		return out, err
+	}
+	ok := bool(C.cadaclysm_blacksmith_vertex_ref(h, i, doubles(&out[0])))
+	runtime.KeepAlive(s)
+	if !ok {
+		return out, failure("vertex_ref")
+	}
+	return out, nil
+}
+
+// FindVertex is the vertex nearest ref (any point: a VertexRef, or one picked) within
+// tolerance; -1 and no error where no vertex is that near. A BuildError for a point that
+// is not three finite numbers or a tolerance not positive. Python's tolerance default is
+// 1e-3.
+func (s *Solid) FindVertex(ref [3]float64, tolerance float64) (int, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return -1, err
+	}
+	found := int(C.cadaclysm_blacksmith_find_vertex(h, doubles(&ref[0]), C.double(tolerance)))
+	runtime.KeepAlive(s)
+	if found == -2 {
+		return -1, failure("find_vertex")
+	}
+	if found < 0 {
+		return -1, nil
+	}
+	return found, nil
+}
+
+// -- identity: ids on faces and edges, where each came from, and a verb's history
+
+// Origin is an input face (or edge) a face (edge) came from: Operand the input's index in
+// the verb's operand order (a boolean's target 0, its tool 1), ID that input face's FaceID.
+// Python's (operand, id) pair; equal by value.
+type Origin struct {
+	Operand uint32
+	ID      uint64
+}
+
+// Kept is a History entry for an input that became exactly one output, keeping its id:
+// Input the input, Out the output's id. Python's ((operand, id), out_id).
+type Kept struct {
+	Input Origin
+	Out   uint64
+}
+
+// Modified is a History entry for an input split, merged or renumbered: Input the input,
+// Outs the ids of the outputs it became (a split's first piece, which keeps the id,
+// first). Python's ((operand, id), [out_ids]).
+type Modified struct {
+	Input Origin
+	Outs  []uint64
+}
+
+// History is what a verb did to its inputs' faces (or edges), read off the result's ids
+// and origins alone (Solid.History, Solid.EdgeHistory) -- Python's History. Every list is
+// in (operand, id) order, Generated in id order:
+//
+//   - Kept: the inputs that became exactly one output, keeping their id;
+//   - Modified: the inputs split (several outputs name them), merged (their output has
+//     other origins too) or renumbered (a cut's bore, a later operand's clashing id);
+//   - Generated: the outputs with no origin (a fillet's round, the faces a split cuts);
+//   - Deleted: the inputs no output names (a cut tool's caps).
+//
+// Copied out whole; the library's handle is already freed. Never nil slices: an empty
+// list is empty, so reflect.DeepEqual compares two histories by value.
+type History struct {
+	Kept      []Kept
+	Modified  []Modified
+	Generated []uint64
+	Deleted   []Origin
+}
+
+// String is Python's History.__repr__.
+func (h History) String() string {
+	return fmt.Sprintf("History(kept=%d, modified=%d, generated=%d, deleted=%d)",
+		len(h.Kept), len(h.Modified), len(h.Generated), len(h.Deleted))
+}
+
+// Attribute is one attribute, Key and Value -- what Attributes and FaceAttributes list,
+// in key order (byte order).
+type Attribute struct {
+	Key   string
+	Value string
+}
+
+// Tracked is this solid tracked: its faces numbered 1..n in face order and its edges 1..m
+// in Edges' order, each its own origin. Tracking is opt-in and rides on from here: a verb
+// on a tracked solid gives a tracked result, its faces keeping the ids of the faces they
+// lie on, and naming those as their origins. A tracked solid comes back as it is.
+func (s *Solid) Tracked() (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_solid_tracked(h), "solid_tracked")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// IsTracked is whether this solid carries face and edge ids (Tracked, or made from a
+// tracked solid, or given an attribute).
+func (s *Solid) IsTracked() (bool, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return false, err
+	}
+	tracked := bool(C.cadaclysm_blacksmith_solid_is_tracked(h))
+	runtime.KeepAlive(s)
+	if !tracked && lastError() != "" {
+		return false, failure("solid_is_tracked")
+	}
+	return tracked, nil
+}
+
+// idOf is an id read through call (face_id, edge_id): the id and true, or false where the
+// solid is untracked (the call's 0 with no reason), or the library's reason.
+func (s *Solid) idOf(at int, what string, call func(*C.CadaclysmBlacksmithSolid, C.uint32_t) C.uint64_t) (uint64, bool, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return 0, false, err
+	}
+	i, err := index(at)
+	if err != nil {
+		return 0, false, err
+	}
+	id := uint64(call(h, i))
+	runtime.KeepAlive(s)
+	if id == 0 {
+		if lastError() != "" {
+			return 0, false, failure(what)
+		}
+		return 0, false, nil
+	}
+	return id, true, nil
+}
+
+// withID is the index whose id is id (face_with_id, edge_with_id), or -1 where none has it.
+func (s *Solid) withID(id uint64, what string, call func(*C.CadaclysmBlacksmithSolid, C.uint64_t) C.uint32_t) (int, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return -1, err
+	}
+	found := uint32(call(h, C.uint64_t(id)))
+	runtime.KeepAlive(s)
+	if found == none {
+		if lastError() != "" {
+			return -1, failure(what)
+		}
+		return -1, nil
+	}
+	return int(found), nil
+}
+
+// origins reads the origins of face (edge) at through count and originAt.
+func (s *Solid) origins(at int, what string,
+	count func(*C.CadaclysmBlacksmithSolid, C.uint32_t) C.uint32_t,
+	originAt func(*C.CadaclysmBlacksmithSolid, C.uint32_t, C.uint32_t, *C.uint32_t, *C.uint64_t) C.bool) ([]Origin, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.KeepAlive(s)
+	i, err := index(at)
+	if err != nil {
+		return nil, err
+	}
+	n := uint32(count(h, i))
+	if n == none {
+		return nil, failure(what + "_origin_count")
+	}
+	out := make([]Origin, 0, n)
+	for k := uint32(0); k < n; k++ {
+		var operand C.uint32_t
+		var id C.uint64_t
+		if !bool(originAt(h, i, C.uint32_t(k), &operand, &id)) {
+			return nil, failure(what + "_origin_at")
+		}
+		out = append(out, Origin{Operand: uint32(operand), ID: uint64(id)})
+	}
+	return out, nil
+}
+
+// FaceID is face's id, and true; false where this solid is untracked. An id stays with
+// its face through every verb that keeps the face -- a move, a boolean, a fillet of
+// another edge -- so it names "the same face, through my edits" within a session; a piece
+// split off, a later operand's face whose id an earlier one already has, and a face on no
+// input get fresh ids, the same run after run. Ids are not written to files: to find a
+// face on a model rebuilt or read again, use FaceRef. A BuildError for a face the solid
+// does not have. Ids are never 0.
+func (s *Solid) FaceID(face int) (uint64, bool, error) {
+	return s.idOf(face, "face_id", func(h *C.CadaclysmBlacksmithSolid, i C.uint32_t) C.uint64_t {
+		return C.cadaclysm_blacksmith_face_id(h, i)
+	})
+}
+
+// FaceWithID is the face whose id is id, -1 where no face has it (an untracked solid, an
+// id 0, a face a verb deleted) -- FindFace's shape.
+func (s *Solid) FaceWithID(id uint64) (int, error) {
+	return s.withID(id, "face_with_id", func(h *C.CadaclysmBlacksmithSolid, id C.uint64_t) C.uint32_t {
+		return C.cadaclysm_blacksmith_face_with_id(h, id)
+	})
+}
+
+// FaceOrigins is the input faces face came from: the face it lies on most first; empty
+// (non-nil) for a face the verb generated (a fillet's round, a split's cut face) or an
+// untracked solid; more than one for a face merged from several (Join with merge). A
+// BuildError for a face the solid does not have.
+func (s *Solid) FaceOrigins(face int) ([]Origin, error) {
+	return s.origins(face, "face",
+		func(h *C.CadaclysmBlacksmithSolid, i C.uint32_t) C.uint32_t {
+			return C.cadaclysm_blacksmith_face_origin_count(h, i)
+		},
+		func(h *C.CadaclysmBlacksmithSolid, i, k C.uint32_t, operand *C.uint32_t, id *C.uint64_t) C.bool {
+			return C.cadaclysm_blacksmith_face_origin_at(h, i, k, operand, id)
+		})
+}
+
+// EdgeID is edge's id (edge an index into Edges), as FaceID.
+func (s *Solid) EdgeID(edge int) (uint64, bool, error) {
+	return s.idOf(edge, "edge_id", func(h *C.CadaclysmBlacksmithSolid, i C.uint32_t) C.uint64_t {
+		return C.cadaclysm_blacksmith_edge_id(h, i)
+	})
+}
+
+// EdgeWithID is the edge whose id is id, -1 where no edge has it.
+func (s *Solid) EdgeWithID(id uint64) (int, error) {
+	return s.withID(id, "edge_with_id", func(h *C.CadaclysmBlacksmithSolid, id C.uint64_t) C.uint32_t {
+		return C.cadaclysm_blacksmith_edge_with_id(h, id)
+	})
+}
+
+// EdgeOrigins is the input edge edge lies on, as FaceOrigins: one origin, or none for a
+// new edge (edge merges are not seen).
+func (s *Solid) EdgeOrigins(edge int) ([]Origin, error) {
+	return s.origins(edge, "edge",
+		func(h *C.CadaclysmBlacksmithSolid, i C.uint32_t) C.uint32_t {
+			return C.cadaclysm_blacksmith_edge_origin_count(h, i)
+		},
+		func(h *C.CadaclysmBlacksmithSolid, i, k C.uint32_t, operand *C.uint32_t, id *C.uint64_t) C.bool {
+			return C.cadaclysm_blacksmith_edge_origin_at(h, i, k, operand, id)
+		})
+}
+
+// History is what the verb that made this solid did to the faces of inputs -- passed in
+// its operand order (a.Cut(b, ...).History(a, b)) -- read off this solid's ids and origins
+// alone. A BuildError where this solid or an input is untracked, or an origin names an
+// operand past the inputs.
+func (s *Solid) History(inputs ...*Solid) (History, error) {
+	return s.history(false, inputs)
+}
+
+// EdgeHistory is History for the edges, by edge id.
+func (s *Solid) EdgeHistory(inputs ...*Solid) (History, error) {
+	return s.history(true, inputs)
+}
+
+func (s *Solid) history(edges bool, inputs []*Solid) (History, error) {
+	defer pin()()
+	what := "history"
+	if edges {
+		what = "edge_history"
+	}
+	h, err := s.h()
+	if err != nil {
+		return History{}, err
+	}
+	// One slot at least, so the array is never null (Python's max(len, 1)).
+	handles := make([]*C.CadaclysmBlacksmithSolid, max(len(inputs), 1))
+	for i, in := range inputs {
+		if handles[i], err = in.h(); err != nil {
+			return History{}, err
+		}
+	}
+	var raw *C.CadaclysmBlacksmithHistory
+	if edges {
+		raw = C.cadaclysm_blacksmith_edge_history(h, &handles[0], C.size_t(len(inputs)))
+	} else {
+		raw = C.cadaclysm_blacksmith_history(h, &handles[0], C.size_t(len(inputs)))
+	}
+	runtime.KeepAlive(s)
+	for _, in := range inputs {
+		runtime.KeepAlive(in)
+	}
+	if raw == nil {
+		return History{}, failure(what)
+	}
+	defer C.cadaclysm_blacksmith_history_free(raw)
+	return readHistory(raw)
+}
+
+// readHistory is the four lists of a history handle, copied out; the caller frees it.
+func readHistory(raw *C.CadaclysmBlacksmithHistory) (History, error) {
+	var operand C.uint32_t
+	var id, outID C.uint64_t
+	n := uint32(C.cadaclysm_blacksmith_history_kept_count(raw))
+	out := History{Kept: make([]Kept, 0, n)}
+	for i := uint32(0); i < n; i++ {
+		if !bool(C.cadaclysm_blacksmith_history_kept_at(raw, C.uint32_t(i), &operand, &id, &outID)) {
+			return History{}, failure("history_kept_at")
+		}
+		out.Kept = append(out.Kept, Kept{Input: Origin{Operand: uint32(operand), ID: uint64(id)}, Out: uint64(outID)})
+	}
+	n = uint32(C.cadaclysm_blacksmith_history_modified_count(raw))
+	out.Modified = make([]Modified, 0, n)
+	for i := uint32(0); i < n; i++ {
+		if !bool(C.cadaclysm_blacksmith_history_modified_at(raw, C.uint32_t(i), &operand, &id)) {
+			return History{}, failure("history_modified_at")
+		}
+		m := uint32(C.cadaclysm_blacksmith_history_modified_output_count(raw, C.uint32_t(i)))
+		if m == none {
+			return History{}, failure("history_modified_output_count")
+		}
+		outs := make([]uint64, m)
+		for j := uint32(0); j < m; j++ {
+			outs[j] = uint64(C.cadaclysm_blacksmith_history_modified_output_at(raw, C.uint32_t(i), C.uint32_t(j)))
+		}
+		out.Modified = append(out.Modified, Modified{Input: Origin{Operand: uint32(operand), ID: uint64(id)}, Outs: outs})
+	}
+	n = uint32(C.cadaclysm_blacksmith_history_generated_count(raw))
+	out.Generated = make([]uint64, n)
+	for i := uint32(0); i < n; i++ {
+		out.Generated[i] = uint64(C.cadaclysm_blacksmith_history_generated_at(raw, C.uint32_t(i)))
+	}
+	n = uint32(C.cadaclysm_blacksmith_history_deleted_count(raw))
+	out.Deleted = make([]Origin, 0, n)
+	for i := uint32(0); i < n; i++ {
+		if !bool(C.cadaclysm_blacksmith_history_deleted_at(raw, C.uint32_t(i), &operand, &id)) {
+			return History{}, failure("history_deleted_at")
+		}
+		out.Deleted = append(out.Deleted, Origin{Operand: uint32(operand), ID: uint64(id)})
+	}
+	return out, nil
+}
+
+// originsThrough is out (this solid, made from via by a verb of one operand) with its
+// origins read through via's -- the step that makes Join, Cut and Common with merge read
+// as one verb.
+func (s *Solid) originsThrough(via *Solid) (*Solid, error) {
+	defer pin()()
+	a, b, err := s.pair(via)
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_origins_through(a, b), "origins_through")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(via)
+	return out, err
+}
+
+// -- attributes: text on a solid (written to STEP files) and on its faces (in memory)
+
+// attributeList copies count attributes out through keyAt and valueAt, in key order. The
+// library's strings are borrowed from the solid: copied here, never freed.
+func attributeList(count uint32, keyAt, valueAt func(C.uint32_t) *C.char) ([]Attribute, error) {
+	out := make([]Attribute, 0, count)
+	for i := uint32(0); i < count; i++ {
+		k, v := keyAt(C.uint32_t(i)), valueAt(C.uint32_t(i))
+		if k == nil || v == nil {
+			return nil, failure("attributes")
+		}
+		out = append(out, Attribute{Key: C.GoString(k), Value: C.GoString(v)})
+	}
+	return out, nil
+}
+
+// Attributes is this solid's attributes, in key order (copied; never nil). A solid's
+// attributes go with it through every verb (a verb's result takes its first operand's)
+// and are written to STEP files as user-defined attributes.
+func (s *Solid) Attributes() ([]Attribute, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.KeepAlive(s)
+	n := uint32(C.cadaclysm_blacksmith_attribute_count(h))
+	if n == 0 && lastError() != "" {
+		return nil, failure("attribute_count")
+	}
+	return attributeList(n,
+		func(i C.uint32_t) *C.char { return C.cadaclysm_blacksmith_attribute_key_at(h, i) },
+		func(i C.uint32_t) *C.char { return C.cadaclysm_blacksmith_attribute_value_at(h, i) })
+}
+
+// Attribute is attribute key, and true; false where this solid has none.
+func (s *Solid) Attribute(key string) (string, bool, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return "", false, err
+	}
+	c := C.CString(key)
+	defer C.free(unsafe.Pointer(c))
+	raw := C.cadaclysm_blacksmith_attribute(h, c)
+	defer runtime.KeepAlive(s)
+	if raw == nil {
+		if lastError() != "" {
+			return "", false, failure("attribute")
+		}
+		return "", false, nil
+	}
+	return C.GoString(raw), true, nil
+}
+
+// WithAttribute is this solid with attribute key set to value, over any it had: a new
+// solid, tracked if this one was not. Keys and values are text with no NUL (Go's text
+// stops at one); an empty key is refused.
+func (s *Solid) WithAttribute(key, value string) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	k, v := C.CString(key), C.CString(value)
+	defer C.free(unsafe.Pointer(k))
+	defer C.free(unsafe.Pointer(v))
+	out, err := newSolid(C.cadaclysm_blacksmith_with_attribute(h, k, v), "with_attribute")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// sortedKeys is attributes' keys in key order (byte order), the order the With...s loops take.
+func sortedKeys(attributes map[string]string) []string {
+	keys := make([]string, 0, len(attributes))
+	for k := range attributes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// setEach applies step once per key of attributes, in key order, closing every
+// intermediate solid. With none it is a new handle equal to this solid (through
+// WithoutAttribute of the empty key, which no attribute has), never this one: the caller
+// owns, and closes, what comes back.
+func (s *Solid) setEach(attributes map[string]string, step func(*Solid, string, string) (*Solid, error)) (*Solid, error) {
+	keys := sortedKeys(attributes)
+	if len(keys) == 0 {
+		return s.WithoutAttribute("")
+	}
+	cur := s
+	for _, k := range keys {
+		next, err := step(cur, k, attributes[k])
+		if cur != s {
+			cur.Close()
+		}
+		if err != nil {
+			return nil, err
+		}
+		cur = next
+	}
+	return cur, nil
+}
+
+// WithAttributes is this solid with every attribute given set, in key order -- each step
+// WithAttribute, its intermediate solid closed.
+func (s *Solid) WithAttributes(attributes map[string]string) (*Solid, error) {
+	return s.setEach(attributes, func(cur *Solid, k, v string) (*Solid, error) { return cur.WithAttribute(k, v) })
+}
+
+// WithoutAttribute is this solid without attribute key: a new solid, equal to this one
+// where it had none.
+func (s *Solid) WithoutAttribute(key string) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	k := C.CString(key)
+	defer C.free(unsafe.Pointer(k))
+	out, err := newSolid(C.cadaclysm_blacksmith_without_attribute(h, k), "without_attribute")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// FaceAttributes is face's attributes, in key order (copied; never nil). A face's
+// attributes follow its id: kept through a verb, and copied to every face that names it as
+// an origin (each piece of a split face has its parent's). They stay in memory: no file
+// carries them. A BuildError for a face the solid does not have.
+func (s *Solid) FaceAttributes(face int) ([]Attribute, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.KeepAlive(s)
+	f, err := index(face)
+	if err != nil {
+		return nil, err
+	}
+	n := uint32(C.cadaclysm_blacksmith_face_attribute_count(h, f))
+	if n == none {
+		return nil, failure("face_attribute_count")
+	}
+	return attributeList(n,
+		func(i C.uint32_t) *C.char { return C.cadaclysm_blacksmith_face_attribute_key_at(h, f, i) },
+		func(i C.uint32_t) *C.char { return C.cadaclysm_blacksmith_face_attribute_value_at(h, f, i) })
+}
+
+// FaceAttribute is face's attribute key, and true; false where it has none. A BuildError
+// for a face the solid does not have.
+func (s *Solid) FaceAttribute(face int, key string) (string, bool, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return "", false, err
+	}
+	f, err := index(face)
+	if err != nil {
+		return "", false, err
+	}
+	c := C.CString(key)
+	defer C.free(unsafe.Pointer(c))
+	raw := C.cadaclysm_blacksmith_face_attribute(h, f, c)
+	defer runtime.KeepAlive(s)
+	if raw == nil {
+		if lastError() != "" {
+			return "", false, failure("face_attribute")
+		}
+		return "", false, nil
+	}
+	return C.GoString(raw), true, nil
+}
+
+// WithFaceAttribute is this solid with face's attribute key set to value: a new solid,
+// tracked if this one was not. Refused as WithAttribute, and for a face the solid does not
+// have.
+func (s *Solid) WithFaceAttribute(face int, key, value string) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	f, err := index(face)
+	if err != nil {
+		return nil, err
+	}
+	k, v := C.CString(key), C.CString(value)
+	defer C.free(unsafe.Pointer(k))
+	defer C.free(unsafe.Pointer(v))
+	out, err := newSolid(C.cadaclysm_blacksmith_with_face_attribute(h, f, k, v), "with_face_attribute")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// WithFaceAttributes is this solid with every attribute given set on face, in key order --
+// each step WithFaceAttribute, its intermediate solid closed.
+func (s *Solid) WithFaceAttributes(face int, attributes map[string]string) (*Solid, error) {
+	return s.setEach(attributes, func(cur *Solid, k, v string) (*Solid, error) { return cur.WithFaceAttribute(face, k, v) })
+}
+
+// WithoutFaceAttribute is this solid without face's attribute key: a new solid, equal to
+// this one where the face had none.
+func (s *Solid) WithoutFaceAttribute(face int, key string) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	f, err := index(face)
+	if err != nil {
+		return nil, err
+	}
+	k := C.CString(key)
+	defer C.free(unsafe.Pointer(k))
+	out, err := newSolid(C.cadaclysm_blacksmith_without_face_attribute(h, f, k), "without_face_attribute")
+	runtime.KeepAlive(s)
+	return out, err
 }
 
 // FaceFrame is the workplane on face: origin at the face's boundary centroid, z its
@@ -7731,6 +9003,1554 @@ func samplesOf(list *C.CadaclysmBlacksmithSamples, call string) ([]At, error) {
 		out = append(out, atOf(&raw))
 	}
 	return out, nil
+}
+
+// ---- NurbsCurve: curves in space -----------------------------------------------------------
+
+// CurveTolerance is the tolerance Python's NurbsCurve.fit, projected_to_face, pulled_to_face
+// and face_hits default to (1e-3). Go has no defaults, so it is named here for the call to
+// pass; 0 or NaN asks for the inputs' effective tolerance.
+const CurveTolerance = 1e-3
+
+// JoinCurveTolerance is the tolerance Python's NurbsCurve.joined defaults to (1e-6).
+const JoinCurveTolerance = 1e-6
+
+// Curvature is a curve's bending at a parameter (NurbsCurve.Curvature) -- Python's
+// Curvature: Kappa (1 / radius), the unit Tangent, the unit Normal toward the centre and the
+// Binormal (tangent x normal), and the Centre of the osculating circle -- nil on a straight
+// piece, where Kappa is 0 and Normal, Binormal are zero.
+type Curvature struct {
+	Kappa    float64
+	Tangent  [3]float64
+	Normal   [3]float64
+	Binormal [3]float64
+	Centre   *[3]float64
+}
+
+func (k Curvature) String() string {
+	return fmt.Sprintf("Curvature(kappa=%.9g, centre=%v)", k.Kappa, k.Centre)
+}
+
+// NurbsCurve is a curve in space -- always a NURBS, so a line, an arc or a conic is an exact
+// rational one -- to model with: built through points, read off an edge or a face,
+// projected onto a plane or a face, trimmed, extended and blended; asked for its points,
+// derivatives, curvature, length and crossings. Python's NurbsCurve. Immutable; every edit
+// returns a new curve. Close frees the handle; the finalizer does so otherwise.
+//
+// Not [Curve], which is the plain data an edge's curve is copied out as;
+// NurbsCurveFromEdge turns an edge into one of these.
+//
+// A face here is its whole surface: projecting onto, pulling to and crossing a face ignore
+// its trims.
+type NurbsCurve struct {
+	handle *C.CadaclysmBlacksmithNurbsCurve
+	_      noTiny // see noTiny
+	// FitError is the largest distance from a point (NurbsCurveFit) or from the surface
+	// (ProjectedToFace, PulledToFace) to the curve; nil on any other curve.
+	FitError *float64
+}
+
+func newNurbsCurve(handle *C.CadaclysmBlacksmithNurbsCurve, what string, fitError *float64) (*NurbsCurve, error) {
+	if handle == nil {
+		return nil, failure(what)
+	}
+	c := &NurbsCurve{handle: handle, FitError: fitError}
+	runtime.SetFinalizer(c, (*NurbsCurve).finalize)
+	return c, nil
+}
+
+func (c *NurbsCurve) finalize() {
+	if c.handle != nil {
+		C.cadaclysm_blacksmith_nurbs_curve_free(c.handle)
+		c.handle = nil
+	}
+}
+
+// Close gives the curve back. Idempotent.
+func (c *NurbsCurve) Close() {
+	c.finalize()
+	runtime.SetFinalizer(c, nil)
+}
+
+// Closed is whether Close has already run. A nil NurbsCurve counts as closed.
+func (c *NurbsCurve) Closed() bool { return c == nil || c.handle == nil }
+
+func (c *NurbsCurve) h() (*C.CadaclysmBlacksmithNurbsCurve, error) {
+	if c == nil || c.handle == nil {
+		return nil, fmt.Errorf("nurbs curve: %w", ErrClosed)
+	}
+	return c.handle, nil
+}
+
+// curveU32 is a count or an id as the C ABI reads it (0 to 4294967295), refused here, named,
+// rather than wrapped.
+func curveU32(v int, what string) (C.uint32_t, error) {
+	if v < 0 || int64(v) > math.MaxUint32 {
+		return 0, &BuildError{Message: fmt.Sprintf("%s is out of range: %d", what, v)}
+	}
+	return C.uint32_t(v), nil
+}
+
+// optVec is an optional direction as the C ABI's pointer, NULL for nil.
+func optVec(v *[3]float64) *C.double {
+	if v == nil {
+		return nil
+	}
+	return doubles(&v[0])
+}
+
+// optDoubles is an optional list as the C ABI's pointer, NULL for nil.
+func optDoubles(v []float64) *C.double {
+	if v == nil {
+		return nil
+	}
+	if len(v) == 0 {
+		v = []float64{0}
+	}
+	return doubles(&v[0])
+}
+
+// NewNurbsCurve is the curve with control points points, of degree (1 to 7), weights one per
+// point (positive) or nil, and the full knot vector knots (len(points) + degree + 1 values,
+// non-decreasing) or nil for clamped and uniform -- Python's NurbsCurve(...). Go has no
+// defaults: pass 3 for Python's degree.
+func NewNurbsCurve(points [][3]float64, degree int, weights, knots []float64) (*NurbsCurve, error) {
+	defer pin()()
+	if weights != nil && len(weights) != len(points) {
+		return nil, &BuildError{Message: fmt.Sprintf("nurbs_curve_new: %d weights for %d points; give one per point", len(weights), len(points))}
+	}
+	d, err := curveU32(degree, "nurbs_curve_new: degree")
+	if err != nil {
+		return nil, err
+	}
+	xyz := flatPoints(points)
+	raw := C.cadaclysm_blacksmith_nurbs_curve_new(doubles(&xyz[0]), C.size_t(len(points)), optDoubles(weights), d,
+		optDoubles(knots), C.size_t(len(knots)))
+	return newNurbsCurve(raw, "nurbs_curve_new", nil)
+}
+
+// NurbsCurveThrough is the curve of degree (1 to 7; Python's default is 3) through points in
+// order, chord-length parametrised. closed closes it back to the first point, smooth across
+// the seam; an open curve may leave along startTangent and arrive along endTangent (nil for
+// none; directions, their length does not matter).
+func NurbsCurveThrough(points [][3]float64, degree int, closed bool, startTangent, endTangent *[3]float64) (*NurbsCurve, error) {
+	defer pin()()
+	d, err := curveU32(degree, "nurbs_curve_through: degree")
+	if err != nil {
+		return nil, err
+	}
+	xyz := flatPoints(points)
+	raw := C.cadaclysm_blacksmith_nurbs_curve_through(doubles(&xyz[0]), C.size_t(len(points)), d, C.bool(closed),
+		optVec(startTangent), optVec(endTangent))
+	return newNurbsCurve(raw, "nurbs_curve_through", nil)
+}
+
+// NurbsCurveFit is a curve of degree within tolerance of every point, through the first and
+// the last (least squares); its FitError is the largest distance from a point to it.
+// tolerance 0 or NaN: the effective tolerance; Python's default is CurveTolerance.
+func NurbsCurveFit(points [][3]float64, degree int, tolerance float64) (*NurbsCurve, error) {
+	defer pin()()
+	d, err := curveU32(degree, "nurbs_curve_fit: degree")
+	if err != nil {
+		return nil, err
+	}
+	xyz := flatPoints(points)
+	var fit C.double
+	raw := C.cadaclysm_blacksmith_nurbs_curve_fit(doubles(&xyz[0]), C.size_t(len(points)), d, C.double(tolerance), &fit)
+	if raw == nil {
+		return nil, failure("nurbs_curve_fit")
+	}
+	e := float64(fit)
+	return newNurbsCurve(raw, "nurbs_curve_fit", &e)
+}
+
+// NurbsCurveFromEdge is edge (an index into Edges, as Fillet takes) of solid as an exact
+// NURBS over the edge's own span of its curve, running the way the edge runs.
+func NurbsCurveFromEdge(solid *Solid, edge int) (*NurbsCurve, error) {
+	defer pin()()
+	sh, err := solid.h()
+	if err != nil {
+		return nil, err
+	}
+	e, err := curveU32(edge, "nurbs_curve_from_edge: edge")
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_from_edge(sh, e)
+	runtime.KeepAlive(solid)
+	return newNurbsCurve(raw, "nurbs_curve_from_edge", nil)
+}
+
+// NurbsCurveIsocurve is the isocurve of face of solid's surface: along u at v = at when
+// alongU, else along v at u = at. NURBS faces only.
+func NurbsCurveIsocurve(solid *Solid, face int, alongU bool, at float64) (*NurbsCurve, error) {
+	defer pin()()
+	sh, err := solid.h()
+	if err != nil {
+		return nil, err
+	}
+	f, err := curveU32(face, "nurbs_curve_from_face_isocurve: face")
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_from_face_isocurve(sh, f, C.bool(alongU), C.double(at))
+	runtime.KeepAlive(solid)
+	return newNurbsCurve(raw, "nurbs_curve_from_face_isocurve", nil)
+}
+
+// NurbsCurveBlend is the curve bridging a (at its end when aEnd, else its start) to b (at its
+// end when bEnd, else its start): continuity 1 matches position and tangent (a cubic), 2
+// also the curvature (a quintic; Python's default); bulge (positive; Python's default 1)
+// scales how far the tangents reach.
+func NurbsCurveBlend(a *NurbsCurve, aEnd bool, b *NurbsCurve, bEnd bool, continuity int, bulge float64) (*NurbsCurve, error) {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return nil, err
+	}
+	bh, err := b.h()
+	if err != nil {
+		return nil, err
+	}
+	k, err := curveU32(continuity, "nurbs_curve_blend: continuity")
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_blend(ah, C.bool(aEnd), bh, C.bool(bEnd), k, C.double(bulge))
+	runtime.KeepAlive(a)
+	runtime.KeepAlive(b)
+	return newNurbsCurve(raw, "nurbs_curve_blend", nil)
+}
+
+// NurbsCurveJoined is curves joined end to end into one curve (Rhino's JoinCurves): in the
+// order given, each turned where needed so its start meets the previous one's end within
+// tolerance (the joint placed at the midpoint of the two ends; Python's default is
+// JoinCurveTolerance). All are raised to the highest degree among them and each runs over
+// k..k + 1, joined C0 -- a corner stays a corner; a rational curve keeps its points. One
+// curve gives a copy; none, or a gap past tolerance, is a *BuildError naming the two curves.
+func NurbsCurveJoined(curves []*NurbsCurve, tolerance float64) (*NurbsCurve, error) {
+	defer pin()()
+	handles := make([]*C.CadaclysmBlacksmithNurbsCurve, len(curves), len(curves)+1)
+	for i, c := range curves {
+		h, err := c.h()
+		if err != nil {
+			return nil, err
+		}
+		handles[i] = h
+	}
+	handles = append(handles, nil)
+	raw := C.cadaclysm_blacksmith_nurbs_curve_joined(&handles[0], C.size_t(len(curves)), C.double(tolerance))
+	for _, c := range curves {
+		runtime.KeepAlive(c)
+	}
+	return newNurbsCurve(raw, "nurbs_curve_joined", nil)
+}
+
+// tweenMethods are NurbsCurve.Tween's methods, as cadaclysm_blacksmith_nurbs_curve_tween
+// numbers them.
+var tweenMethods = [...]string{"plain", "matching", "sampling"}
+
+// Tween is count curves blending evenly from this curve to other (Rhino's CreateTweenCurves
+// family), tween i at the fraction (i + 1) / (count + 1). method is a string, as Python's
+// (Python's default is "matching"):
+//
+//   - "plain": control point by control point; the curves must already share one structure
+//     (degree, control-point count, knots), as Rhino's CreateTweenCurves needs.
+//   - "matching": the curves made compatible exactly (degree elevation, knot merging), then
+//     blended in homogeneous coordinates -- rational curves stay rational.
+//   - "sampling": both divided by arc length into *samples pieces (required here, refused
+//     for the other methods), and a cubic interpolated through the blended samples.
+//
+// align (Python's default true) turns other, and moves a closed curve's seam, to line it up
+// with this one first (Rhino's calls leave that to the caller). tolerance 0 or NaN: the
+// inputs' effective tolerance. A count of 0, one curve closed and the other open, plain on
+// curves that are not compatible, or too few samples is a *BuildError, as are the method
+// and samples checks (Python's ValueError).
+func (c *NurbsCurve) Tween(other *NurbsCurve, count int, method string, samples *int, align bool, tolerance float64) ([]*NurbsCurve, error) {
+	defer pin()()
+	which := -1
+	for i, m := range tweenMethods {
+		if m == method {
+			which = i
+		}
+	}
+	if which < 0 {
+		return nil, &BuildError{Message: fmt.Sprintf("nurbs_curve_tween: method must be one of %s, not '%s'",
+			strings.Join(tweenMethods[:], ", "), method)}
+	}
+	if method == "sampling" {
+		if samples == nil {
+			return nil, &BuildError{Message: "nurbs_curve_tween: sampling needs samples"}
+		}
+	} else if samples != nil {
+		return nil, &BuildError{Message: fmt.Sprintf("nurbs_curve_tween: samples is read only by sampling, not %s", method)}
+	}
+	n, err := curveU32(count, "nurbs_curve_tween: count")
+	if err != nil {
+		return nil, err
+	}
+	var s C.uint32_t
+	if samples != nil {
+		if s, err = curveU32(*samples, "nurbs_curve_tween: samples"); err != nil {
+			return nil, err
+		}
+	}
+	ah, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	bh, err := other.h()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*C.CadaclysmBlacksmithNurbsCurve, max(int(n), 1))
+	ok := bool(C.cadaclysm_blacksmith_nurbs_curve_tween(ah, bh, n, C.uint32_t(which), s, C.bool(align), C.double(tolerance), &out[0]))
+	runtime.KeepAlive(c)
+	runtime.KeepAlive(other)
+	if !ok {
+		return nil, failure("nurbs_curve_tween")
+	}
+	list := make([]*NurbsCurve, 0, n)
+	for i := 0; i < int(n); i++ {
+		t, err := newNurbsCurve(out[i], "nurbs_curve_tween", nil)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, t)
+	}
+	return list, nil
+}
+
+// ---- edits
+
+// ProjectedToPlane is this curve projected onto the plane through origin with normal, along
+// direction (nil: the normal). Exact.
+func (c *NurbsCurve) ProjectedToPlane(origin, normal [3]float64, direction *[3]float64) (*NurbsCurve, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_projected_to_plane(h, doubles(&origin[0]), doubles(&normal[0]), optVec(direction))
+	runtime.KeepAlive(c)
+	return newNurbsCurve(raw, "nurbs_curve_projected_to_plane", nil)
+}
+
+// ProjectedToFace is this curve projected along direction onto face of solid (its whole
+// surface), fitted within tolerance (Python's default is CurveTolerance); the result's
+// FitError is the largest distance between it and the surface. A *BuildError where a point's
+// ray misses.
+func (c *NurbsCurve) ProjectedToFace(solid *Solid, face int, direction [3]float64, tolerance float64) (*NurbsCurve, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	sh, err := solid.h()
+	if err != nil {
+		return nil, err
+	}
+	f, err := curveU32(face, "nurbs_curve_projected_to_face: face")
+	if err != nil {
+		return nil, err
+	}
+	var fit C.double
+	raw := C.cadaclysm_blacksmith_nurbs_curve_projected_to_face(h, sh, f, doubles(&direction[0]), C.double(tolerance), &fit)
+	runtime.KeepAlive(c)
+	runtime.KeepAlive(solid)
+	if raw == nil {
+		return nil, failure("nurbs_curve_projected_to_face")
+	}
+	e := float64(fit)
+	return newNurbsCurve(raw, "nurbs_curve_projected_to_face", &e)
+}
+
+// PulledToFace is this curve pulled onto face of solid (its whole surface): every point to
+// its nearest surface point, fitted within tolerance (FitError as for the projection;
+// Python's default is CurveTolerance).
+func (c *NurbsCurve) PulledToFace(solid *Solid, face int, tolerance float64) (*NurbsCurve, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	sh, err := solid.h()
+	if err != nil {
+		return nil, err
+	}
+	f, err := curveU32(face, "nurbs_curve_pulled_to_face: face")
+	if err != nil {
+		return nil, err
+	}
+	var fit C.double
+	raw := C.cadaclysm_blacksmith_nurbs_curve_pulled_to_face(h, sh, f, C.double(tolerance), &fit)
+	runtime.KeepAlive(c)
+	runtime.KeepAlive(solid)
+	if raw == nil {
+		return nil, failure("nurbs_curve_pulled_to_face")
+	}
+	e := float64(fit)
+	return newNurbsCurve(raw, "nurbs_curve_pulled_to_face", &e)
+}
+
+// Reversed is the same curve run the other way over the same domain.
+func (c *NurbsCurve) Reversed() (*NurbsCurve, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_reversed(h)
+	runtime.KeepAlive(c)
+	return newNurbsCurve(raw, "nurbs_curve_reversed", nil)
+}
+
+// Trimmed is the part from t0 to t1 (t0 < t1, inside the domain), over t0..t1.
+func (c *NurbsCurve) Trimmed(t0, t1 float64) (*NurbsCurve, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_trimmed(h, C.double(t0), C.double(t1))
+	runtime.KeepAlive(c)
+	return newNurbsCurve(raw, "nurbs_curve_trimmed", nil)
+}
+
+// Extended is this curve continued length past its end (past its start when atStart) along
+// its own end polynomial -- position, tangent and curvature there unchanged, every old
+// parameter its old point.
+func (c *NurbsCurve) Extended(length float64, atStart bool) (*NurbsCurve, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_extended(h, C.bool(atStart), C.double(length))
+	runtime.KeepAlive(c)
+	return newNurbsCurve(raw, "nurbs_curve_extended", nil)
+}
+
+// Elevated is the same curve at degree Degree + by (at most 12; Python's default by is 1).
+func (c *NurbsCurve) Elevated(by int) (*NurbsCurve, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	b, err := curveU32(by, "nurbs_curve_elevated: by")
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_elevated(h, b)
+	runtime.KeepAlive(c)
+	return newNurbsCurve(raw, "nurbs_curve_elevated", nil)
+}
+
+// Transformed is this curve through the affine map t: its control points mapped, weights and
+// knots kept -- exact. A singular map (a projection) is allowed.
+func (c *NurbsCurve) Transformed(t Transform) (*NurbsCurve, error) {
+	return c.TransformedRows(t.Rows())
+}
+
+// TransformedRows is Transformed from 16 numbers, row-major, as Solid.TransformRows takes
+// them.
+func (c *NurbsCurve) TransformedRows(rows [16]float64) (*NurbsCurve, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_transformed(h, doubles(&rows[0]))
+	runtime.KeepAlive(c)
+	return newNurbsCurve(raw, "nurbs_curve_transformed", nil)
+}
+
+// Clone is a copy of this curve with a handle of its own (Python has no need of one; the C
+// ABI names it). FitError is kept.
+func (c *NurbsCurve) Clone() (*NurbsCurve, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_nurbs_curve_clone(h)
+	runtime.KeepAlive(c)
+	var fit *float64
+	if c.FitError != nil {
+		e := *c.FitError
+		fit = &e
+	}
+	return newNurbsCurve(raw, "nurbs_curve_clone", fit)
+}
+
+// ---- reading
+
+// Degree is the curve's degree.
+func (c *NurbsCurve) Degree() (int, error) {
+	h, err := c.h()
+	if err != nil {
+		return 0, err
+	}
+	n := int(C.cadaclysm_blacksmith_nurbs_curve_degree(h))
+	runtime.KeepAlive(c)
+	return n, nil
+}
+
+// readDoubles runs a call that writes n doubles, under pin, and hands them back or the
+// library's refusal.
+func (c *NurbsCurve) readDoubles(n int, what string, call func(h *C.CadaclysmBlacksmithNurbsCurve, out *C.double) C.bool) ([]float64, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]float64, max(n, 1))
+	ok := bool(call(h, doubles(&out[0])))
+	runtime.KeepAlive(c)
+	if !ok {
+		return nil, failure(what)
+	}
+	return out[:n], nil
+}
+
+// ControlPoints is the control points, in order.
+func (c *NurbsCurve) ControlPoints() ([][3]float64, error) {
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	n := int(C.cadaclysm_blacksmith_nurbs_curve_control_count(h))
+	runtime.KeepAlive(c)
+	flat, err := c.readDoubles(3*n, "nurbs_curve_control_points", func(h *C.CadaclysmBlacksmithNurbsCurve, out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_nurbs_curve_control_points(h, out)
+	})
+	if err != nil {
+		return nil, err
+	}
+	points := make([][3]float64, n)
+	for i := range points {
+		points[i] = triple(flat[3*i : 3*i+3])
+	}
+	return points, nil
+}
+
+// Weights is the control points' weights, one each (all 1 on a polynomial curve).
+func (c *NurbsCurve) Weights() ([]float64, error) {
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	n := int(C.cadaclysm_blacksmith_nurbs_curve_control_count(h))
+	runtime.KeepAlive(c)
+	return c.readDoubles(n, "nurbs_curve_weights", func(h *C.CadaclysmBlacksmithNurbsCurve, out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_nurbs_curve_weights(h, out)
+	})
+}
+
+// Knots is the full knot vector.
+func (c *NurbsCurve) Knots() ([]float64, error) {
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	n := int(C.cadaclysm_blacksmith_nurbs_curve_knot_count(h))
+	runtime.KeepAlive(c)
+	return c.readDoubles(n, "nurbs_curve_knots", func(h *C.CadaclysmBlacksmithNurbsCurve, out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_nurbs_curve_knots(h, out)
+	})
+}
+
+// Domain is the parameter range, first and last.
+func (c *NurbsCurve) Domain() (lo, hi float64, err error) {
+	d, err := c.readDoubles(2, "nurbs_curve_domain", func(h *C.CadaclysmBlacksmithNurbsCurve, out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_nurbs_curve_domain(h, out)
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return d[0], d[1], nil
+}
+
+// IsRational is whether any weight differs from 1.
+func (c *NurbsCurve) IsRational() (bool, error) {
+	h, err := c.h()
+	if err != nil {
+		return false, err
+	}
+	r := bool(C.cadaclysm_blacksmith_nurbs_curve_is_rational(h))
+	runtime.KeepAlive(c)
+	return r, nil
+}
+
+// IsClosed is whether the curve's end meets its start -- the answer, not a flag.
+func (c *NurbsCurve) IsClosed() (bool, error) {
+	h, err := c.h()
+	if err != nil {
+		return false, err
+	}
+	r := bool(C.cadaclysm_blacksmith_nurbs_curve_is_closed(h))
+	runtime.KeepAlive(c)
+	return r, nil
+}
+
+// Point is the point at parameter t, inside the domain.
+func (c *NurbsCurve) Point(t float64) ([3]float64, error) {
+	p, err := c.readDoubles(3, "nurbs_curve_point", func(h *C.CadaclysmBlacksmithNurbsCurve, out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_nurbs_curve_point(h, C.double(t), out)
+	})
+	if err != nil {
+		return [3]float64{}, err
+	}
+	return triple(p), nil
+}
+
+// Derivatives is the point and its derivatives at t up to order (at most 8; Python's default
+// is 2): order + 1 entries, C, C', C'', ....
+func (c *NurbsCurve) Derivatives(t float64, order int) ([][3]float64, error) {
+	k, err := curveU32(order, "nurbs_curve_derivatives: order")
+	if err != nil {
+		return nil, err
+	}
+	flat, err := c.readDoubles(3*(min(order, 8)+1), "nurbs_curve_derivatives", func(h *C.CadaclysmBlacksmithNurbsCurve, out *C.double) C.bool {
+		return C.cadaclysm_blacksmith_nurbs_curve_derivatives(h, C.double(t), k, out)
+	})
+	if err != nil {
+		return nil, err
+	}
+	list := make([][3]float64, order+1)
+	for i := range list {
+		list[i] = triple(flat[3*i : 3*i+3])
+	}
+	return list, nil
+}
+
+// Curvature is the curvature and Frenet frame at t.
+func (c *NurbsCurve) Curvature(t float64) (Curvature, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return Curvature{}, err
+	}
+	var raw C.CadaclysmBlacksmithCurvature
+	ok := bool(C.cadaclysm_blacksmith_nurbs_curve_curvature(h, C.double(t), &raw))
+	runtime.KeepAlive(c)
+	if !ok {
+		return Curvature{}, failure("nurbs_curve_curvature")
+	}
+	k := Curvature{Kappa: float64(raw.kappa)}
+	for i := 0; i < 3; i++ {
+		k.Tangent[i] = float64(raw.tangent[i])
+		k.Normal[i] = float64(raw.normal[i])
+		k.Binormal[i] = float64(raw.binormal[i])
+	}
+	if raw.has_centre != 0 {
+		var centre [3]float64
+		for i := 0; i < 3; i++ {
+			centre[i] = float64(raw.centre[i])
+		}
+		k.Centre = &centre
+	}
+	return k, nil
+}
+
+// Length is the curve's length, to the relative accuracy (0 asks for the default).
+func (c *NurbsCurve) Length(accuracy float64) (Length, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return Length{}, err
+	}
+	var raw C.CadaclysmBlacksmithLength
+	ok := bool(C.cadaclysm_blacksmith_nurbs_curve_length(h, C.double(accuracy), &raw))
+	runtime.KeepAlive(c)
+	if !ok {
+		return Length{}, failure("nurbs_curve_length")
+	}
+	return lengthOf(&raw), nil
+}
+
+// PointAtLength is the point at arc length s from the curve's start.
+func (c *NurbsCurve) PointAtLength(s, accuracy float64) (At, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return At{}, err
+	}
+	var raw C.CadaclysmBlacksmithAt
+	ok := bool(C.cadaclysm_blacksmith_nurbs_curve_point_at_length(h, C.double(s), C.double(accuracy), &raw))
+	runtime.KeepAlive(c)
+	if !ok {
+		return At{}, failure("nurbs_curve_point_at_length")
+	}
+	return atOf(&raw), nil
+}
+
+// DivideByCount is the curve in n pieces of equal arc length: n + 1 samples, n for a closed
+// curve.
+func (c *NurbsCurve) DivideByCount(n int, accuracy float64) ([]At, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	k, err := curveU32(n, "nurbs_curve_divide_by_count: n")
+	if err != nil {
+		return nil, err
+	}
+	list := C.cadaclysm_blacksmith_nurbs_curve_divide_by_count(h, k, C.double(accuracy))
+	runtime.KeepAlive(c)
+	return samplesOf(list, "nurbs_curve_divide_by_count")
+}
+
+// DivideByLength is samples every step of arc length from the start; a closed curve never
+// repeats it.
+func (c *NurbsCurve) DivideByLength(step, accuracy float64) ([]At, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	list := C.cadaclysm_blacksmith_nurbs_curve_divide_by_length(h, C.double(step), C.double(accuracy))
+	runtime.KeepAlive(c)
+	return samplesOf(list, "nurbs_curve_divide_by_length")
+}
+
+// PlaneHits is where the curve crosses the plane through origin with normal, in parameter
+// order (Error each point's distance from the plane). A *BuildError for a curve lying in the
+// plane; a touch that does not cross is not listed.
+func (c *NurbsCurve) PlaneHits(origin, normal [3]float64) ([]At, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	list := C.cadaclysm_blacksmith_nurbs_curve_plane_hits(h, doubles(&origin[0]), doubles(&normal[0]))
+	runtime.KeepAlive(c)
+	return samplesOf(list, "nurbs_curve_plane_hits")
+}
+
+// FaceHits is where the curve crosses face of solid (its whole surface), within tolerance of
+// it (Python's default is CurveTolerance), in parameter order (Error each point's distance
+// from the surface).
+func (c *NurbsCurve) FaceHits(solid *Solid, face int, tolerance float64) ([]At, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	sh, err := solid.h()
+	if err != nil {
+		return nil, err
+	}
+	f, err := curveU32(face, "nurbs_curve_face_hits: face")
+	if err != nil {
+		return nil, err
+	}
+	list := C.cadaclysm_blacksmith_nurbs_curve_face_hits(h, sh, f, C.double(tolerance))
+	runtime.KeepAlive(c)
+	runtime.KeepAlive(solid)
+	return samplesOf(list, "nurbs_curve_face_hits")
+}
+
+// Comb is a curvature comb to draw: at n + 1 even parameters (n 1 or more; Python's default
+// is 64), the curve point and that point moved by -scale * kappa * normal (out of the bend).
+// Straight stretches give zero teeth. Each entry is (point, tip).
+func (c *NurbsCurve) Comb(n int, scale float64) ([][2][3]float64, error) {
+	lo, hi, err := c.Domain()
+	if err != nil {
+		return nil, err
+	}
+	steps := max(n, 1)
+	out := make([][2][3]float64, 0, steps+1)
+	for i := 0; i <= steps; i++ {
+		t := lo + (hi-lo)*float64(i)/float64(steps)
+		k, err := c.Curvature(t)
+		if err != nil {
+			return nil, err
+		}
+		p, err := c.Point(t)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, [2][3]float64{p, {
+			p[0] - scale*k.Kappa*k.Normal[0],
+			p[1] - scale*k.Kappa*k.Normal[1],
+			p[2] - scale*k.Kappa*k.Normal[2],
+		}})
+	}
+	return out, nil
+}
+
+// String is Python's repr.
+func (c *NurbsCurve) String() string {
+	if c.Closed() {
+		return "NurbsCurve(closed)"
+	}
+	degree, _ := c.Degree()
+	points, _ := c.ControlPoints()
+	rational, _ := c.IsRational()
+	lo, hi, _ := c.Domain()
+	return fmt.Sprintf("NurbsCurve(degree=%d, controls=%d, rational=%v, domain=(%.9g, %.9g))", degree, len(points), rational, lo, hi)
+}
+
+// curveToNurbs is a curve value's exact NURBS form.
+func curveToNurbs(kind uint32, v []float64) (*NurbsCurve, error) {
+	defer pin()()
+	return newNurbsCurve(C.cadaclysm_blacksmith_curve_value_to_nurbs(C.uint32_t(kind), doubles(&v[0])), "curve_value_to_nurbs", nil)
+}
+
+// ToNurbs is the line as an exact NURBS curve (degree 1) over its parameter range.
+func (l LineValue) ToNurbs() (*NurbsCurve, error) { return curveToNurbs(valueLine, l.v[:]) }
+
+// ToNurbs is the circle as an exact rational NURBS curve, closed.
+func (c CircleValue) ToNurbs() (*NurbsCurve, error) { return curveToNurbs(valueCircle, c.v[:]) }
+
+// ToNurbs is the arc as an exact rational NURBS curve.
+func (a ArcValue) ToNurbs() (*NurbsCurve, error) { return curveToNurbs(valueArc, a.v[:]) }
+
+// ToNurbs is the ellipse as an exact rational NURBS curve, closed.
+func (e EllipseValue) ToNurbs() (*NurbsCurve, error) { return curveToNurbs(valueEllipse, e.v[:]) }
+
+// ToNurbs is the rectangle's boundary as an exact closed degree-1 NURBS curve, a knot at each
+// corner, so its parameter is t.
+func (r RectangleValue) ToNurbs() (*NurbsCurve, error) { return curveToNurbs(valueRectangle, r.v[:]) }
+
+// ---- sheets from curves -----------------------------------------------------------------------
+
+// SheetTolerance is the tolerance Python's sweep_rail, sweep_two_rails, edge_surface,
+// network_surface and fillet_surfaces default to (1e-3).
+const SheetTolerance = 1e-3
+
+// CurveCutTolerance is the tolerance Python's split_by_curve and trim_by_curve default to
+// (0.05).
+const CurveCutTolerance = 0.05
+
+// PatchTolerance is the tolerance Python's n_sided_patch defaults to (0.01).
+const PatchTolerance = 0.01
+
+// sheetSides maps a side name to the code the C ABI reads: the face's u = 0 isocurve, u = 1,
+// v = 0, v = 1.
+var sheetSides = map[string]uint32{"u0": 0, "u1": 1, "v0": 2, "v1": 3}
+
+// sheetSide is a side's code, or Python's refusal for a name that is none of the four.
+func sheetSide(side string) (C.uint32_t, error) {
+	code, ok := sheetSides[side]
+	if !ok {
+		return 0, &BuildError{Message: fmt.Sprintf("a side is 'u0', 'u1', 'v0' or 'v1', not '%s'", side)}
+	}
+	return C.uint32_t(code), nil
+}
+
+// Continuity is how well two faces meet along their sides (Solid.Continuity): the largest Gap
+// between the sides (G0), the largest Angle between their normals in radians (G1), the
+// largest difference of normal Curvature across the edge (G2), each with where it was found
+// (GapAt, AngleAt, CurvatureAt), and how many points were asked (Samples).
+type Continuity struct {
+	Gap         float64
+	GapAt       [3]float64
+	Angle       float64
+	AngleAt     [3]float64
+	Curvature   float64
+	CurvatureAt [3]float64
+	Samples     int
+}
+
+func continuityOf(raw *C.CadaclysmBlacksmithContinuity) Continuity {
+	return Continuity{
+		Gap:         float64(raw.gap),
+		GapAt:       [3]float64{float64(raw.gap_at[0]), float64(raw.gap_at[1]), float64(raw.gap_at[2])},
+		Angle:       float64(raw.angle),
+		AngleAt:     [3]float64{float64(raw.angle_at[0]), float64(raw.angle_at[1]), float64(raw.angle_at[2])},
+		Curvature:   float64(raw.curvature),
+		CurvatureAt: [3]float64{float64(raw.curvature_at[0]), float64(raw.curvature_at[1]), float64(raw.curvature_at[2])},
+		Samples:     int(raw.samples),
+	}
+}
+
+// PatchReport is how well an N-sided patch (NSidedPatch) meets: Faces sub-patches, the worst
+// Boundary Continuity against the neighbours (the gap over every side, the angle over those
+// met at G1 or G2, the curvature jump over those at G2), the worst Internal one across the
+// patch's own spokes, and CornerAngle (radians), the most a corner of the hole leaves no
+// patch able to meet: zero where the neighbours meet each other at G1.
+type PatchReport struct {
+	Faces       int
+	Boundary    Continuity
+	Internal    Continuity
+	CornerAngle float64
+}
+
+// JoinReport is what JoinSheets did: Sewn edges (each two naked edges become one shared
+// edge), the widest WorstGap between two sewn edges (0 where all met exactly), the naked
+// edges -- bordered by one face -- NakedBefore (once the T-junctions are cut) and NakedAfter,
+// Refused groups of naked edges that share both ends but were left apart (too far apart, or
+// three or more), faces Turned, and whether the result is Closed: a solid.
+type JoinReport struct {
+	Sewn        int
+	WorstGap    float64
+	NakedBefore int
+	NakedAfter  int
+	Refused     int
+	Turned      int
+	Closed      bool
+}
+
+// SheetError is, on a sheet from SweepRail, SweepTwoRails, EdgeSurface, NetworkSurface,
+// FilletSurfaces, Flange or ExtrudeTo, the largest distance from the sheet to what it was
+// fitted to (the curves given; the exact fillet; the swept section; the hits); nil on every
+// other solid.
+func (s *Solid) SheetError() *float64 {
+	if s == nil || s.sheetError == nil {
+		return nil
+	}
+	e := *s.sheetError
+	return &e
+}
+
+// PatchReport is, on a sheet from NSidedPatch, how well it meets its boundaries; nil on
+// every other solid.
+func (s *Solid) PatchReport() *PatchReport {
+	if s == nil || s.patchReport == nil {
+		return nil
+	}
+	r := *s.patchReport
+	return &r
+}
+
+// curveHandles is the C handles of curves, padded by one nil so that an empty list still has
+// an address to pass (the C call refuses it by name). KeepAlive curves after the call.
+func curveHandles(curves []*NurbsCurve) ([]*C.CadaclysmBlacksmithNurbsCurve, error) {
+	handles := make([]*C.CadaclysmBlacksmithNurbsCurve, len(curves), len(curves)+1)
+	for i, c := range curves {
+		h, err := c.h()
+		if err != nil {
+			return nil, err
+		}
+		handles[i] = h
+	}
+	return append(handles, nil), nil
+}
+
+func keepCurves(curves []*NurbsCurve) {
+	for _, c := range curves {
+		runtime.KeepAlive(c)
+	}
+}
+
+// fitted is out with its SheetError set to e, when the call made one.
+func fitted(out *Solid, e C.double) *Solid {
+	if out != nil {
+		v := float64(e)
+		out.sheetError = &v
+	}
+	return out
+}
+
+// LoftCurves is the sheet lofted through sections, degree across them (lowered to fit; Python's
+// default is 3); loose shapes it by them instead, through the first and last only; closed
+// makes it periodic across them, the last section back to the first. A *BuildError for fewer
+// than two sections, and so on.
+func LoftCurves(sections []*NurbsCurve, degree int, loose, closed bool) (*Solid, error) {
+	defer pin()()
+	deg, err := curveU32(degree, "loft_curves: degree")
+	if err != nil {
+		return nil, err
+	}
+	handles, err := curveHandles(sections)
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_loft_curves(&handles[0], C.size_t(len(sections)), deg, C.bool(loose), C.bool(closed)), "loft_curves")
+	keepCurves(sections)
+	return out, err
+}
+
+// SweepRail is sections swept along rail, each carried by the rail's frame from the rail
+// point nearest its centre and blended between: frame "rmf" (Python's default) is
+// rotation-minimising, "fixed" keeps up upright (nil up: the library's choice). Fitted within
+// tolerance (SheetTolerance); the sheet's SheetError says how close.
+func SweepRail(rail *NurbsCurve, sections []*NurbsCurve, frame string, up *[3]float64, tolerance float64) (*Solid, error) {
+	var kind C.uint32_t
+	switch frame {
+	case "rmf":
+		kind = 0
+	case "fixed":
+		kind = 1
+	default:
+		return nil, &BuildError{Message: fmt.Sprintf("sweep_rail: frame is 'rmf' or 'fixed', not '%s'", frame)}
+	}
+	defer pin()()
+	r, err := rail.h()
+	if err != nil {
+		return nil, err
+	}
+	handles, err := curveHandles(sections)
+	if err != nil {
+		return nil, err
+	}
+	var e C.double
+	out, err := newSolid(C.cadaclysm_blacksmith_sweep_rail(r, &handles[0], C.size_t(len(sections)), kind, optVec(up), C.double(tolerance), &e), "sweep_rail")
+	runtime.KeepAlive(rail)
+	keepCurves(sections)
+	return fitted(out, e), err
+}
+
+// SweepTwoRails is sections swept between two rails: each section's first end on railA and last
+// on railB, carried by the rotation and uniform scale that keep them there, the rails matched
+// by arc length. Fitted within tolerance (SheetTolerance); SheetError says how close.
+func SweepTwoRails(railA, railB *NurbsCurve, sections []*NurbsCurve, tolerance float64) (*Solid, error) {
+	defer pin()()
+	a, err := railA.h()
+	if err != nil {
+		return nil, err
+	}
+	b, err := railB.h()
+	if err != nil {
+		return nil, err
+	}
+	handles, err := curveHandles(sections)
+	if err != nil {
+		return nil, err
+	}
+	var e C.double
+	out, err := newSolid(C.cadaclysm_blacksmith_sweep_two_rails(a, b, &handles[0], C.size_t(len(sections)), C.double(tolerance), &e), "sweep_two_rails")
+	runtime.KeepAlive(railA)
+	runtime.KeepAlive(railB)
+	keepCurves(sections)
+	return fitted(out, e), err
+}
+
+// EdgeSurface is the Coons sheet of 2, 3 or 4 boundary curves meeting end to end within
+// tolerance (SheetTolerance; in order round the boundary, each either way round): exact for
+// non-rational boundaries, rational ones fitted first (SheetError).
+func EdgeSurface(curves []*NurbsCurve, tolerance float64) (*Solid, error) {
+	defer pin()()
+	handles, err := curveHandles(curves)
+	if err != nil {
+		return nil, err
+	}
+	var e C.double
+	out, err := newSolid(C.cadaclysm_blacksmith_edge_surface(&handles[0], C.size_t(len(curves)), C.double(tolerance), &e), "edge_surface")
+	keepCurves(curves)
+	return fitted(out, e), err
+}
+
+// NetworkSurface is the Gordon sheet of a curve network: uCurves (in order across the other
+// way) and vCurves, every one of the first crossing every one of the second within tolerance
+// (SheetTolerance). SheetError is the largest distance from the sheet to the curves given.
+func NetworkSurface(uCurves, vCurves []*NurbsCurve, tolerance float64) (*Solid, error) {
+	defer pin()()
+	uh, err := curveHandles(uCurves)
+	if err != nil {
+		return nil, err
+	}
+	vh, err := curveHandles(vCurves)
+	if err != nil {
+		return nil, err
+	}
+	var e C.double
+	out, err := newSolid(C.cadaclysm_blacksmith_network_surface(&uh[0], C.size_t(len(uCurves)), &vh[0], C.size_t(len(vCurves)), C.double(tolerance), &e), "network_surface")
+	keepCurves(uCurves)
+	keepCurves(vCurves)
+	return fitted(out, e), err
+}
+
+// Continuity is how well this solid's face's side side ("u0", "u1", "v0" or "v1": a boundary
+// isocurve of its NURBS surface) meets other's face otherFace along otherSide: the largest gap,
+// angle between the normals and difference of curvature across the edge, with where each is.
+// samples is Python's 64.
+func (s *Solid) Continuity(side string, other *Solid, otherSide string, face, otherFace, samples int) (Continuity, error) {
+	sa, err := sheetSide(side)
+	if err != nil {
+		return Continuity{}, err
+	}
+	sb, err := sheetSide(otherSide)
+	if err != nil {
+		return Continuity{}, err
+	}
+	defer pin()()
+	fa, err := curveU32(face, "continuity: face")
+	if err != nil {
+		return Continuity{}, err
+	}
+	fb, err := curveU32(otherFace, "continuity: other_face")
+	if err != nil {
+		return Continuity{}, err
+	}
+	n, err := curveU32(samples, "continuity: samples")
+	if err != nil {
+		return Continuity{}, err
+	}
+	a, err := s.h()
+	if err != nil {
+		return Continuity{}, err
+	}
+	b, err := other.h()
+	if err != nil {
+		return Continuity{}, err
+	}
+	var raw C.CadaclysmBlacksmithContinuity
+	ok := bool(C.cadaclysm_blacksmith_continuity(a, fa, sa, b, fb, sb, n, &raw))
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(other)
+	if !ok {
+		return Continuity{}, failure("continuity")
+	}
+	return continuityOf(&raw), nil
+}
+
+// Matched is face face as a sheet of its own, its side side bent to meet other's otherSide at
+// G level (Python's 2): 0 position, 1 tangent plane, 2 curvature. The opposite side stays where
+// it was.
+func (s *Solid) Matched(side string, other *Solid, otherSide string, level, face, otherFace int) (*Solid, error) {
+	sa, err := sheetSide(side)
+	if err != nil {
+		return nil, err
+	}
+	sb, err := sheetSide(otherSide)
+	if err != nil {
+		return nil, err
+	}
+	defer pin()()
+	fa, err := curveU32(face, "match_side: face")
+	if err != nil {
+		return nil, err
+	}
+	fb, err := curveU32(otherFace, "match_side: other_face")
+	if err != nil {
+		return nil, err
+	}
+	lv, err := curveU32(level, "match_side: level")
+	if err != nil {
+		return nil, err
+	}
+	a, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	b, err := other.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_match_side(a, fa, sa, b, fb, sb, lv), "match_side")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(other)
+	return out, err
+}
+
+// BlendSides is a sheet spanning from a's side sideA (of face faceA) to b's side sideB (of face
+// faceB), meeting each at G level (1 or 2; Python's 2); bulge (Python's 1) scales how far it
+// leaves each edge along its neighbour's tangent.
+func BlendSides(a *Solid, sideA string, b *Solid, sideB string, level int, bulge float64, faceA, faceB int) (*Solid, error) {
+	sa, err := sheetSide(sideA)
+	if err != nil {
+		return nil, err
+	}
+	sb, err := sheetSide(sideB)
+	if err != nil {
+		return nil, err
+	}
+	defer pin()()
+	fa, err := curveU32(faceA, "blend_sides: face_a")
+	if err != nil {
+		return nil, err
+	}
+	fb, err := curveU32(faceB, "blend_sides: face_b")
+	if err != nil {
+		return nil, err
+	}
+	lv, err := curveU32(level, "blend_sides: level")
+	if err != nil {
+		return nil, err
+	}
+	ha, err := a.h()
+	if err != nil {
+		return nil, err
+	}
+	hb, err := b.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_blend_sides(ha, fa, sa, hb, fb, sb, lv, C.double(bulge)), "blend_sides")
+	runtime.KeepAlive(a)
+	runtime.KeepAlive(b)
+	return out, err
+}
+
+// PatchBoundary is one side of the hole NSidedPatch fills: a side of a sheet's face, met at
+// G Level, or a NurbsCurve, met at G0. Make one with SheetBoundary or CurveBoundary.
+type PatchBoundary struct {
+	// Sheet, Side ("u0", "u1", "v0" or "v1"), Face, Level (0, 1 or 2) and the Range of the
+	// side's parameter, (0, 1) the whole side and (1, 0) the whole side backwards; Sheet nil
+	// for a curve boundary.
+	Sheet *Solid
+	Side  string
+	Face  int
+	Level int
+	Range [2]float64
+	// Curve is the boundary curve, nil for a sheet's side.
+	Curve *NurbsCurve
+}
+
+// SheetBoundary is sheet's side side, face 0, met at G2 over the whole side. Change Level, Face
+// or Range on the copy for Python's level, face and range.
+func SheetBoundary(sheet *Solid, side string) PatchBoundary {
+	return PatchBoundary{Sheet: sheet, Side: side, Level: 2, Range: [2]float64{0, 1}}
+}
+
+// CurveBoundary is curve as a boundary, met at G0.
+func CurveBoundary(curve *NurbsCurve) PatchBoundary {
+	return PatchBoundary{Curve: curve, Range: [2]float64{0, 1}}
+}
+
+// NSidedPatch is the sheet filling a hole of 3 or more sides (Rhino's Patch, OCCT's
+// MakeFilling, on sheets' sides): N four-sided NURBS faces round a central point, G1 or G2 to
+// each other. boundaries run in order round the hole and either way round, and must meet end
+// to end within tolerance (PatchTolerance); bulge (Python's 1) scales how far the patch leaves
+// each neighbour along its tangent.
+//
+// Face i meets boundary i's second half along its "v0" side and boundary i + 1's first half
+// along its "u1", so Continuity measures each neighbour; the result's PatchReport holds the
+// worst of them, measured the same way.
+func NSidedPatch(boundaries []PatchBoundary, bulge, tolerance float64) (*Solid, error) {
+	defer pin()()
+	n := len(boundaries)
+	// The rows are C memory: they hold C pointers, and cgo allows a Go pointer only to Go
+	// memory without Go pointers in it -- C memory is the one place that is never in doubt.
+	size := unsafe.Sizeof(C.CadaclysmBlacksmithPatchBoundary{})
+	mem := C.calloc(C.size_t(max(n, 1)), C.size_t(size))
+	defer C.free(mem)
+	rows := unsafe.Slice((*C.CadaclysmBlacksmithPatchBoundary)(mem), max(n, 1))
+	for i, b := range boundaries {
+		row := &rows[i]
+		if b.Curve != nil {
+			h, err := b.Curve.h()
+			if err != nil {
+				return nil, err
+			}
+			row.curve = h
+			row.from, row.to = 0, 1
+			continue
+		}
+		h, err := b.Sheet.h()
+		if err != nil {
+			return nil, err
+		}
+		side, err := sheetSide(b.Side)
+		if err != nil {
+			return nil, err
+		}
+		face, err := curveU32(b.Face, "n_sided_patch: face")
+		if err != nil {
+			return nil, err
+		}
+		level, err := curveU32(b.Level, "n_sided_patch: level")
+		if err != nil {
+			return nil, err
+		}
+		row.sheet, row.face, row.side = h, face, side
+		row.from, row.to, row.level = C.double(b.Range[0]), C.double(b.Range[1]), level
+	}
+	var raw C.CadaclysmBlacksmithPatchReport
+	out, err := newSolid(C.cadaclysm_blacksmith_n_sided_patch((*C.CadaclysmBlacksmithPatchBoundary)(mem), C.size_t(n), C.double(bulge), C.double(tolerance), &raw), "n_sided_patch")
+	for _, b := range boundaries {
+		runtime.KeepAlive(b.Sheet)
+		runtime.KeepAlive(b.Curve)
+	}
+	if out != nil {
+		out.patchReport = &PatchReport{
+			Faces:       int(raw.faces),
+			Boundary:    continuityOf(&raw.boundary),
+			Internal:    continuityOf(&raw.internal),
+			CornerAngle: float64(raw.corner_angle),
+		}
+	}
+	return out, err
+}
+
+// FilletSurfaces is the rolling-ball fillet between a's face faceA and b's face faceB (their
+// whole NURBS surfaces): the ball on the side each face's normal points to (flipA, flipB: the
+// other side), of radius, or, given radiusEnd (nil: constant), running linearly from radius to
+// radiusEnd along the fillet. Returns the fillet sheet (its SheetError set) and the contact
+// curves on a and b, to trim them back with TrimByCurve and join with JoinSheets; the curves
+// are owned by the caller and outlive the solids. tolerance is SheetTolerance in Python.
+func FilletSurfaces(a, b *Solid, radius float64, radiusEnd *float64, flipA, flipB bool, tolerance float64, faceA, faceB int) (*Solid, *NurbsCurve, *NurbsCurve, error) {
+	defer pin()()
+	fa, err := curveU32(faceA, "fillet_surfaces: face_a")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	fb, err := curveU32(faceB, "fillet_surfaces: face_b")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ha, err := a.h()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	hb, err := b.h()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	end := radius
+	if radiusEnd != nil {
+		end = *radiusEnd
+	}
+	var ra, rb *C.CadaclysmBlacksmithNurbsCurve
+	var e C.double
+	raw := C.cadaclysm_blacksmith_fillet_surfaces(ha, fa, hb, fb, C.double(radius), C.double(end), C.bool(flipA), C.bool(flipB), C.double(tolerance), &ra, &rb, &e)
+	runtime.KeepAlive(a)
+	runtime.KeepAlive(b)
+	sheet, err := newSolid(raw, "fillet_surfaces")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	fitted(sheet, e)
+	curveA, err := newNurbsCurve(ra, "fillet_surfaces", nil)
+	if err != nil {
+		sheet.Close()
+		if rb != nil {
+			C.cadaclysm_blacksmith_nurbs_curve_free(rb)
+		}
+		return nil, nil, nil, err
+	}
+	curveB, err := newNurbsCurve(rb, "fillet_surfaces", nil)
+	if err != nil {
+		sheet.Close()
+		curveA.Close()
+		return nil, nil, nil, err
+	}
+	return sheet, curveA, curveB, nil
+}
+
+// SplitByCurve is this sheet cut along curve -- one lying on it, say projected or pulled onto
+// it -- and nothing removed: every face comes back in its pieces outside the cutter, then its
+// pieces inside, each a face, as SplitSheet orders them. The cutter is curve run along
+// direction (nil: the mean of the sheet's normals along the curve) through the whole sheet. A
+// closed curve's inside is the island it bounds; an open curve's is the side left of its run,
+// seen from where direction points, and an open curve is run on straight past both ends, so it
+// should cross the sheet's boundary. Where the cut lies on the curve the rim is one edge
+// carrying the curve's own span exactly, which another sheet's edge along the curve sews to.
+// tolerance is CurveCutTolerance in Python.
+func (s *Solid) SplitByCurve(curve *NurbsCurve, direction *[3]float64, tolerance float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	c, err := curve.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_split_by_curve(h, c, optVec(direction), C.double(tolerance)), "split_by_curve")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(curve)
+	return out, err
+}
+
+// TrimByCurve is this sheet cut along curve and one side thrown away (see SplitByCurve): keep
+// "inside" keeps the island a closed curve bounds, "outside" (Python's default) the sheet with
+// the hole; for an open curve "left" (the same as "inside") keeps the side left of its run
+// seen from where direction points, "right" the other. A *BuildError where nothing of the
+// sheet lies on the kept side.
+func (s *Solid) TrimByCurve(curve *NurbsCurve, keep string, direction *[3]float64, tolerance float64) (*Solid, error) {
+	var inside bool
+	switch keep {
+	case "inside", "left":
+		inside = true
+	case "outside", "right":
+	default:
+		return nil, &BuildError{Message: fmt.Sprintf("trim_by_curve: keep must be 'outside', 'inside', 'left' or 'right', not '%s'", keep)}
+	}
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	c, err := curve.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_trim_by_curve(h, c, optVec(direction), C.bool(inside), C.double(tolerance)), "trim_by_curve")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(curve)
+	return out, err
+}
+
+// Flange is section swept along each of edges (naked edges of this sheet, by index: see
+// EdgeIndices) on the face's own frame: at every point of the edge the section's x runs
+// outward from the face -- square to the edge, in the face's tangent plane -- and its y along
+// the face's normal, so a section from (0, 0) to (0, -10) turns the edge under by 10 all along
+// it however the panel curves, (0, 0) to (10, 0) carries the face on, and a lip stands proud
+// with y > 0. section is a curve in the plane z = 0 starting at the origin. With join (Python's
+// default) the sweeps come back sewn to this sheet (its faces first, then one per edge), else
+// alone, sewn to each other. Each sweep is fitted within tolerance (Python's default 1e-3);
+// SheetError says how close. A *BuildError for an edge bordered by two faces, a section not
+// starting at the origin, and sweeps that did not sew on.
+func (s *Solid) Flange(edges []int, section *NurbsCurve, tolerance float64, join bool) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	which, err := indices(edges)
+	if err != nil {
+		return nil, err
+	}
+	c, err := section.h()
+	if err != nil {
+		return nil, err
+	}
+	var first *C.uint32_t
+	if len(which) > 0 {
+		first = (*C.uint32_t)(unsafe.Pointer(&which[0]))
+	}
+	var e C.double
+	out, err := newSolid(C.cadaclysm_blacksmith_flange(h, first, C.size_t(len(which)), c, C.double(tolerance), C.bool(join), &e), "flange")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(which)
+	runtime.KeepAlive(section)
+	return fitted(out, e), err
+}
+
+// ExtrudeTo is each of edges (naked edges of this sheet, by index: see EdgeIndices) slid
+// along direction until it meets target: every point of the edge travels along the direction
+// to its first hit on target's faces (trimmed, not their whole surfaces). One wall per edge --
+// the edge's own curve swept straight, bounded by the curve through the hits, fitted within
+// tolerance (Python's default 1e-3) of every hit (SheetError) -- so a wheel arch cut in a
+// panel runs in to the well's inner wall as its liner. With join (Python's default) the walls
+// come back sewn to this sheet (its faces first, then one per edge), else alone, sewn to each
+// other. A *BuildError naming the point whose line misses the target, and for a direction of
+// no length or nil.
+func (s *Solid) ExtrudeTo(edges []int, direction *[3]float64, target *Solid, tolerance float64, join bool) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	which, err := indices(edges)
+	if err != nil {
+		return nil, err
+	}
+	t, err := target.h()
+	if err != nil {
+		return nil, err
+	}
+	var first *C.uint32_t
+	if len(which) > 0 {
+		first = (*C.uint32_t)(unsafe.Pointer(&which[0]))
+	}
+	var e C.double
+	out, err := newSolid(C.cadaclysm_blacksmith_extrude_to(h, first, C.size_t(len(which)), optVec(direction), t, C.double(tolerance), C.bool(join), &e), "extrude_to")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(which)
+	runtime.KeepAlive(target)
+	return fitted(out, e), err
+}
+
+// JoinSheets is sheets joined into one body, their faces in order, and a JoinReport of what
+// was done: every two naked edges whose ends and curves agree within tolerance (0: a rounding
+// of the body's size) sewn into one -- a gap closed is kept as that edge's own tolerance -- the
+// faces turned to agree, and a closed result turned to face out, a solid the booleans, Mass
+// and the writers take. Edges with exact curves are compared to the tolerance however coarsely
+// each was sampled. At a tolerance above 0 a T-junction is sewn too: one sheet's edge along
+// part of another's is first cut where the other's corner lies on it.
+func JoinSheets(sheets []*Solid, tolerance float64) (*Solid, JoinReport, error) {
+	defer pin()()
+	handles := make([]*C.CadaclysmBlacksmithSolid, len(sheets), len(sheets)+1)
+	for i, s := range sheets {
+		h, err := s.h()
+		if err != nil {
+			return nil, JoinReport{}, err
+		}
+		handles[i] = h
+	}
+	handles = append(handles, nil)
+	var raw C.CadaclysmBlacksmithJoinReport
+	out, err := newSolid(C.cadaclysm_blacksmith_join_sheets(&handles[0], C.size_t(len(sheets)), C.double(tolerance), &raw), "join_sheets")
+	for _, s := range sheets {
+		runtime.KeepAlive(s)
+	}
+	if err != nil {
+		return nil, JoinReport{}, err
+	}
+	return out, JoinReport{
+		Sewn: int(raw.sewn), WorstGap: float64(raw.worst_gap), NakedBefore: int(raw.naked_before),
+		NakedAfter: int(raw.naked_after), Refused: int(raw.refused), Turned: int(raw.turned), Closed: raw.closed != 0,
+	}, nil
+}
+
+// RecessFaces is how many of Recess's result faces are each part's, the faces in this order.
+type RecessFaces struct {
+	Sheet, Fillet, Walls, Pane int
+}
+
+// Recess is this sheet with an opening recessed into it along outline -- a window, a lamp, a
+// grille or an air intake set into a panel -- and how many of the result's faces are each
+// part's (sheet, fillet, walls, pane), the faces in that order.
+//
+// outline is a closed curve on the sheet (one face or several joined); each of its points is
+// found on the sheet, so it may stand a little off it. The walls run back depth along the
+// sheet's own normal at every point of the rim -- not along one view -- behind the face
+// (against its normal; negative: in front), leaning in toward the opening by draft radians
+// (negative: out) and meeting on the mitre at the outline's corners. fillet above 0 rounds the
+// rim between the sheet and the walls (the outline must then be smooth). pane closes the back
+// with one patch whose four sides end where the outline turns most, so it does not twist.
+// Every piece is sewn to the next: only the sheet's own boundary is left naked, and the walls'
+// foot without a pane. A *BuildError for an outline that is not closed, a corner with a
+// fillet, or a fillet deeper than the walls. Python's defaults: draft 0, fillet 0, pane true,
+// tolerance 0.05.
+func (s *Solid) Recess(outline *NurbsCurve, depth, draft, fillet float64, pane bool, tolerance float64) (*Solid, RecessFaces, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, RecessFaces{}, err
+	}
+	c, err := outline.h()
+	if err != nil {
+		return nil, RecessFaces{}, err
+	}
+	var faces [4]C.uint32_t
+	out, err := newSolid(C.cadaclysm_blacksmith_recess(h, c, C.double(depth), C.double(draft), C.double(fillet), C.bool(pane), C.double(tolerance), &faces[0]), "recess")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(outline)
+	if err != nil {
+		return nil, RecessFaces{}, err
+	}
+	return out, RecessFaces{Sheet: int(faces[0]), Fillet: int(faces[1]), Walls: int(faces[2]), Pane: int(faces[3])}, nil
+}
+
+// FilletVarying is Fillet with the radius running linearly from radius to radiusEnd in arc
+// length along each edge, radius at the end where the edge's curve starts: spline edges only
+// (a *BuildError otherwise). tolerance as Fillet's.
+func (s *Solid) FilletVarying(edges []int, radius, radiusEnd, tolerance float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	which, err := indices(edges)
+	if err != nil {
+		return nil, err
+	}
+	var first *C.uint32_t
+	if len(which) > 0 {
+		first = (*C.uint32_t)(unsafe.Pointer(&which[0]))
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_fillet_varying(
+		h, first, C.size_t(len(which)), C.double(radius), C.double(radiusEnd), C.double(tolerance)), "fillet_varying")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(which)
+	return out, err
+}
+
+// FilletRadiusEnd is Python's fillet(edges, radius, radius_end=...): a radiusEnd given and
+// different from radius goes to FilletVarying, anything else to Fillet.
+func (s *Solid) FilletRadiusEnd(edges []int, radius float64, radiusEnd *float64, tolerance float64) (*Solid, error) {
+	if radiusEnd != nil && *radiusEnd != radius {
+		return s.FilletVarying(edges, radius, *radiusEnd, tolerance)
+	}
+	return s.Fillet(edges, radius, tolerance)
 }
 
 // EdgePointAtLength is the point length along edge from the start of its curve's range, an
@@ -9607,13 +12427,30 @@ func (s *Solid) Chamfer(edges []int, distance, tolerance float64) (*Solid, error
 
 // merged is out with its flush faces merged when merge is given and true -- the trailing
 // flag Join, Cut and Common take (Python's merge=True), so a call without it stands as it
-// was. The unmerged solid is closed.
+// was -- and, where out is tracked, its origins read through out's (originsThrough). Both
+// intermediates are closed.
 func merged(out *Solid, err error, merge []bool) (*Solid, error) {
 	if err != nil || len(merge) == 0 || !merge[0] {
 		return out, err
 	}
 	defer out.Close()
-	return out.MergeFlush()
+	flat, err := out.MergeFlush()
+	if err != nil {
+		return nil, err
+	}
+	// One verb to the caller: on a tracked result the merge's origins are read back
+	// through the boolean's, so they name this solid as operand 0 and other as 1, not the
+	// faces between the two steps (Python's _combine).
+	tracked, err := out.IsTracked()
+	if err != nil || !tracked {
+		if err != nil {
+			flat.Close()
+			return nil, err
+		}
+		return flat, nil
+	}
+	defer flat.Close()
+	return flat.originsThrough(out)
 }
 
 // PushPull is face pushed out by distance along its outward normal (pulled in, negative)
@@ -10919,6 +13756,52 @@ func (a *Assembly) Step(path, schema, unit string) error {
 		return err
 	}
 	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+// Rhino3dmBytes is this assembly, and everything placed under it, as one Rhino .3dm:
+// each distinct part (as StepText counts them) a block holding its body, each
+// sub-assembly a block of references to what it places — nested assemblies are nested
+// blocks — and this assembly's own placements references at the top of the file, on a
+// layer named after it. Each reference is named as its placement was. unit and the
+// warnings as the package's Rhino3dmBytes. Refused, as StepText is, for an assembly
+// reachable from this one that places nothing.
+func (a *Assembly) Rhino3dmBytes(unit string) ([]byte, error) {
+	defer pin()()
+	h, err := a.h()
+	if err != nil {
+		return nil, err
+	}
+	code, _, err := satHandles(nil, unit)
+	if err != nil {
+		return nil, err
+	}
+	var n C.size_t
+	raw := C.cadaclysm_blacksmith_assembly_3dm_bytes(h, code, &n)
+	runtime.KeepAlive(a)
+	return taken3dm(raw, n, "assembly_3dm_bytes")
+}
+
+// Write3dm writes Rhino3dmBytes to path, by the library itself, which names the file
+// in its refusal when it cannot.
+func (a *Assembly) Write3dm(path, unit string) error {
+	defer pin()()
+	h, err := a.h()
+	if err != nil {
+		return err
+	}
+	code, _, err := satHandles(nil, unit)
+	if err != nil {
+		return err
+	}
+	cs := C.CString(path)
+	defer C.free(unsafe.Pointer(cs))
+	ok := C.cadaclysm_blacksmith_assembly_3dm(h, cs, code)
+	runtime.KeepAlive(a)
+	if !ok {
+		return failure("assembly_3dm")
+	}
+	warn3dm()
+	return nil
 }
 
 // ToScene is this assembly as a reader Scene, through STEP text and cadaclysm.OpenMemory —
@@ -13557,4 +16440,596 @@ func (s *Sketch) OpenChains(tolerance float64) ([]*Profile, error) {
 	out, err := profileList(C.cadaclysm_blacksmith_sketch_open_chains(h, C.double(tolerance)), "sketch_open_chains")
 	runtime.KeepAlive(s)
 	return out, err
+}
+
+// ---- documents ----------------------------------------------------------------------
+
+// Document is a model as data: a graph of nodes (profile.rect, solid.extrude,
+// measure.mass, ...), each a blacksmith verb reading other nodes by id, with named
+// parameters any number can be an "=expression" of, evaluated incrementally, and edited
+// by ops that are undoable and branch. Every edit is one commit; the whole thing -- nodes,
+// parameters, history, branches -- saves as JSON text and loads back to the same document.
+// [DocumentKinds] lists the node kinds. Python's Document, in the Rust binding's shape.
+//
+//	doc, _ := blacksmith.NewDocument("mm")
+//	defer doc.Close()
+//	doc.Apply(`{"op": "add", "node": {"id": "r1", "kind": "profile.rect", "w": 10, "h": 10}}`, "")
+//	doc.Apply(`{"op": "add", "node": {"id": "x1", "kind": "solid.extrude", "profile": "r1", "frame": "xy", "distance": 10}}`, "")
+//	solid, _ := doc.ResultSolid("x1") // an ordinary Solid of the caller's own
+//
+// Ops, the changed sets, the statuses, Errors, Value, Params, Branches, Log, Tips and the
+// kinds are JSON text, as the C ABI has them: decode them with encoding/json where a
+// program wants them as data. A refused op is a *BuildError with the library's reason,
+// and the document is unchanged. Errors, Value and the Result* reads bring the nodes up to
+// date first, so the answer is always the current document's; each Solid, Profile,
+// NurbsCurve and Subd a result gives is the caller's own, and outlives later edits and the
+// document. Owns a handle: Close it, or let the finalizer; a call after Close returns
+// ErrClosed wrapped as "document: closed". One goroutine at a time.
+type Document struct {
+	handle *C.CadaclysmBlacksmithDocument
+	_      noTiny // see noTiny
+}
+
+// newDocument wraps a handle the library just returned, or reports why it returned none.
+func newDocument(handle *C.CadaclysmBlacksmithDocument, what string) (*Document, error) {
+	if handle == nil {
+		return nil, failure(what)
+	}
+	d := &Document{handle: handle}
+	runtime.SetFinalizer(d, (*Document).finalize)
+	return d, nil
+}
+
+func (d *Document) finalize() {
+	if d.handle != nil {
+		C.cadaclysm_blacksmith_document_free(d.handle)
+		d.handle = nil
+	}
+}
+
+// h is the live handle, or ErrClosed ("document: closed") after Close.
+func (d *Document) h() (*C.CadaclysmBlacksmithDocument, error) {
+	if d == nil || d.handle == nil {
+		return nil, fmt.Errorf("document: %w", ErrClosed)
+	}
+	return d.handle, nil
+}
+
+// Closed is whether Close has already run. A nil Document counts as closed.
+func (d *Document) Closed() bool { return d == nil || d.handle == nil }
+
+// Close frees the document. Idempotent, and a no-op on a nil Document; the results read
+// from it are the caller's own and outlive it. The error return is always nil; it exists
+// so a Document satisfies io.Closer.
+func (d *Document) Close() error {
+	if d == nil || d.handle == nil {
+		return nil
+	}
+	h := d.handle
+	d.handle = nil
+	runtime.SetFinalizer(d, nil)
+	C.cadaclysm_blacksmith_document_free(h)
+	return nil
+}
+
+// ownedText is the owned text a document call returned, read and freed; nil is the
+// refusal last_error names. Call under pin.
+func ownedText(raw *C.char, what string) (string, error) {
+	if raw == nil {
+		return "", failure(what)
+	}
+	defer C.cadaclysm_blacksmith_string_free(raw)
+	return C.GoString(raw), nil
+}
+
+// cOptional is s as a C string, or NULL for "" (the ABI's "none"), and the func that frees it.
+func cOptional(s string) (*C.char, func()) {
+	if s == "" {
+		return nil, func() {}
+	}
+	c := C.CString(s)
+	return c, func() { C.free(unsafe.Pointer(c)) }
+}
+
+// text runs call on the live handle and reads its owned text, naming what on a refusal.
+func (d *Document) text(what string, call func(*C.CadaclysmBlacksmithDocument) *C.char) (string, error) {
+	defer pin()()
+	h, err := d.h()
+	if err != nil {
+		return "", err
+	}
+	raw := call(h)
+	runtime.KeepAlive(d)
+	return ownedText(raw, what)
+}
+
+// NewDocument is an empty document counting lengths in units ("mm", "cm", "m", "in" or
+// "ft"; "" is mm) -- Python's Document(units).
+func NewDocument(units string) (*Document, error) {
+	defer pin()()
+	c := C.CString(units)
+	defer C.free(unsafe.Pointer(c))
+	return newDocument(C.cadaclysm_blacksmith_document_new(c), "document_new")
+}
+
+// LoadDocument is the document Save wrote as text: its nodes, parameters, history and
+// branches. A *BuildError for text that is not a document.
+func LoadDocument(text string) (*Document, error) {
+	defer pin()()
+	c := C.CString(text)
+	defer C.free(unsafe.Pointer(c))
+	return newDocument(C.cadaclysm_blacksmith_document_load(c), "document_load")
+}
+
+// OpenDocument is the document saved in the file at path.
+func OpenDocument(path string) (*Document, error) {
+	text, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadDocument(string(text))
+}
+
+// DocumentKinds is every node kind the library knows, as the JSON text of an array of rows
+// (name, inputs, output, cost, help) -- Python's Document.kinds(). Needs no document.
+func DocumentKinds() (string, error) {
+	defer pin()()
+	return ownedText(C.cadaclysm_blacksmith_document_kinds(), "document_kinds")
+}
+
+// NewBimDocument is an empty building document: the blacksmith kinds and the bim.* ones,
+// holding a hidden bim.project node whose random guid seeds every IFC GlobalId it exports
+// -- Python's Document.new_bim(units).
+func NewBimDocument(units string) (*Document, error) {
+	defer pin()()
+	c := C.CString(units)
+	defer C.free(unsafe.Pointer(c))
+	return newDocument(C.cadaclysm_bim_document_new(c), "bim_document_new")
+}
+
+// LoadBimDocument is a building document Save wrote as text, opened with the bim.* kinds.
+func LoadBimDocument(text string) (*Document, error) {
+	defer pin()()
+	c := C.CString(text)
+	defer C.free(unsafe.Pointer(c))
+	return newDocument(C.cadaclysm_bim_document_load(c), "bim_document_load")
+}
+
+// OpenBimDocument is the building document saved in the file at path.
+func OpenBimDocument(path string) (*Document, error) {
+	text, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadBimDocument(string(text))
+}
+
+// BimKinds is every node kind a building document knows, the blacksmith's and the bim.*
+// ones, as DocumentKinds lists them. Needs no document.
+func BimKinds() (string, error) {
+	defer pin()()
+	return ownedText(C.cadaclysm_bim_kinds(), "bim_kinds")
+}
+
+// ExportIfc is the building as IFC text. options is C's JSON, every key optional --
+// {"schema": "IFC4" | "IFC2X3", "geometry": "parametric" | "exact", "timestamp": <Unix
+// seconds>, "name": <IfcProject name>} -- and "" takes every default (IFC4, parametric, now,
+// no name). A refused export is a *BuildError with the library's text verbatim:
+// `bim_document_export_ifc: {"refusals": [{"node": <id> | null, "reason": <text>}]}`.
+func (d *Document) ExportIfc(options string) (string, error) {
+	opts, free := cOptional(options)
+	defer free()
+	return d.text("bim_document_export_ifc", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_bim_document_export_ifc(h, opts)
+	})
+}
+
+// Save is the document as JSON text; write it to a file yourself.
+func (d *Document) Save() (string, error) {
+	return d.text("document_save", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_save(h)
+	})
+}
+
+// Apply applies one op, as JSON text (`{"op": "add", "node": {...}}`, set, remove, rename,
+// param), and records it as one commit with message ("" for none). The changed set's JSON
+// text, {"added": [ids], "changed": [ids], "removed": [ids], "params": [names]}.
+func (d *Document) Apply(op, message string) (string, error) {
+	cop := C.CString(op)
+	defer C.free(unsafe.Pointer(cop))
+	msg, free := cOptional(message)
+	defer free()
+	return d.text("document_apply", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_apply(h, cop, msg)
+	})
+}
+
+// AddSolid is a node holding solid exactly as it is -- a solid.body (a sheet.body with
+// sheet) carrying the kernel's own B-rep ([Solid.DocumentBody]), in this document's units,
+// its colours kept. Its id is returned.
+func (d *Document) AddSolid(solid *Solid, sheet bool) (string, error) {
+	body, err := solid.DocumentBody()
+	if err != nil {
+		return "", err
+	}
+	kind := "solid.body"
+	if sheet {
+		kind = "sheet.body"
+	}
+	return d.addHolding(`{"op": "add", "node": {"kind": "` + kind + `", "body": ` + body + `}}`)
+}
+
+// AddProfile is a profile.path node holding profile exactly ([Profile.DocumentPath]: arcs
+// and NURBS as they are, holes included, its colour kept), in this document's units. Its
+// id is returned.
+func (d *Document) AddProfile(profile *Profile) (string, error) {
+	path, err := profile.DocumentPath()
+	if err != nil {
+		return "", err
+	}
+	return d.addHolding(`{"op": "add", "node": {"kind": "profile.path", "path": ` + path + `}}`)
+}
+
+func (d *Document) addHolding(op string) (string, error) {
+	changed, err := d.Apply(op, "")
+	if err != nil {
+		return "", err
+	}
+	var set struct {
+		Added []string `json:"added"`
+	}
+	if json.Unmarshal([]byte(changed), &set) != nil || len(set.Added) == 0 {
+		return "", &BuildError{Message: fmt.Sprintf("document_apply: no node was added (%s)", changed)}
+	}
+	return set.Added[0], nil
+}
+
+// Params is the parameters as the JSON text of an object, name to value (a number, or an
+// "=expression"). Read-only: set one with a param op through Apply.
+func (d *Document) Params() (string, error) {
+	return d.text("document_params", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_params(h)
+	})
+}
+
+// Batch runs body with a batch open: the ops it applies are live and recorded as one
+// commit with message ("" for none) when it returns nil; an empty batch records nothing.
+// When body returns an error (or panics), every op of the batch is rolled back and that
+// error (or panic) is passed on -- a refused roll-back never hides it. Python's
+// `with doc.batch(message):`. A batch or preview already open is refused as
+// "document_batch_begin: ...".
+func (d *Document) Batch(message string, body func() error) error {
+	msg, free := cOptional(message)
+	defer free()
+	if err := d.begin("document_batch_begin", func(h *C.CadaclysmBlacksmithDocument) bool {
+		return bool(C.cadaclysm_blacksmith_document_batch_begin(h, msg))
+	}); err != nil {
+		return err
+	}
+	return d.scope(body, d.batchAbort, d.batchEnd)
+}
+
+// Preview runs body with a preview open: the ops it applies evaluate but are never
+// recorded, and are taken back when it returns, normally or with an error (or a panic),
+// which is passed on -- a refused clean-up never hides it. Python's `with doc.preview():`.
+// A batch or preview already open is refused as "document_preview_begin: ...".
+func (d *Document) Preview(body func() error) error {
+	if err := d.begin("document_preview_begin", func(h *C.CadaclysmBlacksmithDocument) bool {
+		return bool(C.cadaclysm_blacksmith_document_preview_begin(h))
+	}); err != nil {
+		return err
+	}
+	return d.scope(body, d.endPreview, d.endPreview)
+}
+
+func (d *Document) begin(what string, call func(*C.CadaclysmBlacksmithDocument) bool) error {
+	defer pin()()
+	h, err := d.h()
+	if err != nil {
+		return err
+	}
+	ok := call(h)
+	runtime.KeepAlive(d)
+	if !ok {
+		return failure(what)
+	}
+	return nil
+}
+
+// scope runs body, then end on a nil return or cleanup on an error or a panic, whose own
+// refusal is dropped: the body's error is the one to report.
+func (d *Document) scope(body func() error, cleanup, end func() error) error {
+	done := false
+	defer func() {
+		if !done { // body panicked: clean up, and let the panic go on
+			_ = cleanup()
+		}
+	}()
+	if err := body(); err != nil {
+		done = true
+		_ = cleanup()
+		return err
+	}
+	done = true
+	return end()
+}
+
+func (d *Document) batchEnd() error {
+	_, err := d.text("document_batch_end", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_batch_end(h)
+	})
+	return err
+}
+
+func (d *Document) batchAbort() error {
+	_, err := d.text("document_batch_abort", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_batch_abort(h)
+	})
+	return err
+}
+
+func (d *Document) endPreview() error {
+	_, err := d.EndPreview()
+	return err
+}
+
+// PreviewFrame is one drag frame: op (JSON text) applied without being recorded, after
+// taking back the last frame, so each frame is relative to the state before the drag and
+// never stacks. The changed set's JSON text. Needs no Preview scope; EndPreview takes the
+// drag back.
+func (d *Document) PreviewFrame(op string) (string, error) {
+	cop := C.CString(op)
+	defer C.free(unsafe.Pointer(cop))
+	return d.text("document_preview", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_preview(h, cop)
+	})
+}
+
+// EndPreview takes back an open preview or drag; the changed set's JSON text.
+func (d *Document) EndPreview() (string, error) {
+	return d.text("document_end_preview", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_end_preview(h)
+	})
+}
+
+// Undo takes back the head commit; false when there was nothing to take back.
+func (d *Document) Undo() (bool, error) {
+	text, err := d.text("document_undo", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_undo(h)
+	})
+	return err == nil && strings.TrimSpace(text) != "null", err
+}
+
+// Redo puts back the commit Undo took back; false when there was nothing to put back.
+func (d *Document) Redo() (bool, error) {
+	text, err := d.text("document_redo", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_redo(h)
+	})
+	return err == nil && strings.TrimSpace(text) != "null", err
+}
+
+// Branches is the branch list's JSON text: {"branches": {name: commit}, "branch":
+// name|null, "head": commit, "unnamed": [commit], "can_undo": bool, "can_redo": bool} --
+// where Python's branch, branches, head, can_undo and can_redo are read from.
+func (d *Document) Branches() (string, error) {
+	return d.text("document_branch_list", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_branch_list(h)
+	})
+}
+
+// BranchNew is a new branch name. With at "" it starts at the head and the document
+// switches onto it; with at a commit id it starts there.
+func (d *Document) BranchNew(name, at string) error {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	cat, free := cOptional(at)
+	defer free()
+	_, err := d.text("document_branch_new", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_branch_new(h, cname, cat)
+	})
+	return err
+}
+
+// Switch moves the head to the branch of that name, else to the commit of that id (which
+// detaches the head: Branches' "branch" is then null). The nodes follow.
+func (d *Document) Switch(nameOrCommitID string) error {
+	c := C.CString(nameOrCommitID)
+	defer C.free(unsafe.Pointer(c))
+	_, err := d.text("document_branch_switch", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_branch_switch(h, c)
+	})
+	return err
+}
+
+// BranchRename renames branch old to newName; refused when old is missing or newName is taken.
+func (d *Document) BranchRename(old, newName string) error {
+	cold, cnew := C.CString(old), C.CString(newName)
+	defer C.free(unsafe.Pointer(cold))
+	defer C.free(unsafe.Pointer(cnew))
+	return d.begin("document_branch_rename", func(h *C.CadaclysmBlacksmithDocument) bool {
+		return bool(C.cadaclysm_blacksmith_document_branch_rename(h, cold, cnew))
+	})
+}
+
+// BranchDelete deletes branch name; the current branch is refused. Its commits stay, as tips.
+func (d *Document) BranchDelete(name string) error {
+	c := C.CString(name)
+	defer C.free(unsafe.Pointer(c))
+	return d.begin("document_branch_delete", func(h *C.CadaclysmBlacksmithDocument) bool {
+		return bool(C.cadaclysm_blacksmith_document_branch_delete(h, c))
+	})
+}
+
+// Tips is the tips of the lines no branch names -- what an undo followed by an edit leaves
+// behind -- as the JSON text of whole commits, [{"id", "parents", "message"?, "author"?,
+// "time"?, "ops"}].
+func (d *Document) Tips() (string, error) {
+	return d.text("document_tips", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_tips(h)
+	})
+}
+
+// Log is the commits of branch's line, newest first, the root c0 last, as Tips' JSON text;
+// branch "" is the line from the head back to the root.
+func (d *Document) Log(branch string) (string, error) {
+	c, free := cOptional(branch)
+	defer free()
+	return d.text("document_log", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_log(h, c)
+	})
+}
+
+// Evaluate evaluates the nodes that are stale (only the cheap kinds with cheapOnly); the
+// JSON text of every node's status, [{"id", "state": "ok"|"error"|"blocked"|"pending", ...}].
+func (d *Document) Evaluate(cheapOnly bool) (string, error) {
+	return d.text("document_evaluate", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_evaluate(h, C.bool(cheapOnly))
+	})
+}
+
+// Errors is the JSON text of the nodes the evaluation left in error or blocked,
+// [{"id", "state", "message"}]. Evaluates first.
+func (d *Document) Errors() (string, error) {
+	if _, err := d.Evaluate(false); err != nil {
+		return "", err
+	}
+	return d.text("document_errors", func(h *C.CadaclysmBlacksmithDocument) *C.char {
+		return C.cadaclysm_blacksmith_document_errors(h)
+	})
+}
+
+// Value is node id's value as JSON text: a number, a point or list, a record, text. A
+// *BuildError for a node with none (missing, or in error). Evaluates first.
+func (d *Document) Value(id string) (string, error) {
+	return d.read(id, "document_value", func(h *C.CadaclysmBlacksmithDocument, key *C.char) *C.char {
+		return C.cadaclysm_blacksmith_document_value(h, key)
+	})
+}
+
+// ResultKind is what node id evaluated to: "solid", "sheet", "profile", "profiles",
+// "nurbs", "subd", "curve", "list" (a node run over a list: its items are id#0, id#1, ...),
+// "value", or "none" (no such node, or one that failed). Read a solid or sheet with
+// ResultSolid, a profile with ResultProfile, profiles with ResultProfiles, a curve with
+// ResultNurbsCurve, a cage with ResultSubd, anything else with Value. Evaluates first.
+func (d *Document) ResultKind(id string) (string, error) {
+	return d.read(id, "document_result_kind", func(h *C.CadaclysmBlacksmithDocument, key *C.char) *C.char {
+		return C.cadaclysm_blacksmith_document_result_kind(h, key)
+	})
+}
+
+// read evaluates, then reads call's owned text for node id.
+func (d *Document) read(id, what string, call func(*C.CadaclysmBlacksmithDocument, *C.char) *C.char) (string, error) {
+	if _, err := d.Evaluate(false); err != nil {
+		return "", err
+	}
+	key := C.CString(id)
+	defer C.free(unsafe.Pointer(key))
+	return d.text(what, func(h *C.CadaclysmBlacksmithDocument) *C.char { return call(h, key) })
+}
+
+// result evaluates, then hands take the live handle and node id's C key, under pin.
+func (d *Document) result(id string, take func(*C.CadaclysmBlacksmithDocument, *C.char) error) error {
+	if _, err := d.Evaluate(false); err != nil {
+		return err
+	}
+	defer pin()()
+	h, err := d.h()
+	if err != nil {
+		return err
+	}
+	key := C.CString(id)
+	defer C.free(unsafe.Pointer(key))
+	err = take(h, key)
+	runtime.KeepAlive(d)
+	return err
+}
+
+// ResultSolid is node id's solid or sheet, a Solid of the caller's own. A *BuildError
+// when id is not an evaluated solid or sheet. Evaluates first.
+func (d *Document) ResultSolid(id string) (out *Solid, err error) {
+	err = d.result(id, func(h *C.CadaclysmBlacksmithDocument, key *C.char) (err error) {
+		out, err = newSolid(C.cadaclysm_blacksmith_document_result_solid(h, key), "document_result_solid")
+		return err
+	})
+	return out, err
+}
+
+// ResultProfile is node id's profile, a Profile of the caller's own. Evaluates first.
+func (d *Document) ResultProfile(id string) (out *Profile, err error) {
+	err = d.result(id, func(h *C.CadaclysmBlacksmithDocument, key *C.char) (err error) {
+		out, err = newProfile(C.cadaclysm_blacksmith_document_result_profile(h, key), "document_result_profile")
+		return err
+	})
+	return out, err
+}
+
+// ResultProfiles is node id's profiles, when it is a list of profiles (or a sketch), each a
+// Profile of the caller's own; a *BuildError ("document_result_profile_count: ...")
+// otherwise. Evaluates first.
+func (d *Document) ResultProfiles(id string) (out []*Profile, err error) {
+	err = d.result(id, func(h *C.CadaclysmBlacksmithDocument, key *C.char) error {
+		n := uint32(C.cadaclysm_blacksmith_document_result_profile_count(h, key))
+		if n == none {
+			return failure("document_result_profile_count")
+		}
+		for i := uint32(0); i < n; i++ {
+			p, err := newProfile(C.cadaclysm_blacksmith_document_result_profile_at(h, key, C.uint32_t(i)), "document_result_profile_at")
+			if err != nil {
+				for _, q := range out {
+					q.Close()
+				}
+				out = nil
+				return err
+			}
+			out = append(out, p)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// ResultNurbsCurve is node id's NURBS curve, a NurbsCurve of the caller's own. Evaluates first.
+func (d *Document) ResultNurbsCurve(id string) (out *NurbsCurve, err error) {
+	err = d.result(id, func(h *C.CadaclysmBlacksmithDocument, key *C.char) (err error) {
+		out, err = newNurbsCurve(C.cadaclysm_blacksmith_document_result_nurbs_curve(h, key), "document_result_nurbs_curve", nil)
+		return err
+	})
+	return out, err
+}
+
+// ResultSubd is node id's subdivision cage, a Subd of the caller's own. Evaluates first.
+func (d *Document) ResultSubd(id string) (out *Subd, err error) {
+	err = d.result(id, func(h *C.CadaclysmBlacksmithDocument, key *C.char) (err error) {
+		out, err = newSubd(C.cadaclysm_blacksmith_document_result_subd(h, key), "document_result_subd")
+		return err
+	})
+	return out, err
+}
+
+// DocumentBody is this solid as a Document's solid.body node holds it, JSON text: the
+// kernel's own B-rep, every number as it is, and its colours (the solid's, each face's and
+// each edge's). What [Document.AddSolid] puts in a document. Needs no document.
+func (s *Solid) DocumentBody() (string, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return "", err
+	}
+	raw := C.cadaclysm_blacksmith_document_solid_body(h)
+	runtime.KeepAlive(s)
+	return ownedText(raw, "document_solid_body")
+}
+
+// DocumentPath is this profile as a Document's profile.path node holds it, JSON text:
+// {"start", "segments", "holes", "colour"}, its segments exact (lines, arcs, Beziers,
+// conics, NURBS). What [Document.AddProfile] puts in a document. Needs no document.
+func (p *Profile) DocumentPath() (string, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return "", err
+	}
+	raw := C.cadaclysm_blacksmith_document_profile_path(h)
+	runtime.KeepAlive(p)
+	return ownedText(raw, "document_profile_path")
 }

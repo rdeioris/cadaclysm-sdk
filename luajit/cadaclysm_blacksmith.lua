@@ -88,7 +88,7 @@ if not pcall(ffi.typeof, "struct CadaclysmBlacksmithMesh") then
 end
 
 --- This file's own version (the workspace's); `version()` is the loaded library's.
-M.__version__ = "0.12.0"
+M.__version__ = "0.13.0"
 
 --- What the ABI returns for "no such face" and uses for "the whole solid".
 M.NONE = 0xFFFFFFFF
@@ -98,10 +98,6 @@ M.UNITS = { m = 0, mm = 1, ["in"] = 2 }
 
 local NONE = M.NONE
 local UNITS = M.UNITS
-
--- `Assembly:pair`'s `pitch` when the caller gives none: the C ABI reads a NaN pitch as
--- "not given", the same way Python's wrapper passes `float("nan")`.
-local NAN = 0 / 0
 
 -- ---- errors -------------------------------------------------------------------
 
@@ -269,6 +265,11 @@ end
 -- Every entry point this module calls, checked when the library loads: LuaJIT
 -- resolves a symbol on first use, so a library older than this file would
 -- otherwise fail mid-build with a bare "cannot resolve symbol".
+local C
+
+-- In a block of its own (the main chunk's 200 live locals): only `bind` leaves it.
+local bind
+do
 local ENTRY_POINTS = {
   "cadaclysm_blacksmith_last_error", "cadaclysm_blacksmith_license_set", "cadaclysm_blacksmith_license_info",
   "cadaclysm_blacksmith_license_notice_count", "cadaclysm_blacksmith_build_date", "cadaclysm_blacksmith_version",
@@ -305,6 +306,8 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_extrude_faces", "cadaclysm_blacksmith_face", "cadaclysm_blacksmith_face_sheet",
   "cadaclysm_blacksmith_health", "cadaclysm_blacksmith_health_free", "cadaclysm_blacksmith_health_summary", "cadaclysm_blacksmith_health_free_edges", "cadaclysm_blacksmith_health_wires", "cadaclysm_blacksmith_health_small", "cadaclysm_blacksmith_health_crack_edges",
   "cadaclysm_blacksmith_healed", "cadaclysm_blacksmith_heal_body", "cadaclysm_blacksmith_heal_free", "cadaclysm_blacksmith_heal_summary", "cadaclysm_blacksmith_heal_fixes", "cadaclysm_blacksmith_heal_refused", "cadaclysm_blacksmith_edge_tolerance",
+  "cadaclysm_blacksmith_effective_tolerance", "cadaclysm_blacksmith_solid_tolerances",
+  "cadaclysm_blacksmith_solid_with_tolerances", "cadaclysm_blacksmith_vertex_tolerance",
   "cadaclysm_blacksmith_drop_faces", "cadaclysm_blacksmith_place", "cadaclysm_blacksmith_translate",
   "cadaclysm_blacksmith_scaled",
   "cadaclysm_blacksmith_rotate", "cadaclysm_blacksmith_mirror", "cadaclysm_blacksmith_join", "cadaclysm_blacksmith_cut",
@@ -353,6 +356,8 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_manifold", "cadaclysm_blacksmith_step", "cadaclysm_blacksmith_sat_text",
   "cadaclysm_blacksmith_sat", "cadaclysm_blacksmith_brep_text", "cadaclysm_blacksmith_brep",
   "cadaclysm_blacksmith_string_free",
+  "cadaclysm_blacksmith_3dm_bytes", "cadaclysm_blacksmith_3dm", "cadaclysm_blacksmith_assembly_3dm_bytes",
+  "cadaclysm_blacksmith_assembly_3dm", "cadaclysm_blacksmith_bytes_free",
   "cadaclysm_blacksmith_from_brep", "cadaclysm_blacksmith_brep_layout_id",
   "cadaclysm_blacksmith_svg_options_init", "cadaclysm_blacksmith_svg_text", "cadaclysm_blacksmith_svg",
   "cadaclysm_blacksmith_silhouette_beziers", "cadaclysm_blacksmith_silhouette_beziers_free",
@@ -448,11 +453,104 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_solid_value_area", "cadaclysm_blacksmith_solid_value_volume", "cadaclysm_blacksmith_solid_value_to_solid",
   "cadaclysm_blacksmith_cuboid_from_bounds", "cadaclysm_blacksmith_cuboid_around", "cadaclysm_blacksmith_cuboid_corners",
   "cadaclysm_blacksmith_cuboid_point_at", "cadaclysm_blacksmith_cuboid_closest_point", "cadaclysm_blacksmith_frame_fit",
+  "cadaclysm_blacksmith_rectangle_corners", "cadaclysm_blacksmith_rectangle_area", "cadaclysm_blacksmith_rectangle_closest_point",
+  "cadaclysm_blacksmith_rectangle_contains", "cadaclysm_blacksmith_rectangle_to_sheet", "cadaclysm_blacksmith_triangle_area",
+  "cadaclysm_blacksmith_triangle_perimeter", "cadaclysm_blacksmith_triangle_centroid", "cadaclysm_blacksmith_triangle_circumcircle",
+  "cadaclysm_blacksmith_triangle_point_at", "cadaclysm_blacksmith_triangle_barycentric", "cadaclysm_blacksmith_triangle_closest_point",
+  "cadaclysm_blacksmith_triangle_edge", "cadaclysm_blacksmith_triangle_to_sheet", "cadaclysm_blacksmith_ray_point_at",
+  "cadaclysm_blacksmith_ray_closest_point",
+  "cadaclysm_blacksmith_solid_tracked", "cadaclysm_blacksmith_solid_is_tracked", "cadaclysm_blacksmith_face_id",
+  "cadaclysm_blacksmith_face_with_id", "cadaclysm_blacksmith_face_origin_count", "cadaclysm_blacksmith_face_origin_at",
+  "cadaclysm_blacksmith_edge_id", "cadaclysm_blacksmith_edge_with_id", "cadaclysm_blacksmith_edge_origin_count",
+  "cadaclysm_blacksmith_edge_origin_at", "cadaclysm_blacksmith_origins_through",
+  "cadaclysm_blacksmith_with_attribute", "cadaclysm_blacksmith_without_attribute", "cadaclysm_blacksmith_attribute",
+  "cadaclysm_blacksmith_attribute_count", "cadaclysm_blacksmith_attribute_key_at", "cadaclysm_blacksmith_attribute_value_at",
+  "cadaclysm_blacksmith_with_face_attribute", "cadaclysm_blacksmith_without_face_attribute", "cadaclysm_blacksmith_face_attribute",
+  "cadaclysm_blacksmith_face_attribute_count", "cadaclysm_blacksmith_face_attribute_key_at",
+  "cadaclysm_blacksmith_face_attribute_value_at",
+  "cadaclysm_blacksmith_history", "cadaclysm_blacksmith_edge_history", "cadaclysm_blacksmith_history_free",
+  "cadaclysm_blacksmith_history_kept_count", "cadaclysm_blacksmith_history_kept_at",
+  "cadaclysm_blacksmith_history_modified_count", "cadaclysm_blacksmith_history_modified_at",
+  "cadaclysm_blacksmith_history_modified_output_count", "cadaclysm_blacksmith_history_modified_output_at",
+  "cadaclysm_blacksmith_history_generated_count", "cadaclysm_blacksmith_history_generated_at",
+  "cadaclysm_blacksmith_history_deleted_count", "cadaclysm_blacksmith_history_deleted_at",
+  "cadaclysm_blacksmith_edge_ref", "cadaclysm_blacksmith_find_edge", "cadaclysm_blacksmith_vertex_count",
+  "cadaclysm_blacksmith_vertex_ref", "cadaclysm_blacksmith_find_vertex",
+  "cadaclysm_blacksmith_curve_value_to_nurbs",
+  "cadaclysm_blacksmith_nurbs_curve_blend",
+  "cadaclysm_blacksmith_nurbs_curve_clone",
+  "cadaclysm_blacksmith_nurbs_curve_control_count",
+  "cadaclysm_blacksmith_nurbs_curve_control_points",
+  "cadaclysm_blacksmith_nurbs_curve_curvature",
+  "cadaclysm_blacksmith_nurbs_curve_degree",
+  "cadaclysm_blacksmith_nurbs_curve_derivatives",
+  "cadaclysm_blacksmith_nurbs_curve_divide_by_count",
+  "cadaclysm_blacksmith_nurbs_curve_divide_by_length",
+  "cadaclysm_blacksmith_nurbs_curve_domain",
+  "cadaclysm_blacksmith_nurbs_curve_elevated",
+  "cadaclysm_blacksmith_nurbs_curve_extended",
+  "cadaclysm_blacksmith_nurbs_curve_face_hits",
+  "cadaclysm_blacksmith_nurbs_curve_fit",
+  "cadaclysm_blacksmith_nurbs_curve_free",
+  "cadaclysm_blacksmith_nurbs_curve_from_edge",
+  "cadaclysm_blacksmith_nurbs_curve_from_face_isocurve",
+  "cadaclysm_blacksmith_nurbs_curve_is_closed",
+  "cadaclysm_blacksmith_nurbs_curve_is_rational",
+  "cadaclysm_blacksmith_nurbs_curve_joined",
+  "cadaclysm_blacksmith_nurbs_curve_knot_count",
+  "cadaclysm_blacksmith_nurbs_curve_knots",
+  "cadaclysm_blacksmith_nurbs_curve_length",
+  "cadaclysm_blacksmith_nurbs_curve_new",
+  "cadaclysm_blacksmith_nurbs_curve_plane_hits",
+  "cadaclysm_blacksmith_nurbs_curve_point",
+  "cadaclysm_blacksmith_nurbs_curve_point_at_length",
+  "cadaclysm_blacksmith_nurbs_curve_projected_to_face",
+  "cadaclysm_blacksmith_nurbs_curve_projected_to_plane",
+  "cadaclysm_blacksmith_nurbs_curve_pulled_to_face",
+  "cadaclysm_blacksmith_nurbs_curve_reversed",
+  "cadaclysm_blacksmith_nurbs_curve_through",
+  "cadaclysm_blacksmith_nurbs_curve_transformed",
+  "cadaclysm_blacksmith_nurbs_curve_trimmed",
+  "cadaclysm_blacksmith_nurbs_curve_tween",
+  "cadaclysm_blacksmith_nurbs_curve_weights",
+  "cadaclysm_blacksmith_loft_curves",
+  "cadaclysm_blacksmith_sweep_rail",
+  "cadaclysm_blacksmith_sweep_two_rails",
+  "cadaclysm_blacksmith_edge_surface",
+  "cadaclysm_blacksmith_network_surface",
+  "cadaclysm_blacksmith_continuity",
+  "cadaclysm_blacksmith_match_side",
+  "cadaclysm_blacksmith_blend_sides",
+  "cadaclysm_blacksmith_n_sided_patch",
+  "cadaclysm_blacksmith_fillet_surfaces",
+  "cadaclysm_blacksmith_fillet_varying",
+  "cadaclysm_blacksmith_split_by_curve",
+  "cadaclysm_blacksmith_trim_by_curve",
+  "cadaclysm_blacksmith_join_sheets",
+  "cadaclysm_blacksmith_flange",
+  "cadaclysm_blacksmith_extrude_to",
+  "cadaclysm_blacksmith_recess",
+  "cadaclysm_blacksmith_document_new", "cadaclysm_blacksmith_document_load", "cadaclysm_blacksmith_document_save",
+  "cadaclysm_blacksmith_document_apply", "cadaclysm_blacksmith_document_preview",
+  "cadaclysm_blacksmith_document_preview_begin", "cadaclysm_blacksmith_document_end_preview",
+  "cadaclysm_blacksmith_document_batch_begin", "cadaclysm_blacksmith_document_batch_end",
+  "cadaclysm_blacksmith_document_batch_abort", "cadaclysm_blacksmith_document_undo", "cadaclysm_blacksmith_document_redo",
+  "cadaclysm_blacksmith_document_params", "cadaclysm_blacksmith_document_evaluate",
+  "cadaclysm_blacksmith_document_result_kind", "cadaclysm_blacksmith_document_result_solid",
+  "cadaclysm_blacksmith_document_result_profile", "cadaclysm_blacksmith_document_result_profile_count",
+  "cadaclysm_blacksmith_document_result_profile_at", "cadaclysm_blacksmith_document_result_nurbs_curve",
+  "cadaclysm_blacksmith_document_result_subd", "cadaclysm_blacksmith_document_value",
+  "cadaclysm_blacksmith_document_errors", "cadaclysm_blacksmith_document_kinds",
+  "cadaclysm_blacksmith_document_solid_body", "cadaclysm_blacksmith_document_profile_path",
+  "cadaclysm_blacksmith_document_branch_new", "cadaclysm_blacksmith_document_branch_switch",
+  "cadaclysm_blacksmith_document_tips", "cadaclysm_blacksmith_document_branch_rename",
+  "cadaclysm_blacksmith_document_branch_delete", "cadaclysm_blacksmith_document_branch_list",
+  "cadaclysm_blacksmith_document_log", "cadaclysm_blacksmith_document_free",
+  "cadaclysm_bim_document_new", "cadaclysm_bim_document_load", "cadaclysm_bim_kinds",
+  "cadaclysm_bim_document_export_ifc",
 }
 
-local C
-
-local function bind(path)
+bind = function(path)
   local ok, loaded = pcall(ffi.load, path)
   if not ok then raise(tostring(loaded)) end
   for _, name in ipairs(ENTRY_POINTS) do
@@ -464,6 +562,7 @@ local function bind(path)
   end
   C = loaded
   return C
+end
 end
 
 local function lib()
@@ -758,9 +857,14 @@ function M.license(text_or_path)
 end
 
 --- Set a kernel option, by its name, for the whole process from the next call on:
---- "boolean.mesh_budget", "boolean.finest_tolerance", "profile_boolean.point_budget" or
---- "measure.default_accuracy". Raises -- and changes nothing -- for a name that is not
---- an option or a value it does not take, saying which and what it takes.
+--- "boolean.mesh_budget", "boolean.finest_tolerance", "profile_boolean.point_budget",
+--- "measure.default_accuracy", "step.validation_properties",
+--- "step.validation_accuracy", "tolerance.relative" or
+--- "tolerance.angular". Raises -- and changes nothing -- for a name that is not
+--- an option or a value it does not take, saying which and what it takes. The last two
+--- stamp a written STEP part file with each body's measured area, volume and centroid,
+--- there for the kernel that reads the file to check the transfer against; off by
+--- default, since it measures every body in the file at "step.validation_accuracy" (1e-5).
 function M.set_option(name, value)
   if not lib().cadaclysm_blacksmith_option_set(tostring(name), tonumber(value)) then
     fail("option '" .. tostring(name) .. "' refused")
@@ -775,6 +879,47 @@ function M.option(name)
     fail("no option '" .. tostring(name) .. "'")
   end
   return out[0]
+end
+
+-- Tolerances. Every default stays what it is: `a:join(b)` still means 0.05. Passing 0 (or
+-- NaN, `0/0`) as the `tolerance` of a verb that takes a distance tolerance -- a boolean,
+-- fillet, shell, split, section, hit test, mesh, curve fit or profile verb -- opts into the
+-- model's own: `effective_tolerance(...)`, the larger of the loosest absolute tolerance the
+-- inputs declare and the option "tolerance.relative" (default 1e-4) times their size; nil is
+-- still the verb's default. A solid declares what its file said (`Solid.tolerances`, nil for
+-- what it did not say; the reader's `Scene.tolerances` is the file's), every verb's result
+-- inherits the loosest of its inputs', and `Solid:with_tolerances` sets it.
+-- "tolerance.angular" (default one degree) stands in where nothing declares an angle.
+
+--- What a solid declares about its own precision: `absolute`, a length in the model's own
+--- units, and `angular`, in radians -- each nil where nothing declared it. What
+--- `Solid.tolerances` returns.
+---@class Tolerances
+---@field absolute number|nil
+---@field angular number|nil
+local Tolerances = {}
+Tolerances.__index = Tolerances
+M.Tolerances = Tolerances
+
+
+--- The tolerance a verb given a tolerance of 0 (or NaN) works at over the solids given: the
+--- larger of the loosest absolute tolerance they declare (`Solid.tolerances`) and
+--- `option("tolerance.relative")` times the largest of their sizes, never finer than their
+--- coordinates can represent. 0 for no solids, or solids with nothing to size by -- which a
+--- verb refuses.
+---@return number
+function M.effective_tolerance(...)
+  local solids = { ... }
+  local out = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(#solids, 1))
+  for i, s in ipairs(solids) do
+    if type(s) ~= "table" or s._h == nil then
+      raise("effective_tolerance: expected a Solid, got " .. tostring(s))
+    end
+    out[i - 1] = s:_h()
+  end
+  local t = lib().cadaclysm_blacksmith_effective_tolerance(out, #solids)
+  if t ~= t then fail("effective_tolerance") end
+  return t
 end
 
 --- One line about the license the library is running under. Never empty: the
@@ -2429,9 +2574,18 @@ end
 
 -- -- combining
 
+-- One verb to the caller: a tracked result's merge reads its origins back through the
+-- boolean's (`origins_through`), so it names this solid as operand 0 and `other` as 1,
+-- not the faces between the two steps. Both intermediates are freed.
 local function merged(out, merge)
   if not merge then return out end
-  local ok, result = pcall(out.merge_flush, out)
+  local ok, result = pcall(function()
+    local flushed = out:merge_flush()
+    if not out.is_tracked then return flushed end
+    local through = new_solid(lib().cadaclysm_blacksmith_origins_through(flushed:_h(), out:_h()), "origins_through")
+    flushed:close()
+    return through
+  end)
   out:close()
   if not ok then error(result, 0) end
   return result
@@ -3024,6 +3178,49 @@ function Solid:edge_tolerance(edge)
   return t
 end
 
+--- What this solid declares about its own precision, as `Tolerances`: read from its file,
+--- inherited through every verb from the loosest of its inputs, or set by `with_tolerances`;
+--- nil in a field nothing declared. A verb given a tolerance of 0 works at
+--- `effective_tolerance`, which takes it into account.
+function Solid_get.tolerances(self)
+  local absolute, angular = ffi.new("double[1]"), ffi.new("double[1]")
+  if not lib().cadaclysm_blacksmith_solid_tolerances(self:_h(), absolute, angular) then fail("solid_tolerances") end
+  local declared = function(v) if v ~= v then return nil end return v end
+  return setmetatable({ absolute = declared(absolute[0]), angular = declared(angular[0]) }, M.Tolerances)
+end
+
+--- A new solid: this one declaring `absolute` (a length) and `angular` (radians) instead of
+--- what it declared, its name, paint and marks kept. nil or 0 (or NaN) declares nothing for
+--- that field; a negative or infinite value raises `BuildError`.
+---@param absolute number|nil
+---@param angular number|nil
+---@return Solid
+function Solid:with_tolerances(absolute, angular)
+  local function given(v, field)
+    if v == nil then return 0 / 0 end
+    if type(v) ~= "number" then raise("solid_with_tolerances: " .. field .. " must be a number or nil, got " .. tostring(v)) end
+    return v
+  end
+  return new_solid(lib().cadaclysm_blacksmith_solid_with_tolerances(self:_h(), given(absolute, "absolute"), given(angular, "angular")))
+end
+
+--- How loose this solid's vertex at `point` ({x, y, z}) is, where its producer said (an OCCT
+--- `.brep` records one per vertex): the tolerance of the nearest recorded vertex within its
+--- own tolerance of `point`. nil where none is recorded there.
+---@param point number[]
+---@return number|nil
+function Solid:vertex_tolerance(point)
+  if type(point) ~= "table" or type(point[1]) ~= "number" or type(point[2]) ~= "number" or type(point[3]) ~= "number" then
+    raise("vertex_tolerance: a point is three numbers, got " .. tostring(point))
+  end
+  local t = lib().cadaclysm_blacksmith_vertex_tolerance(self:_h(), point[1], point[2], point[3])
+  if t ~= t then
+    if last_error() ~= "" then fail("vertex_tolerance") end
+    return nil
+  end
+  return t
+end
+
 end
 
 -- -- naming
@@ -3247,6 +3444,20 @@ end
 function Solid:sat(path, unit)
   if unit == nil then unit = "mm" end
   M.write_sat(path, { self }, unit)
+end
+
+--- This solid as a Rhino `.3dm`'s bytes (a Lua string): its exact brep, named and
+--- coloured as the solid is; `unit` as `rhino3dm_bytes`.
+function Solid:rhino3dm_bytes(unit)
+  if unit == nil then unit = "mm" end
+  return M.rhino3dm_bytes({ self }, unit)
+end
+
+--- Write this solid to a Rhino `.3dm` at `path`, by the library itself; `unit` as
+--- `rhino3dm_bytes`.
+function Solid:write_3dm(path, unit)
+  if unit == nil then unit = "mm" end
+  M.write_3dm(path, { self }, unit)
 end
 
 --- This solid as OCCT `.brep` text; see `write_brep_text`.
@@ -3505,12 +3716,14 @@ end
 
 -- The containment codes of the C ABI (OUTSIDE 0, INSIDE 1, ON 2) as Python's strings. Any other
 -- code is a refusal naming the call, never a guess.
-local CONTAINMENT = { [0] = "outside", "inside", "on" }
-
-local function containment(code, what)
-  local name = CONTAINMENT[code]
-  if name == nil then raise(what .. ": the library answered " .. tostring(code) .. ", not a containment code") end
-  return name
+local containment
+do
+  local names = { [0] = "outside", "inside", "on" }
+  containment = function(code, what)
+    local name = names[code]
+    if name == nil then raise(what .. ": the library answered " .. tostring(code) .. ", not a containment code") end
+    return name
+  end
 end
 
 -- An edge index: a whole number a uint32 holds. Refused, named, before the library is asked.
@@ -3816,6 +4029,386 @@ function Solid:find_face(face_ref, hint, tolerance)
   return found
 end
 
+--- Edge `edge` (an index into `edges`, from zero) by what it is, fifteen numbers:
+--- its kind (line 0, circle 1, ellipse 2, B-spline 3, other 4), its midpoint
+--- (x y z), its unit tangent there (x y z), its length, the outward normals there
+--- of the two faces meeting on it (x y z each; an open sheet's rim gives the one
+--- face's twice), and its span -- how far from the midpoint `find_edge` may find
+--- it on a resized solid. `face_ref`'s twin. Raises `BuildError` for an edge past
+--- the table or one with no length to measure.
+function Solid:edge_ref(edge)
+  local out = ffi.new("double[15]")
+  if not lib().cadaclysm_blacksmith_edge_ref(self:_h(), edge, out) then fail("edge_ref") end
+  local t = {}
+  for i = 0, 14 do t[i + 1] = out[i] end
+  return t
+end
+
+--- The edge `edge_ref` (from `edge_ref`) refers to: of the edges of that kind
+--- passing within `tolerance` (default 1e-3) of its midpoint and running the same
+--- way, the one of nearest length; where none does (the solid was resized), the
+--- edge of that kind running the same way between faces facing the same two ways,
+--- the only one or the one clearly nearest, no farther than the span. Nil where
+--- the edge is gone. Raises `BuildError` for a malformed reference or a tolerance
+--- not positive.
+function Solid:find_edge(edge_ref, tolerance)
+  if type(edge_ref) ~= "table" or #edge_ref ~= 15 then
+    raise("find_edge: an edge reference is fifteen finite numbers")
+  end
+  local ref = ffi.new("double[15]", edge_ref)
+  local found = lib().cadaclysm_blacksmith_find_edge(self:_h(), ref, tolerance or 1e-3)
+  if found == -2 then fail("find_edge") end
+  if found < 0 then return nil end
+  return found
+end
+
+--- How many vertices this solid has: its edges' ends, welded, in the order
+--- `vertex_ref` and `find_vertex` index.
+function Solid_get.vertex_count(self)
+  local n = lib().cadaclysm_blacksmith_vertex_count(self:_h())
+  if n == 0 and last_error() ~= "" then fail("vertex_count") end
+  return n
+end
+
+--- Vertex `vertex` (from zero) by where it is: `{x, y, z}`. Raises `BuildError`
+--- for a vertex the solid does not have.
+function Solid:vertex_ref(vertex)
+  local out = ffi.new("double[3]")
+  if not lib().cadaclysm_blacksmith_vertex_ref(self:_h(), vertex, out) then fail("vertex_ref") end
+  return { out[0], out[1], out[2] }
+end
+
+--- The vertex nearest `vertex_ref` (any point `{x, y, z}`: a `vertex_ref`, or one
+--- picked) within `tolerance` (default 1e-3); nil where no vertex is that near.
+--- Raises `BuildError` for a point that is not three finite numbers or a
+--- tolerance not positive.
+function Solid:find_vertex(vertex_ref, tolerance)
+  if type(vertex_ref) ~= "table" or #vertex_ref ~= 3 then
+    raise("find_vertex: a vertex reference is three finite numbers")
+  end
+  local ref = ffi.new("double[3]", vertex_ref)
+  local found = lib().cadaclysm_blacksmith_find_vertex(self:_h(), ref, tolerance or 1e-3)
+  if found == -2 then fail("find_vertex") end
+  if found < 0 then return nil end
+  return found
+end
+
+-- -- identity: ids on faces and edges, where each came from, and a verb's history
+
+--- What a verb did to its inputs' faces (or edges), read off the result's ids and
+--- origins alone (`Solid:history`, `Solid:edge_history`): a table of four Lua
+--- arrays. An input is named `{operand, id}`: the operand its index in the inputs
+--- as passed (the verb's operand order: a boolean's target 0, its tool 1), the id
+--- its `face_id`. Every list is in (operand, id) order, `generated` in id order.
+--- Ids are Lua numbers (they count up from 1 per solid, far below 2^53).
+---@class History
+---@field kept table  `{ {operand, id}, out_id }` each: an input that became exactly one output, keeping its id
+---@field modified table  `{ {operand, id}, {out_ids...} }` each: an input split, merged or renumbered
+---@field generated table  the ids of the outputs with no origin (a fillet's round, a split's cut faces)
+---@field deleted table  `{operand, id}` each: the inputs no output names (a cut tool's caps)
+local History = {}
+History.__index = History
+History.__tostring = function(h)
+  return ("History(kept=%d, modified=%d, generated=%d, deleted=%d)"):format(#h.kept, #h.modified, #h.generated, #h.deleted)
+end
+M.History = History
+
+-- The four lists of history handle `h`, read whole; the caller frees it.
+local function read_history(L, h)
+  local operand, id, out = ffi.new("uint32_t[1]"), ffi.new("uint64_t[1]"), ffi.new("uint64_t[1]")
+  local kept, modified, generated, deleted = {}, {}, {}, {}
+  for i = 0, L.cadaclysm_blacksmith_history_kept_count(h) - 1 do
+    if not L.cadaclysm_blacksmith_history_kept_at(h, i, operand, id, out) then fail("history_kept_at") end
+    kept[#kept + 1] = { { tonumber(operand[0]), tonumber(id[0]) }, tonumber(out[0]) }
+  end
+  for i = 0, L.cadaclysm_blacksmith_history_modified_count(h) - 1 do
+    if not L.cadaclysm_blacksmith_history_modified_at(h, i, operand, id) then fail("history_modified_at") end
+    local n = L.cadaclysm_blacksmith_history_modified_output_count(h, i)
+    if n == NONE then fail("history_modified_output_count") end
+    local outs = {}
+    for j = 0, n - 1 do outs[j + 1] = tonumber(L.cadaclysm_blacksmith_history_modified_output_at(h, i, j)) end
+    modified[#modified + 1] = { { tonumber(operand[0]), tonumber(id[0]) }, outs }
+  end
+  for i = 0, L.cadaclysm_blacksmith_history_generated_count(h) - 1 do
+    generated[i + 1] = tonumber(L.cadaclysm_blacksmith_history_generated_at(h, i))
+  end
+  for i = 0, L.cadaclysm_blacksmith_history_deleted_count(h) - 1 do
+    if not L.cadaclysm_blacksmith_history_deleted_at(h, i, operand, id) then fail("history_deleted_at") end
+    deleted[#deleted + 1] = { tonumber(operand[0]), tonumber(id[0]) }
+  end
+  return setmetatable({ kept = kept, modified = modified, generated = generated, deleted = deleted }, History)
+end
+
+-- An id argument: a whole Lua number from 0 up (ids count up from 1 and never reach 2^53).
+local function id_arg(value, what)
+  if type(value) ~= "number" or value ~= math.floor(value) or value < 0 or value >= 2 ^ 64 then
+    raise(("%s: %s is not an id (a whole number from 0)"):format(what, repr(value)))
+  end
+  return value
+end
+
+local function text_arg(value, what, role)
+  if type(value) ~= "string" then raise(("%s: a %s is a string, not %s"):format(what, role, type(value))) end
+  return value
+end
+
+-- `pairs_or_map` (a table key -> value, or an array of `{key, value}`) in key order.
+local function sorted_attributes(pairs_or_map, what)
+  if type(pairs_or_map) ~= "table" then raise(what .. ": expected a table, got " .. repr(pairs_or_map)) end
+  local list = {}
+  for k, v in pairs(pairs_or_map) do
+    if type(k) == "number" and type(v) == "table" then
+      list[#list + 1] = { v[1], v[2] }
+    else
+      list[#list + 1] = { k, v }
+    end
+  end
+  for _, kv in ipairs(list) do text_arg(kv[1], what, "key"); text_arg(kv[2], what, "value") end
+  table.sort(list, function(a, b) return a[1] < b[1] end)
+  return list
+end
+
+-- Apply `step(solid, key, value)` for each pair in key order, freeing each intermediate.
+local function each_attribute(self, list, step)
+  local out = self
+  for _, kv in ipairs(list) do
+    local ok, nxt = pcall(step, out, kv[1], kv[2])
+    if out ~= self then out:close() end
+    if not ok then error(nxt, 0) end
+    out = nxt
+  end
+  return out
+end
+
+--- This solid tracked: its faces numbered 1..n in face order and its edges 1..m in
+--- the edge table's order, each its own origin. Tracking is opt-in and rides on
+--- from here: a verb on a tracked solid gives a tracked result, its faces keeping
+--- the ids of the faces they lie on and naming those as their origins. A tracked
+--- solid comes back as it is.
+function Solid:tracked()
+  return new_solid(lib().cadaclysm_blacksmith_solid_tracked(self:_h()), "solid_tracked")
+end
+
+--- Whether this solid carries face and edge ids (`tracked`, made from a tracked
+--- solid, or given an attribute).
+function Solid_get.is_tracked(self)
+  local tracked = lib().cadaclysm_blacksmith_solid_is_tracked(self:_h())
+  if not tracked and last_error() ~= "" then fail("solid_is_tracked") end
+  return tracked
+end
+
+-- The helpers below take what the C call returned, not its name: each call is spelled out
+-- where it is made, so the bindings parity check can see it. They hang off
+-- `Solid`, not locals: the main chunk is at LuaJIT's 200-local limit.
+
+function Solid._id_of(id, what)
+  if id == 0 then
+    if last_error() ~= "" then fail(what) end
+    return nil
+  end
+  return tonumber(id)
+end
+
+function Solid._with_id(found, what)
+  if found == NONE then
+    if last_error() ~= "" then fail(what) end
+    return nil
+  end
+  return found
+end
+
+-- `n` is the C origin count; `at(i, operand, id)` the C `_origin_at` for origin `i`.
+function Solid._origins(n, at, kind)
+  if n == NONE then fail(kind .. "_origin_count") end
+  local operand, id = ffi.new("uint32_t[1]"), ffi.new("uint64_t[1]")
+  local out = {}
+  for i = 0, n - 1 do
+    if not at(i, operand, id) then fail(kind .. "_origin_at") end
+    out[i + 1] = { tonumber(operand[0]), tonumber(id[0]) }
+  end
+  return out
+end
+
+--- Face `face`'s id (a Lua number), nil where this solid is untracked. An id stays
+--- with its face through every verb that keeps the face -- a move, a boolean, a
+--- fillet of another edge -- so it names "the same face, through my edits" within
+--- a session; a piece split off, a later operand's face whose id an earlier one
+--- already has, and a face on no input get fresh ids, the same run after run. Ids
+--- are not written to files: to find a face on a model rebuilt or read again, use
+--- `face_ref`. Raises `BuildError` for a face the solid does not have.
+function Solid:face_id(face)
+  return Solid._id_of(lib().cadaclysm_blacksmith_face_id(self:_h(), face), "face_id")
+end
+
+--- The face whose id is `id`, nil where no face has it (an untracked solid, a face
+--- a verb deleted).
+function Solid:face_with_id(id)
+  return Solid._with_id(lib().cadaclysm_blacksmith_face_with_id(self:_h(), id_arg(id, "face_with_id")), "face_with_id")
+end
+
+--- The input faces face `face` came from, an array of `{operand, id}`: the operand
+--- its input's index in the verb's operand order (a boolean's target 0, its tool
+--- 1), the id that input face's `face_id`. The face it lies on most first; empty
+--- for a face the verb generated (a fillet's round, a split's cut face) or an
+--- untracked solid; more than one for a face merged from several (`join` with
+--- `merge`). Raises `BuildError` for a face the solid does not have.
+function Solid:face_origins(face)
+  local L, h = lib(), self:_h()
+  return Solid._origins(L.cadaclysm_blacksmith_face_origin_count(h, face),
+    function(i, operand, id) return L.cadaclysm_blacksmith_face_origin_at(h, face, i, operand, id) end, "face")
+end
+
+--- Edge `edge`'s id (an index into `edges`, from zero), as `face_id`.
+function Solid:edge_id(edge)
+  return Solid._id_of(lib().cadaclysm_blacksmith_edge_id(self:_h(), edge), "edge_id")
+end
+
+--- The edge whose id is `id`, nil where no edge has it.
+function Solid:edge_with_id(id)
+  return Solid._with_id(lib().cadaclysm_blacksmith_edge_with_id(self:_h(), id_arg(id, "edge_with_id")), "edge_with_id")
+end
+
+--- The input edge edge `edge` lies on, as `face_origins`: one `{operand, id}`, or
+--- none for a new edge (edge merges are not seen).
+function Solid:edge_origins(edge)
+  local L, h = lib(), self:_h()
+  return Solid._origins(L.cadaclysm_blacksmith_edge_origin_count(h, edge),
+    function(i, operand, id) return L.cadaclysm_blacksmith_edge_origin_at(h, edge, i, operand, id) end, "edge")
+end
+
+-- `call(handles, n)` is the C `history` or `edge_history` on this solid.
+function Solid:_history(what, call, ...)
+  local L = lib()
+  local n = select("#", ...)
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle((select(i, ...)), what) end
+  local h = call(handles, n)
+  if h == nil then fail(what) end
+  local ok, result = pcall(read_history, L, h)
+  L.cadaclysm_blacksmith_history_free(h)
+  if not ok then error(result, 0) end
+  return result
+end
+
+--- What the verb that made this solid did to the faces of the solids given --
+--- passed in its operand order (`a:cut(b):history(a, b)`) -- read off this
+--- solid's ids and origins alone, as a `History`. Raises `BuildError` where this
+--- solid or an input is untracked, or an origin names an operand past the inputs.
+function Solid:history(...)
+  return self:_history("history",
+    function(handles, n) return lib().cadaclysm_blacksmith_history(self:_h(), handles, n) end, ...)
+end
+
+--- `history` for the edges, by edge id.
+function Solid:edge_history(...)
+  return self:_history("edge_history",
+    function(handles, n) return lib().cadaclysm_blacksmith_edge_history(self:_h(), handles, n) end, ...)
+end
+
+-- -- attributes: text on a solid (written to STEP files) and on its faces (in memory)
+
+--- This solid's attributes, an array of `{key, value}` in key order (a copy). A
+--- solid's attributes go with it through every verb (a verb's result takes its
+--- first operand's) and are written to STEP files as user-defined attributes.
+function Solid_get.attributes(self)
+  local L, h = lib(), self:_h()
+  local n = L.cadaclysm_blacksmith_attribute_count(h)
+  if n == 0 and last_error() ~= "" then fail("attribute_count") end
+  local out = {}
+  for i = 0, n - 1 do
+    local k, v = L.cadaclysm_blacksmith_attribute_key_at(h, i), L.cadaclysm_blacksmith_attribute_value_at(h, i)
+    if k == nil or v == nil then fail("attributes") end
+    out[i + 1] = { ffi.string(k), ffi.string(v) }
+  end
+  return out
+end
+
+--- Attribute `key`, nil where this solid has none.
+function Solid:attribute(key)
+  local raw = lib().cadaclysm_blacksmith_attribute(self:_h(), text_arg(key, "attribute", "key"))
+  if raw == nil then
+    if last_error() ~= "" then fail("attribute") end
+    return nil
+  end
+  return ffi.string(raw)
+end
+
+--- This solid with attribute `key` set to `value`, over any it had: a new solid,
+--- tracked if this one was not. Keys and values are text (no NUL); an empty key is
+--- refused.
+function Solid:with_attribute(key, value)
+  local what = "with_attribute"
+  return new_solid(lib().cadaclysm_blacksmith_with_attribute(self:_h(), text_arg(key, what, "key"),
+    text_arg(value, what, "value")), what)
+end
+
+--- This solid with every attribute given set, in key order: `attributes` a table
+--- key -> value, or an array of `{key, value}`.
+function Solid:with_attributes(attributes)
+  return each_attribute(self, sorted_attributes(attributes, "with_attributes"),
+    function(s, k, v) return s:with_attribute(k, v) end)
+end
+
+--- This solid without attribute `key`: a new solid, equal to this one where it
+--- had none.
+function Solid:without_attribute(key)
+  local what = "without_attribute"
+  return new_solid(lib().cadaclysm_blacksmith_without_attribute(self:_h(), text_arg(key, what, "key")), what)
+end
+
+--- Face `face`'s attributes, an array of `{key, value}` in key order (a copy). A
+--- face's attributes follow its id: kept through a verb, and copied to every face
+--- that names it as an origin (each piece of a split face has its parent's). They
+--- stay in memory: no file carries them. Raises `BuildError` for a face the solid
+--- does not have.
+function Solid:face_attributes(face)
+  local L, h = lib(), self:_h()
+  local n = L.cadaclysm_blacksmith_face_attribute_count(h, face)
+  if n == NONE then fail("face_attribute_count") end
+  local out = {}
+  for i = 0, n - 1 do
+    local k = L.cadaclysm_blacksmith_face_attribute_key_at(h, face, i)
+    local v = L.cadaclysm_blacksmith_face_attribute_value_at(h, face, i)
+    if k == nil or v == nil then fail("face_attributes") end
+    out[i + 1] = { ffi.string(k), ffi.string(v) }
+  end
+  return out
+end
+
+--- Face `face`'s attribute `key`, nil where it has none. Raises `BuildError` for a
+--- face the solid does not have.
+function Solid:face_attribute(face, key)
+  local raw = lib().cadaclysm_blacksmith_face_attribute(self:_h(), face, text_arg(key, "face_attribute", "key"))
+  if raw == nil then
+    if last_error() ~= "" then fail("face_attribute") end
+    return nil
+  end
+  return ffi.string(raw)
+end
+
+--- This solid with face `face`'s attribute `key` set to `value`: a new solid,
+--- tracked if this one was not. Refused as `with_attribute`, and for a face the
+--- solid does not have.
+function Solid:with_face_attribute(face, key, value)
+  local what = "with_face_attribute"
+  return new_solid(lib().cadaclysm_blacksmith_with_face_attribute(self:_h(), face, text_arg(key, what, "key"),
+    text_arg(value, what, "value")), what)
+end
+
+--- This solid with every attribute given set on face `face`, in key order:
+--- `attributes` as `with_attributes` takes them.
+function Solid:with_face_attributes(face, attributes)
+  return each_attribute(self, sorted_attributes(attributes, "with_face_attributes"),
+    function(s, k, v) return s:with_face_attribute(face, k, v) end)
+end
+
+--- This solid without face `face`'s attribute `key`: a new solid, equal to this
+--- one where the face had none.
+function Solid:without_face_attribute(face, key)
+  local what = "without_face_attribute"
+  return new_solid(lib().cadaclysm_blacksmith_without_face_attribute(self:_h(), face, text_arg(key, what, "key")), what)
+end
+
 -- edge_indices is needed by both fillet/chamfer and edges_coloured, so it is defined
 -- once here, ahead of the colour section that is the first to use it.
 local function edge_indices(edges, call)
@@ -3936,11 +4529,17 @@ function Solid._edge_curve(L, h, i)
 end
 
 --- The edges (`Edge` records or their indices) rounded by `radius`.
---- `tolerance` defaults to 1e-6; `progress` as `join`'s.
-function Solid:fillet(edges, radius, tolerance, progress)
+--- `tolerance` defaults to 1e-6; `progress` as `join`'s. `radius_end` (spline edges only)
+--- runs the radius linearly from `radius` to it in arc length along the edge, `radius` at the
+--- end where the edge's curve starts; nil, or equal to `radius`, is the constant fillet.
+function Solid:fillet(edges, radius, tolerance, progress, radius_end)
   if tolerance == nil then tolerance = 1e-6 end
   local arr, n = edge_indices(edges, "fillet")
   local a = self:_h()
+  if radius_end ~= nil and radius_end ~= radius then
+    return new_solid(lib().cadaclysm_blacksmith_fillet_varying(a, arr, n, number(radius, "fillet"),
+      number(radius_end, "fillet"), tolerance))
+  end
   local cb, done = progress_callback(progress)
   local h = done(lib().cadaclysm_blacksmith_fillet(a, arr, n, radius, tolerance, cb, nil))
   return new_solid(h)
@@ -8492,6 +9091,59 @@ function M.write_sat(path, solids, unit)
   if not lib().cadaclysm_blacksmith_sat(handles, n, tostring(path), UNITS[unit]) then fail("sat") end
 end
 
+-- The `.3dm` writers' two helpers, one table: the main chunk is at LuaJIT's limit of 200
+-- live locals.
+local dm3 = {}
+
+-- What a `.3dm` write did not write as itself -- `last_error` on a success, a line
+-- each -- said on standard error, one line each.
+function dm3.warn()
+  for line in last_error():gmatch("[^\n]+") do
+    io.stderr:write("3dm: ", line, "\n")
+  end
+end
+
+-- The bytes a `.3dm` call handed over (`len` a `size_t[1]`), copied out as a Lua
+-- string and released with `bytes_free` (never `string_free`), its notes warned; a
+-- null is the failure `last_error` names.
+function dm3.taken(raw, len, what)
+  if raw == nil then fail(what) end
+  dm3.warn()
+  local n = tonumber(len[0])
+  local result = ffi.string(raw, n)
+  lib().cadaclysm_blacksmith_bytes_free(raw, n)
+  return result
+end
+
+--- Several solids (a Lua array) as one Rhino `.3dm` (version 8, which Rhino 8
+--- and 9 open), as a Lua string of its bytes: one object each, its exact brep,
+--- or -- where a body has no exact form there -- its mesh, with a warning saying
+--- so. Each object is named as its solid is, coloured with the solid's own colour
+--- (a face's or an edge's own is left out) and carries the solid's attributes as
+--- user text. `unit` "mm" (default), "m" or "in" is the file's: the numbers
+--- written are the numbers held. The warnings -- one a line of what was not
+--- written as itself -- go to `io.stderr`, each starting "3dm: ".
+function M.rhino3dm_bytes(solids, unit)
+  if unit == nil then unit = "mm" end
+  if UNITS[unit] == nil then raise("unit must be one of ['in', 'm', 'mm']") end
+  local n = #solids
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle(solids[i], "rhino3dm_bytes") end
+  local len = ffi.new("size_t[1]")
+  return dm3.taken(lib().cadaclysm_blacksmith_3dm_bytes(handles, n, UNITS[unit], len), len, "3dm_bytes")
+end
+
+--- `rhino3dm_bytes` written to `path` by the library itself, which names the
+--- file in its refusal when it cannot.
+function M.write_3dm(path, solids, unit)
+  if unit == nil then unit = "mm" end
+  if UNITS[unit] == nil then raise("unit must be one of ['in', 'm', 'mm']") end
+  local n = #solids
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_3dm") end
+  if not lib().cadaclysm_blacksmith_3dm(handles, n, tostring(path), UNITS[unit]) then fail("3dm") end
+  dm3.warn()
+end
 --- One OCCT `.brep` file's text, each solid its own solid under one compound (one
 --- solid is the file's root): the exact surfaces and curves, with a curve in each
 --- face's own parameters for every edge, so OCCT's `BRepTools::Read` gives a shape
@@ -8659,7 +9311,8 @@ function Assembly:pair(joint_name, kind, frame, opts)
     end
   end
 
-  local pitch_arg = NAN
+  -- the C ABI reads a NaN pitch as "not given", the same way Python's wrapper passes `float("nan")`
+  local pitch_arg = 0 / 0
   if opts.pitch ~= nil then pitch_arg = number(opts.pitch, "pair: pitch") end
 
   if not lib().cadaclysm_blacksmith_assembly_pair(
@@ -9081,6 +9734,30 @@ end
 function Assembly:step(path, schema, unit)
   if unit == nil then unit = "mm" end
   write_text(path, self:step_text(schema, unit))
+end
+
+--- This assembly, and everything placed under it, as one Rhino `.3dm` (a Lua
+--- string of its bytes): each distinct part (as `step_text` counts them) a block
+--- holding its body, each sub-assembly a block of references to what it places
+--- -- nested assemblies are nested blocks -- and this assembly's own placements
+--- references at the top of the file, on a layer named after it. Each reference
+--- is named as its placement was. `unit` and the warnings as `rhino3dm_bytes`.
+--- Raises `BuildError`, as `step_text` does, for an assembly reachable from this
+--- one that places nothing.
+function Assembly:rhino3dm_bytes(unit)
+  if unit == nil then unit = "mm" end
+  if UNITS[unit] == nil then raise("unit must be one of ['in', 'm', 'mm']") end
+  local len = ffi.new("size_t[1]")
+  return dm3.taken(lib().cadaclysm_blacksmith_assembly_3dm_bytes(self:_h(), UNITS[unit], len), len, "assembly_3dm_bytes")
+end
+
+--- Write this assembly to a Rhino `.3dm` at `path`, by the library itself, which
+--- names the file in its refusal when it cannot; `unit` as `rhino3dm_bytes`.
+function Assembly:write_3dm(path, unit)
+  if unit == nil then unit = "mm" end
+  if UNITS[unit] == nil then raise("unit must be one of ['in', 'm', 'mm']") end
+  if not lib().cadaclysm_blacksmith_assembly_3dm(self:_h(), tostring(path), UNITS[unit]) then fail("assembly_3dm") end
+  dm3.warn()
 end
 
 --- This assembly as a reader `Scene`, through STEP text and
@@ -9973,7 +10650,8 @@ end
 -- ---- the values ----------------------------------------------------------------------------------
 
 -- CADACLYSM_BLACKSMITH_VALUE_*: the kind each value array is tagged with, and its name.
-local VALUE_NAMES = { [0] = "line", "circle", "arc", "ellipse", "sphere", "cylinder", "cone", "torus", "cuboid" }
+local VALUE_NAMES = { [0] = "line", "circle", "arc", "ellipse", "sphere", "cylinder", "cone", "torus", "cuboid",
+  "rectangle", "triangle", "ray" }
 
 -- `values` squared up by the library's `value_check`: the canonical array every value holds. A
 -- count other than `value_size`'s is refused here, in the library's own sentence.
@@ -10068,7 +10746,7 @@ local Value_get = {}
 M.Value = Value
 
 --- The value's kind by name: "line", "circle", "arc", "ellipse", "sphere", "cylinder", "cone",
---- "torus" or "cuboid".
+--- "torus", "cuboid", "rectangle", "triangle" or "ray".
 function Value_get.kind(self) return VALUE_NAMES[kind_of(self)] end
 
 --- The canonical array, as a fresh Lua array.
@@ -10097,7 +10775,7 @@ function Value:transform(t)
     kind_of(self), c_array(v), Transform._matrix(t, "value_transform"), out), out, #v))
 end
 
---- What every curve value shares (`Line`, `Circle`, `Arc`, `Ellipse`).
+--- What every curve value shares (`Line`, `Circle`, `Arc`, `Ellipse`, and a `Rectangle`'s boundary).
 ---@class CurveValue
 local CurveValue = {}
 M.CurveValue = CurveValue
@@ -10149,8 +10827,9 @@ M.SolidValue = SolidValue
 --- The `Frame` the shape is placed on.
 function SolidValue_get.frame(self) return Frame.of(slice(self._v, 1, 12)) end
 
---- Whether `p` lies inside the closed shape or within `tolerance` of it (default 1e-9). A
---- negative or non-finite tolerance raises `BuildError`.
+--- Whether `p` lies inside the closed shape or within `tolerance` of it (default 1e-9). NaN is
+--- unset, the shape's own effective tolerance (`tolerance.relative` times its diagonal); 0 is
+--- exact. A negative or infinite tolerance raises `BuildError`.
 function SolidValue:contains(p, tolerance)
   if tolerance == nil then tolerance = 1e-9 end
   local r = lib().cadaclysm_blacksmith_solid_value_contains(kind_of(self), c_array(self._v),
@@ -10504,6 +11183,212 @@ function Cuboid:closest_point(p)
   return wrote(what, lib().cadaclysm_blacksmith_cuboid_closest_point(c_array(self._v), point3(p, what), out), out, 3)
 end
 
+-- ---- the rectangle, the triangle and the ray (plan B4) ----------------------------------------
+-- In a block of its own, as the other sections': LuaJIT's 200 live locals.
+do
+-- The containment codes of the C ABI (OUTSIDE 0, INSIDE 1, ON 2) as Python's strings.
+local WORDS = { [0] = "outside", "inside", "on" }
+
+--- The rectangle over `x` and `y` (increasing `Interval`s, or pairs) in its frame's x-y plane,
+--- as a value. As a curve it is its boundary: `t` runs 0..4, one unit a side from corner
+--- `(x0, y0)` counter-clockwise about the frame's z, clamped outside that range;
+--- `closest_point` is the boundary's, not unique on a tie (the centre). `Rectangle.new(frame,
+--- x, y)` or `Rectangle(frame, x, y)`; `Rectangle.from_array(v)` takes the sixteen numbers.
+---@class Rectangle
+local Rectangle, Rectangle_get = value_class("Rectangle", 9, { "frame", "x", "y" }, CURVE)
+
+function Rectangle.new(frame, x, y)
+  x, y = Interval.of(x), Interval.of(y)
+  return value_new(Rectangle, on_frame(frame, { x.t0, x.t1, y.t0, y.t1 }))
+end
+
+--- A rectangle from its sixteen numbers, `frame[12] x0 x1 y0 y1`, through `value_check`.
+function Rectangle.from_array(values) return value_new(Rectangle, values) end
+
+--- The `Frame` the rectangle lies on: its ranges run along the frame's x and y.
+function Rectangle_get.frame(self) return conic_frame(self) end
+--- The range along the frame's x, an `Interval`.
+function Rectangle_get.x(self) return Interval.new(self._v[13], self._v[14]) end
+--- The range along the frame's y, an `Interval`.
+function Rectangle_get.y(self) return Interval.new(self._v[15], self._v[16]) end
+
+--- The four corners, a list of {x, y, z}: `(x0, y0)`, `(x1, y0)`, `(x1, y1)`, `(x0, y1)`.
+function Rectangle:corners()
+  local out = ffi.new("double[12]")
+  local c = wrote("rectangle_corners", lib().cadaclysm_blacksmith_rectangle_corners(c_array(self._v), out), out, 12)
+  local corners = {}
+  for k = 0, 3 do corners[k + 1] = { c[3 * k + 1], c[3 * k + 2], c[3 * k + 3] } end
+  return corners
+end
+
+--- The filled rectangle's area.
+function Rectangle:area()
+  local out = ffi.new("double[1]")
+  return wrote("rectangle_area", lib().cadaclysm_blacksmith_rectangle_area(c_array(self._v), out), out, 1)[1]
+end
+
+--- `p` projected onto the plane and clamped into the filled rectangle when `include_interior`
+--- (the default), else the boundary's closest point, a fresh {x, y, z}.
+function Rectangle:closest_point_in(p, include_interior)
+  local what = "rectangle_closest_point"
+  local out = ffi.new("double[3]")
+  return wrote(what, lib().cadaclysm_blacksmith_rectangle_closest_point(c_array(self._v), point3(p, what),
+    include_interior ~= false, out), out, 3)
+end
+
+--- Where `p`, projected onto the plane, lies: "inside", "outside", or "on" within `tolerance`
+--- of the boundary. Nil (the default) or NaN is unset: the rectangle's own effective tolerance
+--- (`tolerance.relative` times its diagonal); 0 is exact. A negative or infinite one raises
+--- `BuildError`.
+function Rectangle:contains(p, tolerance)
+  local what = "rectangle_contains"
+  local tol = 0 / 0
+  if tolerance ~= nil then tol = number(tolerance, what) end
+  local r = lib().cadaclysm_blacksmith_rectangle_contains(c_array(self._v), point3(p, what), tol)
+  if r == NONE then fail(what) end
+  if WORDS[r] == nil then raise(what .. ": the library answered " .. tostring(r) .. ", not a containment code") end
+  return WORDS[r]
+end
+
+--- The filled rectangle as a one-face planar sheet `Solid` facing the frame's z.
+function Rectangle:to_sheet()
+  return new_solid(lib().cadaclysm_blacksmith_rectangle_to_sheet(c_array(self._v)), "rectangle_to_sheet")
+end
+
+local SHAPE = { { Value, Value_get } }
+
+--- The triangle `a`, `b`, `c`, as a value; a degenerate one (collinear or coincident points)
+--- raises `BuildError`. `Triangle.new(a, b, c)` or `Triangle(a, b, c)`, each {x, y, z};
+--- `Triangle.from_array(v)` takes the nine numbers.
+---@class Triangle
+local Triangle, Triangle_get = value_class("Triangle", 10, { "a", "b", "c" }, SHAPE)
+
+function Triangle.new(a, b, c)
+  a, b, c = point_of(a, "Triangle"), point_of(b, "Triangle"), point_of(c, "Triangle")
+  return value_new(Triangle, { a[1], a[2], a[3], b[1], b[2], b[3], c[1], c[2], c[3] })
+end
+
+--- A triangle from its nine numbers, `a[3] b[3] c[3]`, through `value_check`.
+function Triangle.from_array(values) return value_new(Triangle, values) end
+
+--- The first vertex, {x, y, z}.
+function Triangle_get.a(self) return slice(self._v, 1, 3) end
+--- The second vertex, {x, y, z}.
+function Triangle_get.b(self) return slice(self._v, 4, 6) end
+--- The third vertex, {x, y, z}.
+function Triangle_get.c(self) return slice(self._v, 7, 9) end
+
+--- The area.
+function Triangle:area()
+  local out = ffi.new("double[1]")
+  return wrote("triangle_area", lib().cadaclysm_blacksmith_triangle_area(c_array(self._v), out), out, 1)[1]
+end
+
+--- The sum of the three sides.
+function Triangle:perimeter()
+  local out = ffi.new("double[1]")
+  return wrote("triangle_perimeter", lib().cadaclysm_blacksmith_triangle_perimeter(c_array(self._v), out), out, 1)[1]
+end
+
+--- The area centroid, the vertices' mean, a fresh {x, y, z}.
+function Triangle:centroid()
+  local out = ffi.new("double[3]")
+  return wrote("triangle_centroid", lib().cadaclysm_blacksmith_triangle_centroid(c_array(self._v), out), out, 3)
+end
+
+--- The `Circle` through `a`, `b` and `c`: its x toward `a`, turning them counter-clockwise.
+function Triangle:circumcircle()
+  local out = ffi.new("double[13]")
+  return value_of(M.Circle, wrote("triangle_circumcircle", lib().cadaclysm_blacksmith_triangle_circumcircle(
+    c_array(self._v), out), out, 13))
+end
+
+--- The point of barycentric weights `wa`, `wb`, `wc`, used as given, a fresh {x, y, z}.
+function Triangle:point_at(wa, wb, wc)
+  local what = "triangle_point_at"
+  local out = ffi.new("double[3]")
+  return wrote(what, lib().cadaclysm_blacksmith_triangle_point_at(c_array(self._v), number(wa, what), number(wb, what),
+    number(wc, what), out), out, 3)
+end
+
+--- The weights {wa, wb, wc}, summing to 1, of `p` projected onto the plane.
+function Triangle:barycentric(p)
+  local what = "triangle_barycentric"
+  local out = ffi.new("double[3]")
+  return wrote(what, lib().cadaclysm_blacksmith_triangle_barycentric(c_array(self._v), point3(p, what), out), out, 3)
+end
+
+--- The closest point of the filled triangle to `p`, exact, a fresh {x, y, z}.
+function Triangle:closest_point(p)
+  local what = "triangle_closest_point"
+  local out = ffi.new("double[3]")
+  return wrote(what, lib().cadaclysm_blacksmith_triangle_closest_point(c_array(self._v), point3(p, what), out), out, 3)
+end
+
+--- How far `p` lies from the filled triangle.
+function Triangle:distance_to(p)
+  return distance(self:closest_point(p), point_of(p, "triangle_closest_point"))
+end
+
+--- Edge `i` as a `Line`: 0 `a` to `b`, 1 `b` to `c`, 2 `c` to `a`.
+function Triangle:edge(i)
+  local what = "triangle_edge"
+  if type(i) ~= "number" or i < 0 or i > 4294967295 or i ~= math.floor(i) then
+    raise(what .. ": edge must be an index, got " .. repr(i))
+  end
+  local out = ffi.new("double[6]")
+  return value_of(M.Line, wrote(what, lib().cadaclysm_blacksmith_triangle_edge(c_array(self._v), i, out),
+    out, 6))
+end
+
+--- The filled triangle as a one-face planar sheet `Solid`, its normal turning `a`, `b`, `c`
+--- counter-clockwise.
+function Triangle:to_sheet()
+  return new_solid(lib().cadaclysm_blacksmith_triangle_to_sheet(c_array(self._v)), "triangle_to_sheet")
+end
+
+--- The half-line from `position` along `direction`, as a value. The direction is kept as
+--- given, not unitised, so `t` counts lengths of it; a zero one raises `BuildError`, and so
+--- does `bounds` (a ray has no box). `Ray.new(position, direction)` or `Ray(position,
+--- direction)`; `Ray.from_array(v)` takes the six numbers.
+---@class Ray
+local Ray, Ray_get = value_class("Ray", 11, { "position", "direction" }, SHAPE)
+
+function Ray.new(position, direction)
+  local o, d = point_of(position, "Ray"), point_of(direction, "Ray")
+  return value_new(Ray, { o[1], o[2], o[3], d[1], d[2], d[3] })
+end
+
+--- A ray from its six numbers, `position[3] direction[3]`, through `value_check`.
+function Ray.from_array(values) return value_new(Ray, values) end
+
+--- The start, {x, y, z}.
+function Ray_get.position(self) return slice(self._v, 1, 3) end
+--- The direction as given, {x, y, z}.
+function Ray_get.direction(self) return slice(self._v, 4, 6) end
+
+--- `position + t * direction`, any `t` (behind the start too), a fresh {x, y, z}.
+function Ray:point_at(t)
+  local what = "ray_point_at"
+  local out = ffi.new("double[3]")
+  return wrote(what, lib().cadaclysm_blacksmith_ray_point_at(c_array(self._v), number(t, what), out), out, 3)
+end
+
+--- The `CurveFoot` on the ray nearest `p`: `t` clamped at 0, so a point behind the start
+--- answers the start. Always unique.
+function Ray:closest_point(p)
+  local what = "ray_closest_point"
+  local out = ffi.new("double[4]")
+  local f = wrote(what, lib().cadaclysm_blacksmith_ray_closest_point(c_array(self._v), point3(p, what), out), out, 4)
+  return CurveFoot.new(f[1], { f[2], f[3], f[4] }, true)
+end
+
+--- How far `p` lies from the ray.
+function Ray:distance_to(p)
+  return distance(self:closest_point(p).point, point_of(p, "ray_closest_point"))
+end
+end
+
 -- ---- an edge's curve as its value -----------------------------------------------------------
 
 local Curve_get = {}
@@ -10534,6 +11419,1762 @@ end
 
 end
 value_geometry()
+end
+
+-- ---- NurbsCurve: curves in space -------------------------------------------------------------
+
+-- In a function of its own, as the value geometry above: the main chunk is at LuaJIT's limit of
+-- 200 live locals, so only `M.NurbsCurve` and `M.Curvature` leave it.
+do
+local function nurbs_curves()
+
+local CurveValue = M.CurveValue
+local Transform = M.Transform
+
+--- A curve's bending at a parameter (`NurbsCurve:curvature`): `kappa` (1 / radius), the unit
+--- `tangent`, the unit `normal` toward the centre and the `binormal` (`tangent x normal`), and
+--- the `centre` of the osculating circle -- nil on a straight piece, where `kappa` is 0 and
+--- `normal`, `binormal` are zero.
+---@class Curvature
+---@field kappa number
+---@field tangent number[]    three, unit
+---@field normal number[]     three, unit toward the centre
+---@field binormal number[]   three
+---@field centre number[]|nil three, nil on a straight piece
+local Curvature = {}
+class(Curvature)
+callable(Curvature)
+M.Curvature = Curvature
+
+function Curvature.new(fields)
+  return setmetatable(fields, Curvature)
+end
+
+Curvature.__tostring = function(self)
+  return ("Curvature(kappa=%.9g, centre=%s)"):format(self.kappa, self.centre and
+    ("(%.6g, %.6g, %.6g)"):format(self.centre[1], self.centre[2], self.centre[3]) or "nil")
+end
+
+local function c_slice(out, i, j)
+  local r = {}
+  for k = i, j do r[#r + 1] = out[k] end
+  return r
+end
+
+-- A point as the C ABI takes it, three doubles, refused by `what`'s name when it is not three numbers.
+local function point3(point, what)
+  if type(point) ~= "table" then raise(("%s: a point is 3 numbers, got %s"):format(what, repr(point))) end
+  if #point ~= 3 then raise(("%s: a point is 3 numbers, got %d"):format(what, #point)) end
+  local out = ffi.new("double[3]")
+  for i = 1, 3 do
+    if type(point[i]) ~= "number" then raise(("%s: a point is 3 numbers, got %s"):format(what, repr(point[i]))) end
+    out[i - 1] = point[i]
+  end
+  return out
+end
+
+local function index_u32(value, call, name)
+  if type(value) ~= "number" or value ~= math.floor(value) then
+    raise(("%s: %s must be a whole number, got %s"):format(call, name, repr(value)))
+  end
+  if value < 0 or value > 4294967295 then raise(("%s: %s is out of range: %.14g"):format(call, name, value)) end
+  return value
+end
+
+-- The arc-length readers, as the sections above hold them out of this block's sight.
+local function tolerance_of(tolerance, what)
+  if tolerance == nil then return 0 / 0 end
+  if type(tolerance) ~= "number" then raise(what .. ": tolerance must be a number, got " .. tostring(tolerance)) end
+  return tolerance
+end
+
+local function accuracy_arg(accuracy, what)
+  if accuracy == nil then return 0 end
+  return number(accuracy, what)
+end
+
+local function length_of(raw)
+  return M.Length.new({
+    length = raw.length,
+    error = raw.error,
+    accuracy_met = raw.accuracy_met ~= 0,
+    from_polyline = raw.from_polyline ~= 0,
+  })
+end
+
+local function at_of(raw)
+  return M.At.new({
+    point = { raw.point[0], raw.point[1], raw.point[2] },
+    tangent = { raw.tangent[0], raw.tangent[1], raw.tangent[2] },
+    parameter = raw.parameter,
+    segment = raw.segment ~= NONE and tonumber(raw.segment) or nil,
+    error = raw.error,
+    from_polyline = raw.from_polyline ~= 0,
+  })
+end
+
+-- A divide's list read into `At`s and freed on every path; a null list raises the library's reason.
+local function read_samples(list, what)
+  local L = lib()
+  if list == nil then fail(what) end
+  local out, reason = {}, nil
+  local count = L.cadaclysm_blacksmith_samples_count(list)
+  local raw = ffi.new("CadaclysmBlacksmithAt[1]")
+  for i = 0, count - 1 do
+    if not L.cadaclysm_blacksmith_samples_at(list, i, raw) then
+      reason = last_error()
+      break
+    end
+    out[i + 1] = at_of(raw[0])
+  end
+  L.cadaclysm_blacksmith_samples_free(list)
+  if reason ~= nil then
+    error(setmetatable({ message = reason ~= "" and reason or "samples_at", ids = {} }, BuildError), 2)
+  end
+  return out
+end
+
+local function triple_of(a) return { a[0], a[1], a[2] } end
+
+local function curvature_of(raw)
+  return Curvature.new({
+    kappa = raw.kappa,
+    tangent = triple_of(raw.tangent),
+    normal = triple_of(raw.normal),
+    binormal = triple_of(raw.binormal),
+    centre = raw.has_centre ~= 0 and triple_of(raw.centre) or nil,
+  })
+end
+
+local function free_curve(h) lib().cadaclysm_blacksmith_nurbs_curve_free(h) end
+
+--- A curve in space -- always a NURBS, so a line, an arc or a conic is an exact rational one --
+--- to model with: built through points, read off an edge or a face, projected onto a plane or a
+--- face, trimmed, extended and blended; asked for its points, derivatives, curvature, length
+--- and crossings. Immutable; every edit returns a new curve, and the garbage collector frees it.
+--- Not `Curve`, which is the plain data an edge's curve is copied out as; `NurbsCurve.from_edge`
+--- turns an edge into one of these.
+---
+--- A face here is its whole surface: projecting onto, pulling to and crossing a face ignore its
+--- trims. `NurbsCurve.new(points, degree, weights, knots)` or `NurbsCurve(...)`: `degree` (1 to
+--- 7, default 3), `weights` one per point (positive) or nil, and the full knot vector `knots`
+--- (`#points + degree + 1` values, non-decreasing) or nil for clamped and uniform. Points are
+--- `{x, y, z}` each; `degree`, `control_points`, `weights`, `knots`, `domain`, `is_rational`
+--- and `is_closed` read like fields.
+---@class NurbsCurve
+---@field degree integer
+---@field control_points number[][]  {x, y, z} each
+---@field weights number[]           one per control point
+---@field knots number[]
+---@field domain number[]            {first, last}
+---@field is_rational boolean
+---@field is_closed boolean          the answer, not a flag
+---@field fit_error number|nil       set only on curves from `fit`, `projected_to_face`, `pulled_to_face`
+local NurbsCurve = {}
+local NurbsCurve_get = {}
+class(NurbsCurve, NurbsCurve_get)
+callable(NurbsCurve)
+M.NurbsCurve = NurbsCurve
+
+NurbsCurve.__newindex = function(_, key) raise("NurbsCurve is immutable: cannot set " .. tostring(key)) end
+
+-- The handle of a NurbsCurve argument, refused by `what`'s name when it is anything else.
+local function curve_handle(c, what)
+  if type(c) ~= "table" or getmetatable(c) ~= NurbsCurve then
+    raise(what .. ": expected a NurbsCurve, got " .. repr(c))
+  end
+  return rawget(c, "_ptr")
+end
+
+-- A new curve around a handle the library gave, or its refusal raised.
+local function curve_of(handle, what, fit_error)
+  checked(handle, what)
+  return setmetatable({ _ptr = ffi.gc(handle, free_curve), fit_error = fit_error }, NurbsCurve)
+end
+
+-- Points ({x, y, z} each) as one flat C array and their count, each refused by `what`'s name.
+local function xyz_of(points, what)
+  if type(points) ~= "table" then raise(("%s: expected a list of points, got %s"):format(what, repr(points))) end
+  local n = #points
+  local out = ffi.new("double[?]", math.max(3 * n, 1))
+  for i = 1, n do
+    local d = point3(points[i], what)
+    out[3 * i - 3], out[3 * i - 2], out[3 * i - 1] = d[0], d[1], d[2]
+  end
+  return out, n
+end
+
+-- A direction as three doubles, or nil for the C ABI's NULL.
+local function optional3(v, what)
+  if v == nil then return nil end
+  return point3(v, what)
+end
+
+-- A list of numbers as a C array and its length, or nil and 0 for none.
+local function optional_numbers(list, what)
+  if list == nil then return nil, 0 end
+  if type(list) ~= "table" then raise(("%s: expected a list of numbers, got %s"):format(what, repr(list))) end
+  local out = ffi.new("double[?]", math.max(#list, 1))
+  for i = 1, #list do out[i - 1] = number(list[i], what) end
+  return out, #list
+end
+
+local function default(v, fallback)
+  if v == nil then return fallback end
+  return v
+end
+
+-- `tolerance` as the C ABI takes it: nil is NaN (the effective one), 0 the same.
+local function tol(tolerance, what)
+  return tolerance_of(tolerance, what)
+end
+
+-- An edge argument: an `Edge` or its index.
+local function edge_arg(edge, what)
+  if type(edge) == "table" and getmetatable(edge) == M.Edge then return edge.index end
+  return index_u32(edge, what, "edge")
+end
+
+-- ---- building ------------------------------------------------------------------------------
+
+function NurbsCurve.new(points, degree, weights, knots)
+  local xyz, n = xyz_of(points, "nurbs_curve_new")
+  if weights ~= nil and (type(weights) ~= "table" or #weights ~= n) then
+    raise(("nurbs_curve_new: %s weights for %d points; give one per point"):format(
+      type(weights) == "table" and tostring(#weights) or repr(weights), n))
+  end
+  local w = optional_numbers(weights, "nurbs_curve_new")
+  local k, kn = optional_numbers(knots, "nurbs_curve_new")
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_new(xyz, n, w,
+    index_u32(default(degree, 3), "nurbs_curve_new", "degree"), k, kn), "nurbs_curve_new")
+end
+
+--- The curve of `degree` (1 to 7, default 3) through `points` in order, chord-length
+--- parametrised. `closed` true closes it back to the first point, smooth across the seam; an
+--- open curve may leave along `start_tangent` and arrive along `end_tangent` (directions; their
+--- length does not matter).
+---@param points number[][]
+---@param degree integer|nil
+---@param closed boolean|nil
+---@param start_tangent number[]|nil
+---@param end_tangent number[]|nil
+---@return NurbsCurve
+function NurbsCurve.through(points, degree, closed, start_tangent, end_tangent)
+  local xyz, n = xyz_of(points, "nurbs_curve_through")
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_through(xyz, n,
+    index_u32(default(degree, 3), "nurbs_curve_through", "degree"), closed and true or false,
+    optional3(start_tangent, "nurbs_curve_through"), optional3(end_tangent, "nurbs_curve_through")),
+    "nurbs_curve_through")
+end
+
+--- A curve of `degree` (default 3) within `tolerance` (default 1e-3; 0 asks for the effective
+--- one) of every point, through the first and the last (least squares); its `fit_error` is the
+--- largest distance from a point to it.
+---@param points number[][]
+---@param degree integer|nil
+---@param tolerance number|nil
+---@return NurbsCurve
+function NurbsCurve.fit(points, degree, tolerance)
+  local xyz, n = xyz_of(points, "nurbs_curve_fit")
+  local err = ffi.new("double[1]")
+  local h = lib().cadaclysm_blacksmith_nurbs_curve_fit(xyz, n, index_u32(default(degree, 3), "nurbs_curve_fit", "degree"),
+    tol(default(tolerance, 1e-3), "nurbs_curve_fit"), err)
+  return curve_of(h, "nurbs_curve_fit", err[0])
+end
+
+--- Edge `edge` (an `Edge` or its index) of `solid` as an exact NURBS over the edge's own span
+--- of its curve, running the way the edge runs.
+---@param solid Solid
+---@param edge Edge|integer
+---@return NurbsCurve
+function NurbsCurve.from_edge(solid, edge)
+  local s = solid_handle(solid, "nurbs_curve_from_edge")
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_from_edge(s, edge_arg(edge, "nurbs_curve_from_edge")),
+    "nurbs_curve_from_edge")
+end
+
+--- The isocurve of face `face` of `solid`'s surface: along `u` at `v = at` when `along_u`, else
+--- along `v` at `u = at`. NURBS faces only.
+---@param solid Solid
+---@param face integer
+---@param along_u boolean
+---@param at number
+---@return NurbsCurve
+function NurbsCurve.isocurve(solid, face, along_u, at)
+  local s = solid_handle(solid, "nurbs_curve_from_face_isocurve")
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_from_face_isocurve(s,
+    index_u32(face, "nurbs_curve_from_face_isocurve", "face"), along_u and true or false,
+    number(at, "nurbs_curve_from_face_isocurve")), "nurbs_curve_from_face_isocurve")
+end
+
+--- The curve bridging `a` (at its end when `a_end`, else its start) to `b` (at its end when
+--- `b_end`, else its start): `continuity` (default 2) 1 matches position and tangent (a cubic),
+--- 2 also the curvature (a quintic); `bulge` (positive, default 1) scales how far the tangents
+--- reach.
+---@param a NurbsCurve
+---@param a_end boolean
+---@param b NurbsCurve
+---@param b_end boolean
+---@param continuity integer|nil
+---@param bulge number|nil
+---@return NurbsCurve
+function NurbsCurve.blend(a, a_end, b, b_end, continuity, bulge)
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_blend(curve_handle(a, "nurbs_curve_blend"), a_end and true or false,
+    curve_handle(b, "nurbs_curve_blend"), b_end and true or false,
+    index_u32(default(continuity, 2), "nurbs_curve_blend", "continuity"),
+    number(default(bulge, 1), "nurbs_curve_blend")), "nurbs_curve_blend")
+end
+
+--- `curves` joined end to end into one curve (Rhino's JoinCurves): in the order given, each
+--- turned where needed so its start meets the previous one's end within `tolerance` (default
+--- 1e-6; the joint placed at the midpoint of the two ends). All are raised to the highest degree
+--- among them and each runs over `k..k + 1`, joined C0 -- a corner stays a corner; a rational
+--- curve keeps its points. One curve gives a copy; none, or a gap past `tolerance`, raises
+--- `BuildError` naming the two curves.
+---@param curves NurbsCurve[]
+---@param tolerance number|nil
+---@return NurbsCurve
+function NurbsCurve.joined(curves, tolerance)
+  if type(curves) ~= "table" then raise("nurbs_curve_joined: expected a list of curves, got " .. repr(curves)) end
+  local n = #curves
+  local arr = ffi.new("const struct CadaclysmBlacksmithNurbsCurve *[?]", math.max(n, 1))
+  for i = 1, n do arr[i - 1] = curve_handle(curves[i], "nurbs_curve_joined") end
+  local h = lib().cadaclysm_blacksmith_nurbs_curve_joined(arr, n, number(default(tolerance, 1e-6), "nurbs_curve_joined"))
+  return curve_of(h, "nurbs_curve_joined")
+end
+
+local TWEEN_METHODS = { plain = 0, matching = 1, sampling = 2 }
+
+--- `count` curves blending evenly from this curve to `other` (Rhino's CreateTweenCurves
+--- family), tween `i` at the fraction `i / (count + 1)`, as a list. `method` is a string:
+---
+--- - `"plain"`: control point by control point; the curves must already share one structure
+---   (degree, control-point count, knots).
+--- - `"matching"` (the default): the curves made compatible exactly (degree elevation, knot
+---   merging), then blended in homogeneous coordinates -- rational curves stay rational.
+--- - `"sampling"`: both divided by arc length into `samples` pieces (required here, refused
+---   otherwise), and a cubic interpolated through the blended samples.
+---
+--- `align` (default true) turns `other`, and moves a closed curve's seam, to line it up with
+--- this one first. `tolerance` nil: the inputs' effective tolerance. A count of 0, one curve
+--- closed and the other open, plain on curves that are not compatible, or too few samples
+--- raises `BuildError`.
+---@param other NurbsCurve
+---@param count integer
+---@param method string|nil
+---@param samples integer|nil
+---@param align boolean|nil
+---@param tolerance number|nil
+---@return NurbsCurve[]
+function NurbsCurve:tween(other, count, method, samples, align, tolerance)
+  method = default(method, "matching")
+  if TWEEN_METHODS[method] == nil then
+    raise(("nurbs_curve_tween: method must be one of plain, matching, sampling, not %s"):format(repr(method)))
+  end
+  if method == "sampling" then
+    if samples == nil then raise("nurbs_curve_tween: sampling needs samples") end
+  elseif samples ~= nil then
+    raise(("nurbs_curve_tween: samples is read only by sampling, not %s"):format(method))
+  end
+  local a, b = curve_handle(self, "nurbs_curve_tween"), curve_handle(other, "nurbs_curve_tween")
+  local n = index_u32(count, "nurbs_curve_tween", "count")
+  local s = index_u32(default(samples, 0), "nurbs_curve_tween", "samples")
+  local out = ffi.new("struct CadaclysmBlacksmithNurbsCurve *[?]", math.max(n, 1))
+  if not lib().cadaclysm_blacksmith_nurbs_curve_tween(a, b, n, TWEEN_METHODS[method], s,
+      align == nil or align and true or false, tol(tolerance, "nurbs_curve_tween"), out) then
+    fail("nurbs_curve_tween")
+  end
+  local curves = {}
+  for i = 1, n do curves[i] = curve_of(out[i - 1], "nurbs_curve_tween") end
+  return curves
+end
+
+-- ---- edits ---------------------------------------------------------------------------------
+
+--- This curve projected onto the plane through `origin` with `normal`, along `direction` (nil:
+--- the normal). Exact.
+---@param origin number[]
+---@param normal number[]
+---@param direction number[]|nil
+---@return NurbsCurve
+function NurbsCurve:projected_to_plane(origin, normal, direction)
+  local w = "nurbs_curve_projected_to_plane"
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_projected_to_plane(curve_handle(self, w),
+    point3(origin, w), point3(normal, w), optional3(direction, w)), w)
+end
+
+--- This curve projected along `direction` onto face `face` of `solid` (its whole surface),
+--- fitted within `tolerance` (default 1e-3); the result's `fit_error` is the largest distance
+--- between it and the surface. Raises `BuildError` where a point's ray misses.
+---@param solid Solid
+---@param face integer
+---@param direction number[]
+---@param tolerance number|nil
+---@return NurbsCurve
+function NurbsCurve:projected_to_face(solid, face, direction, tolerance)
+  local w = "nurbs_curve_projected_to_face"
+  local err = ffi.new("double[1]")
+  local h = lib().cadaclysm_blacksmith_nurbs_curve_projected_to_face(curve_handle(self, w), solid_handle(solid, w),
+    index_u32(face, w, "face"), point3(direction, w), tol(default(tolerance, 1e-3), w), err)
+  return curve_of(h, w, err[0])
+end
+
+--- This curve pulled onto face `face` of `solid` (its whole surface): every point to its
+--- nearest surface point, fitted within `tolerance` (default 1e-3; `fit_error` as for the
+--- projection).
+---@param solid Solid
+---@param face integer
+---@param tolerance number|nil
+---@return NurbsCurve
+function NurbsCurve:pulled_to_face(solid, face, tolerance)
+  local w = "nurbs_curve_pulled_to_face"
+  local err = ffi.new("double[1]")
+  local h = lib().cadaclysm_blacksmith_nurbs_curve_pulled_to_face(curve_handle(self, w), solid_handle(solid, w),
+    index_u32(face, w, "face"), tol(default(tolerance, 1e-3), w), err)
+  return curve_of(h, w, err[0])
+end
+
+--- The same curve run the other way over the same domain.
+---@return NurbsCurve
+function NurbsCurve:reversed()
+  local w = "nurbs_curve_reversed"
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_reversed(curve_handle(self, w)), w)
+end
+
+--- The part from `t0` to `t1` (`t0 < t1`, inside the domain), over `t0..t1`.
+---@param t0 number
+---@param t1 number
+---@return NurbsCurve
+function NurbsCurve:trimmed(t0, t1)
+  local w = "nurbs_curve_trimmed"
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_trimmed(curve_handle(self, w), number(t0, w), number(t1, w)), w)
+end
+
+--- This curve continued `length` past its end (or its start when `at_start`) along its own end
+--- polynomial -- position, tangent and curvature there unchanged, every old parameter its old
+--- point.
+---@param length number
+---@param at_start boolean|nil
+---@return NurbsCurve
+function NurbsCurve:extended(length, at_start)
+  local w = "nurbs_curve_extended"
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_extended(curve_handle(self, w), at_start and true or false,
+    number(length, w)), w)
+end
+
+--- The same curve at degree `degree + by` (`by` default 1; at most 12).
+---@param by integer|nil
+---@return NurbsCurve
+function NurbsCurve:elevated(by)
+  local w = "nurbs_curve_elevated"
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_elevated(curve_handle(self, w),
+    index_u32(default(by, 1), w, "by")), w)
+end
+
+--- This curve through the affine map `t` (a `Transform`, or sixteen numbers): its control points
+--- mapped, weights and knots kept -- exact. A singular map (a projection) is allowed.
+---@param t Transform|number[]
+---@return NurbsCurve
+function NurbsCurve:transformed(t)
+  local w = "nurbs_curve_transformed"
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_transformed(curve_handle(self, w), Transform._matrix(t, w)), w)
+end
+
+--- A second curve with the same shape, owning its own handle.
+---@return NurbsCurve
+function NurbsCurve:clone()
+  local w = "nurbs_curve_clone"
+  return curve_of(lib().cadaclysm_blacksmith_nurbs_curve_clone(curve_handle(self, w)), w)
+end
+
+-- ---- reading -------------------------------------------------------------------------------
+
+function NurbsCurve_get.degree(self)
+  return tonumber(lib().cadaclysm_blacksmith_nurbs_curve_degree(curve_handle(self, "nurbs_curve_degree")))
+end
+
+function NurbsCurve_get.control_points(self)
+  local w = "nurbs_curve_control_points"
+  local h = curve_handle(self, w)
+  local n = tonumber(lib().cadaclysm_blacksmith_nurbs_curve_control_count(h))
+  local out = ffi.new("double[?]", math.max(3 * n, 1))
+  if not lib().cadaclysm_blacksmith_nurbs_curve_control_points(h, out) then fail(w) end
+  local points = {}
+  for i = 1, n do points[i] = { out[3 * i - 3], out[3 * i - 2], out[3 * i - 1] } end
+  return points
+end
+
+function NurbsCurve_get.weights(self)
+  local w = "nurbs_curve_weights"
+  local h = curve_handle(self, w)
+  local n = tonumber(lib().cadaclysm_blacksmith_nurbs_curve_control_count(h))
+  local out = ffi.new("double[?]", math.max(n, 1))
+  if not lib().cadaclysm_blacksmith_nurbs_curve_weights(h, out) then fail(w) end
+  return c_slice(out, 0, n - 1)
+end
+
+function NurbsCurve_get.knots(self)
+  local w = "nurbs_curve_knots"
+  local h = curve_handle(self, w)
+  local n = tonumber(lib().cadaclysm_blacksmith_nurbs_curve_knot_count(h))
+  local out = ffi.new("double[?]", math.max(n, 1))
+  if not lib().cadaclysm_blacksmith_nurbs_curve_knots(h, out) then fail(w) end
+  return c_slice(out, 0, n - 1)
+end
+
+function NurbsCurve_get.domain(self)
+  local w = "nurbs_curve_domain"
+  local out = ffi.new("double[2]")
+  if not lib().cadaclysm_blacksmith_nurbs_curve_domain(curve_handle(self, w), out) then fail(w) end
+  return { out[0], out[1] }
+end
+
+function NurbsCurve_get.is_rational(self)
+  return lib().cadaclysm_blacksmith_nurbs_curve_is_rational(curve_handle(self, "nurbs_curve_is_rational")) and true or false
+end
+
+function NurbsCurve_get.is_closed(self)
+  return lib().cadaclysm_blacksmith_nurbs_curve_is_closed(curve_handle(self, "nurbs_curve_is_closed")) and true or false
+end
+
+--- The point at parameter `t`, inside the domain, a fresh {x, y, z}.
+---@param t number
+---@return number[]
+function NurbsCurve:point(t)
+  local w = "nurbs_curve_point"
+  local out = ffi.new("double[3]")
+  if not lib().cadaclysm_blacksmith_nurbs_curve_point(curve_handle(self, w), number(t, w), out) then fail(w) end
+  return { out[0], out[1], out[2] }
+end
+
+--- The point and its derivatives at `t` up to `order` (default 2, at most 8): a list of
+--- `order + 1` {x, y, z}, `{C, C', C'', ...}`.
+---@param t number
+---@param order integer|nil
+---@return number[][]
+function NurbsCurve:derivatives(t, order)
+  local w = "nurbs_curve_derivatives"
+  local k = index_u32(default(order, 2), w, "order")
+  local out = ffi.new("double[?]", 3 * (math.min(k, 8) + 1))
+  if not lib().cadaclysm_blacksmith_nurbs_curve_derivatives(curve_handle(self, w), number(t, w), k, out) then fail(w) end
+  local list = {}
+  for i = 1, k + 1 do list[i] = { out[3 * i - 3], out[3 * i - 2], out[3 * i - 1] } end
+  return list
+end
+
+--- The curvature and Frenet frame at `t`, a `Curvature`.
+---@param t number
+---@return Curvature
+function NurbsCurve:curvature(t)
+  local w = "nurbs_curve_curvature"
+  local out = ffi.new("CadaclysmBlacksmithCurvature[1]")
+  if not lib().cadaclysm_blacksmith_nurbs_curve_curvature(curve_handle(self, w), number(t, w), out) then fail(w) end
+  return curvature_of(out[0])
+end
+
+--- The curve's length, a `Length`, to the relative `accuracy` (0 or nil asks for the default).
+---@param accuracy number|nil
+---@return Length
+function NurbsCurve:length(accuracy)
+  local w = "nurbs_curve_length"
+  local out = ffi.new("CadaclysmBlacksmithLength[1]")
+  if not lib().cadaclysm_blacksmith_nurbs_curve_length(curve_handle(self, w), accuracy_arg(accuracy, w), out) then fail(w) end
+  return length_of(out[0])
+end
+
+--- The point at arc length `s` from the curve's start, an `At` (its `segment` nil).
+---@param s number
+---@param accuracy number|nil
+---@return At
+function NurbsCurve:point_at_length(s, accuracy)
+  local w = "nurbs_curve_point_at_length"
+  local out = ffi.new("CadaclysmBlacksmithAt[1]")
+  if not lib().cadaclysm_blacksmith_nurbs_curve_point_at_length(curve_handle(self, w), number(s, w),
+      accuracy_arg(accuracy, w), out) then
+    fail(w)
+  end
+  return at_of(out[0])
+end
+
+--- The curve in `n` pieces of equal arc length, a list of `At`: `n + 1` samples, `n` for a
+--- closed curve.
+---@param n integer
+---@param accuracy number|nil
+---@return At[]
+function NurbsCurve:divide_by_count(n, accuracy)
+  local w = "nurbs_curve_divide_by_count"
+  return read_samples(lib().cadaclysm_blacksmith_nurbs_curve_divide_by_count(curve_handle(self, w),
+    index_u32(n, w, "n"), accuracy_arg(accuracy, w)), w)
+end
+
+--- Samples every `step` of arc length from the start, a list of `At`; a closed curve never
+--- repeats its start.
+---@param step number
+---@param accuracy number|nil
+---@return At[]
+function NurbsCurve:divide_by_length(step, accuracy)
+  local w = "nurbs_curve_divide_by_length"
+  return read_samples(lib().cadaclysm_blacksmith_nurbs_curve_divide_by_length(curve_handle(self, w),
+    number(step, w), accuracy_arg(accuracy, w)), w)
+end
+
+--- Where the curve crosses the plane through `origin` with `normal`, a list of `At` in
+--- parameter order (`error` each point's distance from the plane). Raises `BuildError` for a
+--- curve lying in the plane; a touch that does not cross is not listed.
+---@param origin number[]
+---@param normal number[]
+---@return At[]
+function NurbsCurve:plane_hits(origin, normal)
+  local w = "nurbs_curve_plane_hits"
+  return read_samples(lib().cadaclysm_blacksmith_nurbs_curve_plane_hits(curve_handle(self, w),
+    point3(origin, w), point3(normal, w)), w)
+end
+
+--- Where the curve crosses face `face` of `solid` (its whole surface), within `tolerance`
+--- (default 1e-3) of it, a list of `At` in parameter order (`error` each point's distance from
+--- the surface).
+---@param solid Solid
+---@param face integer
+---@param tolerance number|nil
+---@return At[]
+function NurbsCurve:face_hits(solid, face, tolerance)
+  local w = "nurbs_curve_face_hits"
+  return read_samples(lib().cadaclysm_blacksmith_nurbs_curve_face_hits(curve_handle(self, w), solid_handle(solid, w),
+    index_u32(face, w, "face"), tol(default(tolerance, 1e-3), w)), w)
+end
+
+--- A curvature comb to draw: at `n + 1` even parameters (`n` default 64, at least 1 step), a
+--- list of `{ p, q }` pairs, the curve point `p` and that point moved by
+--- `-scale * kappa * normal` (`scale` default 1; out of the bend), `q`. Straight stretches give
+--- zero teeth.
+---@param n integer|nil
+---@param scale number|nil
+---@return number[][][]
+function NurbsCurve:comb(n, scale)
+  n = default(n, 64)
+  scale = default(scale, 1)
+  local d = self.domain
+  local lo, hi = d[1], d[2]
+  local steps = math.max(math.floor(n), 1)
+  local teeth = {}
+  for i = 0, steps do
+    local t = lo + (hi - lo) * i / steps
+    local k = self:curvature(t)
+    local p = self:point(t)
+    teeth[i + 1] = { p, { p[1] - scale * k.kappa * k.normal[1], p[2] - scale * k.kappa * k.normal[2],
+      p[3] - scale * k.kappa * k.normal[3] } }
+  end
+  return teeth
+end
+
+NurbsCurve.__tostring = function(self)
+  local d = self.domain
+  return ("NurbsCurve(degree=%d, controls=%d, rational=%s, domain=(%.9g, %.9g))"):format(self.degree,
+    #self.control_points, tostring(self.is_rational), d[1], d[2])
+end
+
+--- The exact NURBS form of this curve value, a `NurbsCurve`: a line is degree 1, a circle, an
+--- arc or an ellipse an exact rational curve.
+---@return NurbsCurve
+function CurveValue:to_nurbs()
+  local w = "curve_value_to_nurbs"
+  local v = rawget(self, "_v")
+  local arr = ffi.new("double[?]", math.max(#v, 1))
+  for i = 1, #v do arr[i - 1] = v[i] end
+  return curve_of(lib().cadaclysm_blacksmith_curve_value_to_nurbs(getmetatable(self)._KIND, arr), w)
+end
+
+end
+nurbs_curves()
+end
+
+-- ---- Sheets from curves ----------------------------------------------------------------------
+
+-- In a function of its own, as the curves above: the main chunk is at LuaJIT's limit of 200
+-- live locals, so only `M.Continuity`, `M.PatchReport` and `M.JoinReport` leave it.
+do
+local function curve_sheets()
+
+local Solid = M.Solid
+
+--- How well two faces meet along their sides (`Solid:continuity`): the largest `gap` between
+--- the sides (G0), the largest `angle` between their normals in radians (G1), the largest
+--- difference of normal `curvature` across the edge (G2), each with where it was found
+--- (`gap_at`, `angle_at`, `curvature_at`: three numbers), and how many points were asked
+--- (`samples`).
+---@class Continuity
+---@field gap number
+---@field gap_at number[]       three
+---@field angle number
+---@field angle_at number[]     three
+---@field curvature number
+---@field curvature_at number[] three
+---@field samples integer
+local Continuity = {}
+class(Continuity)
+callable(Continuity)
+M.Continuity = Continuity
+
+function Continuity.new(fields)
+  return setmetatable(fields, Continuity)
+end
+
+Continuity.__tostring = function(self)
+  return ("Continuity(gap=%.3g, angle=%.3g, curvature=%.3g)"):format(self.gap, self.angle, self.curvature)
+end
+
+local function continuity_of(raw)
+  return Continuity.new({
+    gap = raw.gap, gap_at = { raw.gap_at[0], raw.gap_at[1], raw.gap_at[2] },
+    angle = raw.angle, angle_at = { raw.angle_at[0], raw.angle_at[1], raw.angle_at[2] },
+    curvature = raw.curvature, curvature_at = { raw.curvature_at[0], raw.curvature_at[1], raw.curvature_at[2] },
+    samples = tonumber(raw.samples),
+  })
+end
+
+--- How well an N-sided patch (`Solid.n_sided_patch`) meets: `faces` sub-patches, the worst
+--- `boundary` `Continuity` against the neighbours (the gap over every side, the angle over
+--- those met at G1 or G2, the curvature jump over those at G2), the worst `internal` one
+--- across the patch's own spokes, and `corner_angle` (radians), the most a corner of the hole
+--- leaves no patch able to meet: zero where the neighbours meet each other at G1.
+---@class PatchReport
+---@field faces integer
+---@field boundary Continuity
+---@field internal Continuity
+---@field corner_angle number
+local PatchReport = {}
+class(PatchReport)
+callable(PatchReport)
+M.PatchReport = PatchReport
+
+function PatchReport.new(fields)
+  return setmetatable(fields, PatchReport)
+end
+
+PatchReport.__tostring = function(self)
+  return ("PatchReport(faces=%d, boundary=%s, internal=%s, corner_angle=%.3g)"):format(self.faces,
+    tostring(self.boundary), tostring(self.internal), self.corner_angle)
+end
+
+--- What `Solid.join_sheets` did: `sewn` edges (each two naked edges become one shared edge),
+--- the widest `worst_gap` between two sewn edges (0 where all met exactly), the naked edges
+--- -- bordered by one face -- `naked_before` (once the T-junctions are cut) and
+--- `naked_after`, `refused` groups of naked edges that share both ends but were left apart
+--- (too far apart, or three or more), faces `turned`, and whether the result is `closed`: a
+--- solid.
+---@class JoinReport
+---@field sewn integer
+---@field worst_gap number
+---@field naked_before integer
+---@field naked_after integer
+---@field refused integer
+---@field turned integer
+---@field closed boolean
+local JoinReport = {}
+class(JoinReport)
+callable(JoinReport)
+M.JoinReport = JoinReport
+
+function JoinReport.new(fields)
+  return setmetatable(fields, JoinReport)
+end
+
+JoinReport.__tostring = function(self)
+  return ("JoinReport(sewn=%d, naked %d -> %d, refused=%d, turned=%d, worst_gap=%.3g, closed=%s)"):format(
+    self.sewn, self.naked_before, self.naked_after, self.refused, self.turned, self.worst_gap, tostring(self.closed))
+end
+
+-- ---- the arguments -------------------------------------------------------------------------
+
+local SIDES = { u0 = 0, u1 = 1, v0 = 2, v1 = 3 }
+
+local function side_code(side)
+  local code = type(side) == "string" and SIDES[side] or nil
+  if code == nil then raise(("a side is 'u0', 'u1', 'v0' or 'v1', not %s"):format(repr(side))) end
+  return code
+end
+
+-- A whole number from 0 to 4294967295 for a `uint32_t`, refused by `call`'s name.
+local function whole(value, call, name)
+  if type(value) ~= "number" or value ~= math.floor(value) then
+    raise(("%s: %s must be a whole number, got %s"):format(call, name, repr(value)))
+  end
+  if value < 0 or value > 4294967295 then raise(("%s: %s is out of range: %.14g"):format(call, name, value)) end
+  return value
+end
+
+local function or_default(v, fallback)
+  if v == nil then return fallback end
+  return v
+end
+
+-- A distance tolerance: nil is NaN, which the library works at the inputs' effective tolerance.
+local function tolerance_arg(v, call)
+  if v == nil then return 0 / 0 end
+  if type(v) ~= "number" then raise(("%s: tolerance must be a number, got %s"):format(call, repr(v))) end
+  return v
+end
+
+local function handle_of_curve(c, call)
+  if type(c) ~= "table" or getmetatable(c) ~= M.NurbsCurve then
+    raise(call .. ": expected a NurbsCurve, got " .. repr(c))
+  end
+  return rawget(c, "_ptr")
+end
+
+-- A list of curves as a `const NurbsCurve *` array (never read past `n`) and its count.
+local function curve_array(curves, call)
+  if type(curves) ~= "table" then raise(("%s: expected a list of curves, got %s"):format(call, repr(curves))) end
+  local n = #curves
+  local arr = ffi.new("const struct CadaclysmBlacksmithNurbsCurve *[?]", math.max(n, 1))
+  for i = 1, n do arr[i - 1] = handle_of_curve(curves[i], call) end
+  return arr, n
+end
+
+-- A direction as three doubles, or nil for the C ABI's NULL.
+local function direction_arg(v, call)
+  if v == nil then return nil end
+  if type(v) ~= "table" or #v ~= 3 then raise(("%s: a direction is 3 numbers, got %s"):format(call, repr(v))) end
+  local out = ffi.new("double[3]")
+  for i = 1, 3 do out[i - 1] = number(v[i], call) end
+  return out
+end
+
+local function free_rail(h) lib().cadaclysm_blacksmith_nurbs_curve_free(h) end
+
+-- A new curve around a handle the library gave (a rail), or its refusal raised.
+local function curve_of(handle, call)
+  checked(handle, call)
+  return setmetatable({ _ptr = ffi.gc(handle, free_rail) }, M.NurbsCurve)
+end
+
+-- A solid, with `sheet_error` set from `err` where the call fitted it.
+local function fitted(handle, err, call)
+  local out = new_solid(handle, call)
+  if err ~= nil then out._sheet_error = tonumber(err[0]) end
+  return out
+end
+
+--- Set on the sheets `Solid.sweep_rail`, `sweep_two_rails`, `edge_surface`, `network_surface`,
+--- `fillet_surfaces`, `Solid:flange` and `Solid:extrude_to` fit: the largest distance from the
+--- sheet to what it was fitted to.
+--- nil on every other solid. Read-only.
+---@return number|nil
+function Solid_get.sheet_error(self)
+  return rawget(self, "_sheet_error")
+end
+
+--- Set by `Solid.n_sided_patch`: a `PatchReport`. nil on every other solid. Read-only.
+---@return PatchReport|nil
+function Solid_get.patch_report(self)
+  return rawget(self, "_patch_report")
+end
+
+-- ---- sheets from curves --------------------------------------------------------------------
+
+--- The sheet lofted through `sections` (`NurbsCurve`s), `degree` (default 3) across them
+--- (lowered to fit); `loose` shapes it by them instead, through the first and last only;
+--- `closed` makes it periodic across them, the last section back to the first.
+---@param sections NurbsCurve[]
+---@param degree integer|nil
+---@param loose boolean|nil
+---@param closed boolean|nil
+---@return Solid
+function Solid.loft_curves(sections, degree, loose, closed)
+  local w = "loft_curves"
+  local arr, n = curve_array(sections, w)
+  local d = whole(or_default(degree, 3), w, "degree")
+  return new_solid(lib().cadaclysm_blacksmith_loft_curves(arr, n, d, loose and true or false, closed and true or false), w)
+end
+
+local FRAMES = { rmf = 0, fixed = 1 }
+
+--- `sections` swept along `rail`, each carried by the rail's frame from the rail point
+--- nearest its centre and blended between: `frame` `"rmf"` (the default) rotation-minimising,
+--- `"fixed"` keeping `up` (three numbers) upright. Fitted within `tolerance` (default 1e-3;
+--- the sheet's `sheet_error` says how close).
+---@param rail NurbsCurve
+---@param sections NurbsCurve[]
+---@param frame string|nil
+---@param up number[]|nil
+---@param tolerance number|nil
+---@return Solid
+function Solid.sweep_rail(rail, sections, frame, up, tolerance)
+  local w = "sweep_rail"
+  frame = or_default(frame, "rmf")
+  local kind = type(frame) == "string" and FRAMES[frame] or nil
+  if kind == nil then raise(("sweep_rail: frame is 'rmf' or 'fixed', not %s"):format(repr(frame))) end
+  local r = handle_of_curve(rail, w)
+  local arr, n = curve_array(sections, w)
+  local err = ffi.new("double[1]")
+  return fitted(lib().cadaclysm_blacksmith_sweep_rail(r, arr, n, kind, direction_arg(up, w),
+    tolerance_arg(or_default(tolerance, 1e-3), w), err), err, w)
+end
+
+--- `sections` swept between two rails: each section's first end on `rail_a` and last on
+--- `rail_b`, carried by the rotation and uniform scale that keep them there, the rails
+--- matched by arc length. Fitted within `tolerance` (default 1e-3; `sheet_error`).
+---@param rail_a NurbsCurve
+---@param rail_b NurbsCurve
+---@param sections NurbsCurve[]
+---@param tolerance number|nil
+---@return Solid
+function Solid.sweep_two_rails(rail_a, rail_b, sections, tolerance)
+  local w = "sweep_two_rails"
+  local a, b = handle_of_curve(rail_a, w), handle_of_curve(rail_b, w)
+  local arr, n = curve_array(sections, w)
+  local err = ffi.new("double[1]")
+  return fitted(lib().cadaclysm_blacksmith_sweep_two_rails(a, b, arr, n, tolerance_arg(or_default(tolerance, 1e-3), w), err),
+    err, w)
+end
+
+--- The Coons sheet of 2, 3 or 4 boundary curves meeting end to end within `tolerance`
+--- (default 1e-3; in order round the boundary, each either way round): exact for
+--- non-rational boundaries, rational ones fitted first (`sheet_error`).
+---@param curves NurbsCurve[]
+---@param tolerance number|nil
+---@return Solid
+function Solid.edge_surface(curves, tolerance)
+  local w = "edge_surface"
+  local arr, n = curve_array(curves, w)
+  local err = ffi.new("double[1]")
+  return fitted(lib().cadaclysm_blacksmith_edge_surface(arr, n, tolerance_arg(or_default(tolerance, 1e-3), w), err), err, w)
+end
+
+--- The Gordon sheet of a curve network: `u_curves` (in order across the other way) and
+--- `v_curves`, every one of the first crossing every one of the second within `tolerance`
+--- (default 1e-3). `sheet_error` is the largest distance from the sheet to the curves given.
+---@param u_curves NurbsCurve[]
+---@param v_curves NurbsCurve[]
+---@param tolerance number|nil
+---@return Solid
+function Solid.network_surface(u_curves, v_curves, tolerance)
+  local w = "network_surface"
+  local ua, un = curve_array(u_curves, w)
+  local va, vn = curve_array(v_curves, w)
+  local err = ffi.new("double[1]")
+  return fitted(lib().cadaclysm_blacksmith_network_surface(ua, un, va, vn, tolerance_arg(or_default(tolerance, 1e-3), w), err),
+    err, w)
+end
+
+-- ---- continuity ----------------------------------------------------------------------------
+
+--- How well face `face` (default 0)'s side `side` (`"u0"`, `"u1"`, `"v0"`, `"v1"`: a boundary
+--- isocurve of its NURBS surface) meets `other`'s face `other_face` (default 0) along
+--- `other_side`: the largest gap, angle between the normals and difference of curvature
+--- across the edge, with where each is, a `Continuity`. `samples` defaults to 64.
+---@param side string
+---@param other Solid
+---@param other_side string
+---@param face integer|nil
+---@param other_face integer|nil
+---@param samples integer|nil
+---@return Continuity
+function Solid:continuity(side, other, other_side, face, other_face, samples)
+  local w = "continuity"
+  local sa, sb = side_code(side), side_code(other_side)
+  local fa, fb = whole(or_default(face, 0), w, "face"), whole(or_default(other_face, 0), w, "other_face")
+  local ns = whole(or_default(samples, 64), w, "samples")
+  local b = solid_handle(other, w)
+  local out = ffi.new("struct CadaclysmBlacksmithContinuity[1]")
+  if not lib().cadaclysm_blacksmith_continuity(self:_h(), fa, sa, b, fb, sb, ns, out) then fail(w) end
+  return continuity_of(out[0])
+end
+
+--- Face `face` as a sheet of its own, its side `side` bent to meet `other`'s `other_side` at
+--- G`level` (default 2): 0 position, 1 tangent plane, 2 curvature. The opposite side stays
+--- where it was.
+---@param side string
+---@param other Solid
+---@param other_side string
+---@param level integer|nil
+---@param face integer|nil
+---@param other_face integer|nil
+---@return Solid
+function Solid:matched(side, other, other_side, level, face, other_face)
+  local w = "match_side"
+  local sa, sb = side_code(side), side_code(other_side)
+  local fa, fb = whole(or_default(face, 0), w, "face"), whole(or_default(other_face, 0), w, "other_face")
+  local lv = whole(or_default(level, 2), w, "level")
+  local b = solid_handle(other, w)
+  return new_solid(lib().cadaclysm_blacksmith_match_side(self:_h(), fa, sa, b, fb, sb, lv), w)
+end
+
+--- A sheet spanning from `a`'s side to `b`'s, meeting each at G`level` (1 or 2; default 2);
+--- `bulge` (default 1) scales how far it leaves each edge along its neighbour's tangent.
+---@param a Solid
+---@param side_a string
+---@param b Solid
+---@param side_b string
+---@param level integer|nil
+---@param bulge number|nil
+---@param face_a integer|nil
+---@param face_b integer|nil
+---@return Solid
+function Solid.blend_sides(a, side_a, b, side_b, level, bulge, face_a, face_b)
+  local w = "blend_sides"
+  local sa, sb = side_code(side_a), side_code(side_b)
+  local fa, fb = whole(or_default(face_a, 0), w, "face_a"), whole(or_default(face_b, 0), w, "face_b")
+  local lv = whole(or_default(level, 2), w, "level")
+  local ha, hb = solid_handle(a, w), solid_handle(b, w)
+  return new_solid(lib().cadaclysm_blacksmith_blend_sides(ha, fa, sa, hb, fb, sb, lv, number(or_default(bulge, 1), w)), w)
+end
+
+local BOUNDARY_KEYS = { sheet = true, side = true, level = true, face = true, range = true }
+
+-- One `n_sided_patch` boundary written into row `row` of the C array.
+local function patch_row(row, b, i)
+  local w = "n_sided_patch"
+  row.sheet, row.curve, row.face, row.side, row.from, row.to, row.level = nil, nil, 0, 0, 0, 1, 0
+  if type(b) == "table" and getmetatable(b) == M.NurbsCurve then
+    row.curve = rawget(b, "_ptr")
+    return
+  end
+  if type(b) ~= "table" or getmetatable(b) == Solid then
+    raise(("%s: boundary %d is a sheet side or a NurbsCurve, got %s"):format(w, i, repr(b)))
+  end
+  local sheet, side, level, face, range
+  if b[1] ~= nil then
+    if #b > 3 then raise(("%s: boundary %d is {sheet, side} or {sheet, side, level}"):format(w, i)) end
+    sheet, side, level, face, range = b[1], b[2], or_default(b[3], 2), 0, { 0, 1 }
+  else
+    local unknown = {}
+    for k in pairs(b) do
+      if not BOUNDARY_KEYS[k] then unknown[#unknown + 1] = tostring(k) end
+    end
+    if #unknown > 0 then
+      table.sort(unknown)
+      raise(("%s: boundary %d: unknown keys {%s}"):format(w, i, table.concat(unknown, ", ")))
+    end
+    sheet, side, level, face, range = b.sheet, b.side, or_default(b.level, 2), or_default(b.face, 0),
+      or_default(b.range, { 0, 1 })
+  end
+  row.sheet = solid_handle(sheet, w)
+  row.face = whole(face, w, "face")
+  row.side = side_code(side)
+  if type(range) ~= "table" then raise(("%s: boundary %d: range is {from, to}, got %s"):format(w, i, repr(range))) end
+  row.from, row.to = number(range[1], w), number(range[2], w)
+  row.level = whole(level, w, "level")
+end
+
+--- The sheet filling a hole of 3 or more sides (Rhino's Patch, OCCT's MakeFilling, on
+--- sheets' sides): N four-sided NURBS faces round a central point, G1 or G2 to each other.
+--- Each of `boundaries`, in order round the hole and either way round, is a sheet's side met
+--- at G2, `{sheet, side}`; `{sheet, side, level}` with `level` 0, 1 or 2; a table with
+--- `sheet`, `side` and any of `level`, `face` and `range` (`{from, to}` of the side's
+--- parameter, the whole side `{0, 1}`, backwards `{1, 0}`); or a `NurbsCurve`, met at G0. A
+--- side is `"u0"`, `"u1"`, `"v0"` or `"v1"`. The boundaries must meet end to end within
+--- `tolerance` (default 0.01); `bulge` (default 1) scales how far the patch leaves each
+--- neighbour along its tangent.
+---
+--- Face `i` meets boundary `i`'s second half along its `"v0"` side and boundary `i + 1`'s
+--- first half along its `"u1"`, so `Solid:continuity` measures each neighbour; the result's
+--- `patch_report` holds the worst of them, measured the same way.
+---@param boundaries table[]
+---@param bulge number|nil
+---@param tolerance number|nil
+---@return Solid
+function Solid.n_sided_patch(boundaries, bulge, tolerance)
+  local w = "n_sided_patch"
+  if type(boundaries) ~= "table" then raise(("%s: expected a list of boundaries, got %s"):format(w, repr(boundaries))) end
+  local n = #boundaries
+  local rows = ffi.new("struct CadaclysmBlacksmithPatchBoundary[?]", math.max(n, 1))
+  for i = 1, n do patch_row(rows[i - 1], boundaries[i], i - 1) end
+  local report = ffi.new("struct CadaclysmBlacksmithPatchReport[1]")
+  local out = new_solid(lib().cadaclysm_blacksmith_n_sided_patch(rows, n, number(or_default(bulge, 1), w),
+    tolerance_arg(or_default(tolerance, 0.01), w), report), w)
+  local r = report[0]
+  out._patch_report = PatchReport.new({
+    faces = tonumber(r.faces), boundary = continuity_of(r.boundary), internal = continuity_of(r.internal),
+    corner_angle = r.corner_angle,
+  })
+  return out
+end
+
+--- The rolling-ball fillet between `a`'s face `face_a` and `b`'s face `face_b` (default 0;
+--- their whole NURBS surfaces): the ball on the side each face's normal points to (`flip_a`
+--- / `flip_b`: the other side), of `radius`, or running linearly from `radius` to
+--- `radius_end` along the fillet. `tolerance` defaults to 1e-3. Returns the fillet sheet (its
+--- `sheet_error` set) and the contact curves on `a` and `b`, to trim them back with
+--- `Solid:trim_by_curve` and join with `Solid.join_sheets`. The curves are `NurbsCurve`s of
+--- their own, valid after the sheets are closed.
+---@param a Solid
+---@param b Solid
+---@param radius number
+---@param radius_end number|nil
+---@param flip_a boolean|nil
+---@param flip_b boolean|nil
+---@param tolerance number|nil
+---@param face_a integer|nil
+---@param face_b integer|nil
+---@return Solid sheet
+---@return NurbsCurve rail_a
+---@return NurbsCurve rail_b
+function Solid.fillet_surfaces(a, b, radius, radius_end, flip_a, flip_b, tolerance, face_a, face_b)
+  local w = "fillet_surfaces"
+  local fa, fb = whole(or_default(face_a, 0), w, "face_a"), whole(or_default(face_b, 0), w, "face_b")
+  local r0 = number(radius, w)
+  local r1 = radius_end == nil and r0 or number(radius_end, w)
+  local ha, hb = solid_handle(a, w), solid_handle(b, w)
+  local ra, rb = ffi.new("struct CadaclysmBlacksmithNurbsCurve *[1]"), ffi.new("struct CadaclysmBlacksmithNurbsCurve *[1]")
+  local err = ffi.new("double[1]")
+  local sheet = fitted(lib().cadaclysm_blacksmith_fillet_surfaces(ha, fa, hb, fb, r0, r1, flip_a and true or false,
+    flip_b and true or false, tolerance_arg(or_default(tolerance, 1e-3), w), ra, rb, err), err, w)
+  local rail_a = curve_of(ra[0], w)
+  local rail_b = curve_of(rb[0], w)
+  return sheet, rail_a, rail_b
+end
+
+-- ---- trimming and joining ------------------------------------------------------------------
+
+--- This sheet cut along `curve` -- one lying on it, say projected or pulled onto it -- and
+--- nothing removed: every face comes back in its pieces outside the cutter, then its pieces
+--- inside, each a face, as `split_sheet` orders them. The cutter is `curve` run along
+--- `direction` (three numbers; nil: the mean of the sheet's normals along the curve) through
+--- the whole sheet. A closed curve's inside is the island it bounds; an open curve's is the
+--- side left of its run, seen from where `direction` points, and an open curve is run on
+--- straight past both ends, so it should cross the sheet's boundary. Where the cut lies on the
+--- curve the rim is one edge carrying the curve's own span exactly, which another sheet's edge
+--- along the curve sews to. `tolerance` defaults to 0.05.
+---@param curve NurbsCurve
+---@param direction number[]|nil
+---@param tolerance number|nil
+---@return Solid
+function Solid:split_by_curve(curve, direction, tolerance)
+  local w = "split_by_curve"
+  local c = handle_of_curve(curve, w)
+  return new_solid(lib().cadaclysm_blacksmith_split_by_curve(self:_h(), c, direction_arg(direction, w),
+    tolerance_arg(or_default(tolerance, 0.05), w)), w)
+end
+
+local KEEPS = { outside = false, inside = true, left = true, right = false }
+
+--- This sheet cut along `curve` and one side thrown away (see `split_by_curve`): `keep`
+--- `"inside"` keeps the island a closed curve bounds, `"outside"` (the default) the sheet
+--- with the hole; for an open curve `"left"` (the same as `"inside"`) keeps the side left of
+--- its run seen from where `direction` points, `"right"` the other. Raises `BuildError` where
+--- nothing of the sheet lies on the kept side.
+---@param curve NurbsCurve
+---@param keep string|nil
+---@param direction number[]|nil
+---@param tolerance number|nil
+---@return Solid
+function Solid:trim_by_curve(curve, keep, direction, tolerance)
+  local w = "trim_by_curve"
+  keep = or_default(keep, "outside")
+  if type(keep) ~= "string" or KEEPS[keep] == nil then
+    raise(("trim_by_curve: keep must be 'outside', 'inside', 'left' or 'right', not %s"):format(repr(keep)))
+  end
+  local c = handle_of_curve(curve, w)
+  return new_solid(lib().cadaclysm_blacksmith_trim_by_curve(self:_h(), c, direction_arg(direction, w), KEEPS[keep],
+    tolerance_arg(or_default(tolerance, 0.05), w)), w)
+end
+
+--- `section` swept along each of `edges` (naked edges of this sheet: `Edge` records or their
+--- indices) on the face's own frame: at every point of the edge the section's `x` runs outward
+--- from the face -- square to the edge, in the face's tangent plane -- and its `y` along the
+--- face's normal, so a section from `(0, 0)` to `(0, -10)` turns the edge under by 10 all along
+--- it however the panel curves, `(0, 0)` to `(10, 0)` carries the face on, and a lip stands
+--- proud with `y > 0`. `section` is a `NurbsCurve` in the plane `z = 0` starting at the
+--- origin. With `join` (the default) the sweeps come back sewn to this sheet (its faces first,
+--- then one per edge), else alone, sewn to each other. Each sweep is fitted within `tolerance`
+--- (default 1e-3; `sheet_error` says how close). Raises `BuildError` for an edge bordered by
+--- two faces, a section not starting at the origin, and sweeps that did not sew on.
+---@param edges (Edge|integer)[]
+---@param section NurbsCurve
+---@param tolerance number|nil
+---@param join boolean|nil
+---@return Solid
+function Solid:flange(edges, section, tolerance, join)
+  local w = "flange"
+  local arr, n = edge_indices(edges, w)
+  local c = handle_of_curve(section, w)
+  local err = ffi.new("double[1]")
+  return fitted(lib().cadaclysm_blacksmith_flange(self:_h(), arr, n, c, tolerance_arg(or_default(tolerance, 1e-3), w),
+    join == nil or (join and true or false), err), err, w)
+end
+
+--- Each of `edges` (naked edges of this sheet: `Edge` records or their indices) slid along
+--- `direction` (three numbers) until it meets `target`: every point of the edge travels along
+--- the direction to its first hit on `target`'s faces (trimmed, not their whole surfaces). One
+--- wall per edge -- the edge's own curve swept straight, bounded by the curve through the hits,
+--- fitted within `tolerance` (default 1e-3) of every hit (`sheet_error`) -- so a wheel arch cut
+--- in a panel runs in to the well's inner wall as its liner. With `join` (the default) the
+--- walls come back sewn to this sheet (its faces first, then one per edge), else alone, sewn to
+--- each other. Raises `BuildError` naming the point whose line misses the target.
+---@param edges (Edge|integer)[]
+---@param direction number[]
+---@param target Solid
+---@param tolerance number|nil
+---@param join boolean|nil
+---@return Solid
+function Solid:extrude_to(edges, direction, target, tolerance, join)
+  local w = "extrude_to"
+  local arr, n = edge_indices(edges, w)
+  local d = direction_arg(direction, w)
+  local err = ffi.new("double[1]")
+  return fitted(lib().cadaclysm_blacksmith_extrude_to(self:_h(), arr, n, d, solid_handle(target, w),
+    tolerance_arg(or_default(tolerance, 1e-3), w), join == nil or (join and true or false), err), err, w)
+end
+
+--- `sheets` joined into one body, their faces in order, and a `JoinReport` of what was done:
+--- every two naked edges whose ends and curves agree within `tolerance` (default 0: a
+--- rounding of the body's size) sewn into one -- a gap closed is kept as that edge's own
+--- tolerance -- the faces turned to agree, and a closed result turned to face out, a solid
+--- the booleans, `mass` and the writers take. Edges with exact curves are compared to the
+--- tolerance however coarsely each was sampled. At a tolerance above 0 a T-junction is sewn
+--- too: one sheet's edge along part of another's is first cut where the other's corner lies on
+--- it. Returns the solid and the report.
+---@param sheets Solid[]
+---@param tolerance number|nil
+---@return Solid
+---@return JoinReport
+function Solid.join_sheets(sheets, tolerance)
+  local w = "join_sheets"
+  if type(sheets) ~= "table" then raise(("%s: expected a list of sheets, got %s"):format(w, repr(sheets))) end
+  local n = #sheets
+  local arr = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do arr[i - 1] = solid_handle(sheets[i], w) end
+  local report = ffi.new("struct CadaclysmBlacksmithJoinReport[1]")
+  local out = new_solid(lib().cadaclysm_blacksmith_join_sheets(arr, n, tolerance_arg(or_default(tolerance, 0), w), report), w)
+  local r = report[0]
+  return out, JoinReport.new({
+    sewn = tonumber(r.sewn), worst_gap = r.worst_gap, naked_before = tonumber(r.naked_before),
+    naked_after = tonumber(r.naked_after), refused = tonumber(r.refused), turned = tonumber(r.turned),
+    closed = r.closed ~= 0,
+  })
+end
+
+--- This sheet with an opening recessed into it along `outline` -- a window, a lamp, a grille or
+--- an air intake set into a panel -- and how many of the result's faces are each part's:
+--- `{ sheet, fillet, walls, pane }`, the faces in that order. `outline` is a closed curve on the
+--- sheet (one face or several joined); each of its points is found on the sheet, so it may
+--- stand a little off it. The walls run back `depth` along the sheet's own normal at every
+--- point of the rim -- not along one view -- behind the face (against its normal; negative: in
+--- front), leaning in toward the opening by `draft` radians (default 0; negative: out) and
+--- meeting on the mitre at the outline's corners. `fillet` above 0 (default 0) rounds the rim
+--- between the sheet and the walls (the outline must then be smooth). `pane` (default true)
+--- closes the back with one patch whose four sides end where the outline turns most, so it
+--- does not twist. Every piece is sewn to the next: only the sheet's own boundary is left
+--- naked, and the walls' foot without a pane. Raises `BuildError` for an outline that is not
+--- closed, a corner with a fillet, or a fillet deeper than the walls.
+---@param outline NurbsCurve
+---@param depth number
+---@param draft number|nil
+---@param fillet number|nil
+---@param pane boolean|nil
+---@param tolerance number|nil
+---@return Solid
+---@return integer[]
+function Solid:recess(outline, depth, draft, fillet, pane, tolerance)
+  local w = "recess"
+  local c = handle_of_curve(outline, w)
+  local faces = ffi.new("uint32_t[4]")
+  local out = new_solid(lib().cadaclysm_blacksmith_recess(self:_h(), c, number(depth, w), number(or_default(draft, 0), w),
+    number(or_default(fillet, 0), w), pane ~= false, tolerance_arg(or_default(tolerance, 0.05), w), faces), w)
+  return out, { tonumber(faces[0]), tonumber(faces[1]), tonumber(faces[2]), tonumber(faces[3]) }
+end
+
+end
+curve_sheets()
+end
+
+-- ---- documents ---------------------------------------------------------------------------------
+
+-- In a function of its own, as the curves above: the main chunk is at LuaJIT's limit of 200 live
+-- locals (a `do` block's count too), so only `M.Document`, `Solid:document_body` and
+-- `Profile:document_path` leave it.
+do
+local function documents()
+
+-- Owned text a document call returned, read and freed; nil raises the library's reason.
+local function owned_text(raw, what)
+  if raw == nil then fail(what) end
+  local out = ffi.string(raw)
+  lib().cadaclysm_blacksmith_string_free(raw)
+  return out
+end
+
+local function text_arg(value, what, name)
+  if type(value) ~= "string" then raise(("%s: %s must be text, got %s"):format(what, name, repr(value))) end
+  return value
+end
+
+-- An optional text argument: nil or empty is C's null.
+local function optional_text(value, what, name)
+  if value == nil or value == "" then return nil end
+  return text_arg(value, what, name)
+end
+
+local function read_text(path, what)
+  local f, err = io.open(tostring(path), "rb")
+  if not f then raise(what .. ": " .. tostring(err)) end
+  local data = f:read("*a")
+  f:close()
+  return data
+end
+
+-- The first id of a changed set's `"added"` list, `{"added": ["n1"], ...}`, or nil.
+local function first_added(changed)
+  local at = changed:find('"added"', 1, true)
+  if not at then return nil end
+  local i = changed:match('^%s*:%s*%[%s*"()', at + 7)
+  if not i then return nil end
+  local id = {}
+  while i <= #changed do
+    local c = changed:sub(i, i)
+    if c == '"' then return table.concat(id) end
+    if c == "\\" then
+      i = i + 1
+      c = changed:sub(i, i)
+    end
+    id[#id + 1] = c
+    i = i + 1
+  end
+  return nil
+end
+
+local function free_document(h) lib().cadaclysm_blacksmith_document_free(h) end
+local function free_nurbs_curve(h) lib().cadaclysm_blacksmith_nurbs_curve_free(h) end
+local function free_cage(h) lib().cadaclysm_blacksmith_subd_free(h) end
+
+--- A model as data: a graph of nodes (`profile.rect`, `solid.extrude`, `measure.mass`, ...),
+--- each a blacksmith verb reading other nodes by id, with named parameters any number can be an
+--- `"=expression"` of, evaluated incrementally, and edited by ops that are undoable and branch.
+--- Every edit is one commit; the whole thing -- nodes, parameters, history, branches -- saves as
+--- JSON text and loads back to the same document. `Document.kinds()` lists the node kinds.
+---
+---     local doc = bs.Document.new("mm")
+---     doc:apply('{"op": "add", "node": {"id": "r1", "kind": "profile.rect", "w": 10, "h": 10}}')
+---     doc:apply('{"op": "add", "node": {"id": "x1", "kind": "solid.extrude", "profile": "r1", "frame": "xy", "distance": 10}}')
+---     local solid = doc:result_solid("x1")   -- an ordinary Solid of the caller's own
+---
+--- Ops, the changed sets, the statuses, the parameters, `errors`, `value`, the kinds, the branch
+--- list, the log and the tips are JSON text, as the C ABI has them: this module reads no JSON.
+--- A refused op raises `BuildError` with the library's reason (`document_apply: ...`), and the
+--- document is unchanged. `result_*`, `value`, `errors` bring the nodes up to date first; each
+--- `Solid`, `Profile`, `NurbsCurve` and `Subd` a result gives is the caller's own and outlives
+--- later edits and the document. `close()` frees it; so does the garbage collector. A closed
+--- document raises `document: closed`. One thread at a time.
+---@class Document
+local Document = {}
+class(Document)
+callable(Document)
+M.Document = Document
+
+local function new_document(handle, what)
+  checked(handle, what)
+  return setmetatable({ _ptr = ffi.gc(handle, free_document) }, Document)
+end
+
+Document.__tostring = function(self)
+  local h = rawget(self, "_ptr")
+  if h == nil then return "Document(closed)" end
+  return ("Document(%s)"):format(tostring(h):match("0x%x+") or "?")
+end
+
+--- An empty document counting lengths in `units` (`mm`, `cm`, `m`, `in` or `ft`; nil is `mm`).
+--- `Document(units)` is the same.
+---@param units string|nil
+---@return Document
+function Document.new(units)
+  local u = optional_text(units, "document_new", "units")
+  return new_document(lib().cadaclysm_blacksmith_document_new(u), "document_new")
+end
+
+--- The document `save` wrote as `text`: its nodes, parameters, history and branches.
+---@param text string
+---@return Document
+function Document.load(text)
+  local t = text_arg(text, "document_load", "text")
+  return new_document(lib().cadaclysm_blacksmith_document_load(t), "document_load")
+end
+
+--- The document saved in the file `path`.
+---@param path string
+---@return Document
+function Document.open(path)
+  return Document.load(read_text(path, "document_open"))
+end
+
+--- Every node kind the library knows, as the JSON text of an array of rows (`name`, `inputs`,
+--- `output`, `cost`, `help`). Needs no document.
+---@return string
+function Document.kinds()
+  return owned_text(lib().cadaclysm_blacksmith_document_kinds(), "document_kinds")
+end
+
+--- An empty building document: the blacksmith kinds and the `bim.*` ones, with a hidden
+--- `bim.project` node whose random guid seeds every IFC GlobalId it exports.
+---@param units string|nil
+---@return Document
+function Document.new_bim(units)
+  local u = optional_text(units, "bim_document_new", "units")
+  return new_document(lib().cadaclysm_bim_document_new(u), "bim_document_new")
+end
+
+--- A building document `save` wrote as `text`, opened with the `bim.*` kinds.
+---@param text string
+---@return Document
+function Document.load_bim(text)
+  local t = text_arg(text, "bim_document_load", "text")
+  return new_document(lib().cadaclysm_bim_document_load(t), "bim_document_load")
+end
+
+--- The building document saved in the file `path`.
+---@param path string
+---@return Document
+function Document.open_bim(path)
+  return Document.load_bim(read_text(path, "bim_document_open"))
+end
+
+--- Every node kind a building document knows, the blacksmith's and the `bim.*` ones, as the
+--- JSON text `kinds` gives. Needs no document.
+---@return string
+function Document.bim_kinds()
+  return owned_text(lib().cadaclysm_bim_kinds(), "bim_kinds")
+end
+
+--- Free the document now. Idempotent; a result taken out earlier stays the caller's own.
+function Document:close()
+  local h = rawget(self, "_ptr")
+  if h ~= nil then
+    self._ptr = nil
+    ffi.gc(h, nil)
+    lib().cadaclysm_blacksmith_document_free(h)
+  end
+end
+
+function Document:_h()
+  local h = rawget(self, "_ptr")
+  if h == nil then raise("document: closed") end
+  return h
+end
+
+-- -- saving and editing
+
+--- The document as JSON text (write it to a file yourself).
+---@return string
+function Document:save()
+  return owned_text(lib().cadaclysm_blacksmith_document_save(self:_h()), "document_save")
+end
+
+--- Applies one op, as JSON text (`{"op": "add", "node": {...}}`, `set`, `remove`, `rename`,
+--- `param`), recorded as one commit with `message` (nil: none). The changed set's JSON text,
+--- `{"added": [ids], "changed": [ids], "removed": [ids], "params": [names]}`.
+---@param op string
+---@param message string|nil
+---@return string
+function Document:apply(op, message)
+  local h = self:_h()
+  local o = text_arg(op, "document_apply", "op")
+  local m = optional_text(message, "document_apply", "message")
+  return owned_text(lib().cadaclysm_blacksmith_document_apply(h, o, m), "document_apply")
+end
+
+local function add_holding(doc, op)
+  local changed = doc:apply(op)
+  local id = first_added(changed)
+  if id == nil then raise("document_apply: no node was added (" .. changed .. ")") end
+  return id
+end
+
+--- A node holding `solid` exactly as it is -- one made in code or read from a file -- for other
+--- nodes to read like any built one: a `solid.body` (a `sheet.body` with `sheet` true) carrying
+--- the kernel's own B-rep (`Solid:document_body`), its colours kept. Its id is returned.
+---@param solid Solid
+---@param sheet boolean|nil
+---@return string
+function Document:add_solid(solid, sheet)
+  self:_h()
+  solid_handle(solid, "add_solid")
+  local kind = sheet and "sheet.body" or "solid.body"
+  return add_holding(self, '{"op": "add", "node": {"kind": "' .. kind .. '", "body": ' .. solid:document_body() .. '}}')
+end
+
+--- A `profile.path` node holding `profile` exactly (`Profile:document_path`: arcs and NURBS as
+--- they are, holes included, its colour kept). Its id is returned.
+---@param profile Profile
+---@return string
+function Document:add_profile(profile)
+  self:_h()
+  profile_handle(profile, "add_profile")
+  return add_holding(self, '{"op": "add", "node": {"kind": "profile.path", "path": ' .. profile:document_path() .. '}}')
+end
+
+--- The parameters' JSON text, name to value (a number, or an `"=expression"`). Read-only: set
+--- one with a `param` op through `apply`.
+---@return string
+function Document:params()
+  return owned_text(lib().cadaclysm_blacksmith_document_params(self:_h()), "document_params")
+end
+
+-- Python's `with` block as a call: `body`'s results, or its error passed on after `clean_up`
+-- (whose own refusal is swallowed: the body's error is the one to report).
+local function scoped(body, finish, clean_up)
+  local results = { n = 0 }
+  local function keep(ok, ...)
+    results.n = select("#", ...)
+    for i = 1, results.n do results[i] = select(i, ...) end
+    return ok
+  end
+  if not keep(pcall(body)) then
+    pcall(clean_up)
+    error(results[1], 0)
+  end
+  finish()
+  return unpack(results, 1, results.n)
+end
+
+local function body_arg(body, what)
+  if type(body) ~= "function" then raise(what .. ": expected a function, got " .. repr(body)) end
+  return body
+end
+
+--- `doc:batch(message, function() ... end)` (or `doc:batch(function() ... end)`): the ops `body`
+--- applies go in live and are recorded as one commit with `message`; an empty batch records
+--- nothing. An error inside rolls every op of the batch back and is raised again, the body's
+--- own even when the roll-back is refused. A batch or preview already open raises
+--- `document_batch_begin: ...`. Returns what `body` returns.
+---@param message string|nil
+---@param body function
+function Document:batch(message, body)
+  if body == nil and type(message) == "function" then message, body = nil, message end
+  body_arg(body, "document_batch")
+  local m = optional_text(message, "document_batch_begin", "message")
+  if not lib().cadaclysm_blacksmith_document_batch_begin(self:_h(), m) then fail("document_batch_begin") end
+  return scoped(body, function()
+    owned_text(lib().cadaclysm_blacksmith_document_batch_end(self:_h()), "document_batch_end")
+  end, function()
+    owned_text(lib().cadaclysm_blacksmith_document_batch_abort(self:_h()), "document_batch_abort")
+  end)
+end
+
+--- `doc:preview(function() ... end)`: the ops `body` applies evaluate but are never recorded,
+--- and are taken back on leaving, normally or by an error (raised again, the body's own even
+--- when the take-back is refused): a what-if. A batch or preview already open raises
+--- `document_preview_begin: ...`. Returns what `body` returns.
+---@param body function
+function Document:preview(body)
+  body_arg(body, "document_preview")
+  if not lib().cadaclysm_blacksmith_document_preview_begin(self:_h()) then fail("document_preview_begin") end
+  local function take_back() self:end_preview() end
+  return scoped(body, take_back, take_back)
+end
+
+--- One frame of a drag: applies `op` (JSON text) unrecorded, after taking back the last frame,
+--- so frames replace each other rather than stack. The changed set's JSON text, relative to the
+--- state before the drag. `end_preview` takes the drag back.
+---@param op string
+---@return string
+function Document:preview_frame(op)
+  local h = self:_h()
+  local o = text_arg(op, "document_preview", "op")
+  return owned_text(lib().cadaclysm_blacksmith_document_preview(h, o), "document_preview")
+end
+
+--- Takes back an open preview or drag; the changed set's JSON text.
+---@return string
+function Document:end_preview()
+  return owned_text(lib().cadaclysm_blacksmith_document_end_preview(self:_h()), "document_end_preview")
+end
+
+-- -- history
+
+local function did_something(text) return text:match("^%s*(.-)%s*$") ~= "null" end
+
+--- Takes back the head commit. False when there was nothing to take back.
+---@return boolean
+function Document:undo()
+  return did_something(owned_text(lib().cadaclysm_blacksmith_document_undo(self:_h()), "document_undo"))
+end
+
+--- Puts back the commit `undo` took back. False when there was nothing to put back.
+---@return boolean
+function Document:redo()
+  return did_something(owned_text(lib().cadaclysm_blacksmith_document_redo(self:_h()), "document_redo"))
+end
+
+--- The branch list's JSON text: `{"branches": {name: commit}, "branch": name|null, "head":
+--- commit, "unnamed": [commit], "can_undo": bool, "can_redo": bool}`.
+---@return string
+function Document:branches()
+  return owned_text(lib().cadaclysm_blacksmith_document_branch_list(self:_h()), "document_branch_list")
+end
+
+--- A new branch `name`. Without `at` it starts at the head and the document switches onto it;
+--- with `at` (a commit id) it starts there and the head stays.
+---@param name string
+---@param at string|nil
+function Document:branch_new(name, at)
+  local h = self:_h()
+  local n = text_arg(name, "document_branch_new", "name")
+  local a = optional_text(at, "document_branch_new", "at")
+  owned_text(lib().cadaclysm_blacksmith_document_branch_new(h, n, a), "document_branch_new")
+end
+
+--- Moves the head to the branch of that name, else to the commit of that id (which detaches the
+--- head: the branch list's `branch` is then null). The nodes follow.
+---@param name_or_commit_id string
+function Document:switch(name_or_commit_id)
+  local h = self:_h()
+  local n = text_arg(name_or_commit_id, "document_branch_switch", "name")
+  owned_text(lib().cadaclysm_blacksmith_document_branch_switch(h, n), "document_branch_switch")
+end
+
+--- Renames branch `old` to `new`; refused when `old` is missing or `new` is taken.
+---@param old string
+---@param new string
+function Document:branch_rename(old, new)
+  local h = self:_h()
+  local o, n = text_arg(old, "document_branch_rename", "old"), text_arg(new, "document_branch_rename", "new")
+  if not lib().cadaclysm_blacksmith_document_branch_rename(h, o, n) then fail("document_branch_rename") end
+end
+
+--- Deletes branch `name`; the current branch is refused. Its commits stay, as tips.
+---@param name string
+function Document:branch_delete(name)
+  local h = self:_h()
+  local n = text_arg(name, "document_branch_delete", "name")
+  if not lib().cadaclysm_blacksmith_document_branch_delete(h, n) then fail("document_branch_delete") end
+end
+
+--- The tips of the lines no branch names -- what an undo followed by an edit leaves behind --
+--- as the JSON text of whole commits, `[{"id", "parents", "message"?, "ops"}]`.
+---@return string
+function Document:tips()
+  return owned_text(lib().cadaclysm_blacksmith_document_tips(self:_h()), "document_tips")
+end
+
+--- The commits of `branch`'s line as JSON text, newest first, the root `c0` last; nil is the
+--- line from the head back to the root.
+---@param branch string|nil
+---@return string
+function Document:log(branch)
+  local h = self:_h()
+  local b = optional_text(branch, "document_log", "branch")
+  return owned_text(lib().cadaclysm_blacksmith_document_log(h, b), "document_log")
+end
+
+-- -- evaluating and reading back
+
+--- Evaluates the nodes that are stale (only the cheap kinds with `cheap_only`); the JSON text of
+--- every node's status, `[{"id", "state": "ok"|"error"|"blocked"|"pending", ...}]`.
+---@param cheap_only boolean|nil
+---@return string
+function Document:evaluate(cheap_only)
+  return owned_text(lib().cadaclysm_blacksmith_document_evaluate(self:_h(), cheap_only and true or false), "document_evaluate")
+end
+
+-- The document brought up to date, its handle and `id` as C takes it.
+local function evaluated(doc, id, what)
+  doc:evaluate(false)
+  return doc:_h(), text_arg(id, what, "node id")
+end
+
+--- The JSON text of the nodes the evaluation left in error or blocked, `[{"id", "state", "message"}]`.
+---@return string
+function Document:errors()
+  self:evaluate(false)
+  return owned_text(lib().cadaclysm_blacksmith_document_errors(self:_h()), "document_errors")
+end
+
+--- Node `id`'s value as JSON text: a number, a point or list, a record, text. Raises for a node
+--- with none (missing, or in error).
+---@param id string
+---@return string
+function Document:value(id)
+  local h, key = evaluated(self, id, "document_value")
+  return owned_text(lib().cadaclysm_blacksmith_document_value(h, key), "document_value")
+end
+
+--- What node `id` evaluated to: `solid`, `sheet`, `profile`, `profiles`, `nurbs`, `subd`,
+--- `curve`, `list` (its items are `id#0`, `id#1`, ...), `value` or `none` (no such node, or one
+--- that failed). Read it with the `result_*` call of its kind, anything else with `value`.
+---@param id string
+---@return string
+function Document:result_kind(id)
+  local h, key = evaluated(self, id, "document_result_kind")
+  return owned_text(lib().cadaclysm_blacksmith_document_result_kind(h, key), "document_result_kind")
+end
+
+--- Node `id`'s solid or sheet, a `Solid` of the caller's own.
+---@param id string
+---@return Solid
+function Document:result_solid(id)
+  local h, key = evaluated(self, id, "document_result_solid")
+  return new_solid(lib().cadaclysm_blacksmith_document_result_solid(h, key), "document_result_solid")
+end
+
+--- Node `id`'s profile, a `Profile` of the caller's own.
+---@param id string
+---@return Profile
+function Document:result_profile(id)
+  local h, key = evaluated(self, id, "document_result_profile")
+  return new_profile(lib().cadaclysm_blacksmith_document_result_profile(h, key), "document_result_profile")
+end
+
+--- Node `id`'s profiles, when it is a list of profiles (or a sketch): `Profile`s of the caller's own.
+---@param id string
+---@return Profile[]
+function Document:result_profiles(id)
+  local h, key = evaluated(self, id, "document_result_profile_count")
+  local L = lib()
+  local count = L.cadaclysm_blacksmith_document_result_profile_count(h, key)
+  if count == NONE then fail("document_result_profile_count") end
+  local out = {}
+  for i = 0, count - 1 do
+    out[i + 1] = new_profile(L.cadaclysm_blacksmith_document_result_profile_at(h, key, i), "document_result_profile_at")
+  end
+  return out
+end
+
+--- Node `id`'s curve in space, a `NurbsCurve` of the caller's own.
+---@param id string
+---@return NurbsCurve
+function Document:result_nurbs_curve(id)
+  local h, key = evaluated(self, id, "document_result_nurbs_curve")
+  local c = checked(lib().cadaclysm_blacksmith_document_result_nurbs_curve(h, key), "document_result_nurbs_curve")
+  return setmetatable({ _ptr = ffi.gc(c, free_nurbs_curve) }, M.NurbsCurve)
+end
+
+--- Node `id`'s subdivision cage, a `Subd` of the caller's own.
+---@param id string
+---@return Subd
+function Document:result_subd(id)
+  local h, key = evaluated(self, id, "document_result_subd")
+  local c = checked(lib().cadaclysm_blacksmith_document_result_subd(h, key), "document_result_subd")
+  return setmetatable({ _ptr = ffi.gc(c, free_cage) }, M.Subd)
+end
+
+--- The building as IFC text. `options` is C's JSON text, `{"schema": "IFC4" | "IFC2X3",
+--- "geometry": "parametric" | "exact", "timestamp": <Unix seconds>, "name": <project name>}`,
+--- every key optional; nil is every default (IFC4, parametric, now, no name). A refused export
+--- raises the library's text verbatim: `bim_document_export_ifc: {"refusals": [{"node", "reason"}]}`.
+---@param options string|nil
+---@return string
+function Document:export_ifc(options)
+  local h = self:_h()
+  local o = optional_text(options, "bim_document_export_ifc", "options")
+  return owned_text(lib().cadaclysm_bim_document_export_ifc(h, o), "bim_document_export_ifc")
+end
+
+--- This solid as a `Document`'s `solid.body` node holds it, as JSON text: the kernel's own
+--- B-rep, every number as it is, and its colours. What `Document:add_solid` puts in a document.
+---@return string
+function Solid:document_body()
+  return owned_text(lib().cadaclysm_blacksmith_document_solid_body(self:_h()), "document_solid_body")
+end
+
+--- This profile as its exact segments, as a `Document`'s `profile.path` node holds it, as JSON
+--- text: `{"start", "segments", "holes", "colour"}`. What `Document:add_profile` puts in a document.
+---@return string
+function Profile:document_path()
+  return owned_text(lib().cadaclysm_blacksmith_document_profile_path(profile_handle(self, "document_path")), "document_profile_path")
+end
+
+end
+documents()
 end
 
 return M

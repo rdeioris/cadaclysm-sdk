@@ -1,6 +1,6 @@
 # Cadaclysm blacksmith: a modelling guide for language models
 
-**For cadaclysm 0.12.0.** The API below is this release's: use it with the wrappers and libraries of 0.12.0.
+**For cadaclysm 0.13.0.** The API below is this release's: use it with the wrappers and libraries of 0.13.0.
 
 > This file teaches a language model (ChatGPT, Gemini, Claude or any other) to write Python
 > that builds exact solid CAD parts with the cadaclysm modelling kernel, the *blacksmith*,
@@ -1037,6 +1037,11 @@ write_sat(path: FilePath, solids: Sequence[Solid], unit: Unit = 'mm') -> None
 Write several solids as one ACIS SAT file, each its own body: planes, cylinders, cones, spheres and tori as their own records, splines and swept surfaces as exact NURBS, in the layout Rhino's own exporter writes. `unit` is `mm`, `m` or `in` and goes into the header as millimetres per unit. The library writes the file itself, so a refusal names it.
 
 ```python
+write_3dm(path: FilePath, solids: Sequence[Solid], unit: Unit = 'mm') -> None
+```
+Write several solids as one Rhino `.3dm` (version 8, which Rhino 8 and 9 open), one object each: its exact brep — the surfaces and trims as they are — or, where a body has no exact form there, its mesh, with a warning saying so. Each object is named as its solid is and coloured with the solid's own colour, each painted face with its own (Rhino keeps it on the face; a body written as its mesh carries them as vertex colours; an edge's own colour has no place in a `.3dm` and is left out, with a warning saying so), and carries the solid's attributes as user text. `unit` is `mm`, `m` or `in` and is the file's unit: the numbers written are the numbers held. The library writes the file itself, so a refusal names it.
+
+```python
 svg(things: Sequence[Solid | Profile], path: FilePath | None = None) -> str | None
 ```
 Several solids and profiles' wireframe as one SVG, any mix and any order: a `<g id="solid-<i>">` per solid then a `<g id="profile-<i>">` per profile, each stroked in its own colour where it carries one — a solid's edge colour first, then its body colour (a face colour says nothing about a wireframe) — and the keywords' `stroke=` otherwise. The keywords are `Scene.svg`'s own: `view=` (front, back, left, right, top, bottom, iso), `az=`/`el=` over it, `up=` (default `z`: neither a solid nor a profile carries a convention of its own to default it from), `fov=` (0, the default, is orthographic), `size=`, `margin=`, `tolerance=`, `stroke=` and `background=` (`"#rgb"`, `"#rrggbb"` or a CSS colour name in every language, beside that language's own numeric form; `background=` `None` for transparent), `width=` (the stroke's, in page units), `edges=`, `curves=`, `isocurves=`, `polylines=` (which line sets are drawn; edges by default), and `silhouettes=` (also draw where each solid's surfaces turn away from the eye — the outline a sphere has no edge for, on by default: a sphere's and a torus's only curves are the seams where their one face meets itself, which are not edges of the body and are never drawn, so without it those two draw a blank page. A line set in its own right, so `silhouettes=` with `edges=` off draws the outline alone).
@@ -1066,6 +1071,14 @@ Set a kernel option, by its name, for the whole process from the next call on �
 
 `measure.default_accuracy` (default 1e-7): the relative accuracy `Solid.mass()`, `Solid.edge_length()`, `Profile.length()` and the arc-length samples (`Solid.edge_point_at_length()`, `Profile.point_at_length()` and their divides) refine to when they are asked for 0, the default. Above 0 and below 1. `Solid.oriented_box()` has its own default, 1e-5, and does not read it.
 
+`step.validation_properties` (default 0): whether a STEP part file (`Solid.step()`, `write_step`) carries each body's geometric validation properties — the surface area, the volume and the centroid this kernel measures for it, stated in the file so the kernel that reads it can check the transfer against its own measurement of the same geometry. 1 to write them, 0 not to. Off by default because it measures every body in the file at `step.validation_accuracy`. With no schema named the file moves to AP242, as a colour moves it, since AP203's first edition has no entity to state a property with; a named schema that cannot state them raises `BuildError` rather than writing the file without the figures. A body whose measurement is refused is written without properties, and the file is still written. An assembly file (`write_step_assembly`) never carries them. A reader finds them again on the node, under `Node.attributes`.
+
+`step.validation_accuracy` (default 1e-5): the relative accuracy each body is measured to for those figures — 1e-5, as `Solid.oriented_box()`'s own default, not `measure.default_accuracy`'s 1e-7, because 1e-7 costs tens of seconds on a free-form body and a file is a whole model of them. Above 0 and below 1. STEP has no field for an error bound, so the figures written are as good as this and no better: a receiver who wants to compare against a finer figure asks for a finer one here.
+
+`tolerance.relative` (default 1e-4): the share of a solid's size a verb given no tolerance (0, or none where the language has it) works at, unless the solids declare a looser absolute tolerance — see `effective_tolerance`. Above 0 and below 1.
+
+`tolerance.angular` (default one degree, in radians): the angle that stands in where nothing declares one. Above 0 and below a right angle.
+
 A name that is not an option, or a value the option does not take, raises `BuildError` and changes nothing, saying which and what it takes.
 
 ```python
@@ -1074,22 +1087,27 @@ option(name: str) -> float
 A kernel option's value, by its name: what `set_option` last set, else its default (see `set_option` for the names). A name that is not an option raises `BuildError`, listing the ones there are.
 
 ```python
+effective_tolerance(*solids) -> float
+```
+The tolerance a verb given none — 0, or none where the language has it — works at over `solids`: the larger of the loosest absolute tolerance they declare (`Solid.tolerances`) and `tolerance.relative` (see `set_option`) times the largest of their sizes, never finer than their coordinates can represent. Every verb that takes a distance tolerance (booleans, fillets, shells, splits, sections, hits, meshes, curve fits, profile verbs) reads it so; the wrappers' own defaults (`0.05` for a boolean) stay what they are. 0 for no solids, or solids with nothing to size by, which a verb refuses.
+
+```python
 boxes_apart(a: Box, frame_a: FrameLike, b: Box, frame_b: FrameLike) -> bool
 ```
 True only if box `a` at `frame_a` and box `b` at `frame_b` cannot touch — a separating axis among the boxes' face normals and edge-direction crosses; touching is not apart. Sharper than moving each box (`Box.moved()`) and asking `Box.overlaps()`, which boxes the *result* on the world axes again and so can call two oriented boxes overlapping when they are not (two unit boxes, the second turned 45 degrees about z and moved 2.3 along x: their world boxes overlap, but the boxes themselves do not touch). `frame_a` or `frame_b` not twelve finite numbers or not rigid raises `BuildError`.
 
 ```python
-clash(parts: Iterable[Solid], others: Iterable[Solid] | None = None, clearance: float = 0.0, tolerance: float = 0.05, allowed: Iterable[tuple[int, int]] = ()) -> list[Clash]
+clash(parts: Iterable[Solid], others: Iterable[Solid] | None = None, clearance: float = 0.0, tolerance: 'float | None' = 0.05, allowed: Iterable[tuple[int, int]] = ()) -> list[Clash]
 ```
 Every pair of `parts` — or, with `others`, every part of `parts` against every part of `others` — that penetrates, touches or lies within `clearance` of the other, as `Clash` rows, the solids as they stand. It is the question `Solid.closest()` and `Collider.check()` leave open: not how far apart two parts are, nor only whether they overlap, but which pairs are in trouble and how. A row's `kind` is decided in this order: `"penetrating"` where the volumes overlap; `"touching"` where the boundaries are within `tolerance` of each other; `"too_close"` where they are apart by more than `tolerance` but less than `clearance`; `"refused"` where the pair could not be decided. A pair further apart than `clearance` gives no row, and with `clearance` 0 there are no `"too_close"` rows. `tolerance` is the meshing tolerance, absolute, in model units (0.05 by default); a distance is exact to within it. In a row `a` indexes `parts` and `b` indexes `others` (or `parts` again, when there are no `others`; then `a < b`). Rows come in pair order. `allowed` is pairs of part indices never tested — designed contacts — each exactly two integers; with `others` a pair is (index in `parts`, index in `others`). A negative or non-finite `clearance`, a `tolerance` not positive and finite, an `allowed` pair that is not two indices or one out of range, an empty `others`, or a part that is not a closed solid raises `BuildError`; the kernel's own words are prefixed `clash:`. For the same parts moved pose after pose, build a `Collider` and ask `Collider.clash()`. Whether the parts meet on the way from one pose to the next is `swept_clash`'s question.
 
 ```python
-swept_clash(parts: Iterable[Solid], poses: Iterable[Iterable[FrameLike]], others: Iterable[Solid] | None = None, other_poses: Iterable[Iterable[FrameLike]] | None = None, clearance: float = 0.0, tolerance: float = 0.05, resolution: float = 0.001, max_steps: int = 100000, allowed: Iterable[tuple[int, int]] = ()) -> list[SweptClash]
+swept_clash(parts: Iterable[Solid], poses: Iterable[Iterable[FrameLike]], others: Iterable[Solid] | None = None, other_poses: Iterable[Iterable[FrameLike]] | None = None, clearance: float = 0.0, tolerance: 'float | None' = 0.05, resolution: float = 0.001, max_steps: int = 100000, allowed: Iterable[tuple[int, int]] = ()) -> list[SweptClash]
 ```
 Every pair of `parts` — or, with `others`, every part of `parts` against every part of `others` — that penetrates, touches or comes within `clearance` of the other anywhere on a path, as `SweptClash` rows: `clash`'s question asked of the motion, not only of the poses. Each part is its own group: pose `k` of `poses` is one `Frame` (or twelve numbers) per part of `parts`, and pose `k` of `other_poses` one per part of `others`; `others` and `other_poses` go together, and the two have as many poses. The motion between poses, the guarantee, `resolution` and `max_steps` are `Collider.swept_clash()`'s; `clearance`, `tolerance` (the meshing tolerance, absolute, 0.05 by default) and `allowed` are `clash`'s, and a row's `a` indexes `parts`, its `b` `others` (or `parts` again; then `a < b`). Rows come in pair order. `others` without `other_poses` or the other way round, a different number of poses in the two, a pose with the wrong number of frames, an empty set, fewer than two poses, an `allowed` pair that is not two indices or one out of range, a part that is not a closed solid, or a bad frame, tolerance, `clearance`, `resolution` or `max_steps` raises `BuildError`; the kernel's own words are prefixed `swept_clash:`.
 
 ```python
-thickness(solids: Iterable[Solid], maximum: float, sharp_angle: float = 0.0, tolerance: float = 0.01) -> list[Thickness]
+thickness(solids: Iterable[Solid], maximum: float, sharp_angle: float = 0.0, tolerance: 'float | None' = 0.01) -> list[Thickness]
 ```
 Every wall-thickness reading within `maximum` on `solids`, measured against each other, as `Thickness` rows by body then vertex: a `ThicknessGauge` built at `tolerance` (0.01 by default), asked `ThicknessGauge.thickness()` once and freed. Build the gauge yourself to ask more than once. `maximum` not positive and finite, `sharp_angle` negative or not finite, or a `tolerance` not positive and finite raises `BuildError`, with the gauge call's own prefix (`thickness_gauge_new:`, `thickness_gauge_measure:`).
 
@@ -1174,7 +1192,7 @@ Profile.parabola(vertex: Point2, axis: Point2, focal: float, from_: float, to: f
 Start drawing on the arc of the parabola with `vertex`, axis direction `axis` and focal length `focal`, over the across-axis coordinates `from`..`to`: the path begins at the arc's first point and holds the arc as one conic segment — a reflector from rim to rim; `parabola((0, 0), (0, 1), 20, -50, 50)` is a dish 100 wide opening up. A zero axis, a focal length not positive and finite, or `from` not under `to` raises `BuildError`.
 
 ```python
-Profile.chain(pieces: Iterable[Profile], tolerance: float = 1e-06) -> Profile
+Profile.chain(pieces: Iterable[Profile], tolerance: 'float | None' = 1e-06) -> Profile
 ```
 Open profiles — paths ended open — joined end to end into one: the forge's merge. They may come in any order and either way round: each next piece is the first of the rest with an end within `tolerance` (1e-6 by default) of either end of the chain so far, reversed where that makes it meet. Every segment is kept exactly — a line a line, an arc an arc, a spline the same spline. Closed where the chain's two ends meet, otherwise an open chain. A piece that is empty, has holes, is closed on its own or meets none of the others raises `BuildError` naming it by its index.
 
@@ -1189,12 +1207,12 @@ profile.close_loop() -> Profile
 This profile closed — the forge's sketch "close": where its last segment stops short of its start (a path ended open), a straight segment back to it; where it already comes back within 1e-9 of its extent, its last segment made to land on the start exactly. A closed profile comes back as it is, and holes are closed the same way.
 
 ```python
-profile.pieces(cutters: Iterable[Profile], tolerance: float = 1e-06) -> list[Profile]
+profile.pieces(cutters: Iterable[Profile], tolerance: 'float | None' = 1e-06) -> list[Profile]
 ```
 This curve cut where the `cutters` cross, touch or run along it — the sketch trim's pieces: in order along the curve from its start, each an open profile of portions of this one's own segments (a line's stretch a line, an arc's an arc, a spline's the same spline over part of its domain, nothing refitted). One piece, this curve, where nothing cuts it; a closed curve's piece round its start is one piece. Cuts closer than `tolerance` to each other fold onto one. A curve with no segments raises `BuildError`.
 
 ```python
-profile.trim(cutters: Iterable[Profile], piece: int, tolerance: float = 1e-06) -> list[Profile]
+profile.trim(cutters: Iterable[Profile], piece: int, tolerance: 'float | None' = 1e-06) -> list[Profile]
 ```
 This curve with piece `piece` of `Profile.pieces()` taken away — the sketch trim, the forge's: what is left, as open profiles. One for a closed curve (its other pieces run together from where the removed one ended), the stretches before and after for an open one, none where the piece was the whole curve. A piece the curve does not have raises `BuildError`.
 
@@ -1204,7 +1222,7 @@ profile.with_hole(hole: 'Profile') -> Profile
 This outline with `hole` cut out of it.
 
 ```python
-profile.common(other: Profile, tolerance: float = 1e-06) -> list[Profile]
+profile.common(other: Profile, tolerance: 'float | None' = 1e-06) -> list[Profile]
 ```
 The region this outline and `other` share, both read in one plane, as a list of zero or more profiles — each boundary counter-clockwise, each hole clockwise, arcs and splines kept exact. An arc kept from an input can still come out split at that input's own seam point (two circles' lens is four arcs, one pair per circle) — exact, not an approximation. Two loops of a result may touch at a point (two holes whose corners meet, one from each input): a right point set that the verbs needing simple loops — `Solid.extrude()`, a boolean taking it as an input — refuse. Both must be closed and simple; no shared area is an empty list. A `tolerance` not positive and finite, an outline open or crossing itself, a `tolerance` too fine for these outlines (following their arcs and splines to a tenth of it would take more than 8 million points, about 128 MB), and, as a defect rather than an outcome, a result that fails to close, raises `BuildError`.
 
@@ -1249,22 +1267,22 @@ profile.round(radius: float, corners: Iterable[int] | None = None, open: bool = 
 This outline with its corners rounded by `radius`: where two straight segments meet, both are cut back and an exact arc tangent to both goes between them; a corner next to an arc or a spline is left as it is. With no `corners` every such corner is rounded, the holes' too; a list picks corners of the outline — corner `k` is where segment `k` ends. `open` reads the profile as an open chain whose two ends stay square. A radius that does not fit raises `BuildError` naming the corner.
 
 ```python
-profile.to_arcs(tolerance: float = 0.01) -> Profile
+profile.to_arcs(tolerance: 'float | None' = 0.01) -> Profile
 ```
 This profile with every free-form side (a Bezier, a conic, a NURBS) replaced by lines and arcs within `tolerance` of it — what a G-code writer can say. Lines and arcs pass through as they are, every loop closes on itself exactly, holes are converted the same way. `tolerance` (0.01 by default) not positive and finite, or a spline that does not evaluate, raises `BuildError`.
 
 ```python
-profile.offset(distance: float, tolerance: float = 0.01) -> list[Profile]
+profile.offset(distance: float, tolerance: 'float | None' = 0.01) -> list[Profile]
 ```
 This profile grown by `distance` (shrunk where it is negative), as zero or more profiles, all lines and arcs: outward corners rounded by `|distance|`, holes moving against the boundary (a hole shrinks as the profile grows). Free-form sides are fitted to `tolerance` first (`Profile.to_arcs()`). A shrink that eats the whole profile is an empty list. A `distance` not finite, a `tolerance` (0.01 by default) not positive and finite, a loop with no sides, or loops that cross or touch, raises `BuildError`.
 
 ```python
 profile.document_path() -> dict[str, Any]
 ```
-This profile as its exact segments, as a `Document`'s `profile.path` node holds it: a record of its `start`, its `segments` (each a `line`, `arc`, `bezier`, `conic` or `nurbs` with its points, weights and knots, never flattened) and its `holes`. What `Document.add_profile()` puts in a document.
+This profile as its exact segments, as a `Document`'s `profile.path` node holds it: a record of its `start`, its `segments` (each a `line`, `arc`, `bezier`, `conic` or `nurbs` with its points, weights and knots, never flattened), its `holes` and its `colour`. What `Document.add_profile()` puts in a document.
 
 ```python
-profile.polylines(tolerance: float = 0.05) -> list[numpy.ndarray]
+profile.polylines(tolerance: 'float | None' = 0.05) -> list[numpy.ndarray]
 ```
 The outline, then each hole, as polylines at z = 0 within `tolerance` of its arcs and splines — what a viewer draws it with. A closed loop repeats its first point at the end; an open chain (a profile ended open) stays open. Views, like `Solid.mesh()` — copies in Node, Godot and Python.
 
@@ -1375,7 +1393,7 @@ SweepPath.at(point: Point3) -> SweepPath
 Start a path at a 3D point.
 
 ```python
-SweepPath.along(curve: Profile, frame: FrameLike, tolerance: float = 0.05, open: bool = True) -> SweepPath
+SweepPath.along(curve: Profile, frame: FrameLike, tolerance: 'float | None' = 0.05, open: bool = True) -> SweepPath
 ```
 The path a 2D chain (usually from `Path.end_open()`) draws on `frame`: a line a straight piece, an arc a circular one, a Bézier or spline fitted with biarcs — arcs tangent to each other and to the curve — within `tolerance`, so the path is tangent throughout and the sweep exact along it. `open` false closes the path back to its start.
 
@@ -1763,6 +1781,14 @@ interval.normalized_parameter_at(t: float) -> float | None
 ```
 The fraction of the way `t` lies from `t0` toward `t1`; `None` for a singleton.
 
+### Tolerances
+
+```python
+class Tolerances(NamedTuple)
+```
+
+What a solid declares about its own precision, as a named tuple: `absolute`, a length in the model's own units, and `angular`, in radians — each none where nothing declared it. What `Solid.tolerances` returns.
+
 ### CurveFoot
 
 ```python
@@ -1821,7 +1847,7 @@ How far `p` lies from the curve: the distance to its `closest_point`.
 ```python
 line.to_nurbs() -> NurbsCurve
 ```
-The curve as its exact `NurbsCurve` (a conic as a rational quadratic). Native only: the web build has no `NurbsCurve`, so there this raises `BuildError` before any call.
+The curve as its exact `NurbsCurve` (a conic as a rational quadratic).
 
 ```python
 line.bounds() -> tuple[tuple[float, float, float], tuple[float, float, float]]
@@ -1879,7 +1905,7 @@ How far `p` lies from the curve: the distance to its `closest_point`.
 ```python
 circle.to_nurbs() -> NurbsCurve
 ```
-The curve as its exact `NurbsCurve` (a conic as a rational quadratic). Native only: the web build has no `NurbsCurve`, so there this raises `BuildError` before any call.
+The curve as its exact `NurbsCurve` (a conic as a rational quadratic).
 
 ```python
 circle.frame: Frame  (property)
@@ -1959,7 +1985,7 @@ How far `p` lies from the curve: the distance to its `closest_point`.
 ```python
 arc.to_nurbs() -> NurbsCurve
 ```
-The curve as its exact `NurbsCurve` (a conic as a rational quadratic). Native only: the web build has no `NurbsCurve`, so there this raises `BuildError` before any call.
+The curve as its exact `NurbsCurve` (a conic as a rational quadratic).
 
 ```python
 arc.frame: Frame  (property)
@@ -2023,7 +2049,7 @@ How far `p` lies from the curve: the distance to its `closest_point`.
 ```python
 ellipse.to_nurbs() -> NurbsCurve
 ```
-The curve as its exact `NurbsCurve` (a conic as a rational quadratic). Native only: the web build has no `NurbsCurve`, so there this raises `BuildError` before any call.
+The curve as its exact `NurbsCurve` (a conic as a rational quadratic).
 
 ```python
 ellipse.frame: Frame  (property)
@@ -2438,6 +2464,204 @@ cuboid.transform(t: 'Transform | Sequence[float]')
 ```
 This value under `t` (a `Transform`, or 16 numbers), a value of the same type. A line takes any map that keeps its ends apart and an ellipse any that keeps it an ellipse; every other value only a similarity — turn a circle into an `Ellipse` first for anything else. Any other map raises `BuildError`.
 
+### Rectangle
+
+```python
+class Rectangle(_CurveValue)
+```
+
+The rectangle over `x` and `y` (increasing `Interval`s, or pairs) in its frame's x-y plane, as a value — Rhino's `Rectangle3d`. As a curve it is its boundary: `t` runs 0..4, one unit a side, from corner `(x0, y0)` counter-clockwise about the frame's z. Immutable, with nothing to free: equal by value, hashable, iterating as its numbers, the maths the library's own, so every language answers alike. A frame argument is a `Frame` or 12 numbers; one within 1e-6 of right-handed and orthonormal is squared up, any other raises `BuildError`, as does a size that is not positive and finite.
+
+```python
+rectangle.x: Interval  (property)
+rectangle.y: Interval  (property)
+```
+The two ranges along the frame's x and y, as `Interval`s.
+
+```python
+rectangle.frame: Frame  (property)
+```
+The `Frame` the rectangle lies on.
+
+```python
+rectangle.corners() -> list[tuple[float, float, float]]
+```
+The four corners in Rhino's `Corner(i)` order: `(x0, y0)`, `(x1, y0)`, `(x1, y1)`, `(x0, y1)`.
+
+```python
+rectangle.area() -> float
+```
+The filled rectangle's area.
+
+```python
+rectangle.point_at(t: float) -> tuple[float, float, float]
+```
+The boundary's point at `t`: side `k` for `t` in `k..k+1`. A `t` outside 0..4 is clamped, as Rhino's `PointAt` does, not wrapped.
+
+```python
+rectangle.tangent_at(t: float) -> tuple[float, float, float]
+```
+The unit direction of `t`'s side: the frame's x, y, -x, -y in turn.
+
+```python
+rectangle.length() -> float
+```
+The boundary's length, the circumference.
+
+```python
+rectangle.closest_point(p: Point3) -> CurveFoot
+```
+The `CurveFoot` on the boundary nearest `p` (projected onto the plane first). `unique` is `False` where two sides lie equally near — the centre, any point on the medial axis — and the answer is a fixed pick among them.
+
+```python
+rectangle.distance_to(p: Point3) -> float
+```
+How far `p` lies from the boundary.
+
+```python
+rectangle.closest_point_in(p: Point3, include_interior: bool = True) -> tuple[float, float, float]
+```
+Rhino's `ClosestPoint(p, includeInterior)`: `p` projected onto the plane and clamped into the filled rectangle when `include_interior` (the default), else the boundary's closest point.
+
+```python
+rectangle.contains(p: Point3, tolerance: 'float | None' = None) -> str
+```
+Where `p`, projected onto the plane, lies: `"inside"`, `"outside"`, or `"on"` within `tolerance` of the boundary (Rhino's `Contains`). `tolerance` None (or NaN) is unset — the rectangle's own effective tolerance, `tolerance.relative` times its diagonal; 0 is exact, so only a point exactly on the boundary is on it. A negative or infinite one raises `BuildError`.
+
+```python
+rectangle.to_sheet() -> Solid
+```
+The filled rectangle as a one-face planar sheet `Solid`, facing the frame's z.
+
+```python
+rectangle.to_nurbs() -> NurbsCurve
+```
+The boundary as its exact closed degree-1 `NurbsCurve`, a knot at each corner, so its parameter is `t`.
+
+```python
+rectangle.bounds() -> tuple[tuple[float, float, float], tuple[float, float, float]]
+```
+The world box of the four corners, `(min, max)`.
+
+```python
+rectangle.transform(t: 'Transform | Sequence[float]')
+```
+This rectangle under `t` (a `Transform`, or 16 numbers): any map that keeps its sides square — a similarity, a mirror, a stretch along its own axes. A shear in its plane, or a map that flattens it, raises `BuildError` (Rhino's `Transform` answers a rectangle that is not the image).
+
+### Triangle
+
+```python
+class Triangle(_Value)
+```
+
+The triangle `a`, `b`, `c`, as a value — Rhino's `Triangle3d`. Collinear or coincident points (an area at most 1e-12 of the longest side squared) raises `BuildError`. Immutable, with nothing to free: equal by value, hashable, iterating as its numbers, the maths the library's own, so every language answers alike. A frame argument is a `Frame` or 12 numbers; one within 1e-6 of right-handed and orthonormal is squared up, any other raises `BuildError`, as does a size that is not positive and finite.
+
+```python
+triangle.a: tuple[float, float, float]  (property)
+triangle.b: tuple[float, float, float]  (property)
+triangle.c: tuple[float, float, float]  (property)
+```
+The three vertices.
+
+```python
+triangle.area() -> float
+```
+The area.
+
+```python
+triangle.perimeter() -> float
+```
+The sum of the three sides.
+
+```python
+triangle.centroid() -> tuple[float, float, float]
+```
+The area centroid, the vertices' mean (Rhino's `AreaCenter`).
+
+```python
+triangle.circumcircle() -> Circle
+```
+The `Circle` through `a`, `b` and `c`: its x toward `a`, turning them counter-clockwise.
+
+```python
+triangle.point_at(wa: float, wb: float, wc: float) -> tuple[float, float, float]
+```
+The point of barycentric weights `wa`, `wb`, `wc`, used as given (they need not sum to 1).
+
+```python
+triangle.barycentric(p: Point3) -> tuple[float, float, float]
+```
+The weights `(wa, wb, wc)`, summing to 1, of `p` projected onto the triangle's plane.
+
+```python
+triangle.closest_point(p: Point3) -> tuple[float, float, float]
+```
+The closest point of the filled triangle to `p`, exact (by the vertex, edge and face regions, no iteration).
+
+```python
+triangle.distance_to(p: Point3) -> float
+```
+How far `p` lies from the filled triangle.
+
+```python
+triangle.edge(i: int) -> Line
+```
+Edge `i` as a `Line`: 0 `a` to `b`, 1 `b` to `c`, 2 `c` to `a`. Any other `i` raises `BuildError`.
+
+```python
+triangle.to_sheet() -> Solid
+```
+The filled triangle as a one-face planar sheet `Solid`, its normal turning `a`, `b`, `c` counter-clockwise.
+
+```python
+triangle.bounds() -> tuple[tuple[float, float, float], tuple[float, float, float]]
+```
+The world box of the three vertices, `(min, max)`.
+
+```python
+triangle.transform(t: 'Transform | Sequence[float]')
+```
+This triangle under `t` (a `Transform`, or 16 numbers): any affine map, the vertices to their images. One that flattens it raises `BuildError`.
+
+### Ray
+
+```python
+class Ray(_Value)
+```
+
+The half-line from `position` along `direction`, as a value — Rhino's `Ray3d`. The direction is kept as given, not unitised, so `t` counts lengths of it; a zero one raises `BuildError`. Shooting a ray at a solid is not here: see `Solid.hits()`. Immutable, with nothing to free: equal by value, hashable, iterating as its numbers, the maths the library's own, so every language answers alike. A frame argument is a `Frame` or 12 numbers; one within 1e-6 of right-handed and orthonormal is squared up, any other raises `BuildError`, as does a size that is not positive and finite.
+
+```python
+ray.position: tuple[float, float, float]  (property)
+ray.direction: tuple[float, float, float]  (property)
+```
+The start and the direction.
+
+```python
+ray.point_at(t: float) -> tuple[float, float, float]
+```
+`position + t * direction`, for any `t` — behind the start too, as Rhino's `PointAt`.
+
+```python
+ray.closest_point(p: Point3) -> CurveFoot
+```
+The `CurveFoot` on the ray nearest `p`: `t` clamped at 0, so a point behind the start answers the start. Always `unique`.
+
+```python
+ray.distance_to(p: Point3) -> float
+```
+How far `p` lies from the ray.
+
+```python
+ray.bounds() -> tuple[tuple[float, float, float], tuple[float, float, float]]
+```
+A ray has no box: this raises `BuildError`.
+
+```python
+ray.transform(t: 'Transform | Sequence[float]')
+```
+This ray under `t` (a `Transform`, or 16 numbers): any affine map, the position as a point and the direction as a vector. One that kills the direction raises `BuildError`.
+
 ### Workplane
 
 ```python
@@ -2748,27 +2972,29 @@ On a solid from `Solid.transform()` or `Solid.convert_to_nurbs()`, the trims **t
 #### Booleans
 
 ```python
-solid.join(other: 'Solid', tolerance: float = 0.05, progress: Progress = None, merge: bool = False) -> Solid
+solid.join(other: 'Solid', tolerance: 'float | None' = 0.05, progress: Progress = None, merge: bool = False) -> Solid
 ```
 The union with `other`, as an exact B-rep. `merge` (off by default, so face and edge numbers stay as they were) merges the flush faces the join leaves, as `Solid.merge_flush()` does — Go takes it as a trailing `true`, Java as an overload; `Solid.cut()` and `Solid.common()` take it too. `tolerance` (0.05 by default) is the mesh tolerance the boolean decides at: both solids are meshed at it, so a tighter one is as correct and slower. It is also the resolution: two faces on one surface to within it — a peg the size of its hole, or a hair thinner — are one surface, and the join is a fit; a gap wider than it is a gap. `progress`, where the wrapper takes one, is called with a phase name and a done/total count.
 
+Merged or not, a tracked result's {{Solid.face_origins}} name this solid as operand 0 and `other` as 1: a merged face names one origin in each input face it lies on, not the faces between the join and the merge. The same for `cut` and `common`.
+
 ```python
-solid.cut(other: 'Solid', tolerance: float = 0.05, progress: Progress = None, merge: bool = False) -> Solid
+solid.cut(other: 'Solid', tolerance: 'float | None' = 0.05, progress: Progress = None, merge: bool = False) -> Solid
 ```
 This solid with `other` removed.
 
 ```python
-solid.common(other: 'Solid', tolerance: float = 0.05, progress: Progress = None, merge: bool = False) -> Solid
+solid.common(other: 'Solid', tolerance: 'float | None' = 0.05, progress: Progress = None, merge: bool = False) -> Solid
 ```
 What this solid and `other` share.
 
 ```python
-solid.section(z: float, tolerance: float = 0.05) -> list[Profile]
+solid.section(z: float, tolerance: 'float | None' = 0.05) -> list[Profile]
 ```
 This solid cut by the plane `Z = z`: its closed outlines there, in XY, nested into profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a circle crossing kept exact and any other curve as lines within `tolerance`. A plane that misses the solid is an empty list. A `z` not finite, a `tolerance` (0.05 by default) not positive and finite, a face lying in the plane (section a little above or below it), or a crossing that does not close, raises `BuildError`.
 
 ```python
-solid.split_sheet(tool: 'Solid', tolerance: float = 0.05, progress: Progress = None) -> Solid
+solid.split_sheet(tool: 'Solid', tolerance: 'float | None' = 0.05, progress: Progress = None) -> Solid
 ```
 This solid or sheet cut along `tool`'s boundary with nothing removed: each face comes back as its pieces outside `tool` and then its pieces inside, in the original face order — the start of a surface trim. `tool` must be a closed solid. Keep the pieces you want with `Solid.drop_faces()`, or split and drop in one call with `Solid.trim()`.
 
@@ -2785,24 +3011,49 @@ solid.drop_faces(faces: Iterable[int]) -> Solid
 This solid without the faces listed: the rest keep their surfaces, curves and colours in their order, so an index into the result is this one's with the dropped ones closed up. Dropping every face raises `BuildError`.
 
 ```python
-solid.trim(tool: 'Solid', keep: Literal['outside', 'inside'] = 'outside', tolerance: float = 0.05, progress: Progress = None) -> Solid
+solid.trim(tool: 'Solid', keep: Literal['outside', 'inside'] = 'outside', tolerance: 'float | None' = 0.05, progress: Progress = None) -> Solid
 ```
 This sheet (or solid) cut along the closed `tool`'s boundary and the pieces on one side thrown away: `keep` `"outside"` (the default) keeps what lies outside the tool — a hole punched through — and `"inside"` what lies within it. Nothing on the kept side raises `BuildError`. `tolerance` and `progress` as for `Solid.join()`.
 
 ```python
-solid.split_by_curve(curve: 'NurbsCurve', direction: 'Point3 | None' = None, tolerance: float = 0.05) -> Solid
+solid.split_by_curve(curve: 'NurbsCurve', direction: 'Point3 | None' = None, tolerance: 'float | None' = 0.05) -> Solid
 ```
-This sheet cut along `curve` — a `NurbsCurve` lying on it, typically projected or pulled onto it — with nothing removed: each face comes back as its pieces outside the cutter and then its pieces inside, as `Solid.split_sheet()` orders them. The cutter is the curve run along `direction` (`None`: the mean of the sheet's normals along the curve) through the whole sheet, so the cut follows the curve wherever the sheet is one layer along that direction. A closed curve's inside is the island it bounds; an open curve's is the side left of its run, seen from where `direction` points, and an open curve is run on straight past both ends, so it should reach the sheet's boundary. Where the cut lies on the curve — a curve drawn on the sheet — the rim is one edge carrying the curve's own span exactly, its ends on the curve, so another sheet built along the same curve sews to it with `Solid.join_sheets()`. A direction that is zero, or a curve running along it, raises `BuildError`. Native Python only for now.
+This sheet cut along `curve` — a `NurbsCurve` lying on it, typically projected or pulled onto it — with nothing removed: each face comes back as its pieces outside the cutter and then its pieces inside, as `Solid.split_sheet()` orders them. The cutter is the curve run along `direction` (`None`: the mean of the sheet's normals along the curve) through the whole sheet, so the cut follows the curve wherever the sheet is one layer along that direction. A closed curve's inside is the island it bounds; an open curve's is the side left of its run, seen from where `direction` points, and an open curve is run on straight past both ends, so it should reach the sheet's boundary. Where the cut lies on the curve — a curve drawn on the sheet — the rim is one edge carrying the curve's own span exactly, its ends on the curve, so another sheet built along the same curve sews to it with `Solid.join_sheets()`. A direction that is zero, or a curve running along it, raises `BuildError`.
 
 ```python
-solid.trim_by_curve(curve: 'NurbsCurve', keep: Literal['outside', 'inside', 'left', 'right'] = 'outside', direction: 'Point3 | None' = None, tolerance: float = 0.05) -> Solid
+solid.trim_by_curve(curve: 'NurbsCurve', keep: Literal['outside', 'inside', 'left', 'right'] = 'outside', direction: 'Point3 | None' = None, tolerance: 'float | None' = 0.05) -> Solid
 ```
-This sheet cut along `curve` and one side thrown away (see `Solid.split_by_curve()`): `keep` `"outside"` (the default) keeps the sheet with the hole a closed curve cuts, `"inside"` the island; for an open curve `"left"` (the same as `"inside"`) keeps the side left of its run seen from where `direction` points, `"right"` the other. Nothing on the kept side raises `BuildError`. The kept pieces keep their faces' colours. Native Python only for now.
+This sheet cut along `curve` and one side thrown away (see `Solid.split_by_curve()`): `keep` `"outside"` (the default) keeps the sheet with the hole a closed curve cuts, `"inside"` the island; for an open curve `"left"` (the same as `"inside"`) keeps the side left of its run seen from where `direction` points, `"right"` the other. Nothing on the kept side raises `BuildError`. The kept pieces keep their faces' colours.
 
 ```python
-Solid.join_sheets(sheets: 'Iterable[Solid]', tolerance: float = 0.0) -> tuple[Solid, JoinReport]
+solid.flange(edges: 'Iterable[Edge | int]', section: 'NurbsCurve', tolerance: 'float | None' = 0.001, join: bool = True) -> Solid
 ```
-Separate sheets joined into one body, their faces in order, beside a `JoinReport` of what was done: every two naked edges whose ends and curves agree within `tolerance` (0: a rounding of the body's size) sewn into one edge — a gap closed is kept as that edge's own tolerance, nothing moves — the faces turned to agree across their edges, and a closed result turned to face out: a solid `Solid.cut()`, `Solid.mass()` and the writers take like any other. Edges that carry exact curves are compared to the tolerance however coarsely each sheet sampled them. One sheet's edge running along part of another's is not sewn and stays naked. No sheets, a negative tolerance, or faces that cannot be turned to agree (a one-sided surface) raises `BuildError`. Native Python only for now.
+A section swept along each of `edges` — naked edges of this sheet, bordered by one face — on the face's own frame, the new sheets sewn to this one: at every point of the edge the section's `x` runs outward from the face (square to the edge, in its tangent plane) and its `y` along the face's normal, so a section from `(0, 0)` to `(0, -10)` turns the edge under by 10 all along it however the panel curves — a flange round an opening, a wheel arch's lip, a door-seal return — `(0, 0)` to `(10, 0)` carries the face on, and a lip stands proud with `y > 0`. `section` is a `NurbsCurve` in the plane `z = 0` starting at the origin. With `join` false the sweeps come back alone, sewn to each other. Each is fitted within `tolerance`, and its side along the edge too; `sheet_error` says how close. An edge bordered by two faces, a section not starting at the origin, or sweeps that did not sew on raises `BuildError`.
+
+```python
+solid.extrude_to(edges: 'Iterable[Edge | int]', direction: 'Point3', target: 'Solid', tolerance: 'float | None' = 0.001, join: bool = True) -> Solid
+```
+Each of `edges` — naked edges of this sheet — slid along `direction` until it meets `target`: every point of the edge travels along the direction to its first hit on `target`'s faces (the trimmed faces, not their whole surfaces). One wall per edge, the edge's own curve swept straight and bounded by the curve through the hits, fitted within `tolerance` of every hit (`sheet_error`), so the wall shares the edge exactly and meets the target within the tolerance — a wheel arch cut in a panel run in to the well's inner wall as its liner. The walls come back sewn to this sheet, or alone with `join` false. A direction of no length, or a point whose line misses the target (named), raises `BuildError`.
+
+```python
+solid.split_along_curve(curve: 'NurbsCurve', tolerance: 'float | None' = 0.01) -> Solid
+```
+This sheet cut along `curve`, a `NurbsCurve` lying on it (within ten times `tolerance`), with no direction: each face is cut in its own parameters where the curve crosses it, so the cut follows the curve however far the sheet rolls, and runs on across the seams of a joined sheet. An open curve is carried on along the sheet past both ends to its boundary; a closed one cuts out the island it bounds. Nothing is removed. Where the cut lies on the curve the rim is one edge carrying the curve's own span exactly. A curve that leaves the sheet raises `BuildError`.
+
+```python
+solid.panel_gap(curve: 'NurbsCurve', gap: float = 4.0, flange: float = -10.0, tolerance: 'float | None' = 0.01) -> tuple[Solid, Solid]
+```
+This sheet parted along `curve` (lying on it, as for `Solid.split_along_curve()`) into two panels with a shut line between them — a car body's panel gap: each trimmed back `gap / 2` from the curve, measured along the sheet, and given a flange `flange` along the faces' outward normals on the edge it was cut back to (negative turns it under; 0 for none). Only the cut edges are flanged, not the sheet's own edges, and each flange ends square where the curve runs off the sheet. The panel left of the curve's run (seen from the outward side) first, then the right one; a loop run counter-clockwise from that side has the island on its left. A curve that leaves the sheet, or a gap that leaves nothing of a panel, raises `BuildError`.
+
+```python
+Solid.join_sheets(sheets: 'Iterable[Solid]', tolerance: 'float | None' = 0.0) -> tuple[Solid, JoinReport]
+```
+Separate sheets joined into one body, their faces in order, beside a `JoinReport` of what was done: every two naked edges whose ends and curves agree within `tolerance` (0: a rounding of the body's size) sewn into one edge — a gap closed is kept as that edge's own tolerance, nothing moves — the faces turned to agree across their edges, and a closed result turned to face out: a solid `Solid.cut()`, `Solid.mass()` and the writers take like any other. Edges that carry exact curves are compared to the tolerance however coarsely each sheet sampled them. One sheet's edge running along part of another's is not sewn and stays naked. No sheets, a negative tolerance, or faces that cannot be turned to agree (a one-sided surface) raises `BuildError`.
+
+```python
+solid.recess(outline: 'NurbsCurve', depth: float, draft: float = 0.0, fillet: float = 0.0, pane: bool = True, tolerance: 'float | None' = 0.05) -> tuple[Solid, tuple[int, int, int, int]]
+```
+This sheet with an opening recessed into it along `outline` — a window, a lamp, a grille or an air intake set into a panel — beside how many of the result's faces are each part's: the sheet's, the fillet's, the walls' and the pane's, the faces in that order. `outline` is a closed `NurbsCurve` on the sheet (one face, or several joined by `Solid.join_sheets()`); each of its points is found on the sheet, so a curve drawn a little off it recesses cleanly. The sheet is cut along it and walls run back `depth` along the sheet's own normal at every point of the rim — not along one view, so an opening set into a panel that rolls over from side to roof still runs straight in — behind the face (against its normal; negative: in front), leaning in toward the opening by `draft` radians (negative: out) and meeting on the mitre at the outline's corners. `fillet` above 0 rounds the rim between the sheet and the walls with a ball of that radius; `pane` closes the back with one patch whose four sides end where the outline turns most — a rectangle's corners, the middle of a rounded rectangle's corner arcs — so it does not twist. Every piece is sewn to the next: only the sheet's own boundary is left naked, and the walls' foot where there is no pane. An outline that is not closed, a corner with a fillet, or a fillet deeper than the walls raises `BuildError`.
 
 ```python
 solid.health(tolerance: 'float | None' = None, mesh: bool = False) -> HealthReport
@@ -2828,7 +3079,22 @@ solid.edge_tolerance(edge: int) -> float | None
 How far edge `edge` (a brep edge id, as a `HealFix` or `FreeEdge` names one) may lie off its curve: 0 for an exact edge, the distance healing or sewing moved it where that is recorded, `None` when no trim names the id (an edge healing removed). A solid that cannot be read raises `BuildError`.
 
 ```python
-solid.push_pull(face: int | Iterable[int], distance: float, tolerance: float = 0.05, progress: Progress = None) -> Solid
+solid.tolerances: Tolerances  (property)
+```
+What this solid declares about its own precision, as `Tolerances`: read from its file, inherited through every verb from the loosest of its inputs, or set by `Solid.with_tolerances()`; none in a field nothing declared. A verb given no tolerance works at `effective_tolerance`, which takes it into account.
+
+```python
+solid.with_tolerances(absolute: 'float | None' = None, angular: 'float | None' = None) -> Solid
+```
+A new solid: this one declaring `absolute` (a length) and `angular` (radians) instead of what it declared, its name, paint and marks kept. None or 0 declares nothing for that field; a negative or infinite value raises `BuildError`.
+
+```python
+solid.vertex_tolerance(point: Point3) -> float | None
+```
+How loose this solid's vertex at `point` is, where its producer said (an OCCT `.brep` records one per vertex): the tolerance of the nearest recorded vertex within its own tolerance of `point`. None where none is recorded there.
+
+```python
+solid.push_pull(face: int | Iterable[int], distance: float, tolerance: 'float | None' = 0.05, progress: Progress = None) -> Solid
 ```
 Face `face` pushed out by `distance` along its outward normal — pulled in, negative — as a face extrude does it: the prism over it joined on (cut out) at `tolerance`, and the flush faces merged, so a box's top raised is one taller box of six faces rather than a box and a prism with every side wall split at the seam. A face on a cylinder, a cone, a sphere or a torus moves out along its normal instead, as a press-pull does: the surface a step out — a boss fatter, a bore or a countersink narrower, a dome fuller — with the flat faces beside it carried along in their own planes. Any other curved face is refused, as is a curved face with anything but a plane it can follow beside it, reaching a cone's apex, pushed to its axis or centre, off a plane beside it or run into another edge. A flat face keeps its own colour where it now lies.
 
@@ -2837,7 +3103,7 @@ Several faces push together, as a press-pull on a selection: each by its own rul
 `face` is a face index or a list of them.
 
 ```python
-solid.refillet(face: int, radius: float, tolerance: float = 1e-06) -> Solid
+solid.refillet(face: int, radius: float, tolerance: 'float | None' = 1e-06) -> Solid
 ```
 The round `face` belongs to — a fillet's bands, balls and rim bands joined to that face — made again at `radius`, as a press-pull on a fillet face: taken back to the sharp edges it replaced, and those rounded again, so the round is the one `Solid.fillet()` makes at that radius. Rounds of straight edges between planes (their ends square corners, mitres, balls, or a cylinder, cone or sphere the edge runs into — a D-cut shaft's top edge, a rib's into a boss) and of circular rims between a plane and a cylinder or cone (a boss's foot, a bore's mouth, a counterbore's step); a face that is not one, or a radius that does not fit, raises `BuildError`.
 
@@ -2847,7 +3113,7 @@ solid.unfillet(face: int) -> Solid
 The round `face` belongs to taken off, the faces beside it made sharp again, meeting on the edges the round replaced — the delete of a fillet face. The same rounds as `Solid.refillet()`.
 
 ```python
-solid.rechamfer(face: int, distance: float, tolerance: float = 1e-06) -> Solid
+solid.rechamfer(face: int, distance: float, tolerance: 'float | None' = 1e-06) -> Solid
 ```
 The chamfer `face` belongs to — its bevels (flat between two planes, cones round rims) and the corner triangles joined to that face — cut again at `distance`, as a press-pull on a chamfer face: taken back to the sharp edges it cut, and those bevelled again, so the chamfer is the one `Solid.chamfer()` cuts at that distance. A flat bevel's ends may run into a cylinder, cone or sphere, as a round's may. A face that is not a chamfer's bevel, or a distance that does not fit, raises `BuildError`.
 
@@ -2862,17 +3128,21 @@ solid.merge_flush() -> Solid
 This solid with its flush faces merged: flat faces on one plane, facing one way and meeting along their edges — the seams `Solid.join()` leaves where two parts are flush — made one face, and the vertices left mid-way along a straight edge taken out.
 
 ```python
-solid.split(tool: 'Solid', tolerance: float = 0.05, progress: Progress = None) -> list[Solid]
+solid.split(tool: 'Solid', tolerance: 'float | None' = 0.05, progress: Progress = None) -> list[Solid]
 ```
 This solid split by `tool` into bodies — returned as a list: a closed `tool` gives the parts outside it, then the parts inside; a flat sheet (a `Solid.face()`) splits by the whole plane it lies on. Each connected part is a body of its own, so a U cut across both arms is three. The new faces are pieces of the tool's, the colours carried over. A tool that does not cross the solid, or a curved sheet, raises `BuildError`. `tolerance` and `progress` as for `Solid.join()`.
 
+On a tracked solid each body's faces name this solid as operand 0 and the tool as 1, as the split made them ({{Solid.face_origins}}, {{Solid.history}}).
+
 ```python
-solid.split_by_plane(plane: FrameLike, tolerance: float = 0.05, progress: Progress = None) -> list[Solid]
+solid.split_by_plane(plane: FrameLike, tolerance: 'float | None' = 0.05, progress: Progress = None) -> list[Solid]
 ```
 This solid split by the plane through `plane`'s origin, square to its z (a frame): the bodies in front of it first, then those behind.
 
+On a tracked solid each body's faces name this solid as operand 0: a face cut in two is a piece in each body, one of them keeping its id; the cut faces are generated.
+
 ```python
-solid.split_by_profile(profile: 'Profile', frame: FrameLike, tolerance: float = 0.05, progress: Progress = None) -> list[Solid]
+solid.split_by_profile(profile: 'Profile', frame: FrameLike, tolerance: 'float | None' = 0.05, progress: Progress = None) -> list[Solid]
 ```
 This solid split by the closed `Profile` `profile` drawn on `frame`, pushed straight through it along the frame's z both ways — a split by a sketch profile: the bodies outside the profile first, then those inside. Where the plane lies along z does not matter, only the outline across it: a circle cores a sphere wherever it is drawn above it. The new faces are the profile's walls exactly. A profile that misses the solid, takes all of it or encloses nothing raises `BuildError`. `tolerance` and `progress` as for `Solid.join()`.
 
@@ -2881,8 +3151,10 @@ solid.lumps() -> list[Solid]
 ```
 This solid's connected bodies, each a solid of its own — faces sharing an edge are one body — in the order of their first faces. One body comes back as itself; a boolean that leaves two parts gives two.
 
+A body is some of this solid's faces, not a solid made from it: each face and edge keeps its id and its origins as this solid has them.
+
 ```python
-solid.merge(other: 'Solid', tolerance: float = 0.05, progress: Progress = None) -> Solid
+solid.merge(other: 'Solid', tolerance: 'float | None' = 0.05, progress: Progress = None) -> Solid
 ```
 This solid and `other` as one body that keeps every piece — a union that keeps the inside pieces, as Rhino's `MergeBreps`: every face of both, split where they cross, the walls they share stored once. Its `Solid.regions()` are this solid less `other`, the two together and `other` less this one, those that are not empty; one solid inside the other gives the outer one with a void and the inner one, two solids apart give both. Faces keep the colours of the faces they are pieces of.
 
@@ -2910,22 +3182,22 @@ solid.edges: list[Edge]  (property)
 The solid's edges as `Edge` values — what `Solid.fillet()` and `Solid.chamfer()` take. Copied; safe to keep.
 
 ```python
-solid.fillet(edges: Iterable[Edge | int], radius: float, tolerance: float = 1e-06, progress: Progress = None, radius_end: 'float | None' = None) -> Solid
+solid.fillet(edges: Iterable[Edge | int], radius: 'float | Sequence[float]', tolerance: 'float | None' = 1e-06, progress: Progress = None, radius_end: 'float | None' = None) -> Solid
 ```
 Round the given edges (`Edge` values or their indices) with `radius`. Exact: the blend faces are cylinders, tori and NURBS, and the neighbours are trimmed back onto them. A spline edge — the crease between two faces on NURBS surfaces, running from one free edge of the shell to another, as between a fender patch and a door patch — is rounded by a ball rolled along it, the two faces cut back to where it touches them, in a call of its own (not with straight or circular edges); `tolerance` is then the fillet surface's fit. `radius_end` (spline edges only) runs the radius linearly from `radius` to it in arc length along the edge. A spline edge ending where other shared edges meet, a closed one, or a varying radius on a straight or circular edge raises `BuildError`.
 
 ```python
-solid.chamfer(edges: Iterable[Edge | int], distance: float, tolerance: float = 1e-06) -> Solid
+solid.chamfer(edges: Iterable[Edge | int], distance: float, tolerance: 'float | None' = 1e-06) -> Solid
 ```
 A flat bevel instead of a round: each edge cut back `distance` along both its faces.
 
 ```python
-solid.shell(thickness: float, open: Iterable[int] = (), tolerance: float = 1e-06, progress: Progress = None) -> Solid
+solid.shell(thickness: float, open: Iterable[int] = (), tolerance: 'float | None' = 1e-06, progress: Progress = None) -> Solid
 ```
 Hollow the solid to walls `thickness` thick — inward for a positive thickness, outward (the solid becoming the cavity) for a negative one. The faces listed in `open` are removed so the hollow is reachable.
 
 ```python
-solid.thicken(thickness: float, tolerance: float = 1e-06, progress: Progress = None) -> Solid
+solid.thicken(thickness: float, tolerance: 'float | None' = 1e-06, progress: Progress = None) -> Solid
 ```
 A sheet made a solid `thickness` thick: its faces, their twins moved `thickness` along the faces' normals (against them for a negative thickness), and a wall round every open edge. Two faces of a folded sheet meet on their offsets' mitre; a closed sheet thickens to a hollow. Free-form (NURBS) faces offset by a fit held to `tolerance`. A thickness a face cannot take — a radius used up, a free-form offset folding over — raises `BuildError`.
 
@@ -2957,12 +3229,12 @@ solid.bounds: tuple[tuple[float, float, float], tuple[float, float, float]]  (pr
 The axis-aligned box, at the same cost whatever the solid's size: its mesh at a thousandth of its own extent, in double, so the box is inside the exact one and short of it by at most that. Worked out once per solid, apart from the tessellation `Solid.mesh()` caches. `Solid.bounds_at()` is the box of the mesh at a tolerance you name.
 
 ```python
-solid.bounds_at(tolerance: float) -> tuple[tuple[float, float, float], tuple[float, float, float]]
+solid.bounds_at(tolerance: 'float | None') -> tuple[tuple[float, float, float], tuple[float, float, float]]
 ```
 The bounds over the tessellation at `tolerance` — the same cache `Solid.mesh()` fills, so asking both costs one mesh.
 
 ```python
-solid.is_watertight(tolerance: float = 0.05) -> bool
+solid.is_watertight(tolerance: 'float | None' = 0.05) -> bool
 ```
 Whether `Solid.leaked_edges()` is zero.
 
@@ -2999,25 +3271,25 @@ Samples of one edge every `step` of arc length from its start, as a list of `At`
 ```python
 Solid.loft_curves(sections: 'Iterable[NurbsCurve]', degree: int = 3, loose: bool = False, closed: bool = False) -> Solid
 ```
-A sheet lofted through `sections` (`NurbsCurve`s): one face on one NURBS surface whose `u` runs along the sections and `v` across them, `degree` across them (lowered to what the sections allow). `loose=True` shapes it by the sections instead — through the first and last only, smoother between; `closed=True` makes it periodic across them, the last section back to the first. Fewer than two sections (three closed) raises `BuildError`. Native Python only for now.
+A sheet lofted through `sections` (`NurbsCurve`s): one face on one NURBS surface whose `u` runs along the sections and `v` across them, `degree` across them (lowered to what the sections allow). `loose=True` shapes it by the sections instead — through the first and last only, smoother between; `closed=True` makes it periodic across them, the last section back to the first. Fewer than two sections (three closed) raises `BuildError`.
 
 ```python
-Solid.sweep_rail(rail: 'NurbsCurve', sections: 'Iterable[NurbsCurve]', frame: str = 'rmf', up: 'Point3 | None' = None, tolerance: float = 0.001) -> Solid
+Solid.sweep_rail(rail: 'NurbsCurve', sections: 'Iterable[NurbsCurve]', frame: str = 'rmf', up: 'Point3 | None' = None, tolerance: 'float | None' = 0.001) -> Solid
 ```
 A sheet of `sections` swept along `rail`: each section carried by the rail's frame from the rail point nearest its centre, the sections between blended by their place along the rail. `frame="rmf"` turns the sections no more than the rail makes them (rotation-minimising); `"fixed"` keeps `up` upright, as a sweep along a car's side does. Fitted through enough stations to lie within `tolerance` of that definition; `Solid.sheet_error` says how close it came.
 
 ```python
-Solid.sweep_two_rails(rail_a: 'NurbsCurve', rail_b: 'NurbsCurve', sections: 'Iterable[NurbsCurve]', tolerance: float = 0.001) -> Solid
+Solid.sweep_two_rails(rail_a: 'NurbsCurve', rail_b: 'NurbsCurve', sections: 'Iterable[NurbsCurve]', tolerance: 'float | None' = 0.001) -> Solid
 ```
 A sheet of `sections` swept between two rails: each section's first end on `rail_a` and its last on `rail_b`, carried by the rotation and uniform scale that keep them there, the rails matched by arc length (so a section spreads as the rails do). A section whose ends are not on the rails raises `BuildError`. Fitted within `tolerance` (`Solid.sheet_error`).
 
 ```python
-Solid.edge_surface(curves: 'Iterable[NurbsCurve]', tolerance: float = 0.001) -> Solid
+Solid.edge_surface(curves: 'Iterable[NurbsCurve]', tolerance: 'float | None' = 0.001) -> Solid
 ```
 The Coons sheet of 2, 3 or 4 boundary curves meeting end to end within `tolerance`, given in order round the boundary (each either way round): three leave the fourth side a point, two give the ruled sheet between them. Exact for non-rational boundaries; rational ones (arcs) are fitted first, and `Solid.sheet_error` is that fit's error. Curves that do not meet raises `BuildError`.
 
 ```python
-Solid.network_surface(u_curves: 'Iterable[NurbsCurve]', v_curves: 'Iterable[NurbsCurve]', tolerance: float = 0.001) -> Solid
+Solid.network_surface(u_curves: 'Iterable[NurbsCurve]', v_curves: 'Iterable[NurbsCurve]', tolerance: 'float | None' = 0.001) -> Solid
 ```
 The Gordon sheet of a curve network: `u_curves` in order across one way, `v_curves` across the other, every one of the first crossing every one of the second within `tolerance`. The curves are re-fitted so their crossings share parameters, then blended; `Solid.sheet_error` is the largest distance from the sheet to the curves given. A pair that does not cross raises `BuildError`, naming both.
 
@@ -3032,7 +3304,7 @@ solid.matched(side: str, other: 'Solid', other_side: str, level: int = 2, face: 
 Face `face` as a sheet of its own, its side `side` bent to meet `other`'s `other_side` at G`level`: 0 onto the other side, 1 into its tangent plane, 2 with its curvature too. The opposite side stays where it was; the face is refined across the edge first if it has too few rows. Both faces non-rational NURBS: a rational one, or a level outside 0 to 2, raises `BuildError`.
 
 ```python
-Solid.fillet_surfaces(a: 'Solid', b: 'Solid', radius: float, radius_end: 'float | None' = None, flip_a: bool = False, flip_b: bool = False, tolerance: float = 0.001, face_a: int = 0, face_b: int = 0) -> tuple[Solid, NurbsCurve, NurbsCurve]
+Solid.fillet_surfaces(a: 'Solid', b: 'Solid', radius: float, radius_end: 'float | None' = None, flip_a: bool = False, flip_b: bool = False, tolerance: 'float | None' = 0.001, face_a: int = 0, face_b: int = 0) -> tuple[Solid, NurbsCurve, NurbsCurve]
 ```
 The rolling-ball fillet between `a`'s face `face_a` and `b`'s face `face_b` — their whole NURBS surfaces — as `(fillet, rail_a, rail_b)`: the fillet sheet (its `Solid.sheet_error` set) and the `NurbsCurve`s the ball touches each face along, to trim the faces back with `Solid.trim_by_curve()` and join the three with `Solid.join_sheets()`. The ball sits on the side each face's normal points to (`flip_a`, `flip_b` turn it to the other side); its radius is `radius`, or runs linearly from `radius` at the fillet's first end to `radius_end` at its last. A radius not positive, or sides where the ball cannot touch both faces, raises `BuildError`.
 
@@ -3042,22 +3314,32 @@ Solid.blend_sides(a: 'Solid', side_a: str, b: 'Solid', side_b: str, level: int =
 A sheet spanning from `a`'s side `side_a` to `b`'s side `side_b`, meeting each at G`level` (1 a cubic across, 2 a quintic, matching curvature too); `bulge` scales how far it leaves each edge along its neighbour's tangent. Both faces non-rational NURBS.
 
 ```python
+Solid.n_sided_patch(boundaries: 'Iterable[Any]', bulge: float = 1.0, tolerance: 'float | None' = 0.01) -> Solid
+```
+The sheet filling a hole of three or more sides — where several character lines meet, which four-sided patches cannot close: N four-sided NURBS faces round a central point, one per corner, meeting each other at G1 or G2. Each of `boundaries`, in order round the hole and either way round, is a sheet's side met at G2, `(sheet, side)`; `(sheet, side, level)` with `level` 0, 1 or 2; a dict with `sheet`, `side` and any of `level`, `face` and `range` (`(from, to)` of the side's parameter: `(0, 1)` the whole side, `(1, 0)` the whole side backwards); or a `NurbsCurve`, met at G0. A side is `"u0"`, `"u1"`, `"v0"` or `"v1"`. The boundaries must meet end to end within `tolerance`; `bulge` scales how far the patch leaves each neighbour along its own tangent. Face `i` meets boundary `i`'s second half along its `"v0"` side and boundary `i + 1`'s first half along its `"u1"`, so `Solid.continuity()` measures each neighbour; `Solid.patch_report` holds the worst of them. It joins its neighbours with `Solid.join_sheets()`. Fewer than three boundaries, ends that do not meet, two boundaries running on tangent through a corner, or a rational boundary raises `BuildError`.
+
+```python
+solid.patch_report  (attribute)
+```
+On a sheet from `Solid.n_sided_patch()`, the `PatchReport` of how well it meets; `None` on every other solid.
+
+```python
 solid.sheet_error  (attribute)
 ```
 On a sheet from `Solid.sweep_rail()`, `Solid.sweep_two_rails()`, `Solid.edge_surface()` or `Solid.network_surface()`, how far it came from its definition; `None` on every other solid.
 
 ```python
-solid.contains(point: Point3, tolerance: float = 0.05) -> str
+solid.contains(point: Point3, tolerance: 'float | None' = 0.05) -> str
 ```
 Where `point` is relative to this closed solid: inside, outside, or on, within `tolerance` of its boundary — absolute, in model units (0.05 by default). The body is meshed on every call; for more than a few points build a `Solid.classifier()` once. An open body, a point not finite, or a tolerance not positive and finite raises `BuildError`.
 
 ```python
-solid.classifier(tolerance: float = 0.05) -> Classifier
+solid.classifier(tolerance: 'float | None' = 0.05) -> Classifier
 ```
 A `Classifier` for this closed solid at `tolerance` — absolute, in model units (0.05 by default): the body meshed once, then asked point after point. It keeps its own reference to the body, so it goes on answering after this solid is closed. An open body, or a tolerance not positive and finite, raises `BuildError`.
 
 ```python
-solid.closest(other: 'Solid', tolerance: float = 0.05, progress: Progress = None) -> Closest
+solid.closest(other: 'Solid', tolerance: 'float | None' = 0.05, progress: Progress = None) -> Closest
 ```
 The closest points between this solid's boundary and `other`'s, to `tolerance` — absolute, in model units (0.05 by default) — as a `Closest`; this solid is side `a`. Boundaries are measured, not volumes: a solid wholly inside another is the gap between their skins, not 0, and boundaries that cross are 0 apart (ask `Solid.contains()` for containment). `progress`, where the wrapper takes one, hears "meshing", "pruning" and "refining"; in the browser it is never called. A tolerance not positive and finite, or a solid with no faces, raises `BuildError`. Whether two parts overlap, touch or lie within a clearance of each other is `clash`'s question, asked of a whole set.
 
@@ -3067,7 +3349,7 @@ solid.thickness_at_face(face: int, at: Point3 | None = None, *, maximum, toleran
 How thick this solid's walls are at face `face`, as a `FaceThickness`, on a `ThicknessGauge` of this solid alone built at `tolerance` (0.01 by default), asked `ThicknessGauge.thickness_at_face()` once and freed: at `at`'s foot on the face, or with no `at` over the face's vertices. `maximum` has no default. `None` where nothing on the face reads within `maximum`, or `at`'s foot lies off the face. A face past the end, an `at` not finite, `maximum` not positive and finite, or a `tolerance` not positive and finite raises `BuildError`.
 
 ```python
-solid.bounds_box(tolerance: float = 0.05) -> Box
+solid.bounds_box(tolerance: 'float | None' = 0.05) -> Box
 ```
 This solid's `Box` at `tolerance` (0.05 by default): its boolean mesh, padded by twice that — the broad phase's own bound, cheaper to move and to test against another than the solid itself. `Collider` builds one of these per part at construction. A tolerance not positive and finite, or a solid that meshes to nothing, raises `BuildError`.
 
@@ -3115,6 +3397,139 @@ solid.style_identification: str | None  (property)
 ```
 This solid's outside style's name in its library (`Solid.styled()`'s `identification`), or none.
 
+#### Ids and history
+
+```python
+solid.tracked() -> Solid
+```
+This solid tracked: its faces numbered 1 to n in face order and its edges 1 to m in `Solid.edges`' order, each its own origin. Tracking rides on from here: a verb on a tracked solid gives a tracked result, each face keeping the id of the input face it lies on and naming that face as its origin. **Tracking is opt-in** because it is not free: after every verb the result's faces are matched to the inputs' faces, which measured on some 2,400 real bodies costs 47% (a split) to 287% (a fillet) of the verb's own time at the median. An untracked solid pays nothing. A tracked solid comes back as it is.
+
+```python
+solid.is_tracked: bool  (property)
+```
+Whether this solid carries face and edge ids: it was `Solid.tracked()`, made from a tracked solid, or given an attribute.
+
+```python
+solid.face_id(face: int) -> int | None
+```
+Face `face`'s id, `None` where this solid is untracked. An id stays with its face through every verb that keeps the face — a move, a boolean, a fillet of another edge — so it names "the same face, through my edits" within a session. A piece split off, a later operand's face whose id an earlier one already has, and a face on no input get fresh ids, the same run after run.
+
+**Ids and references answer different questions.** Ids are not written to files and mean nothing on a model built again from scratch or read back: there, find a face by what it is with `Solid.face_ref()` and `Solid.find_face()` (an edge with `Solid.edge_ref()`, a vertex with `Solid.vertex_ref()`). A face the solid does not have raises `BuildError`.
+
+```python
+solid.face_with_id(id: int) -> int | None
+```
+The face whose id is `id`, `None` where no face has it — an untracked solid, or a face a verb deleted.
+
+```python
+solid.face_origins(face: int) -> list[tuple[int, int]]
+```
+The input faces face `face` came from, as `(operand, id)` pairs: the operand the input's index in the verb's operand order (a boolean's target 0, its tool 1), the id that input face's `Solid.face_id()`. The face it lies on most comes first. Empty for a face the verb generated (a fillet's round, the faces a split cuts) and on an untracked solid; more than one for a face merged from several (a join with `merge`). A face the solid does not have raises `BuildError`.
+
+```python
+solid.edge_id(edge: int) -> int | None
+```
+Edge `edge`'s id (an index into `Solid.edges`), as `Solid.face_id()`.
+
+```python
+solid.edge_with_id(id: int) -> int | None
+```
+The edge whose id is `id`, `None` where no edge has it.
+
+```python
+solid.edge_origins(edge: int) -> list[tuple[int, int]]
+```
+The input edge edge `edge` lies on, as `Solid.face_origins()`: one `(operand, id)`, or none for a new edge. Edges merged from several are not seen.
+
+```python
+solid.history(*inputs) -> History
+```
+What the verb that made this solid did to the faces of `inputs`, passed in its operand order (`a.cut(b).history(a, b)`), as a `History`: which input faces were kept, modified (split, merged or renumbered), or deleted, and which faces were generated. Read off this solid's ids and origins alone, so it costs no geometry. An untracked solid or input, or an origin naming an operand past the inputs, raises `BuildError`.
+
+```python
+solid.edge_history(*inputs) -> History
+```
+`Solid.history()` for the edges, by edge id.
+
+#### Attributes
+
+```python
+solid.attributes: _abc.Mapping[str, str]  (property)
+```
+This solid's attributes: text keys and values, read-only, in key order. A solid's attributes go with it through every verb (a verb's result takes its first operand's), and they are the only attributes written to files: `Solid.step()` writes them as STEP user-defined attributes. Face attributes stay in memory.
+
+```python
+solid.attribute(key: str) -> str | None
+```
+Attribute `key`, `None` where this solid has none.
+
+```python
+solid.with_attribute(key: str, value: str) -> Solid
+```
+This solid with attribute `key` set to `value`, over any it had: a new solid, tracked if this one was not. Keys and values are text with no NUL; an empty key raises `BuildError`.
+
+```python
+solid.with_attributes() -> Solid
+```
+This solid with every attribute given set, in key order.
+
+```python
+solid.without_attribute(key: str) -> Solid
+```
+This solid without attribute `key`: a new solid, equal to this one where it had none.
+
+```python
+solid.face_attributes(face: int) -> _abc.Mapping[str, str]
+```
+Face `face`'s attributes, read-only, in key order. A face's attributes follow its id: kept through a verb, and copied to every face that names it as an origin, so each piece of a split face has its parent's. They stay in memory: no file carries them. A face the solid does not have raises `BuildError`.
+
+```python
+solid.face_attribute(face: int, key: str) -> str | None
+```
+Face `face`'s attribute `key`, `None` where it has none.
+
+```python
+solid.with_face_attribute(face: int, key: str, value: str) -> Solid
+```
+This solid with face `face`'s attribute `key` set to `value`: a new solid, tracked if this one was not. Refused as `Solid.with_attribute()` is, and for a face the solid does not have.
+
+```python
+solid.with_face_attributes(face: int) -> Solid
+```
+This solid with every attribute given set on face `face`, in key order.
+
+```python
+solid.without_face_attribute(face: int, key: str) -> Solid
+```
+This solid without face `face`'s attribute `key`: a new solid, equal to this one where the face had none.
+
+#### Edge and vertex references
+
+```python
+solid.edge_ref(edge: int) -> tuple[float, ...]
+```
+Edge `edge` (an index into `Solid.edges`) by what it is, fifteen numbers: its kind (line 0, circle 1, ellipse 2, B-spline 3, other 4), its midpoint (x, y, z), its unit tangent there (x, y, z), its length, the outward normals there of the two faces meeting on it (x, y, z each; an open sheet's rim gives its one face's twice), and its span — how far from the midpoint `Solid.find_edge()` may look on a resized solid. `Solid.face_ref()`'s twin, for a feature made on an edge: unlike an id it survives a rebuild. An edge past the table, or one with no length, raises `BuildError`.
+
+```python
+solid.find_edge(edge_ref: Sequence[float], tolerance: 'float | None' = 0.001) -> int | None
+```
+The edge a reference from `Solid.edge_ref()` refers to: of the edges of that kind passing within `tolerance` of its midpoint and running the same way, the one of nearest length; where none does (the solid was resized), the edge of that kind running the same way between faces facing the same two ways — the only one, or the one clearly nearest, no farther than the span. `None` where the edge is gone. A malformed reference, or a tolerance not positive, raises `BuildError`.
+
+```python
+solid.vertex_count: int  (property)
+```
+How many vertices this solid has: its edges' ends, welded, in the order `Solid.vertex_ref()` and `Solid.find_vertex()` index.
+
+```python
+solid.vertex_ref(vertex: int) -> tuple[float, float, float]
+```
+Vertex `vertex` by where it is: (x, y, z). A vertex the solid does not have raises `BuildError`.
+
+```python
+solid.find_vertex(vertex_ref: Sequence[float], tolerance: 'float | None' = 0.001) -> int | None
+```
+The vertex nearest `vertex_ref` — a `Solid.vertex_ref()`, or any point picked — within `tolerance`; `None` where no vertex is that near. A point that is not three finite numbers, or a tolerance not positive, raises `BuildError`.
+
 #### Colour
 
 ```python
@@ -3150,7 +3565,7 @@ Write this solid as an OCCT `.brep` file; see `write_brep`.
 ```python
 solid.document_body() -> dict[str, Any]
 ```
-This solid as a `Document`'s `solid.body` node holds it: the kernel's own B-rep as a record of its tables (surfaces, curves, trims, loops, faces), every number as it is, so the node gives back exactly this solid. What `Document.add_solid()` puts in a document.
+This solid as a `Document`'s `solid.body` node holds it: the kernel's own B-rep as a record of its tables (surfaces, curves, trims, loops, faces), every number as it is, and its colours (the solid's, each face's and each edge's), so the node gives back exactly this solid, drawn as it was. What `Document.add_solid()` puts in a document.
 
 #### From files
 
@@ -3167,7 +3582,7 @@ Every body a CAD file draws, as solids placed where it draws them: one per place
 #### Output
 
 ```python
-solid.mesh(tolerance: float = 0.05) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+solid.mesh(tolerance: 'float | None' = 0.05) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
 ```
 Triangles at `tolerance`: positions, normals (three floats a vertex) and indices. **In every wrapper that lends a view, views owned by a held tessellation** — valid for as long as you keep the view, whatever happens to the solid: meshed again at any tolerance, closed. Rust borrows the solid for the view's lifetime instead; Node and Godot copy. **A raw span, slice or buffer taken out of a view does not keep the view itself reachable in a collected language**: hold the view while you read one, and copy what must outlive it. The same rule as a FEM mesh's views, for the same reason. **A view pins its whole tessellation** — positions, normals, indices, edges, face counts, in both precisions — until the view itself is freed or collected, whichever the language uses; for data that must outlive the view, `copy()` it and drop the view.
 
@@ -3192,6 +3607,11 @@ The same STEP file as text.
 solid.sat(path: FilePath, unit: Unit = 'mm') -> None
 ```
 Write this solid as an ACIS SAT file; see `write_sat` for `unit`.
+
+```python
+solid.write_3dm(path: FilePath, unit: Unit = 'mm') -> None
+```
+Write this solid as a Rhino `.3dm`; see `write_3dm` for what it carries and `unit`.
 
 ```python
 solid.svg(path: FilePath | None = None) -> str | None
@@ -3277,7 +3697,7 @@ assembly.parts() -> list[str]
 The placement path of every solid under this assembly, at any depth: depth first, placements in order, the placement names down the tree joined by `/`, a `/` or `\` inside a name escaped with `\`, as `Assembly.posed()`'s keys are (`"a\/b/x"` for part `x` of a sub-assembly placed as `a/b`). The index `Assembly.swept_clash()`'s rows use. Empty for an assembly that places no solid.
 
 ```python
-assembly.swept_clash(keyframes: Iterable[Mapping[JointKey, float | Sequence[float]] | Iterable[tuple[JointKey, float | Sequence[float]]]], clearance: float = 0.0, tolerance: float = 0.05, resolution: float = 0.001, max_steps: int = 100000, allowed: Iterable[tuple[int, int]] = (), ground: str | None = None, joined: bool = False) -> list[SweptClash]
+assembly.swept_clash(keyframes: Iterable[Mapping[JointKey, float | Sequence[float]] | Iterable[tuple[JointKey, float | Sequence[float]]]], clearance: float = 0.0, tolerance: 'float | None' = 0.05, resolution: float = 0.001, max_steps: int = 100000, allowed: Iterable[tuple[int, int]] = (), ground: str | None = None, joined: bool = False) -> list[SweptClash]
 ```
 Every pair of this assembly's solids, indexed as `Assembly.parts()` lists them, that penetrates, touches or comes within `clearance` of the other anywhere while this assembly's own mechanism moves through `keyframes`, as `SweptClash` rows in pair order. Each keyframe maps joint keys to values as `Assembly.posed()`'s values do, and every keyframe names the same joints with the same number of values each (the first keyframe fixes their order); time runs in keyframe units, keyframe `k` at time `k`.
 
@@ -3296,6 +3716,16 @@ assembly.step(path: FilePath, schema: Schema = None, unit: Unit = 'mm') -> None
 `Assembly.step_text()` written to a file.
 
 ```python
+assembly.rhino3dm_bytes(unit: Unit = 'mm') -> bytes
+```
+This assembly, and everything placed under it, as one Rhino `.3dm`: each distinct part (as `Assembly.step_text()` counts them) a block holding its body, each sub-assembly a block of references to what it places — so nested assemblies are nested blocks — and this assembly's own placements references at the top of the file, on a layer named after it. Each reference is named as its placement was; block names are the parts' and assemblies' names made ones Rhino takes and numbered past any already taken, whatever their case. Bodies, colours and `unit` as `write_3dm`. An assembly reachable from this one, this one included, that places nothing raises `BuildError`.
+
+```python
+assembly.write_3dm(path: FilePath, unit: Unit = 'mm') -> None
+```
+`Assembly.rhino3dm_bytes()` written to a file by the library itself.
+
+```python
 assembly.to_scene(schema: Schema = None) -> cadaclysm.Scene
 ```
 This assembly as a reader `Scene`, through STEP in memory; see `Solid.to_scene()`.
@@ -3304,6 +3734,34 @@ This assembly as a reader `Scene`, through STEP in memory; see `Solid.to_scene()
 assembly.close() -> None
 ```
 Free this handle now. The garbage collector, or the language's scope, does it otherwise.
+
+### History
+
+```python
+class History
+```
+
+What a verb did to its inputs' faces (or edges) — what `Solid.history()` and `Solid.edge_history()` return, read off the result's ids and origins alone. An input face is named `(operand, id)`: the operand its input's index in the verb's operand order (a boolean's target 0, its tool 1), the id its `Solid.face_id()`. Each list is in `(operand, id)` order, `generated` in id order.
+
+```python
+history.kept  (attribute)
+```
+The inputs that became exactly one output and kept their id, each as `(input, output id)`.
+
+```python
+history.modified  (attribute)
+```
+The inputs split (several outputs name them), merged (their output has other origins too) or renumbered (a cut's bore, a later operand's clashing id), each as `(input, [output ids])`; a split's first piece, which keeps the id, comes first.
+
+```python
+history.generated  (attribute)
+```
+The outputs with no origin: a fillet's round, the faces a split cuts.
+
+```python
+history.deleted  (attribute)
+```
+The inputs no output names, such as the caps of a cut's tool.
 
 ### Edge
 
@@ -3579,7 +4037,7 @@ class NurbsCurve
 
 A curve in space to model with — always a NURBS, so a line, an arc or a conic is an exact rational one. `NurbsCurve(points, degree=3, weights=None, knots=None)` builds one from its control points (degree 1 to 7; weights positive, one per point; the full knot vector, non-decreasing, or None for clamped and uniform); `NurbsCurve.through()`, `NurbsCurve.fit()`, `NurbsCurve.from_edge()`, `NurbsCurve.isocurve()` and `NurbsCurve.blend()` build the rest. Immutable: every edit returns a new curve. Not `Curve`, the plain data an edge's curve is copied out as.
 
-**A face is its whole surface here**: projecting onto, pulling to and crossing a face ignore its trims, so a curve projected past a face's edge lands on the surface's continuation. A curve projected or pulled onto a face is a 3D curve fitted through points on the surface, within the tolerance asked (`NurbsCurve.fit_error` says how close it came), not a curve in the face's parameters. Native Python only for now: under Pyodide every builder raises `BuildError`. Every refusal names the C call, e.g. `nurbs_curve_trimmed: ...`.
+**A face is its whole surface here**: projecting onto, pulling to and crossing a face ignore its trims, so a curve projected past a face's edge lands on the surface's continuation. A curve projected or pulled onto a face is a 3D curve fitted through points on the surface, within the tolerance asked (`NurbsCurve.fit_error` says how close it came), not a curve in the face's parameters. Every refusal names the C call, e.g. `nurbs_curve_trimmed: ...`.
 
 ```python
 NurbsCurve.through(points: 'Iterable[Point3]', degree: int = 3, closed: bool = False, start_tangent: 'Point3 | None' = None, end_tangent: 'Point3 | None' = None) -> NurbsCurve
@@ -3587,7 +4045,7 @@ NurbsCurve.through(points: 'Iterable[Point3]', degree: int = 3, closed: bool = F
 The curve of `degree` through `points` in order, chord-length parametrised. `closed=True` closes it back to the first point, smooth across the seam (`C^(degree-1)`); an open curve may leave along `start_tangent` and arrive along `end_tangent` (directions; their length does not matter). Too few points for the degree, a point repeating the one before it, or a closed curve given end tangents, raises `BuildError`.
 
 ```python
-NurbsCurve.fit(points: 'Iterable[Point3]', degree: int = 3, tolerance: float = 0.001) -> NurbsCurve
+NurbsCurve.fit(points: 'Iterable[Point3]', degree: int = 3, tolerance: 'float | None' = 0.001) -> NurbsCurve
 ```
 A curve of `degree` within `tolerance` of every point, through the first and the last (least squares, growing its control points until the tolerance is met); its `NurbsCurve.fit_error` is the largest distance from a point to it. A tolerance not positive raises `BuildError`.
 
@@ -3607,19 +4065,34 @@ NurbsCurve.blend(a: 'NurbsCurve', a_end: bool, b: 'NurbsCurve', b_end: bool, con
 The curve bridging `a` (at its end when `a_end`, else its start) to `b` (at its end when `b_end`, else its start), leaving `a` and arriving at `b` along their tangents: `continuity` 1 matches position and tangent (a cubic), 2 also the curvature (a quintic). `bulge` (positive, 1 usual) scales how far the tangents reach. Two ends at the same point raises `BuildError`.
 
 ```python
+NurbsCurve.joined(curves: 'Iterable[NurbsCurve]', tolerance: float = 1e-06) -> NurbsCurve
+```
+`curves` joined end to end into one curve, as Rhino's JoinCurves: in the order given, each turned where needed so its start meets the previous one's end (the first one too, when only its start meets the second), within `tolerance`, and the joint placed at the midpoint of the two ends. All are raised to the highest degree among them and each runs over `k..k + 1` of the result, joined C0 — a corner stays a corner; a rational curve (an arc) keeps its points exactly. One curve gives a copy. No curves, or two ends further apart than `tolerance`, raises `BuildError`, naming the two curves and the gap.
+
+```python
+nurbsCurve.tween(other: 'NurbsCurve', count: int, method: str = 'matching', samples: 'int | None' = None, align: bool = True, tolerance: 'float | None' = None) -> list[NurbsCurve]
+```
+`count` curves blending evenly from this curve to `other`, as Rhino's CreateTweenCurves family: the `i`-th at the fraction `(i + 1) / (count + 1)`. `method` says how the two are brought to one structure first. `"plain"` blends control point by control point and weight by weight, so the curves must already share degree, control-point count and knots (raises `BuildError` otherwise; Rhino answers with a curve that is not a blend). `"matching"` makes them compatible exactly, by degree elevation and knot merging, and blends in homogeneous coordinates: rational curves stay rational, and two non-rational curves blend point for point along their parameters. `"sampling"` divides both into `samples` equal pieces by arc length, blends the samples and fits a cubic through them — the robust choice for curves of very different shape; closed curves give a periodic tween. With `align` (the default) `other` is first lined up with this curve: turned to run the same way and, for closed curves, its seam moved round to match this one's start, so the tweens do not twist. Rhino's calls leave that to the caller; `align=False` does the same. `tolerance` (None: the curves' effective tolerance) decides whether a curve is closed and how closely the samples sit at their arc lengths. One curve open and the other closed raises `BuildError`.
+
+```python
 nurbsCurve.projected_to_plane(origin: 'Point3', normal: 'Point3', direction: 'Point3 | None' = None) -> NurbsCurve
 ```
 This curve projected onto the plane through `origin` with `normal`, along `direction` (None: the normal). Exact — the control points move, the weights stay. A direction lying in the plane raises `BuildError`.
 
 ```python
-nurbsCurve.projected_to_face(solid: 'Solid', face: int, direction: 'Point3', tolerance: float = 0.001) -> NurbsCurve
+nurbsCurve.projected_to_face(solid: 'Solid', face: int, direction: 'Point3', tolerance: 'float | None' = 0.001) -> NurbsCurve
 ```
 This curve projected along `direction` onto face `face` of `solid` (its whole surface): sampled, each sample carried along the direction to the surface, fitted within `tolerance`. A sample whose ray misses the surface, or a result straying past the tolerance, raises `BuildError`.
 
 ```python
-nurbsCurve.pulled_to_face(solid: 'Solid', face: int, tolerance: float = 0.001) -> NurbsCurve
+nurbsCurve.pulled_to_face(solid: 'Solid', face: int, tolerance: 'float | None' = 0.001) -> NurbsCurve
 ```
 This curve pulled onto face `face` of `solid` (its whole surface): each sample moved to its nearest surface point, fitted within `tolerance`.
+
+```python
+nurbsCurve.offset_on_sheet(solid: 'Solid', distance: float, tolerance: 'float | None' = 0.001) -> NurbsCurve
+```
+This curve, lying on the sheet `solid` (any of its faces, within ten times `tolerance`), offset `distance` along it: each sample walked that far across the sheet, square to the curve — left of its run seen from the outward side for a positive distance — over the seams of a joined sheet and onto the surface continued past its edge, and fitted within `tolerance`, each side of a crease apart. `fit_error` is the larger of the fit's error and the distance off the sheet. A curve that does not lie on the sheet raises `BuildError`.
 
 ```python
 nurbsCurve.reversed() -> NurbsCurve
@@ -3722,7 +4195,7 @@ nurbsCurve.plane_hits(origin: 'Point3', normal: 'Point3') -> list[At]
 Where the curve crosses the plane through `origin` with `normal`, in parameter order, each an `At` whose `error` is the point's distance from the plane. A curve lying in the plane raises `BuildError`; a touch that does not cross is not listed.
 
 ```python
-nurbsCurve.face_hits(solid: 'Solid', face: int, tolerance: float = 0.001) -> list[At]
+nurbsCurve.face_hits(solid: 'Solid', face: int, tolerance: 'float | None' = 0.001) -> list[At]
 ```
 Where the curve crosses face `face` of `solid` (its whole surface), within `tolerance` of it, in parameter order, each an `At` whose `error` is the point's distance from the surface. A touch that does not cross is not listed.
 
@@ -4165,6 +4638,34 @@ Where on the first side it is.
 continuity.samples  (attribute)
 ```
 How many points along the first side were asked.
+
+### PatchReport
+
+```python
+class PatchReport
+```
+
+How well an N-sided patch meets — `Solid.patch_report`, measured with `Solid.continuity()` on every neighbour and every spoke.
+
+```python
+patchReport.faces  (attribute)
+```
+How many faces: one per side of the hole.
+
+```python
+patchReport.boundary  (attribute)
+```
+The worst `Continuity` against the neighbours: the gap over every side, the angle over those met at G1 or G2, the curvature over those met at G2.
+
+```python
+patchReport.internal  (attribute)
+```
+The worst `Continuity` across the patch's own spokes.
+
+```python
+patchReport.corner_angle  (attribute)
+```
+The largest angle, in radians, between a boundary's tangent at a corner of the hole and the neighbour before it's tangent plane: what no patch can meet there, 0 where the neighbours meet each other at G1.
 
 ### Curvature
 
@@ -5152,12 +5653,12 @@ A new node of a kind with its fields, one commit. Its id is made up unless the c
 ```python
 document.add_solid(solid: 'Solid', sheet: bool = False) -> str
 ```
-A node holding a solid the caller already has — made in code or read from a file — for other nodes to read like any built one: a `solid.body` node (a `sheet.body` one for a sheet) carrying the kernel's own B-rep (`Solid.document_body()`), in the document's units, inside the saved file, which gives back exactly that body. Edges and faces are referenced on it as on any node, and replacing its body later finds them again by geometry. Colours and names are not kept. The new id is returned.
+A node holding a solid the caller already has — made in code or read from a file — for other nodes to read like any built one: a `solid.body` node (a `sheet.body` one for a sheet) carrying the kernel's own B-rep (`Solid.document_body()`), in the document's units, inside the saved file, which gives back exactly that body. Edges and faces are referenced on it as on any node, and replacing its body later finds them again by geometry. Its colours are kept — the solid's, each face's and each edge's — its name is not. The new id is returned.
 
 ```python
 document.add_profile(profile: 'Profile') -> str
 ```
-A `profile.path` node holding a `Profile` exactly (`Profile.document_path()`: arcs and NURBS as they are, holes included), in the document's units. The new id is returned.
+A `profile.path` node holding a `Profile` exactly (`Profile.document_path()`: arcs and NURBS as they are, holes included, its colour kept), in the document's units. The new id is returned.
 
 ```python
 document.set(id: str) -> dict[str, Any]
@@ -5785,7 +6286,7 @@ A constraint that conflicts with the ones already there is refused when it is ad
 In Python an unknown sense or end name raises `ValueError`; every other wrapper raises its kernel error.
 
 ```python
-Sketch.from_profile(profile: Profile, infer: bool = True, tolerance: float = 1e-06) -> Sketch
+Sketch.from_profile(profile: Profile, infer: bool = True, tolerance: 'float | None' = 1e-06) -> Sketch
 ```
 A sketch of `profile`'s lines, arcs and curves, joined end to end by coincident constraints, holes included. With `infer` (the default) it also adds every constraint the geometry already meets within `tolerance` — horizontal and vertical lines, tangent joints, concentric arcs, equal radii — so the profile comes back as a sketch a designer can dimension. Ends within `tolerance` (1e-6 by default) count as joined.
 
@@ -6115,12 +6616,12 @@ sketch.diagnose() -> Dof
 The sketch's degrees of freedom, as a `Dof`: whole and per independent part.
 
 ```python
-sketch.profiles(tolerance: float = 1e-06) -> list[Profile]
+sketch.profiles(tolerance: 'float | None' = 1e-06) -> list[Profile]
 ```
 The closed loops among the solved, non-construction curves, as `Profile` values of exact segments (lines, arcs, the free curves' own shapes); a loop inside another becomes its hole. Ends within `tolerance` (1e-6 by default) join.
 
 ```python
-sketch.open_chains(tolerance: float = 1e-06) -> list[Profile]
+sketch.open_chains(tolerance: 'float | None' = 1e-06) -> list[Profile]
 ```
 The chains of curves that do not close, as open `Profile` values — sweep paths; ends within `tolerance` join.
 

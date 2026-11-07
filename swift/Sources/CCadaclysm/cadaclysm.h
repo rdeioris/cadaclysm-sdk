@@ -1682,6 +1682,21 @@ const char *cadaclysm_schema_read(const struct CadaclysmScene *scene);
 double cadaclysm_metres_per_unit(const struct CadaclysmScene *scene);
 
 /**
+ * What the file declares about its own precision: its absolute tolerance (a length in the
+ * file's own unit, beside [`cadaclysm_metres_per_unit`], whatever convention the scene was
+ * opened into) into `*absolute` and its angular one (radians) into `*angular`, NaN for one it
+ * does not declare -- a 3dm's units and tolerances, STEP's uncertainty, SAT's `resabs`, IGES's
+ * resolution; other formats declare nothing. Each body read from the file carries a copy, which
+ * the kernel's verbs given a tolerance of 0 or NaN work from. Either pointer may be null. False,
+ * with nothing written, for a null scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `absolute` and `angular` each null
+ * or room for one double.
+ */
+bool cadaclysm_tolerances(const struct CadaclysmScene *scene, double *absolute, double *angular);
+
+/**
  * Everything the model covers, **in world coordinates**.
  *
  * The one figure here that is not in a part's own frame, because a bounding box
@@ -3604,7 +3619,7 @@ void cadaclysm_cancel(const struct CadaclysmScene *scene);
 /**
  * Write the whole scene -- every placement of every shape, named and placed
  * as the document's tree is, with a material per colour -- to `path` as glTF,
- * OBJ, OpenUSD or an OCCT `.brep`. False on failure, with
+ * OBJ, OpenUSD, an OCCT `.brep` or a Rhino `.3dm`. False on failure, with
  * [`cadaclysm_last_error`] saying why.
  *
  * `format` is `"glb"` (binary, one file), `"gltf"` (JSON with the vertex
@@ -3622,7 +3637,18 @@ void cadaclysm_cancel(const struct CadaclysmScene *scene);
  * polylines its trims were flattened to, each body once with a location for
  * each place it stands (`cadaclysm_brep_file::write_document` says exactly
  * what that carries). A scene with no exact geometry at all -- an STL, a
- * mesh-only file -- is refused as such. Any other name is refused.
+ * mesh-only file -- is refused as such. `"3dm"` writes a Rhino file (version
+ * 8, which Rhino 8 and 9 open): each body as its exact brep where the reader
+ * kept one and as its mesh otherwise, curves and points as themselves; a shape
+ * drawn in several places once, as a block with a reference at each, and a
+ * `.3dm`'s own blocks kept as they were; a `.3dm`'s own layers, or for any
+ * other file layers named after the assemblies above each object; names,
+ * colours, visibility and text or number properties as user text
+ * (`cadaclysm_rhino3dm::write::write_scene` says exactly what it carries). It
+ * is written in the file's own units and axes, so it needs a scene opened
+ * `CADACLYSM_NATIVE` and refuses one opened into another space. On success,
+ * [`cadaclysm_last_error`] lists what was written as a mesh or left out, one
+ * line each, or is null where nothing was. Any other name is refused.
  *
  * A mechanism goes into a USD layer as UsdPhysics: a rigid body per link and a
  * joint prim per pair, for a simulator (Isaac Sim, Omniverse).
@@ -3815,7 +3841,7 @@ bool cadaclysm_license_set(const char *text_or_path);
 
 /**
  * The license in use, as one line -- `customer=Acme Ltd expiry=2027-09-15
- * entitlements=import,kernel scope=server plan=startup servers=1` -- or, without one, `unlicensed`
+ * scope=server plan=startup servers=1` -- or, without one, `unlicensed`
  * (`unlicensed -- <reason>` when a license was found but did not verify).
  * Never null. Borrowed, and good until the next call on this thread.
  */

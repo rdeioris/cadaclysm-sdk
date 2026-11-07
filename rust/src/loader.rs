@@ -162,6 +162,9 @@ pub(crate) struct Loader<A: 'static> {
     stem: &'static str,
     env: &'static str,
     bind: unsafe fn(&Library, &Path) -> Result<A, String>,
+    // The table's entry points: the first finds the file a copy already in the process
+    // was loaded from.
+    names: &'static [&'static str],
     loaded: OnceLock<Loaded<A>>,
     // Serialises the first load, so two threads racing to it open the library once.
     // Only a success is kept: a failed load is tried again on the next call, so a
@@ -174,8 +177,9 @@ impl<A: 'static> Loader<A> {
         stem: &'static str,
         env: &'static str,
         bind: unsafe fn(&Library, &Path) -> Result<A, String>,
+        names: &'static [&'static str],
     ) -> Loader<A> {
-        Loader { stem, env, bind, loaded: OnceLock::new(), loading: Mutex::new(()) }
+        Loader { stem, env, bind, names, loaded: OnceLock::new(), loading: Mutex::new(()) }
     }
 
     pub(crate) fn file_name(&self) -> String {
@@ -186,37 +190,141 @@ impl<A: 'static> Loader<A> {
         find(&self.file_name(), self.env)
     }
 
-    /// Load the library at `path` (or where [`Loader::find`] finds it) and bind every
-    /// entry point, once. A second call naming the library already loaded is a no-op;
-    /// naming another one is an error, since two copies cannot share a handle or a
-    /// license.
+    /// Load the library at `path` and bind every entry point, once. Without a `path`, a
+    /// library of this file name the process already holds -- one a Python module or
+    /// another library loaded -- is bound rather than a second copy beside it, and only
+    /// where there is none is one loaded from where [`Loader::find`] finds it. A second
+    /// call naming the library already bound is a no-op; naming another one is an error,
+    /// since two copies cannot share a handle or a license.
     pub(crate) fn load(&'static self, path: Option<&Path>) -> Result<&'static A, String> {
+        self.load_with(path, false)
+    }
+
+    /// Bind the copy of the library the process already holds, found by its file name as
+    /// a viewer finds it. An error where the process holds none, or where this crate
+    /// already bound another copy.
+    pub(crate) fn use_loaded(&'static self) -> Result<&'static A, String> {
+        self.load_with(None, true)
+    }
+
+    fn load_with(&'static self, path: Option<&Path>, loaded_only: bool) -> Result<&'static A, String> {
         if let Some(loaded) = self.loaded.get() {
-            return check_same(loaded, path);
+            return self.check_bound(loaded, path, loaded_only);
         }
         let _guard = self.loading.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(loaded) = self.loaded.get() {
-            return check_same(loaded, path);
+            return self.check_bound(loaded, path, loaded_only);
         }
-        let path = match path {
-            Some(path) => path.to_path_buf(),
-            None => self.find()?,
-        };
+        let held = if path.is_none() { self.in_process() } else { None };
         // SAFETY: loading runs the library's initialisers, and every symbol is then
         // read as the signature the table declares. Both are the contract of loading
         // a cadaclysm library at all; nothing on this side can check `path` is one.
         let loaded = unsafe {
-            let library = Library::new(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let (library, path) = match (held, path) {
+                (Some(held), _) => held,
+                (None, _) if loaded_only => return Err(self.none_held()),
+                (None, given) => {
+                    let path = match given {
+                        Some(path) => path.to_path_buf(),
+                        None => self.find()?,
+                    };
+                    (Library::new(&path).map_err(|e| format!("{}: {e}", path.display()))?, path)
+                }
+            };
             let api = (self.bind)(&library, &path)?;
             Loaded { api, path, _library: library }
         };
         Ok(&self.loaded.get_or_init(|| loaded).api)
     }
 
+    /// [`check_same`], and for [`Loader::use_loaded`] that the copy bound is the one the
+    /// process holds under this file name.
+    fn check_bound(&'static self, loaded: &'static Loaded<A>, path: Option<&Path>, loaded_only: bool) -> Result<&'static A, String> {
+        if loaded_only {
+            match self.in_process() {
+                Some((_, held)) if same_file(&held, &loaded.path) => {}
+                Some((_, held)) => {
+                    return Err(format!(
+                        "the library is already loaded from {}, so the copy at {} cannot be bound",
+                        loaded.path.display(),
+                        held.display()
+                    ))
+                }
+                None => return Err(self.none_held()),
+            }
+        }
+        check_same(loaded, path)
+    }
+
+    fn none_held(&self) -> String {
+        format!("no {} is loaded in this process", self.file_name())
+    }
+
+    /// The library of this file name the process already holds, with the file it was
+    /// loaded from (its bare name where the system cannot say). Loads nothing.
+    fn in_process(&self) -> Option<(Library, PathBuf)> {
+        let name = self.file_name();
+        let (library, path) = held(&name, self.names.first().copied().unwrap_or_default())?;
+        Some((library, path.unwrap_or_else(|| PathBuf::from(&name))))
+    }
+
     /// The path the library was loaded from, or `None` before anything loaded it.
     pub(crate) fn loaded_path(&'static self) -> Option<&'static Path> {
         self.loaded.get().map(|loaded| loaded.path.as_path())
     }
+}
+
+/// The library of the file name `name` if the process already holds one, and the file it
+/// came from: Windows' module list, or `dlopen(name, RTLD_NOLOAD)`, which matches a loaded
+/// library's soname (a dylib's install name), as the View's own lookup does. Nothing is
+/// loaded. The file is read off the module (Windows) or the address of its symbol `probe`.
+#[cfg(windows)]
+fn held(name: &str, _probe: &str) -> Option<(Library, Option<PathBuf>)> {
+    use std::os::windows::ffi::OsStringExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleFileNameW(module: isize, name: *mut u16, size: u32) -> u32;
+    }
+    let module = libloading::os::windows::Library::open_already_loaded(name).ok()?.into_raw();
+    let mut buffer = vec![0u16; 32768];
+    // SAFETY: `module` is a module handle this call holds a reference on.
+    let length = unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    let path = (length > 0 && length < buffer.len()).then(|| PathBuf::from(OsString::from_wide(&buffer[..length])));
+    // SAFETY: the handle `into_raw` gave up, taken back to be released on drop.
+    Some((unsafe { libloading::os::windows::Library::from_raw(module) }.into(), path))
+}
+
+#[cfg(unix)]
+fn held(name: &str, probe: &str) -> Option<(Library, Option<PathBuf>)> {
+    use std::ffi::{c_char, c_int, c_void, CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    #[repr(C)]
+    struct DlInfo {
+        fname: *const c_char,
+        fbase: *mut c_void,
+        sname: *const c_char,
+        saddr: *mut c_void,
+    }
+    extern "C" {
+        fn dladdr(address: *const c_void, info: *mut DlInfo) -> c_int;
+    }
+    // RTLD_NOLOAD, which libloading does not name: glibc's and bionic's 4, Apple's 0x10.
+    const RTLD_NOLOAD: c_int = if cfg!(target_vendor = "apple") { 0x10 } else { 0x4 };
+    // SAFETY: with RTLD_NOLOAD nothing is loaded, so no initialiser runs.
+    let library = unsafe { libloading::os::unix::Library::open(Some(name), RTLD_NOLOAD | libloading::os::unix::RTLD_LAZY) }.ok()?;
+    let symbol = format!("{probe}\0");
+    let path = unsafe { library.get::<*const c_void>(symbol.as_bytes()) }.ok().and_then(|address| {
+        let mut info = DlInfo { fname: std::ptr::null(), fbase: std::ptr::null_mut(), sname: std::ptr::null(), saddr: std::ptr::null_mut() };
+        // SAFETY: `address` is a symbol of a loaded library; dladdr only reads it.
+        let found = unsafe { dladdr(*address, &mut info) } != 0 && !info.fname.is_null();
+        found.then(|| PathBuf::from(OsStr::from_bytes(unsafe { CStr::from_ptr(info.fname) }.to_bytes())))
+    });
+    Some((library.into(), path))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn held(_name: &str, _probe: &str) -> Option<(Library, Option<PathBuf>)> {
+    None
 }
 
 fn check_same<A>(loaded: &'static Loaded<A>, path: Option<&Path>) -> Result<&'static A, String> {

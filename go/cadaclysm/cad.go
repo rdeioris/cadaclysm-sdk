@@ -1692,6 +1692,9 @@ type Task struct {
 	scene  *Scene
 }
 
+// ScheduleIndex is the index of the work schedule this task belongs to (scene.Schedules()[i]).
+func (t Task) ScheduleIndex() uint32 { return t.Schedule.Index }
+
 // TaskLink is a sequence between two tasks of a WorkSchedule (IfcRelSequence). From
 // WorkSchedule.Links.
 type TaskLink struct {
@@ -3861,6 +3864,34 @@ func (s *Scene) Substituted() bool {
 // MetresPerUnit is what one length in the file is worth in metres, or 1 where it did not
 // say.
 func (s *Scene) MetresPerUnit() float64 { return float64(C.cadaclysm_metres_per_unit(s.h())) }
+
+// Tolerances is what a file declares about its own precision: Absolute, a length in the file's
+// own unit, and Angular, in radians -- each nil where the file said nothing. What
+// Scene.Tolerances returns.
+type Tolerances struct {
+	Absolute *float64
+	Angular  *float64
+}
+
+// Tolerances is what the file declares about its own precision: the absolute tolerance in the
+// file's own unit (beside MetresPerUnit, whatever convention the scene was opened into) and
+// the angular one in radians, nil for one it does not declare -- a 3dm's units and
+// tolerances, STEP's uncertainty, SAT's resabs, IGES's resolution; other formats declare
+// nothing. Each body read from the file carries a copy, which the kernel's verbs given a
+// tolerance of 0 work from.
+func (s *Scene) Tolerances() Tolerances {
+	var absolute, angular C.double
+	C.cadaclysm_tolerances(s.h(), &absolute, &angular)
+	runtime.KeepAlive(s)
+	out := Tolerances{}
+	if a := float64(absolute); !math.IsNaN(a) {
+		out.Absolute = &a
+	}
+	if g := float64(angular); !math.IsNaN(g) {
+		out.Angular = &g
+	}
+	return out
+}
 
 // Bounds is everything the model covers, in world coordinates — the one figure here not
 // in a node's own frame. This meshes all of it, being the only way to know how far it

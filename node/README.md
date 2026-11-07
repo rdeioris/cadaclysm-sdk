@@ -77,7 +77,7 @@ for (const node of scene.nodes()) {
   console.log(node.label, mesh.triangleCount, 'triangles', node.bounds.size);
   node.saveMesh(`${node.index}.stl`);
 }
-scene.save('model.glb');                  // the whole scene: 'glb', 'gltf' or 'obj'
+scene.save('model.glb');                  // the whole scene: 'glb', 'gltf', 'obj', 'usda' or '3dm'
 scene.close();
 ```
 
@@ -146,6 +146,13 @@ Writing SAT -- `sat()`, `satText()`, `satAsync()`, `writeSat`,
 ACIS records, splines and swept surfaces as exact NURBS, in the layout Rhino's
 own exporter writes. `sat()` and `writeSat` have the library write the file,
 so a refusal names it.
+
+Writing a Rhino `.3dm` -- `rhino3dmBytes()` and `write3dm()` on a solid or an
+assembly, `bs.rhino3dmBytes` and `bs.write3dm` over several solids -- gives each
+solid's exact brep (its mesh where a body has no exact form there), named and
+coloured; an assembly's parts become blocks. The bytes come back as a `Buffer`.
+Anything the writer could not write as itself is said as one
+`process.emitWarning('3dm: ...')` per line.
 
 ## A mesh for a solver
 

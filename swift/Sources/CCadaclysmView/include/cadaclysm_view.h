@@ -2050,8 +2050,9 @@ bool cadaclysm_view_set_occluded(struct CadaclysmView *view, uint32_t item, uint
  * `_MATTE`, for its triangles and its exact faces. Under `CADACLYSM_VIEW_LIGHTING_SHOWROOM`
  * gloss is the clear coat mirroring the room, sharp and silver at a grazing angle; satin a
  * weaker, blurred coat; matte no mirror, a faint grey sheen -- a black tyre stays black.
- * Under the headlight and studio lighting satin and matte draw a soft and a faint highlight
- * riding the camera. Kept across uploads, removes of other items and surface switches.
+ * Under studio lighting, which has no highlight, every finish draws as gloss; under the
+ * headlight satin and matte draw a soft and a faint highlight riding the camera. Kept
+ * across uploads, removes of other items and surface switches.
  * Uploads the scene again, as a show does: set it on each item as it is shown, not over a
  * finished scene item by item. The terminal accepts every finish and draws it as gloss; the
  * render view library accepts GLOSS and refuses SATIN and MATTE. False where the item is

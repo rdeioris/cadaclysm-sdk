@@ -294,6 +294,10 @@ static Result<void> run(const std::string& cube_path) {
             expect(slab.kind == "construction" && shed.kind == "demolition" && topping.kind == "notdefined",
                    "the task kinds are not construction, demolition, notdefined");
             expect(topping.milestone && !slab.milestone, "Topping out is not the milestone, or Slab is");
+            for (const cadaclysm::Task& task : tasks) {
+                expect(task.schedule_index() == 0 && task.schedule_index() == programme.index,
+                       "task " + task.name + " has schedule_index " + std::to_string(task.schedule_index()));
+            }
             expect(slab.identification == "T1" && slab.status == "COMPLETED", "Slab is not T1, COMPLETED");
             expect(slab.time.schedule_start.has_value() && *slab.time.schedule_start == t0 &&
                        !slab.time.schedule_finish.has_value() && slab.time.duration.has_value() &&

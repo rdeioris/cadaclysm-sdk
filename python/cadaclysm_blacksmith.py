@@ -92,6 +92,20 @@ its geometry allows -- see `Solid.open`.
 solids at its tolerance, and a curved solid at `1e-6` is hundreds of thousands
 of triangles. `0.05` is what the crate's own boolean tests run at; a tighter one
 is as correct, only slower.
+
+## Tolerances
+
+Every default above stays what it is: `join(a, b)` still means `0.05`. Passing
+`tolerance=None` (or 0) to a verb that takes a distance tolerance -- a boolean,
+fillet, shell, split, section, hit test, mesh, curve fit or profile verb -- opts
+into the model's own: `effective_tolerance(*solids)`, the larger of the loosest
+absolute tolerance the inputs declare and the option `tolerance.relative`
+(default `1e-4`) times their size. A solid declares what its file said
+(`Solid.tolerances`, a `Tolerances(absolute, angular)` with None for what it
+did not say; `Scene.tolerances` in the reader module is the file's), every
+verb's result inherits the loosest of its inputs', and `Solid.with_tolerances`
+sets it. `tolerance.angular` (default one degree) stands in where nothing
+declares an angle.
 """
 
 from __future__ import annotations
@@ -108,6 +122,8 @@ import os
 import platform
 import sys
 import time
+import types
+import warnings
 from ctypes import (POINTER, c_bool, c_char_p, c_double, c_float, c_int32, c_size_t, c_uint8, c_uint32, c_uint64, c_void_p)
 import collections.abc as _abc
 from dataclasses import dataclass, field
@@ -154,19 +170,20 @@ if TYPE_CHECKING:   # names the annotations use; imported when used, never at lo
 
 __all__ = [
     "Assembly", "At", "Axis", "Box", "BuildError", "Chain", "Clash", "Classifier", "Closest", "Collider", "CollisionHit", "Commit", "Continuity", "Cracks", "Curvature", "Curve", "Document", "Dof", "Edge", "FaceSide", "FaceThickness", "FemEdge",
-    "FemMesh", "FemVertex", "Frame", "FreeEdge", "FreeWire", "HealFix", "HealRefusal", "HealReport", "HealthReport", "Hit", "Interpolator", "Intersection", "Job", "JoinReport", "Length", "Manifold", "Mass", "MeshThickness", "NurbsCurve", "Operation",
-    "OrientedBox", "Overlap", "PartDof", "Path", "Piece", "Profile", "Program", "Quaternion", "RTree", "Region", "Report", "ReportItem", "Selector", "Sketch", "Slant", "SmallFeature", "Solid", "SolidHits",
+    "FemMesh", "FemVertex", "Frame", "FreeEdge", "FreeWire", "HealFix", "HealRefusal", "HealReport", "HealthReport", "History", "Hit", "Interpolator", "Intersection", "Job", "JoinReport", "Length", "Manifold", "Mass", "MeshThickness", "NurbsCurve", "Operation",
+    "OrientedBox", "Overlap", "PartDof", "PatchReport", "Path", "Piece", "Profile", "Program", "Quaternion", "RTree", "Region", "Report", "ReportItem", "Selector", "Sketch", "Slant", "SmallFeature", "Solid", "SolidHits",
     "SolveReport", "Spot", "Stock", "Subd", "SubdMesh",
-    "SubdReport", "SweepPath", "SweptClash", "Thickness", "ThicknessGauge", "ThicknessMesh", "Tool", "Transform", "Workplane",
-    "Arc", "Circle", "Cone", "Cuboid", "CurveFoot", "Cylinder", "Ellipse", "Interval", "Line", "Sphere", "SurfaceFoot", "Torus",
-    "boxes_apart", "clash", "closest_points", "k_neighbors", "mesh_thickness", "swept_clash", "thickness",
+    "SubdReport", "SweepPath", "SweptClash", "Thickness", "ThicknessGauge", "ThicknessMesh", "Tolerances", "Tool", "Transform", "Workplane",
+    "Arc", "Circle", "Cone", "Cuboid", "CurveFoot", "Cylinder", "Ellipse", "Interval", "Line", "Ray", "Rectangle", "Sphere", "SurfaceFoot",
+    "Torus", "Triangle",
+    "boxes_apart", "clash", "closest_points", "effective_tolerance", "k_neighbors", "mesh_thickness", "swept_clash", "thickness",
     "brep_layout_id", "build_date", "default_schema", "library_path", "license", "license_info", "license_notice_count",
     "option", "pair_freedom_count", "set_option", "version",
-    "svg", "write_brep", "write_brep_text", "write_sat", "write_sat_text", "write_step", "write_step_assembly", "write_step_assembly_text", "write_step_text", "__version__",
+    "rhino3dm_bytes", "svg", "write_3dm", "write_brep", "write_brep_text", "write_sat", "write_sat_text", "write_step", "write_step_assembly", "write_step_assembly_text", "write_step_text", "__version__",
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -332,6 +349,17 @@ class _Continuity(ctypes.Structure):
     #: `CadaclysmBlacksmithContinuity`. Pinned by `tests/bindings.rs`.
     _fields_ = [("gap", c_double), ("gap_at", c_double * 3), ("angle", c_double), ("angle_at", c_double * 3),
                 ("curvature", c_double), ("curvature_at", c_double * 3), ("samples", c_uint32)]
+
+
+class _PatchBoundary(ctypes.Structure):
+    #: `CadaclysmBlacksmithPatchBoundary`: `sheet` NULL for a curve boundary. Pinned by `tests/bindings.rs`.
+    _fields_ = [("sheet", c_void_p), ("face", c_uint32), ("side", c_uint32), ("from", c_double), ("to", c_double),
+                ("level", c_uint32), ("curve", c_void_p)]
+
+
+class _PatchReport(ctypes.Structure):
+    #: `CadaclysmBlacksmithPatchReport`. Pinned by `tests/bindings.rs`.
+    _fields_ = [("faces", c_uint32), ("boundary", _Continuity), ("internal", _Continuity), ("corner_angle", c_double)]
 
 
 class _Closest(ctypes.Structure):
@@ -848,6 +876,7 @@ _OPERATIONS = c_void_p
 _SUBD = c_void_p
 _NURBS_CURVE = c_void_p
 _DOCUMENT = c_void_p
+_HISTORY = c_void_p
 
 _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_last_error", c_char_p, []),
@@ -871,6 +900,10 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_heal_fixes", c_uint32, [c_void_p, _U, _D]),
     ("cadaclysm_blacksmith_heal_refused", c_uint32, [c_void_p, _U, _D]),
     ("cadaclysm_blacksmith_edge_tolerance", c_double, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_effective_tolerance", c_double, [POINTER(c_void_p), c_size_t]),
+    ("cadaclysm_blacksmith_solid_tolerances", c_bool, [_SOLID, POINTER(c_double), POINTER(c_double)]),
+    ("cadaclysm_blacksmith_solid_with_tolerances", _SOLID, [_SOLID, c_double, c_double]),
+    ("cadaclysm_blacksmith_vertex_tolerance", c_double, [_SOLID, c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_named", _SOLID, [_SOLID, c_char_p]),
     ("cadaclysm_blacksmith_solid_name", c_char_p, [_SOLID]),
     ("cadaclysm_blacksmith_with_material", _SOLID, [_SOLID, c_char_p]),
@@ -976,10 +1009,17 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_trim", _SOLID, [_SOLID, _SOLID, c_bool, c_double, _PROGRESS, c_void_p]),
     # a sheet trimmed by a curve on it, sheets joined: native only for now (see `Solid.trim_by_curve`).
     ("cadaclysm_blacksmith_split_by_curve", _SOLID, [_SOLID, _NURBS_CURVE, _D, c_double]),
+    ("cadaclysm_blacksmith_split_along_curve", _SOLID, [_SOLID, _NURBS_CURVE, c_double]),
+    ("cadaclysm_blacksmith_panel_gap", c_bool, [_SOLID, _NURBS_CURVE, c_double, c_double, c_double, POINTER(c_void_p)]),
     ("cadaclysm_blacksmith_trim_by_curve", _SOLID, [_SOLID, _NURBS_CURVE, _D, c_bool, c_double]),
+    ("cadaclysm_blacksmith_flange", _SOLID, [_SOLID, _U, c_size_t, _NURBS_CURVE, c_double, c_bool, _D]),
+    ("cadaclysm_blacksmith_extrude_to", _SOLID, [_SOLID, _U, c_size_t, _D, _SOLID, c_double, c_bool, _D]),
     ("cadaclysm_blacksmith_join_sheets", _SOLID, [POINTER(c_void_p), c_size_t, c_double, POINTER(_JoinReport)]),
+    # an opening recessed into a sheet: the four face counts into the `uint32_t[4]`
+    ("cadaclysm_blacksmith_recess", _SOLID, [_SOLID, _NURBS_CURVE, c_double, c_double, c_double, c_bool, c_double, _U]),
     ("cadaclysm_blacksmith_fillet", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_fillet_varying", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_fillet_each", _SOLID, [_SOLID, _U, _D, c_size_t, c_double]),
     ("cadaclysm_blacksmith_chamfer", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double]),
     ("cadaclysm_blacksmith_shell", _SOLID, [_SOLID, c_double, _U, c_size_t, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_thicken", _SOLID, [_SOLID, c_double, c_double, _PROGRESS, c_void_p]),
@@ -1023,10 +1063,14 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_nurbs_curve_projected_to_plane", _NURBS_CURVE, [_NURBS_CURVE, _D, _D, _D]),
     ("cadaclysm_blacksmith_nurbs_curve_projected_to_face", _NURBS_CURVE, [_NURBS_CURVE, _SOLID, c_uint32, _D, c_double, _D]),
     ("cadaclysm_blacksmith_nurbs_curve_pulled_to_face", _NURBS_CURVE, [_NURBS_CURVE, _SOLID, c_uint32, c_double, _D]),
+    ("cadaclysm_blacksmith_nurbs_curve_offset_on_sheet", _NURBS_CURVE, [_NURBS_CURVE, _SOLID, c_double, c_double, _D]),
     ("cadaclysm_blacksmith_nurbs_curve_reversed", _NURBS_CURVE, [_NURBS_CURVE]),
     ("cadaclysm_blacksmith_nurbs_curve_trimmed", _NURBS_CURVE, [_NURBS_CURVE, c_double, c_double]),
     ("cadaclysm_blacksmith_nurbs_curve_extended", _NURBS_CURVE, [_NURBS_CURVE, c_bool, c_double]),
     ("cadaclysm_blacksmith_nurbs_curve_elevated", _NURBS_CURVE, [_NURBS_CURVE, c_uint32]),
+    ("cadaclysm_blacksmith_nurbs_curve_joined", _NURBS_CURVE, [POINTER(_NURBS_CURVE), c_size_t, c_double]),
+    ("cadaclysm_blacksmith_nurbs_curve_tween", c_bool, [_NURBS_CURVE, _NURBS_CURVE, c_uint32, c_uint32, c_uint32, c_bool, c_double,
+                                                        POINTER(_NURBS_CURVE)]),
     ("cadaclysm_blacksmith_nurbs_curve_transformed", _NURBS_CURVE, [_NURBS_CURVE, _D]),
     ("cadaclysm_blacksmith_nurbs_curve_clone", _NURBS_CURVE, [_NURBS_CURVE]),
     ("cadaclysm_blacksmith_nurbs_curve_free", None, [_NURBS_CURVE]),
@@ -1058,6 +1102,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_continuity", c_bool, [_SOLID, c_uint32, c_uint32, _SOLID, c_uint32, c_uint32, c_uint32, POINTER(_Continuity)]),
     ("cadaclysm_blacksmith_match_side", _SOLID, [_SOLID, c_uint32, c_uint32, _SOLID, c_uint32, c_uint32, c_uint32]),
     ("cadaclysm_blacksmith_blend_sides", _SOLID, [_SOLID, c_uint32, c_uint32, _SOLID, c_uint32, c_uint32, c_uint32, c_double]),
+    ("cadaclysm_blacksmith_n_sided_patch", _SOLID, [POINTER(_PatchBoundary), c_size_t, c_double, c_double, POINTER(_PatchReport)]),
     # surface fillets: the rails come back through out-pointers, owned. Native only.
     ("cadaclysm_blacksmith_fillet_surfaces", _SOLID, [_SOLID, c_uint32, _SOLID, c_uint32, c_double, c_double, c_bool, c_bool, c_double,
                                                       POINTER(_NURBS_CURVE), POINTER(_NURBS_CURVE), _D]),
@@ -1068,6 +1113,48 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_closest", c_bool, [_SOLID, _SOLID, c_double, _PROGRESS, c_void_p, POINTER(_Closest)]),
     ("cadaclysm_blacksmith_face_ref", c_bool, [_SOLID, c_uint32, _D]),
     ("cadaclysm_blacksmith_find_face", c_int32, [_SOLID, _D, c_int32, c_double]),
+    # identity and attributes (plan C2): ids, origins, attributes, history, edge and vertex refs
+    ("cadaclysm_blacksmith_solid_tracked", _SOLID, [_SOLID]),
+    ("cadaclysm_blacksmith_solid_is_tracked", c_bool, [_SOLID]),
+    ("cadaclysm_blacksmith_face_id", c_uint64, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_face_with_id", c_uint32, [_SOLID, c_uint64]),
+    ("cadaclysm_blacksmith_face_origin_count", c_uint32, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_face_origin_at", c_bool, [_SOLID, c_uint32, c_uint32, _U, POINTER(c_uint64)]),
+    ("cadaclysm_blacksmith_edge_id", c_uint64, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_edge_with_id", c_uint32, [_SOLID, c_uint64]),
+    ("cadaclysm_blacksmith_edge_origin_count", c_uint32, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_edge_origin_at", c_bool, [_SOLID, c_uint32, c_uint32, _U, POINTER(c_uint64)]),
+    ("cadaclysm_blacksmith_origins_through", _SOLID, [_SOLID, _SOLID]),
+    ("cadaclysm_blacksmith_with_attribute", _SOLID, [_SOLID, c_char_p, c_char_p]),
+    ("cadaclysm_blacksmith_without_attribute", _SOLID, [_SOLID, c_char_p]),
+    ("cadaclysm_blacksmith_attribute", c_char_p, [_SOLID, c_char_p]),
+    ("cadaclysm_blacksmith_attribute_count", c_uint32, [_SOLID]),
+    ("cadaclysm_blacksmith_attribute_key_at", c_char_p, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_attribute_value_at", c_char_p, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_with_face_attribute", _SOLID, [_SOLID, c_uint32, c_char_p, c_char_p]),
+    ("cadaclysm_blacksmith_without_face_attribute", _SOLID, [_SOLID, c_uint32, c_char_p]),
+    ("cadaclysm_blacksmith_face_attribute", c_char_p, [_SOLID, c_uint32, c_char_p]),
+    ("cadaclysm_blacksmith_face_attribute_count", c_uint32, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_face_attribute_key_at", c_char_p, [_SOLID, c_uint32, c_uint32]),
+    ("cadaclysm_blacksmith_face_attribute_value_at", c_char_p, [_SOLID, c_uint32, c_uint32]),
+    ("cadaclysm_blacksmith_history", _HISTORY, [_SOLID, POINTER(c_void_p), c_size_t]),
+    ("cadaclysm_blacksmith_edge_history", _HISTORY, [_SOLID, POINTER(c_void_p), c_size_t]),
+    ("cadaclysm_blacksmith_history_free", None, [_HISTORY]),
+    ("cadaclysm_blacksmith_history_kept_count", c_uint32, [_HISTORY]),
+    ("cadaclysm_blacksmith_history_kept_at", c_bool, [_HISTORY, c_uint32, _U, POINTER(c_uint64), POINTER(c_uint64)]),
+    ("cadaclysm_blacksmith_history_modified_count", c_uint32, [_HISTORY]),
+    ("cadaclysm_blacksmith_history_modified_at", c_bool, [_HISTORY, c_uint32, _U, POINTER(c_uint64)]),
+    ("cadaclysm_blacksmith_history_modified_output_count", c_uint32, [_HISTORY, c_uint32]),
+    ("cadaclysm_blacksmith_history_modified_output_at", c_uint64, [_HISTORY, c_uint32, c_uint32]),
+    ("cadaclysm_blacksmith_history_generated_count", c_uint32, [_HISTORY]),
+    ("cadaclysm_blacksmith_history_generated_at", c_uint64, [_HISTORY, c_uint32]),
+    ("cadaclysm_blacksmith_history_deleted_count", c_uint32, [_HISTORY]),
+    ("cadaclysm_blacksmith_history_deleted_at", c_bool, [_HISTORY, c_uint32, _U, POINTER(c_uint64)]),
+    ("cadaclysm_blacksmith_edge_ref", c_bool, [_SOLID, c_uint32, _D]),
+    ("cadaclysm_blacksmith_find_edge", c_int32, [_SOLID, _D, c_double]),
+    ("cadaclysm_blacksmith_vertex_count", c_uint32, [_SOLID]),
+    ("cadaclysm_blacksmith_vertex_ref", c_bool, [_SOLID, c_uint32, _D]),
+    ("cadaclysm_blacksmith_find_vertex", c_int32, [_SOLID, _D, c_double]),
     ("cadaclysm_blacksmith_frame_midplane", c_bool, [_D, _D, _D]),
     ("cadaclysm_blacksmith_frame_through", c_bool, [_D, _D, _D, _D]),
     ("cadaclysm_blacksmith_transform_translation", c_bool, [_D, _D]),
@@ -1120,6 +1207,22 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_cuboid_point_at", c_bool, [_D, c_double, c_double, c_double, _D]),
     ("cadaclysm_blacksmith_cuboid_closest_point", c_bool, [_D, _D, _D]),
     ("cadaclysm_blacksmith_frame_fit", c_bool, [_D, c_size_t, _D, _D]),
+    ("cadaclysm_blacksmith_rectangle_corners", c_bool, [_D, _D]),
+    ("cadaclysm_blacksmith_rectangle_area", c_bool, [_D, _D]),
+    ("cadaclysm_blacksmith_rectangle_closest_point", c_bool, [_D, _D, c_bool, _D]),
+    ("cadaclysm_blacksmith_rectangle_contains", c_uint32, [_D, _D, c_double]),
+    ("cadaclysm_blacksmith_rectangle_to_sheet", _SOLID, [_D]),
+    ("cadaclysm_blacksmith_triangle_area", c_bool, [_D, _D]),
+    ("cadaclysm_blacksmith_triangle_perimeter", c_bool, [_D, _D]),
+    ("cadaclysm_blacksmith_triangle_centroid", c_bool, [_D, _D]),
+    ("cadaclysm_blacksmith_triangle_circumcircle", c_bool, [_D, _D]),
+    ("cadaclysm_blacksmith_triangle_point_at", c_bool, [_D, c_double, c_double, c_double, _D]),
+    ("cadaclysm_blacksmith_triangle_barycentric", c_bool, [_D, _D, _D]),
+    ("cadaclysm_blacksmith_triangle_closest_point", c_bool, [_D, _D, _D]),
+    ("cadaclysm_blacksmith_triangle_edge", c_bool, [_D, c_uint32, _D]),
+    ("cadaclysm_blacksmith_triangle_to_sheet", _SOLID, [_D]),
+    ("cadaclysm_blacksmith_ray_point_at", c_bool, [_D, c_double, _D]),
+    ("cadaclysm_blacksmith_ray_closest_point", c_bool, [_D, _D, _D]),
     ("cadaclysm_blacksmith_coloured", _SOLID, [_SOLID, c_uint32, c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_colour", c_bool, [_SOLID, c_uint32, _D]),
     ("cadaclysm_blacksmith_parse_colour", c_bool, [c_char_p, _D]),
@@ -1245,6 +1348,9 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_step_assembly", c_void_p, [POINTER(c_void_p), POINTER(c_char_p), c_size_t, POINTER(c_uint32), POINTER(c_double), c_size_t, c_char_p, c_uint32]),
     ("cadaclysm_blacksmith_sat_text", c_void_p, [POINTER(c_void_p), c_size_t, c_uint32]),
     ("cadaclysm_blacksmith_sat", c_bool, [POINTER(c_void_p), c_size_t, c_char_p, c_uint32]),
+    ("cadaclysm_blacksmith_3dm_bytes", c_void_p, [POINTER(c_void_p), c_size_t, c_uint32, POINTER(c_size_t)]),
+    ("cadaclysm_blacksmith_3dm", c_bool, [POINTER(c_void_p), c_size_t, c_char_p, c_uint32]),
+    ("cadaclysm_blacksmith_bytes_free", None, [c_void_p, c_size_t]),
     ("cadaclysm_blacksmith_svg_options_init", None, [POINTER(_SvgOptions)]),
     ("cadaclysm_blacksmith_svg_text", c_void_p, [POINTER(c_void_p), c_size_t, POINTER(_SvgOptions)]),
     ("cadaclysm_blacksmith_svg", c_bool, [POINTER(c_void_p), c_size_t, c_char_p, POINTER(_SvgOptions)]),
@@ -1263,6 +1369,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_assembly_place_solid", c_void_p, [_ASSEMBLY, _SOLID, _D, c_char_p]),
     ("cadaclysm_blacksmith_assembly_place_assembly", c_void_p, [_ASSEMBLY, _ASSEMBLY, _D, c_char_p]),
     ("cadaclysm_blacksmith_assembly_step", c_void_p, [_ASSEMBLY, c_char_p, c_uint32]),
+    ("cadaclysm_blacksmith_assembly_3dm_bytes", c_void_p, [_ASSEMBLY, c_uint32, POINTER(c_size_t)]),
+    ("cadaclysm_blacksmith_assembly_3dm", c_bool, [_ASSEMBLY, c_char_p, c_uint32]),
     ("cadaclysm_blacksmith_assembly_link", c_bool, [_ASSEMBLY, c_char_p, POINTER(c_char_p), c_size_t]),
     ("cadaclysm_blacksmith_assembly_joint", c_bool, [_ASSEMBLY, c_char_p, c_char_p, c_char_p]),
     ("cadaclysm_blacksmith_assembly_pair", c_bool,
@@ -1481,10 +1589,12 @@ _ENTRY_POINTS = [
 _WASM = sys.platform == "emscripten"
 
 
-# The arc-length divides: C hands back a `CadaclysmBlacksmithSamples *` read by `samples_count`/
-# `samples_at` and freed, the wasm a flat array of 10 doubles a sample (no list handle there, so
-# `samples_*` are native only -- the shim never calls them).
-_DIVIDES = ("edge_divide_by_count", "edge_divide_by_length", "profile_divide_by_count", "profile_divide_by_length")
+# The arc-length divides, and a curve's divides and crossings: C hands back a
+# `CadaclysmBlacksmithSamples *` read by `samples_count`/`samples_at` and freed, the wasm a flat
+# array of 10 doubles a sample (no list handle there, so `samples_*` are native only -- the shim
+# never calls them).
+_DIVIDES = ("edge_divide_by_count", "edge_divide_by_length", "profile_divide_by_count", "profile_divide_by_length",
+            "nurbs_curve_divide_by_count", "nurbs_curve_divide_by_length", "nurbs_curve_plane_hits", "nurbs_curve_face_hits")
 
 
 def _at_from_doubles(raw: "_At", v: "list[float]", what: str) -> None:
@@ -1622,6 +1732,39 @@ def _regions(list_: "Any") -> "list[Region]":
         lib.cadaclysm_blacksmith_regions_free(list_)
 
 
+class _WasmHistory:
+    """A history over the wasm: the export's one flat `u64` array, parsed into the four lists
+    `History` has -- `nk`, then `(operand, id, out)` each; `nm`, then `(operand, id, n, outs...)`
+    each; `ng`, then the ids; `nd`, then `(operand, id)` each. The shim answers C's `history_*`
+    readers from it, so `Solid.history` reads one code path. Truthy even when empty."""
+
+    __slots__ = ("kept", "modified", "generated", "deleted")
+
+    def __init__(self, flat: "list[int]"):
+        at = 0
+
+        def take(n):
+            nonlocal at
+            if at + n > len(flat):
+                raise BuildError(f"history: the wasm returned {len(flat)} numbers, cut short at {at}")
+            out = flat[at:at + n]
+            at += n
+            return out
+
+        self.kept = [((k, i), o) for k, i, o in (take(3) for _ in range(take(1)[0]))]
+        self.modified = []
+        for _ in range(take(1)[0]):
+            k, i, n = take(3)
+            self.modified.append(((k, i), take(n)))
+        self.generated = take(take(1)[0])
+        self.deleted = [(k, i) for k, i in (take(2) for _ in range(take(1)[0]))]
+        if at != len(flat):
+            raise BuildError(f"history: the wasm returned {len(flat)} numbers, {len(flat) - at} past the lists")
+
+    def __bool__(self) -> bool:
+        return True
+
+
 class _WasmLibrary:
     """The same entry points over the wasm module (`globalThis.cadaclysm`,
     built from `crates/cadaclysm-wasm`), shaped so every `_lib().name(...)`
@@ -1679,6 +1822,9 @@ class _WasmLibrary:
               "surface_value_point_at", "surface_value_normal_at", "surface_value_closest_point", "surface_value_domain",
               "solid_value_area", "solid_value_volume", "cuboid_from_bounds", "cuboid_around", "cuboid_corners", "cuboid_point_at",
               "cuboid_closest_point", "frame_fit",
+              "rectangle_corners", "rectangle_area", "rectangle_closest_point", "triangle_area", "triangle_perimeter",
+              "triangle_centroid", "triangle_circumcircle", "triangle_point_at", "triangle_barycentric",
+              "triangle_closest_point", "triangle_edge", "ray_point_at", "ray_closest_point",
               # a job's settings and operations change it in place, true or a refusal
               "job_set_clearance", "job_set_tolerance", "job_set_spindle_dwell", "job_set_resolution",
               "job_set_name", "job_face", "job_contour", "job_pocket", "job_drill",
@@ -1717,7 +1863,20 @@ class _WasmLibrary:
               "sketch_point", "sketch_update_reference", "sketch_set_value", "sketch_set_driving",
               "sketch_solve", "sketch_drag", "sketch_diagnose", "sketch_dof_part",
               # the document: the four calls whose export returns nothing and C a success flag
-              "document_preview_begin", "document_batch_begin", "document_branch_rename", "document_branch_delete"}
+              "document_preview_begin", "document_batch_begin", "document_branch_rename", "document_branch_delete",
+              # identity: an origin C writes through two out-pointers (the export returns
+              # `[operand, id]`, see `_back`), and the edge and vertex references' out-arrays
+              "face_origin_at", "edge_origin_at", "edge_ref", "vertex_ref",
+              # tolerances: the declaration's two out-doubles (the export returns them, see `_back`)
+              "solid_tolerances",
+              # NurbsCurve's readers: a success flag, the answer in the out-array (`_OUT`) or the
+              # record (`_back`); `nurbs_curve_tween` writes its handles (`_back`). `is_rational` and
+              # `is_closed` are absent, as `box_overlaps` is: their C return is the answer
+              "nurbs_curve_control_points", "nurbs_curve_weights", "nurbs_curve_knots", "nurbs_curve_domain",
+              "nurbs_curve_point", "nurbs_curve_derivatives", "nurbs_curve_curvature", "nurbs_curve_length",
+              "nurbs_curve_point_at_length", "nurbs_curve_tween",
+              # the sheets' continuity: a success flag, the record in `_back`
+              "continuity"}
     # the sketch's borrowed `const uint32_t *` lists, by the position of their `size_t *count`:
     # the export returns the list itself (a `Uint32Array`), which `_back` copies out to a
     # Python list, filling the count behind `ctypes.byref` from its length as it does
@@ -1748,9 +1907,16 @@ class _WasmLibrary:
               "transform_is_rigid": NONE, "transform_is_similarity": float("nan"),
               # the values: containment's NONE; `value_size`'s export throws on an unknown kind,
               # where C answers 0
-              "solid_value_contains": NONE, "value_size": 0,
+              "solid_value_contains": NONE, "value_size": 0, "rectangle_contains": NONE,
               # a gauge's tolerance: C's NaN for a refusal, never the generic 0
               "thickness_gauge_tolerance": float("nan"),
+              # identity: C's NONE for a refused count and for "no face has the id"; -2 for a
+              # malformed face, edge or vertex reference (-1, "gone", is an answer); None for a refused
+              # attribute read
+              "face_with_id": NONE, "edge_with_id": NONE, "face_origin_count": NONE, "edge_origin_count": NONE,
+              "find_face": -2, "find_edge": -2, "find_vertex": -2, "attribute": None, "face_attribute": None,
+              # tolerances: C's NaN for a refusal, never the generic 0 (0 is an effective tolerance)
+              "effective_tolerance": float("nan"), "vertex_tolerance": float("nan"),
               **{short: None for short in _LISTS}}
     # results that C writes into an out-array of doubles at this position, and the
     # wasm returns as a typed array (`bounds` fills two, `edge` a record: see `_back`)
@@ -1770,17 +1936,28 @@ class _WasmLibrary:
             "curve_value_closest_point": 3, "circle_through": 3, "arc_through": 3, "arc_from_start_tangent_end": 3,
             "ellipse_from_circle": 1, "surface_value_point_at": 4, "surface_value_normal_at": 4, "surface_value_closest_point": 3,
             "surface_value_domain": 2, "cuboid_from_bounds": 2, "cuboid_around": 3, "cuboid_corners": 1, "cuboid_point_at": 4,
-            "cuboid_closest_point": 2,
+            "cuboid_closest_point": 2, "rectangle_corners": 1, "rectangle_closest_point": 3, "triangle_centroid": 1,
+            "triangle_circumcircle": 1, "triangle_point_at": 4, "triangle_barycentric": 2, "triangle_closest_point": 2,
+            "triangle_edge": 2, "ray_point_at": 2, "ray_closest_point": 2,
             # a swept clash's interval, `[start, end]`
-            "swept_clashes_interval": 3}
+            "swept_clashes_interval": 3,
+            # the edge and vertex references
+            "edge_ref": 2, "vertex_ref": 2,
+            # a curve's reads: their one out-array, last
+            "nurbs_curve_control_points": 1, "nurbs_curve_weights": 1, "nurbs_curve_knots": 1, "nurbs_curve_domain": 1,
+            "nurbs_curve_point": 2, "nurbs_curve_derivatives": 3}
     # the one double C writes through `out` at this position, which the export returns as a
     # plain number (not an array, as `_OUT`'s)
-    _SCALARS = {"curve_value_length": 2, "solid_value_area": 2, "solid_value_volume": 2}
+    _SCALARS = {"curve_value_length": 2, "solid_value_area": 2, "solid_value_volume": 2, "rectangle_area": 1,
+                "triangle_area": 1, "triangle_perimeter": 1}
+    # `uint64_t` arguments, by position: an id crosses into the wasm as a JS `BigInt` (a plain
+    # number would be refused by the export's `u64`)
+    _U64_ARGS = {"face_with_id": (1,), "edge_with_id": (1,)}
     # argument positions the C call has and the wasm call does not: an array's
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "merge": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "profile_piece_count": (2,), "profile_piece": (2,), "profile_trim_count": (2,), "profile_trim_chain": (2,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "split_by_profile": (5,), "step": (1,), "step_assembly": (2, 5), "assembly_link": (3,), "assembly_state": (5,), "assembly_sequence": (5,), "assembly_posed": (4,), "sat_text": (1,), "brep_text": (1,), "profile_text": (4,),
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "profile_piece_count": (2,), "profile_piece": (2,), "profile_trim_count": (2,), "profile_trim_chain": (2,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "split_by_profile": (5,), "step": (1,), "step_assembly": (2, 5), "assembly_link": (3,), "assembly_state": (5,), "assembly_sequence": (5,), "assembly_posed": (4,), "sat_text": (1,), "3dm_bytes": (1, 3), "assembly_3dm_bytes": (2,), "brep_text": (1,), "profile_text": (4,),
              "slant_of_plane": (3,), "face_frame": (2,), "face_ref": (2,), "bounds": (2, 3), "bounds64": (2, 3), "box": (1, 2), "job_stock": (1, 2), "edge": (2,), "colour": (2,), "profile_colour": (1,), "edges_coloured": (2,), "edge_colour": (2,), "parse_colour": (1,), "manifold": (1,), "hit": (2,), "edge_curve": (2,), "report_at": (2,),
              "intersect": (4,), "intersection_chain": (2,), "intersection_curve": (2,), "intersection_overlap": (2,), "svg_text": (1,), "drawing_svg_text": (1, 3),
              # the count out-param: the export returns the curves' own array (see `_back`)
@@ -1850,15 +2027,40 @@ class _WasmLibrary:
              "subd_smooth_mesh": (2,), "subd_pick": (3,), "subd_to_solid": (4,),
              # the counted verbs: their `inexact_out`, which the export returns beside the handle (see `_back`)
              "solid_transform": (2,), "solid_convert_to_nurbs": (2,),
+             # the N-sided patch's report, which the export returns after the handle (see `_back`);
+             # its boundaries cross as two arrays, rewritten in `call`
+             "n_sided_patch": (4,),
+             # identity: an origin's two out-pointers (the export returns them), the references' out-arrays
+             "face_origin_at": (3, 4), "edge_origin_at": (3, 4), "edge_ref": (2,), "vertex_ref": (2,),
+             # tolerances: the solids count (a typed array knows its length), the declaration's outs
+             "effective_tolerance": (1,), "solid_tolerances": (1, 2),
              # the values: the point counts (a typed array knows its length); `frame_fit`'s outs
              # too, the export returning frame and deviation as 13 numbers (see `_back`)
              "cuboid_around": (2,), "frame_fit": (1, 2, 3),
+             # NurbsCurve: the point, weight, knot and curve counts (a typed array knows its
+             # length); a fitted curve's `error_out` and the tweens' `out`, which the exports
+             # return instead (see `_back`); the reads' out-arrays and records
+             "nurbs_curve_new": (1, 5), "nurbs_curve_through": (1,), "nurbs_curve_fit": (1, 4),
+             "nurbs_curve_projected_to_face": (5,), "nurbs_curve_pulled_to_face": (4,), "nurbs_curve_joined": (1,),
+             "nurbs_curve_tween": (7,), "nurbs_curve_control_points": (1,), "nurbs_curve_weights": (1,),
+             "nurbs_curve_knots": (1,), "nurbs_curve_domain": (1,), "nurbs_curve_point": (2,),
+             "nurbs_curve_derivatives": (3,), "nurbs_curve_curvature": (2,), "nurbs_curve_length": (2,),
+             "nurbs_curve_point_at_length": (3,),
+             # the sheets from curves, the surface fillets, trim and join: every curve, sheet and
+             # edge count (a typed array knows its length), and the error, rails and report C
+             # writes through an out-argument, which the exports return after the solid (`_back`)
+             "loft_curves": (1,), "sweep_rail": (2, 6), "sweep_two_rails": (3, 5), "edge_surface": (1, 3),
+             "network_surface": (1, 3, 5), "continuity": (7,), "fillet_surfaces": (9, 10, 11), "fillet_varying": (2,),
+             "join_sheets": (1, 3), "flange": (2, 6), "extrude_to": (2, 7), "recess": (7,),
              # the sketch: `add_nurbs`' point and knot counts, `constrain`'s ref count,
              # `drag`'s count and report, the other out-arrays above, and every list's
              # count (`_LISTS`)
              "sketch_add_nurbs": (4, 7), "sketch_constrain": (3,), "sketch_drag": (3, 4),
              **{short: (at,) for short, at in _OUT.items() if short.startswith("sketch_") and short != "sketch_drag"},
              **{short: (at,) for short, at in _LISTS.items()}}
+    # handle arrays the module pads to one entry for ctypes, by (array, count) position
+    _PADDED = {"nurbs_curve_joined": ((0, 1),), "loft_curves": ((0, 1),), "sweep_rail": ((1, 2),), "sweep_two_rails": ((2, 3),),
+               "edge_surface": ((0, 1),), "network_surface": ((0, 1), (2, 3)), "join_sheets": ((0, 1),)}
     # strings the C side returns as `const char*`, and the module decodes
     # `solid_name`'s wasm export returns an empty string for an unnamed solid
     # (see its own doc comment in crates/cadaclysm-wasm/src/blacksmith.rs), and
@@ -1886,6 +2088,128 @@ class _WasmLibrary:
 
     def cadaclysm_blacksmith_silhouette_beziers_free(self, _data, _count):
         pass   # the curves came back as a JS array; there is no C block to release
+
+    # -- identity: a history is one flat array over the wasm (`_WasmHistory`), not a handle, and
+    # C's readers are answered from it here; `history_free` has nothing to free (the wasm's own
+    # export of that name is the document undo history's, which this never reaches)
+    def _history(self, short: str, out, inputs, count):
+        from pyodide.ffi import JsException
+        import js
+        from pyodide.ffi import to_js
+        self._error = None
+        handles = [int(v) for v in list(inputs)[:count]]
+        try:
+            flat = getattr(self._js, "cadaclysm_blacksmith_" + short)(out, js.Uint32Array.new(to_js(handles)))
+        except JsException as e:
+            if self._trapped(e):
+                raise
+            self._error = self._message(e)
+            return 0
+        return _WasmHistory([int(v) for v in flat])
+
+    def cadaclysm_blacksmith_history(self, out, inputs, count):
+        return self._history("history", out, inputs, count)
+
+    def cadaclysm_blacksmith_edge_history(self, out, inputs, count):
+        return self._history("edge_history", out, inputs, count)
+
+    def cadaclysm_blacksmith_history_free(self, _history):
+        pass
+
+    def _entry(self, what: str, rows: list, i: int):
+        self._error = None
+        if not 0 <= i < len(rows):
+            self._error = f"{what}: entry {i} of {len(rows)}"
+            return None
+        return rows[i]
+
+    def cadaclysm_blacksmith_history_kept_count(self, h):
+        return len(h.kept)
+
+    def cadaclysm_blacksmith_history_kept_at(self, h, i, operand, id_, out_id):
+        row = self._entry("history_kept_at", h.kept, i)
+        if row is None:
+            return False
+        (operand._obj.value, id_._obj.value), out_id._obj.value = row
+        return True
+
+    def cadaclysm_blacksmith_history_modified_count(self, h):
+        return len(h.modified)
+
+    def cadaclysm_blacksmith_history_modified_at(self, h, i, operand, id_):
+        row = self._entry("history_modified_at", h.modified, i)
+        if row is None:
+            return False
+        operand._obj.value, id_._obj.value = row[0]
+        return True
+
+    def cadaclysm_blacksmith_history_modified_output_count(self, h, i):
+        row = self._entry("history_modified_output_count", h.modified, i)
+        return NONE if row is None else len(row[1])
+
+    def cadaclysm_blacksmith_history_modified_output_at(self, h, i, j):
+        row = self._entry("history_modified_output_at", h.modified, i)
+        if row is None:
+            return 0
+        if not 0 <= j < len(row[1]):
+            self._error = f"history_modified_output_at: output {j} of {len(row[1])}"
+            return 0
+        return row[1][j]
+
+    def cadaclysm_blacksmith_history_generated_count(self, h):
+        return len(h.generated)
+
+    def cadaclysm_blacksmith_history_generated_at(self, h, i):
+        row = self._entry("history_generated_at", h.generated, i)
+        return 0 if row is None else row
+
+    def cadaclysm_blacksmith_history_deleted_count(self, h):
+        return len(h.deleted)
+
+    def cadaclysm_blacksmith_history_deleted_at(self, h, i, operand, id_):
+        row = self._entry("history_deleted_at", h.deleted, i)
+        if row is None:
+            return False
+        operand._obj.value, id_._obj.value = row
+        return True
+
+    # -- attributes: the wasm hands a solid's (a face's) keys and values over as two whole lists;
+    # C's count and `_at` readers are answered from them, each refusal under its own C name
+    def _texts(self, what: str, export: str, *args):
+        result = getattr(self, "cadaclysm_blacksmith_" + export)(*args)
+        if self._error is not None:
+            lead, colon, rest = self._error.partition(":")
+            self._error = what + colon + rest if colon else self._error
+            return None
+        return [str(v) for v in result]
+
+    def cadaclysm_blacksmith_attribute_count(self, solid):
+        keys = self._texts("attribute_count", "attribute_keys", solid)
+        return 0 if keys is None else len(keys)
+
+    def cadaclysm_blacksmith_face_attribute_count(self, solid, face):
+        keys = self._texts("face_attribute_count", "face_attribute_keys", solid, face)
+        return NONE if keys is None else len(keys)
+
+    def _text_at(self, what: str, texts, i: int):
+        if texts is None:
+            return None
+        if not 0 <= i < len(texts):
+            self._error = f"{what}: attribute {i} of {len(texts)}"
+            return None
+        return texts[i].encode()
+
+    def cadaclysm_blacksmith_attribute_key_at(self, solid, i):
+        return self._text_at("attribute_key_at", self._texts("attribute_key_at", "attribute_keys", solid), i)
+
+    def cadaclysm_blacksmith_attribute_value_at(self, solid, i):
+        return self._text_at("attribute_value_at", self._texts("attribute_value_at", "attribute_values", solid), i)
+
+    def cadaclysm_blacksmith_face_attribute_key_at(self, solid, face, i):
+        return self._text_at("face_attribute_key_at", self._texts("face_attribute_key_at", "face_attribute_keys", solid, face), i)
+
+    def cadaclysm_blacksmith_face_attribute_value_at(self, solid, face, i):
+        return self._text_at("face_attribute_value_at", self._texts("face_attribute_value_at", "face_attribute_values", solid, face), i)
 
     def open_file(self, data: bytes, extension: str) -> "list[int]":
         """Every body a file draws, as solid handles -- the wasm reads the file
@@ -2039,7 +2363,26 @@ class _WasmLibrary:
                     up_nan = (c_double * count)(*(upper[i] if has_upper[i] else float("nan") for i in range(count)))
                 params = args[10] if args[10] is not None else (c_double * 0)()
                 args = (args[0], args[1], args[2], args[3], args[4], lo_nan, up_nan, params)
+            if short == "n_sided_patch":
+                # cadaclysm_blacksmith_n_sided_patch(ids: &[u32], ranges: &[f64], bulge, tolerance):
+                # the `_PatchBoundary` rows (args[0], args[1] of them) have no cheaper way into JS
+                # than their fields, the handles and indices 5 a row (a null sheet or curve 0) and
+                # the range's two ends 2 a row; see the export's doc comment.
+                rows = args[0][:args[1]]
+                ids = [v for b in rows for v in (b.sheet or 0, b.face, b.side, b.level, b.curve or 0)]
+                ends = [v for b in rows for v in (getattr(b, "from"), b.to)]
+                args = ((c_uint32 * len(ids))(*ids), (c_double * len(ends))(*ends), args[2], args[3], args[4])
+            if short in self._PADDED:
+                # `_curve_array` and `join_sheets` pad an empty list to one null handle for ctypes;
+                # the count that says so drops, so the padding comes off here, as `step_assembly`'s does
+                args = list(args)
+                for at, count in self._PADDED[short]:
+                    args[at] = (c_void_p * args[count])(*args[at][:args[count]])
+                args = tuple(args)
             passed = [self._arg(a) for i, a in enumerate(args) if i not in dropped]
+            if short in self._U64_ARGS:
+                import js
+                passed = [js.BigInt(str(int(a))) if i in self._U64_ARGS[short] else a for i, a in enumerate(passed)]
             try:
                 result = function(*passed)
             except JsException as e:
@@ -2094,6 +2437,14 @@ class _WasmLibrary:
         """The wasm's return, as the C call's: written into the out-argument
         and `True` where C fills one, `bytes` where C returns a C string, the
         mesh/polyline arrays under the C struct's names, else as it is."""
+        if short in ("3dm_bytes", "assembly_3dm_bytes"):
+            # `{bytes, notes}`: the bytes themselves (the length into the `c_size_t`
+            # behind `ctypes.byref`), and what C leaves in `last_error` on success
+            data = bytes(result.bytes.to_py())
+            args[-1]._obj.value = len(data)
+            notes = str(result.notes)
+            self._error = notes or None
+            return data
         if short == "edge":
             raw = args[2]._obj   # the `_Edge` behind `ctypes.byref(raw)`; the arrays live in it
             raw.kind = str(result.kind).encode()
@@ -2188,14 +2539,57 @@ class _WasmLibrary:
                 raise BuildError(f"oriented_box: the wasm returned {len(v)} figures, not 15")
             raw.centre[:], raw.axes[:], raw.half[:] = v[0:3], v[3:12], v[12:15]
             return True
-        if short in ("edge_length", "profile_length"):   # 4 doubles, into the `_Length` (flags as 1.0/0.0)
+        if short in ("edge_length", "profile_length", "nurbs_curve_length"):   # 4 doubles, into the `_Length` (flags as 1.0/0.0)
             raw, v = args[3 if short == "edge_length" else 2]._obj, [float(x) for x in result]
             if len(v) != 4:
                 raise BuildError(f"{short}: the wasm returned {len(v)} figures, not 4")
             raw.length, raw.error, raw.accuracy_met, raw.from_polyline = v[0], v[1], int(v[2]), int(v[3])
             return True
-        if short in ("edge_point_at_length", "profile_point_at_length"):   # 10 doubles, into the `_At`
+        if short in ("edge_point_at_length", "profile_point_at_length", "nurbs_curve_point_at_length"):   # 10 doubles, into the `_At`
             _at_from_doubles(args[4 if short == "edge_point_at_length" else 3]._obj, [float(x) for x in result], short)
+            return True
+        if short in ("nurbs_curve_fit", "nurbs_curve_projected_to_face", "nurbs_curve_pulled_to_face",
+                     "sweep_rail", "sweep_two_rails", "edge_surface", "network_surface", "flange", "extrude_to"):
+            # `[curve or sheet, error]`: the error into the `c_double` behind `ctypes.byref`, last
+            v = [float(x) for x in result]
+            args[-1]._obj.value = v[1]
+            return int(v[0])
+        if short == "fillet_surfaces":   # `[sheet, rail_a, rail_b, error]`: each behind its `ctypes.byref`
+            v = [float(x) for x in result]
+            args[9]._obj.value, args[10]._obj.value, args[11]._obj.value = int(v[1]), int(v[2]), v[3]
+            return int(v[0])
+        if short == "join_sheets":   # `[solid, 6 figures, closed]`, into the `_JoinReport`
+            v = [float(x) for x in result]
+            if len(v) != 8:
+                raise BuildError(f"{short}: the wasm returned {len(v)} figures, not 8")
+            raw = args[3]._obj
+            raw.sewn, raw.naked_before, raw.naked_after, raw.refused, raw.turned = (int(x) for x in v[1:6])
+            raw.worst_gap, raw.closed = v[6], int(v[7])
+            return int(v[0])
+        if short == "recess":   # `[solid, sheet, fillet, walls, pane]`, the counts into the `uint32_t[4]`
+            v = [float(x) for x in result]
+            if len(v) != 5:
+                raise BuildError(f"{short}: the wasm returned {len(v)} figures, not 5")
+            args[7][:] = [int(x) for x in v[1:]]
+            return int(v[0])
+        if short == "continuity":   # 13 doubles, into the `_Continuity`
+            raw, v = args[7]._obj, [float(x) for x in result]
+            if len(v) != 13:
+                raise BuildError(f"{short}: the wasm returned {len(v)} figures, not 13")
+            raw.gap, raw.angle, raw.curvature, raw.samples = v[0], v[4], v[8], int(v[12])
+            raw.gap_at[:], raw.angle_at[:], raw.curvature_at[:] = v[1:4], v[5:8], v[9:12]
+            return True
+        if short == "nurbs_curve_tween":   # the tweens' handles, into the caller's `out` array
+            handles = [int(v) for v in result]
+            args[7][0:len(handles)] = handles
+            return True
+        if short == "nurbs_curve_curvature":   # 14 doubles, into the `_Curvature`
+            raw, v = args[2]._obj, [float(x) for x in result]
+            if len(v) != 14:
+                raise BuildError(f"{short}: the wasm returned {len(v)} figures, not 14")
+            raw.kappa = v[0]
+            raw.tangent[:], raw.normal[:], raw.binormal[:], raw.centre[:] = v[1:4], v[4:7], v[7:10], v[10:13]
+            raw.has_centre = int(v[13])
             return True
         if short in _DIVIDES:   # 10 doubles a sample: the list itself, which `_samples` reads
             v = [float(x) for x in result]
@@ -2335,6 +2729,15 @@ class _WasmLibrary:
             values = [int(v) for v in result]
             args[2]._obj.value = values[1]
             return values[0]
+        if short == "n_sided_patch":   # `[solid, 28 numbers]`: the report into the `_PatchReport` behind `ctypes.byref`
+            v = [float(x) for x in result]
+            raw = args[4]._obj
+            raw.faces = int(v[1])
+            for c, at in ((raw.boundary, 2), (raw.internal, 15)):
+                c.gap, c.gap_at[:], c.angle, c.angle_at[:] = v[at], v[at + 1:at + 4], v[at + 4], v[at + 5:at + 8]
+                c.curvature, c.curvature_at[:], c.samples = v[at + 8], v[at + 9:at + 12], int(v[at + 12])
+            raw.corner_angle = v[28]
+            return int(v[0])
         if short == "subd_to_solid":   # `[solid, report]`: the report into the `_SubdReport` behind `ctypes.byref`
             handle, report = result[0], result[1]
             raw = args[4]._obj
@@ -2392,6 +2795,14 @@ class _WasmLibrary:
             args[2]._obj.value = int(result.a)
             args[3]._obj.value = int(result.b)
             return True
+        if short in ("face_origin_at", "edge_origin_at"):   # `[operand, id]`, into the two out-pointers
+            operand, id_ = (int(v) for v in result)
+            args[3]._obj.value, args[4]._obj.value = operand, id_
+            return True
+        if short in ("face_id", "edge_id"):   # a `BigInt`, as the `int` ctypes reads a `uint64_t` as
+            return int(result)
+        if short in ("attribute", "face_attribute"):   # C's null where there is none; `b""` is an empty value
+            return None if _js_null(result) else str(result).encode()
         if short in ("colour", "profile_colour", "edge_colour"):   # three doubles, or null where there is no colour: C's `false`
             if result is None:
                 return False
@@ -2409,6 +2820,11 @@ class _WasmLibrary:
             return ids
         if short == "option_get":   # the value, into the `c_double` behind `ctypes.byref`
             args[1]._obj.value = float(result)
+            return True
+        if short == "solid_tolerances":   # `[absolute, angular]`, into the two `c_double`s behind `ctypes.byref`
+            for out, v in zip(args[1:3], result):
+                if out is not None:
+                    out._obj.value = float(v)
             return True
         if short == "parse_colour":   # [r, g, b] into the `c_double * 3` out-array
             args[1][:] = [float(v) for v in result]
@@ -3013,10 +3429,23 @@ def set_option(name: str, value: float) -> None:
     """Set a kernel option, by its name, for the whole process from the next call on.
 
     The options are numbers under stable names: ``"boolean.mesh_budget"``,
-    ``"boolean.finest_tolerance"``, ``"profile_boolean.point_budget"`` and
-    ``"measure.default_accuracy"``. Raises `BuildError` -- and changes nothing -- for
+    ``"boolean.finest_tolerance"``, ``"profile_boolean.point_budget"``,
+    ``"measure.default_accuracy"``, ``"tolerance.relative"``, ``"tolerance.angular"``,
+    ``"step.validation_properties"`` and ``"step.validation_accuracy"`` (the module's
+    tolerances section says what the tolerance pair does; the STEP pair is described at
+    `Solid.step`). Raises `BuildError` -- and changes nothing -- for
     a name that is not an option or a value it does not take, saying which and what
-    it takes."""
+    it takes.
+
+    ``step.validation_properties`` (0 or 1, default 0) makes `Solid.step` and
+    `write_step` stamp each body with its geometric validation properties -- the area,
+    the volume and the centroid this kernel measures for it, in the file's own length
+    unit, there for the kernel that reads the file to check the transfer against its own
+    measurement. They are measured at ``step.validation_accuracy`` (default 1e-5, above
+    0 and below 1), which is what the option costs: every body in the file, tens of
+    seconds on a free-form one at a fine accuracy. With no schema named the file moves
+    to AP242; a named schema that cannot state them raises. Assembly files never carry
+    them, and a reader finds them again under a node's ``attributes``."""
     if not _lib().cadaclysm_blacksmith_option_set(str(name).encode("utf-8"), float(value)):
         _fail(f"option {name!r} refused")
 
@@ -3029,6 +3458,36 @@ def option(name: str) -> float:
     if not _lib().cadaclysm_blacksmith_option_get(str(name).encode("utf-8"), ctypes.byref(out)):
         _fail(f"no option {name!r}")
     return out.value
+
+
+class Tolerances(NamedTuple):
+    """What a solid (or a file) declares about its own precision: `absolute`, a length in the
+    model's own units, and `angular`, in radians -- each None where the source said nothing."""
+    absolute: "float | None"
+    angular: "float | None"
+
+
+def _tolerance(tolerance: "float | None") -> float:
+    """A verb's distance tolerance as the C ABI takes it: None is unset, NaN, which the
+    library works at the inputs' `effective_tolerance` (as it does 0)."""
+    return float("nan") if tolerance is None else float(tolerance)
+
+
+def _declared(value: float) -> "float | None":
+    return None if math.isnan(value) else float(value)
+
+
+def effective_tolerance(*solids: "Solid") -> float:
+    """The tolerance a verb given `tolerance=None` (or 0) works at over `solids`: the larger of
+    the loosest absolute tolerance they declare and `option("tolerance.relative")` times the
+    largest of their sizes, never finer than their coordinates can represent. 0 for no solids,
+    or solids with nothing to size by -- which a verb refuses."""
+    handles = [s._h() for s in solids]
+    arr = (c_void_p * len(handles))(*handles)
+    t = _lib().cadaclysm_blacksmith_effective_tolerance(arr, len(handles))
+    if math.isnan(t):
+        _fail("effective_tolerance")
+    return float(t)
 
 
 def pair_freedom_count(kind: str) -> int:
@@ -3245,7 +3704,7 @@ class Profile:
         return Path._from_handle(_checked(_lib().cadaclysm_blacksmith_path_parabola(vx, vy, ax, ay, focal, from_, to), "path_parabola"))
 
     @staticmethod
-    def chain(pieces: Iterable[Profile], tolerance: float = 1e-6) -> "Profile":
+    def chain(pieces: Iterable[Profile], tolerance: "float | None" = 1e-6) -> "Profile":
         """Open profiles joined end to end into one -- the forge's merge. The
         pieces (paths ended open) may come in any order and either way round:
         each next one is the first of the rest with an end within `tolerance`
@@ -3256,7 +3715,7 @@ class Profile:
         own, or one that meets none of the others, named by its index."""
         pieces = list(pieces)
         handles = (c_void_p * len(pieces))(*[p._handle for p in pieces])
-        return Profile(_lib().cadaclysm_blacksmith_profile_chain(handles, len(pieces), tolerance))
+        return Profile(_lib().cadaclysm_blacksmith_profile_chain(handles, len(pieces), _tolerance(tolerance)))
 
     @staticmethod
     def from_loops(loops: Iterable[Profile]) -> "Profile":
@@ -3282,15 +3741,15 @@ class Profile:
     def with_hole(self, hole: "Profile") -> "Profile":
         return Profile(_lib().cadaclysm_blacksmith_profile_with_hole(self._handle, hole._handle))
 
-    def to_arcs(self, tolerance: float = 0.01) -> "Profile":
+    def to_arcs(self, tolerance: "float | None" = 0.01) -> "Profile":
         """This profile with every free-form side (a Bezier, a conic, a NURBS) replaced
         by lines and arcs within `tolerance` of it -- what a G-code writer can say.
         Lines and arcs pass through as they are, every loop closes on itself exactly,
         holes are converted the same way. Raises `BuildError` for a `tolerance` not
         positive and finite, or a spline that does not evaluate."""
-        return Profile(_lib().cadaclysm_blacksmith_profile_to_arcs(self._handle, tolerance))
+        return Profile(_lib().cadaclysm_blacksmith_profile_to_arcs(self._handle, _tolerance(tolerance)))
 
-    def offset(self, distance: float, tolerance: float = 0.01) -> "list[Profile]":
+    def offset(self, distance: float, tolerance: "float | None" = 0.01) -> "list[Profile]":
         """This profile grown by `distance` (shrunk where it is negative), as zero or
         more profiles, all lines and arcs: outward corners rounded by `|distance|`,
         holes moving against the boundary (a hole shrinks as the profile grows).
@@ -3298,9 +3757,9 @@ class Profile:
         eats the whole profile is an empty list. Raises `BuildError` for a `distance`
         not finite, a `tolerance` not positive and finite, a loop with no sides, or
         loops that cross or touch."""
-        return _profile_list(_lib().cadaclysm_blacksmith_profile_offset(self._handle, distance, tolerance), "profile_offset")
+        return _profile_list(_lib().cadaclysm_blacksmith_profile_offset(self._handle, distance, _tolerance(tolerance)), "profile_offset")
 
-    def hits(self, other: Profile, tolerance: float = 1e-6) -> "list[Hit]":
+    def hits(self, other: Profile, tolerance: "float | None" = 1e-6) -> "list[Hit]":
         """Where this profile's curves cross, touch or run along `other`'s, both read in
         one plane, as :class:`Hit` values ordered along this profile. Points closer than
         `tolerance` merge; two curves within `tolerance` of each other for longer than it
@@ -3309,7 +3768,7 @@ class Profile:
         even where it leaves mid-both; a tangency or a shallow crossing is one point. A loop
         that stops short of its start is an open chain."""
         lib = _lib()
-        h = lib.cadaclysm_blacksmith_profile_hits(self._handle, other._handle, tolerance)
+        h = lib.cadaclysm_blacksmith_profile_hits(self._handle, other._handle, _tolerance(tolerance))
         if not h:
             _fail("profile_hits")
         try:
@@ -3324,7 +3783,7 @@ class Profile:
         finally:
             lib.cadaclysm_blacksmith_hits_free(h)
 
-    def common(self, other: Profile, tolerance: float = 1e-6) -> "list[Profile]":
+    def common(self, other: Profile, tolerance: "float | None" = 1e-6) -> "list[Profile]":
         """The region this profile and `other` share, both read in one plane, as zero or
         more profiles -- each boundary counter-clockwise, each hole clockwise, arcs and
         splines kept exact. Two loops of a result may touch at a point (two holes whose
@@ -3335,7 +3794,7 @@ class Profile:
         `tolerance` too fine for these profiles (following their arcs and splines to a
         tenth of it would take more than 8 million points, about 128 MB), and, as a
         defect rather than an outcome, a result that fails to close."""
-        return _profile_list(_lib().cadaclysm_blacksmith_profile_common(self._handle, other._handle, tolerance), "profile_common")
+        return _profile_list(_lib().cadaclysm_blacksmith_profile_common(self._handle, other._handle, _tolerance(tolerance)), "profile_common")
 
     @staticmethod
     def text(text: str, size: float = 10.0, font: str | os.PathLike[str] = "",
@@ -3424,7 +3883,7 @@ class Profile:
             picked, count = (c_uint32 * len(ks))(*ks), len(ks)
         return Profile(_lib().cadaclysm_blacksmith_profile_round(self._handle, radius, picked, count, bool(open)))
 
-    def pieces(self, cutters: Iterable[Profile], tolerance: float = 1e-6) -> "list[Profile]":
+    def pieces(self, cutters: Iterable[Profile], tolerance: "float | None" = 1e-6) -> "list[Profile]":
         """This curve cut where the `cutters` (profiles) cross, touch or run along
         it -- the sketch trim's pieces: in order along the curve from its start,
         each an open profile of portions of this one's own segments (a line's
@@ -3436,12 +3895,12 @@ class Profile:
         cutters = list(cutters)
         handles = (c_void_p * len(cutters))(*[c._handle for c in cutters])   # zero-length with none: the wasm takes an array, never None
         lib = _lib()
-        n = lib.cadaclysm_blacksmith_profile_piece_count(self._handle, handles, len(cutters), tolerance)
+        n = lib.cadaclysm_blacksmith_profile_piece_count(self._handle, handles, len(cutters), _tolerance(tolerance))
         if n == 0:
             _fail("profile_piece_count")
-        return [Profile(lib.cadaclysm_blacksmith_profile_piece(self._handle, handles, len(cutters), k, tolerance)) for k in range(n)]
+        return [Profile(lib.cadaclysm_blacksmith_profile_piece(self._handle, handles, len(cutters), k, _tolerance(tolerance))) for k in range(n)]
 
-    def trim(self, cutters: Iterable[Profile], piece: int, tolerance: float = 1e-6) -> "list[Profile]":
+    def trim(self, cutters: Iterable[Profile], piece: int, tolerance: "float | None" = 1e-6) -> "list[Profile]":
         """This curve with piece `piece` of `pieces(cutters)` taken away -- the
         sketch trim: what is left, as open profiles. One for a closed curve (its
         other pieces run together, starting where the removed piece ended), the
@@ -3450,12 +3909,12 @@ class Profile:
         cutters = list(cutters)
         handles = (c_void_p * len(cutters))(*[c._handle for c in cutters])   # zero-length with none: the wasm takes an array, never None
         lib = _lib()
-        n = lib.cadaclysm_blacksmith_profile_trim_count(self._handle, handles, len(cutters), int(piece), tolerance)
+        n = lib.cadaclysm_blacksmith_profile_trim_count(self._handle, handles, len(cutters), int(piece), _tolerance(tolerance))
         if n == 0:
             if _text(lib.cadaclysm_blacksmith_last_error()):
                 _fail("profile_trim_count")
             return []
-        return [Profile(lib.cadaclysm_blacksmith_profile_trim_chain(self._handle, handles, len(cutters), int(piece), k, tolerance)) for k in range(n)]
+        return [Profile(lib.cadaclysm_blacksmith_profile_trim_chain(self._handle, handles, len(cutters), int(piece), k, _tolerance(tolerance))) for k in range(n)]
 
     def length(self, accuracy: float = 0.0) -> "Length":
         """The perimeter of the outer loop -- holes are not counted -- as a `Length`, its exact
@@ -3490,19 +3949,19 @@ class Profile:
 
     def document_path(self) -> "dict[str, Any]":
         """This profile as its exact segments, as a `profile.path` node holds it:
-        `{"start": [x, y], "segments": [...], "holes": [...]}`, each segment a dict with a
-        `type` of `line`, `arc`, `bezier`, `conic` or `nurbs` and its points -- arcs and
-        NURBS as they are, not flattened as `polylines` flattens them. `Document.add_profile`
-        puts it in a document."""
+        `{"start": [x, y], "segments": [...], "holes": [...], "colour": [r, g, b]}`, each segment
+        a dict with a `type` of `line`, `arc`, `bezier`, `conic` or `nurbs` and its points --
+        arcs and NURBS as they are, not flattened as `polylines` flattens them -- and `colour`
+        only where the profile has one. `Document.add_profile` puts it in a document."""
         return json.loads(_owned_text(_lib().cadaclysm_blacksmith_document_profile_path(self._handle), "document_profile_path"))
 
-    def polylines(self, tolerance: float = 0.05) -> "list[numpy.ndarray]":
+    def polylines(self, tolerance: "float | None" = 0.05) -> "list[numpy.ndarray]":
         """The outline, then each hole, as float32 (k,3) read-only arrays at z = 0,
         within `tolerance` of the profile's arcs and splines -- what a viewer draws it
         with. A closed loop repeats its first point at the end; an open chain (a profile
         ended open) stays open, the segments it has. Copies, valid for good (see the
         module docs)."""
-        p = _lib().cadaclysm_blacksmith_profile_polylines(self._handle, tolerance)
+        p = _lib().cadaclysm_blacksmith_profile_polylines(self._handle, _tolerance(tolerance))
         if not p.offsets:
             _fail("profile_polylines")
         points = _copied(p.points, (p.point_count, 3), "f4")
@@ -3657,7 +4116,7 @@ class SweepPath:
         return SweepPath(point)
 
     @staticmethod
-    def along(curve: Profile, frame: FrameLike, tolerance: float = 0.05, open: bool = True) -> "SweepPath":  # noqa: A002
+    def along(curve: Profile, frame: FrameLike, tolerance: "float | None" = 0.05, open: bool = True) -> "SweepPath":  # noqa: A002
         """The path the 2D chain `curve` (usually `Path.end_open()`) draws on
         `frame`: a line a straight piece, an arc a circular one, and a Bezier or
         spline fitted with biarcs -- pairs of arcs tangent to each other and to
@@ -3667,7 +4126,7 @@ class SweepPath:
         implicit. For `Solid.sweep`, whose frame must start where the path does
         and face along it."""
         self = SweepPath.__new__(SweepPath)
-        h = _lib().cadaclysm_blacksmith_sweep_path_along(curve._handle, _frame(frame), tolerance, bool(open))
+        h = _lib().cadaclysm_blacksmith_sweep_path_along(curve._handle, _frame(frame), _tolerance(tolerance), bool(open))
         self._handle = _checked(h, "sweep_path_along")
         return self
 
@@ -3760,12 +4219,92 @@ def _progress(callback):
     return cb, cb   # the second keeps the CFUNCTYPE object alive for the call
 
 
+@dataclass(frozen=True)
+class History:
+    """What a verb did to its inputs' faces (or edges), read off the result's ids and origins
+    alone (`Solid.history`, `Solid.edge_history`). An input is named `(operand, id)`: the
+    operand its index in the inputs as passed (the verb's operand order: a boolean's target 0,
+    its tool 1), the id its `face_id`. Every list is in `(operand, id)` order, `generated` in id
+    order -- the shape of OpenCascade's `BRepTools_History`:
+
+    - `kept`: an input that became exactly one output, keeping its id -- `(input, output id)`;
+    - `modified`: an input split (several outputs name it), merged (its output has other
+      origins too) or renumbered (a cut's bore, a later operand's clashing id) --
+      `(input, [output ids])`, a split's first piece, which keeps the id, first;
+    - `generated`: the outputs with no origin (a fillet's round, the faces a split cuts);
+    - `deleted`: the inputs no output names (a cut tool's caps)."""
+
+    kept: "list[tuple[tuple[int, int], int]]"
+    modified: "list[tuple[tuple[int, int], list[int]]]"
+    generated: "list[int]"
+    deleted: "list[tuple[int, int]]"
+
+    def __repr__(self) -> str:
+        return (f"History(kept={len(self.kept)}, modified={len(self.modified)}, "
+                f"generated={len(self.generated)}, deleted={len(self.deleted)})")
+
+
+def _read_history(lib, h) -> History:
+    """The four lists of history handle `h` (the C handle, or the wasm shim's `_WasmHistory`),
+    read through C's readers; the caller frees it."""
+    operand, id_, out = c_uint32(), c_uint64(), c_uint64()
+    kept, modified, deleted = [], [], []
+    for i in range(lib.cadaclysm_blacksmith_history_kept_count(h)):
+        _ok(lib.cadaclysm_blacksmith_history_kept_at(h, i, ctypes.byref(operand), ctypes.byref(id_), ctypes.byref(out)), "history_kept_at")
+        kept.append(((operand.value, id_.value), out.value))
+    for i in range(lib.cadaclysm_blacksmith_history_modified_count(h)):
+        _ok(lib.cadaclysm_blacksmith_history_modified_at(h, i, ctypes.byref(operand), ctypes.byref(id_)), "history_modified_at")
+        n = lib.cadaclysm_blacksmith_history_modified_output_count(h, i)
+        if n == NONE:
+            _fail("history_modified_output_count")
+        modified.append(((operand.value, id_.value), [lib.cadaclysm_blacksmith_history_modified_output_at(h, i, j) for j in range(n)]))
+    generated = [lib.cadaclysm_blacksmith_history_generated_at(h, i) for i in range(lib.cadaclysm_blacksmith_history_generated_count(h))]
+    for i in range(lib.cadaclysm_blacksmith_history_deleted_count(h)):
+        _ok(lib.cadaclysm_blacksmith_history_deleted_at(h, i, ctypes.byref(operand), ctypes.byref(id_)), "history_deleted_at")
+        deleted.append((operand.value, id_.value))
+    return History(kept=kept, modified=modified, generated=generated, deleted=deleted)
+
+
+def _id(value, what: str) -> int:
+    """An id argument: a whole number from 0 to 2**64 - 1 (ctypes would wrap anything else)."""
+    try:
+        k = operator.index(value)
+    except TypeError:
+        k = None
+    if isinstance(value, bool) or k is None or not 0 <= k < 1 << 64:
+        raise BuildError(f"{what}: {value!r} is not an id (a whole number from 0 to 2**64 - 1)")
+    return k
+
+
+def _key(key, what: str) -> bytes:
+    if not isinstance(key, str):
+        raise TypeError(f"{what}: a key is a str, not {type(key).__name__}")
+    return key.encode("utf-8")
+
+
+def _value(value, what: str) -> bytes:
+    if not isinstance(value, str):
+        raise TypeError(f"{what}: a value is a str, not {type(value).__name__}")
+    return value.encode("utf-8")
+
+
+def _attribute_map(count, key_at, value_at, *args) -> "types.MappingProxyType":
+    """A read-only mapping of the attributes C lists by count and `_at` (in key order)."""
+    out = {}
+    for i in range(count):
+        k, v = key_at(*args, i), value_at(*args, i)
+        if k is None or v is None:
+            _fail("attributes")
+        out[k.decode("utf-8")] = v.decode("utf-8")
+    return types.MappingProxyType(out)
+
+
 class Solid:
     """An exact B-rep solid (or open sheet). Immutable; every operation returns
     a new one. `close()` frees it; so does leaving a `with` block or the garbage
     collector."""
 
-    __slots__ = ("_handle", "__weakref__", "sheet_error", "inexact_trims")
+    __slots__ = ("_handle", "__weakref__", "sheet_error", "inexact_trims", "_attributes", "patch_report")
 
     sheet_error: "float | None"
     #: The trims `transform` or `convert_to_nurbs` lost making this solid (see `transform`); 0 on any other.
@@ -3774,6 +4313,7 @@ class Solid:
     def __init__(self, handle: int | None):
         self.sheet_error = None
         self.inexact_trims = 0
+        self._attributes = None
         self._handle = _checked(handle, "solid")
 
     def __enter__(self) -> "Solid":
@@ -3867,47 +4407,43 @@ class Solid:
         """The sheet lofted through `sections` (:class:`NurbsCurve`), `degree` across them
         (lowered to fit); `loose=True` shapes it by them instead, through the first and last
         only; `closed=True` makes it periodic across them, the last section back to the first."""
-        _native("Solid.loft_curves")
         arr, n = _curve_array(sections)
         return Solid(_lib().cadaclysm_blacksmith_loft_curves(arr, n, _u32(degree, "loft_curves: degree"), bool(loose), bool(closed)))
 
     @staticmethod
     def sweep_rail(rail: "NurbsCurve", sections: "Iterable[NurbsCurve]", frame: str = "rmf", up: "Point3 | None" = None,
-                   tolerance: float = 1e-3) -> "Solid":
+                   tolerance: "float | None" = 1e-3) -> "Solid":
         """`sections` swept along `rail`, each carried by the rail's frame from the rail point
         nearest its centre and blended between: `frame="rmf"` rotation-minimising, `"fixed"`
         keeping `up` upright. Fitted within `tolerance`; the sheet's `sheet_error` says how close."""
-        _native("Solid.sweep_rail")
         kinds = {"rmf": 0, "fixed": 1}
         if frame not in kinds:
             raise ValueError(f"sweep_rail: frame is 'rmf' or 'fixed', not {frame!r}")
         arr, n = _curve_array(sections)
         err = c_double(0.0)
-        solid = Solid(_lib().cadaclysm_blacksmith_sweep_rail(rail._handle, arr, n, kinds[frame], _vec3(up), float(tolerance), ctypes.byref(err)))
+        solid = Solid(_lib().cadaclysm_blacksmith_sweep_rail(rail._handle, arr, n, kinds[frame], _vec3(up), _tolerance(tolerance), ctypes.byref(err)))
         solid.sheet_error = err.value
         return solid
 
     @staticmethod
-    def sweep_two_rails(rail_a: "NurbsCurve", rail_b: "NurbsCurve", sections: "Iterable[NurbsCurve]", tolerance: float = 1e-3) -> "Solid":
+    def sweep_two_rails(rail_a: "NurbsCurve", rail_b: "NurbsCurve", sections: "Iterable[NurbsCurve]", tolerance: "float | None" = 1e-3) -> "Solid":
         """`sections` swept between two rails: each section's first end on `rail_a` and last on
         `rail_b`, carried by the rotation and uniform scale that keep them there, the rails
         matched by arc length. Fitted within `tolerance` (`sheet_error`)."""
-        _native("Solid.sweep_two_rails")
         arr, n = _curve_array(sections)
         err = c_double(0.0)
-        solid = Solid(_lib().cadaclysm_blacksmith_sweep_two_rails(rail_a._handle, rail_b._handle, arr, n, float(tolerance), ctypes.byref(err)))
+        solid = Solid(_lib().cadaclysm_blacksmith_sweep_two_rails(rail_a._handle, rail_b._handle, arr, n, _tolerance(tolerance), ctypes.byref(err)))
         solid.sheet_error = err.value
         return solid
 
     @staticmethod
-    def edge_surface(curves: "Iterable[NurbsCurve]", tolerance: float = 1e-3) -> "Solid":
+    def edge_surface(curves: "Iterable[NurbsCurve]", tolerance: "float | None" = 1e-3) -> "Solid":
         """The Coons sheet of 2, 3 or 4 boundary curves meeting end to end within `tolerance`
         (in order round the boundary, each either way round): exact for non-rational
         boundaries, rational ones fitted first (`sheet_error`)."""
-        _native("Solid.edge_surface")
         arr, n = _curve_array(curves)
         err = c_double(0.0)
-        solid = Solid(_lib().cadaclysm_blacksmith_edge_surface(arr, n, float(tolerance), ctypes.byref(err)))
+        solid = Solid(_lib().cadaclysm_blacksmith_edge_surface(arr, n, _tolerance(tolerance), ctypes.byref(err)))
         solid.sheet_error = err.value
         return solid
 
@@ -3916,7 +4452,6 @@ class Solid:
         """How well face `face`'s side `side` (`"u0"`, `"u1"`, `"v0"`, `"v1"`: a boundary isocurve of
         its NURBS surface) meets `other`'s face `other_face` along `other_side`: the largest gap,
         angle between the normals and difference of curvature across the edge, with where each is."""
-        _native("Solid.continuity")
         out = _Continuity()
         _ok(_lib().cadaclysm_blacksmith_continuity(self._handle, _u32(face, "continuity: face"), _sheet_side(side), other._handle,
                                                    _u32(other_face, "continuity: other_face"), _sheet_side(other_side),
@@ -3926,26 +4461,24 @@ class Solid:
     def matched(self, side: str, other: "Solid", other_side: str, level: int = 2, face: int = 0, other_face: int = 0) -> "Solid":
         """Face `face` as a sheet of its own, its side `side` bent to meet `other`'s `other_side` at
         G`level`: 0 position, 1 tangent plane, 2 curvature. The opposite side stays where it was."""
-        _native("Solid.matched")
         return Solid(_lib().cadaclysm_blacksmith_match_side(self._handle, _u32(face, "match_side: face"), _sheet_side(side), other._handle,
                                                             _u32(other_face, "match_side: other_face"), _sheet_side(other_side),
                                                             _u32(level, "match_side: level")))
 
     @staticmethod
     def fillet_surfaces(a: "Solid", b: "Solid", radius: float, radius_end: "float | None" = None, flip_a: bool = False,
-                        flip_b: bool = False, tolerance: float = 1e-3, face_a: int = 0,
+                        flip_b: bool = False, tolerance: "float | None" = 1e-3, face_a: int = 0,
                         face_b: int = 0) -> "tuple[Solid, NurbsCurve, NurbsCurve]":
         """The rolling-ball fillet between `a`'s face `face_a` and `b`'s face `face_b` (their whole
         NURBS surfaces): the ball on the side each face's normal points to (`flip_a`/`flip_b`: the
         other side), of `radius`, or running linearly from `radius` to `radius_end` along the fillet.
         Returns the fillet sheet (its `sheet_error` set) and the contact curves on `a` and `b`, to
         trim them back with :meth:`trim_by_curve` and join with :meth:`join_sheets`."""
-        _native("Solid.fillet_surfaces")
         ra, rb, err = c_void_p(), c_void_p(), c_double(0.0)
         end = radius if radius_end is None else radius_end
         h = _lib().cadaclysm_blacksmith_fillet_surfaces(a._handle, _u32(face_a, "fillet_surfaces: face_a"), b._handle,
                                                          _u32(face_b, "fillet_surfaces: face_b"), float(radius), float(end),
-                                                         bool(flip_a), bool(flip_b), float(tolerance),
+                                                         bool(flip_a), bool(flip_b), _tolerance(tolerance),
                                                          ctypes.byref(ra), ctypes.byref(rb), ctypes.byref(err))
         sheet = Solid(h)
         sheet.sheet_error = err.value
@@ -3956,21 +4489,57 @@ class Solid:
                     face_a: int = 0, face_b: int = 0) -> "Solid":
         """A sheet spanning from `a`'s side to `b`'s, meeting each at G`level` (1 or 2); `bulge`
         scales how far it leaves each edge along its neighbour's tangent."""
-        _native("Solid.blend_sides")
         return Solid(_lib().cadaclysm_blacksmith_blend_sides(a._handle, _u32(face_a, "blend_sides: face_a"), _sheet_side(side_a), b._handle,
                                                              _u32(face_b, "blend_sides: face_b"), _sheet_side(side_b),
                                                              _u32(level, "blend_sides: level"), float(bulge)))
 
     @staticmethod
-    def network_surface(u_curves: "Iterable[NurbsCurve]", v_curves: "Iterable[NurbsCurve]", tolerance: float = 1e-3) -> "Solid":
+    def n_sided_patch(boundaries: "Iterable[Any]", bulge: float = 1.0, tolerance: "float | None" = 0.01) -> "Solid":
+        """The sheet filling a hole of 3 or more sides (Rhino's Patch, OCCT's MakeFilling, on
+        sheets' sides): N four-sided NURBS faces round a central point, G1 or G2 to each other.
+        Each boundary, in order round the hole and either way round, is a sheet's side met at G2,
+        `(sheet, side)`; `(sheet, side, level)` with `level` 0, 1 or 2; a dict with `sheet`,
+        `side` and any of `level`, `face` and `range` (`(from, to)` of the side's parameter, the
+        whole side `(0, 1)`, backwards `(1, 0)`); or a :class:`NurbsCurve`, met at G0. A side is
+        `"u0"`, `"u1"`, `"v0"` or `"v1"`. The boundaries must meet end to end within `tolerance`;
+        `bulge` scales how far the patch leaves each neighbour along its tangent.
+
+        Face `i` meets boundary `i`'s second half along its `"v0"` side and boundary `i + 1`'s
+        first half along its `"u1"`, so :meth:`continuity` measures each neighbour; the result's
+        `patch_report` holds the worst of them, measured the same way."""
+        rows = []
+        for i, b in enumerate(boundaries):
+            if isinstance(b, NurbsCurve):
+                rows.append(_PatchBoundary(None, 0, 0, 0.0, 1.0, 0, b._handle))
+                continue
+            if isinstance(b, dict):
+                b = dict(b)
+                sheet, side = b.pop("sheet"), b.pop("side")
+                level, face, rng = b.pop("level", 2), b.pop("face", 0), b.pop("range", (0.0, 1.0))
+                if b:
+                    raise ValueError(f"n_sided_patch: boundary {i}: unknown keys {sorted(b)}")
+            else:
+                sheet, side, *more = b
+                if len(more) > 1:
+                    raise ValueError(f"n_sided_patch: boundary {i} is (sheet, side) or (sheet, side, level)")
+                level, face, rng = (more[0] if more else 2), 0, (0.0, 1.0)
+            rows.append(_PatchBoundary(sheet._handle, _u32(face, "n_sided_patch: face"), _sheet_side(side), float(rng[0]), float(rng[1]),
+                                       _u32(level, "n_sided_patch: level"), None))
+        arr = (_PatchBoundary * max(len(rows), 1))(*rows)
+        out = _PatchReport()
+        solid = Solid(_lib().cadaclysm_blacksmith_n_sided_patch(arr, len(rows), float(bulge), _tolerance(tolerance), ctypes.byref(out)))
+        solid.patch_report = PatchReport(out)
+        return solid
+
+    @staticmethod
+    def network_surface(u_curves: "Iterable[NurbsCurve]", v_curves: "Iterable[NurbsCurve]", tolerance: "float | None" = 1e-3) -> "Solid":
         """The Gordon sheet of a curve network: `u_curves` (in order across the other way) and
         `v_curves`, every one of the first crossing every one of the second within `tolerance`.
         `sheet_error` is the largest distance from the sheet to the curves given."""
-        _native("Solid.network_surface")
         ua, un = _curve_array(u_curves)
         va, vn = _curve_array(v_curves)
         err = c_double(0.0)
-        solid = Solid(_lib().cadaclysm_blacksmith_network_surface(ua, un, va, vn, float(tolerance), ctypes.byref(err)))
+        solid = Solid(_lib().cadaclysm_blacksmith_network_surface(ua, un, va, vn, _tolerance(tolerance), ctypes.byref(err)))
         solid.sheet_error = err.value
         return solid
 
@@ -4323,24 +4892,31 @@ class Solid:
     # -- combining
     def _combine(self, f, other: "Solid", tolerance, progress, merge=False) -> "Solid":
         cb, _keep = _progress(progress)
-        out = Solid(f(self._h(), other._h(), tolerance, cb, None))
-        return out.merge_flush() if merge else out
+        out = Solid(f(self._h(), other._h(), _tolerance(tolerance), cb, None))
+        if not merge:
+            return out
+        # One verb to the caller: the merge's origins read back through the boolean's, so a
+        # tracked result names this solid as operand 0 and `other` as 1, not the faces between.
+        merged = out.merge_flush()
+        return Solid(_lib().cadaclysm_blacksmith_origins_through(merged._h(), out._h())) if out.is_tracked else merged
 
-    def join(self, other: "Solid", tolerance: float = 0.05, progress: Progress = None, merge: bool = False) -> "Solid":
+    def join(self, other: "Solid", tolerance: "float | None" = 0.05, progress: Progress = None, merge: bool = False) -> "Solid":
         """This solid and `other` as one. `merge=True` merges the flush faces the
         join leaves where the two meet in a plane or on one cylinder (`merge_flush`),
-        off by default, so face and edge numbers stay as they were."""
+        off by default, so face and edge numbers stay as they were. Merged or not, a
+        tracked result's origins name this solid as operand 0 and `other` as 1: a merged
+        face names one origin in each it lies on (see `face_origins`)."""
         return self._combine(_lib().cadaclysm_blacksmith_join, other, tolerance, progress, merge)
 
-    def cut(self, other: "Solid", tolerance: float = 0.05, progress: Progress = None, merge: bool = False) -> "Solid":
+    def cut(self, other: "Solid", tolerance: "float | None" = 0.05, progress: Progress = None, merge: bool = False) -> "Solid":
         """This solid with `other` removed; `merge` as `join`'s."""
         return self._combine(_lib().cadaclysm_blacksmith_cut, other, tolerance, progress, merge)
 
-    def common(self, other: "Solid", tolerance: float = 0.05, progress: Progress = None, merge: bool = False) -> "Solid":
+    def common(self, other: "Solid", tolerance: "float | None" = 0.05, progress: Progress = None, merge: bool = False) -> "Solid":
         """What this solid and `other` share; `merge` as `join`'s."""
         return self._combine(_lib().cadaclysm_blacksmith_common, other, tolerance, progress, merge)
 
-    def trim(self, tool: "Solid", keep: Literal["outside", "inside"] = "outside", tolerance: float = 0.05,
+    def trim(self, tool: "Solid", keep: Literal["outside", "inside"] = "outside", tolerance: "float | None" = 0.05,
              progress: Progress = None) -> "Solid":
         """`self` (a sheet or a solid) cut along the closed `tool`'s boundary and
         the pieces on one side thrown away: `keep="outside"` keeps what lies
@@ -4351,9 +4927,9 @@ class Solid:
         if keep not in ("outside", "inside"):
             raise BuildError(f"trim: keep must be 'outside' or 'inside', not {keep!r}")
         cb, _keep = _progress(progress)
-        return Solid(_lib().cadaclysm_blacksmith_trim(self._h(), tool._h(), keep == "inside", tolerance, cb, None))
+        return Solid(_lib().cadaclysm_blacksmith_trim(self._h(), tool._h(), keep == "inside", _tolerance(tolerance), cb, None))
 
-    def split_by_curve(self, curve: "NurbsCurve", direction: "Point3 | None" = None, tolerance: float = 0.05) -> "Solid":
+    def split_by_curve(self, curve: "NurbsCurve", direction: "Point3 | None" = None, tolerance: "float | None" = 0.05) -> "Solid":
         """This sheet cut along `curve` -- one lying on it, say projected or pulled onto it --
         and nothing removed: every face comes back in its pieces outside the cutter, then its
         pieces inside, each a face, as `split_sheet` orders them. The cutter is `curve` run
@@ -4362,25 +4938,90 @@ class Solid:
         side left of its run, seen from where `direction` points, and an open curve is run on
         straight past both ends, so it should cross the sheet's boundary. Where the cut lies on
         the curve the rim is one edge carrying the curve's own span exactly, which another
-        sheet's edge along the curve sews to. Native Python only for now."""
-        _native("Solid.split_by_curve")
-        return Solid(_lib().cadaclysm_blacksmith_split_by_curve(self._h(), curve._handle, _vec3(direction), tolerance))
+        sheet's edge along the curve sews to."""
+        return Solid(_lib().cadaclysm_blacksmith_split_by_curve(self._h(), curve._handle, _vec3(direction), _tolerance(tolerance)))
+
+    def split_along_curve(self, curve: "NurbsCurve", tolerance: "float | None" = 0.01) -> "Solid":
+        """This sheet cut along `curve`, a curve lying on it (within ten times `tolerance`),
+        with no direction: the cut is made in each face's own parameters, so it follows the
+        curve wherever the sheet rolls, and runs across the seams of a joined sheet. An open
+        curve is run on along the sheet past both ends to its boundary; a closed one cuts out
+        the island it bounds. Nothing is removed. Where the cut lies on the curve the rim is
+        one edge carrying the curve's own span exactly. Raises `BuildError` where the curve
+        leaves the sheet."""
+        _native("Solid.split_along_curve")
+        return Solid(_lib().cadaclysm_blacksmith_split_along_curve(self._h(), curve._handle, _tolerance(tolerance)))
+
+    def panel_gap(self, curve: "NurbsCurve", gap: float = 4.0, flange: float = -10.0,
+                  tolerance: "float | None" = 0.01) -> "tuple[Solid, Solid]":
+        """This sheet parted along `curve` (lying on it, as for `split_along_curve`) into two
+        panels with a shut line between them: each is trimmed back `gap / 2` from the curve
+        along the sheet, and gets a flange `abs(flange)` deep along its cut edge only -- turned
+        under (against the outward normal) for a negative `flange`, out for a positive one, none
+        for 0. An open curve should cross the sheet's boundary; a closed one cuts out an island.
+        The panel left of the curve's run (seen from the outward normal) first, then the right
+        one; a loop run counter-clockwise from that side has the island on its left. Raises
+        `BuildError` where the curve leaves the sheet or the gap leaves nothing of a panel."""
+        _native("Solid.panel_gap")
+        out = (c_void_p * 2)()
+        if not _lib().cadaclysm_blacksmith_panel_gap(self._h(), curve._handle, float(gap), float(flange),
+                                                     _tolerance(tolerance), out):
+            _fail("panel_gap")
+        return Solid(out[0]), Solid(out[1])
 
     def trim_by_curve(self, curve: "NurbsCurve", keep: Literal["outside", "inside", "left", "right"] = "outside",
-                      direction: "Point3 | None" = None, tolerance: float = 0.05) -> "Solid":
+                      direction: "Point3 | None" = None, tolerance: "float | None" = 0.05) -> "Solid":
         """This sheet cut along `curve` and one side thrown away (see `split_by_curve`):
         `keep="inside"` keeps the island a closed curve bounds, `"outside"` the sheet with the
         hole; for an open curve `"left"` (the same as `"inside"`) keeps the side left of its
         run seen from where `direction` points, `"right"` the other. Raises `BuildError` where
-        nothing of the sheet lies on the kept side. Native Python only for now."""
+        nothing of the sheet lies on the kept side."""
         if keep not in ("outside", "inside", "left", "right"):
             raise BuildError(f"trim_by_curve: keep must be 'outside', 'inside', 'left' or 'right', not {keep!r}")
-        _native("Solid.trim_by_curve")
         return Solid(_lib().cadaclysm_blacksmith_trim_by_curve(self._h(), curve._handle, _vec3(direction),
-                                                               keep in ("inside", "left"), tolerance))
+                                                               keep in ("inside", "left"), _tolerance(tolerance)))
+
+    def flange(self, edges: "Iterable[Edge | int]", section: "NurbsCurve", tolerance: "float | None" = 1e-3,
+               join: bool = True) -> "Solid":
+        """`section` swept along each of `edges` (naked edges of this sheet: `Edge` objects or
+        their indices) on the face's own frame: at every point of the edge the section's `x`
+        runs outward from the face -- square to the edge, in the face's tangent plane -- and its
+        `y` along the face's normal, so a section from `(0, 0)` to `(0, -10)` turns the edge
+        under by 10 all along it however the panel curves, `(0, 0)` to `(10, 0)` carries the
+        face on, and a lip stands proud with `y > 0`. `section` is a curve in the plane
+        `z = 0` starting at the origin. With `join` the sweeps come back sewn to this sheet (its
+        faces first, then one per edge), else alone, sewn to each other. Each sweep is fitted
+        within `tolerance`; `sheet_error` says how close. Raises `BuildError` for an edge
+        bordered by two faces, a section not starting at the origin, and sweeps that did not sew
+        on."""
+        which = _indices(edges, "flange", "edges", edges=True)
+        arr = (c_uint32 * len(which))(*which)
+        err = c_double(0.0)
+        solid = Solid(_lib().cadaclysm_blacksmith_flange(self._h(), arr, len(which), section._handle, _tolerance(tolerance),
+                                                         bool(join), ctypes.byref(err)))
+        solid.sheet_error = err.value
+        return solid
+
+    def extrude_to(self, edges: "Iterable[Edge | int]", direction: "Point3", target: "Solid",
+                   tolerance: "float | None" = 1e-3, join: bool = True) -> "Solid":
+        """Each of `edges` (naked edges of this sheet: `Edge` objects or their indices) slid
+        along `direction` until it meets `target`: every point of the edge travels along the
+        direction to its first hit on `target`'s faces (trimmed, not their whole surfaces). One
+        wall per edge -- the edge's own curve swept straight, bounded by the curve through the
+        hits, fitted within `tolerance` of every hit (`sheet_error`) -- so a wheel arch cut in a
+        panel runs in to the well's inner wall as its liner. With `join` the walls come back
+        sewn to this sheet (its faces first, then one per edge), else alone, sewn to each other.
+        Raises `BuildError` naming the point whose line misses the target."""
+        which = _indices(edges, "extrude_to", "edges", edges=True)
+        arr = (c_uint32 * len(which))(*which)
+        err = c_double(0.0)
+        solid = Solid(_lib().cadaclysm_blacksmith_extrude_to(self._h(), arr, len(which), _vec3(direction), target._h(),
+                                                             _tolerance(tolerance), bool(join), ctypes.byref(err)))
+        solid.sheet_error = err.value
+        return solid
 
     @staticmethod
-    def join_sheets(sheets: "Iterable[Solid]", tolerance: float = 0.0) -> "tuple[Solid, JoinReport]":
+    def join_sheets(sheets: "Iterable[Solid]", tolerance: "float | None" = 0.0) -> "tuple[Solid, JoinReport]":
         """`sheets` joined into one body, their faces in order, and a :class:`JoinReport` of
         what was done: every two naked edges whose ends and curves agree within `tolerance`
         (0: a rounding of the body's size) sewn into one -- a gap closed is kept as that edge's
@@ -4388,15 +5029,36 @@ class Solid:
         solid the booleans, `mass` and the writers take. Edges with exact curves are compared
         to the tolerance however coarsely each was sampled. At a tolerance above 0 a
         T-junction is sewn too: one sheet's edge along part of another's is first cut where the
-        other's corner lies on it. Native Python only for now."""
-        _native("Solid.join_sheets")
+        other's corner lies on it."""
         sheets = list(sheets)
         handles = (c_void_p * max(len(sheets), 1))(*[s._h() for s in sheets])
         report = _JoinReport()
-        joined = Solid(_lib().cadaclysm_blacksmith_join_sheets(handles, len(sheets), float(tolerance), ctypes.byref(report)))
+        joined = Solid(_lib().cadaclysm_blacksmith_join_sheets(handles, len(sheets), _tolerance(tolerance), ctypes.byref(report)))
         return joined, JoinReport(report)
 
-    def split_sheet(self, tool: "Solid", tolerance: float = 0.05, progress: Progress = None) -> "Solid":
+    def recess(self, outline: "NurbsCurve", depth: float, draft: float = 0.0, fillet: float = 0.0, pane: bool = True,
+               tolerance: "float | None" = 0.05) -> "tuple[Solid, tuple[int, int, int, int]]":
+        """This sheet with an opening recessed into it along `outline` -- a window, a lamp, a
+        grille or an air intake set into a panel -- and how many of the result's faces are each
+        part's: `(sheet, fillet, walls, pane)`, the faces in that order.
+
+        `outline` is a closed curve on the sheet (one face or several joined); each of its
+        points is found on the sheet, so it may stand a little off it. The walls run back
+        `depth` along the sheet's own normal at every point of the rim -- not along one view --
+        behind the face (against its normal; negative: in front), leaning in toward the opening
+        by `draft` radians (negative: out) and meeting on the mitre at the outline's corners.
+        `fillet` above 0 rounds the rim between the sheet and the walls (the outline must then
+        be smooth). `pane` closes the back with one patch whose four sides end where the
+        outline turns most, so it does not twist. Every piece is sewn to the next: only the
+        sheet's own boundary is left naked, and the walls' foot without a pane. Raises
+        `BuildError` for an outline that is not closed, a corner with a fillet, or a fillet
+        deeper than the walls."""
+        faces = (c_uint32 * 4)()
+        out = Solid(_lib().cadaclysm_blacksmith_recess(self._h(), outline._handle, float(depth), float(draft), float(fillet),
+                                                       bool(pane), _tolerance(tolerance), faces))
+        return out, (faces[0], faces[1], faces[2], faces[3])
+
+    def split_sheet(self, tool: "Solid", tolerance: "float | None" = 0.05, progress: Progress = None) -> "Solid":
         """`self` (a sheet or a solid) cut along `tool`'s boundary, nothing
         removed: every face of `self` comes back in its pieces outside `tool`
         and its pieces inside, each piece a face -- a surface trim starts
@@ -4413,7 +5075,7 @@ class Solid:
         side dropped, in one call."""
         return self._combine(_lib().cadaclysm_blacksmith_split_sheet, tool, tolerance, progress)
 
-    def intersect(self, other: "Solid", tolerance: float = 0.05, progress: Progress = None) -> "Intersection":
+    def intersect(self, other: "Solid", tolerance: "float | None" = 0.05, progress: Progress = None) -> "Intersection":
         """Where this solid's faces cross or coincide with `other`'s, at `tolerance`,
         as an :class:`Intersection`: `chains` along the curves the faces meet on and
         `overlaps` where a face pair coincides. Neither solid is changed; either may
@@ -4439,7 +5101,7 @@ class Solid:
         solid with no faces, or one that meshes to nothing."""
         lib = _lib()
         cb, _keep = _progress(progress)
-        h = lib.cadaclysm_blacksmith_intersect(self._h(), other._h(), tolerance, cb, None)
+        h = lib.cadaclysm_blacksmith_intersect(self._h(), other._h(), _tolerance(tolerance), cb, None)
         if not h:
             _fail("intersect")
         try:
@@ -4447,7 +5109,7 @@ class Solid:
         finally:
             lib.cadaclysm_blacksmith_intersection_free(h)
 
-    def section(self, z: float, tolerance: float = 0.05) -> "list[Profile]":
+    def section(self, z: float, tolerance: "float | None" = 0.05) -> "list[Profile]":
         """This solid cut by the plane `Z = z`: its closed outlines there, in XY,
         nested into profiles with holes (boundaries counter-clockwise, holes
         clockwise), a line or a circle crossing kept exact and any other curve as
@@ -4455,9 +5117,9 @@ class Solid:
         Raises `BuildError` for a `z` not finite, a `tolerance` not positive and
         finite, a face lying in the plane (section a little above or below it), or
         a crossing that does not close."""
-        return _profile_list(_lib().cadaclysm_blacksmith_solid_section(self._h(), z, tolerance), "solid_section")
+        return _profile_list(_lib().cadaclysm_blacksmith_solid_section(self._h(), z, _tolerance(tolerance)), "solid_section")
 
-    def hits(self, profile: "Profile", frame: FrameLike, tolerance: float = 0.05,
+    def hits(self, profile: "Profile", frame: FrameLike, tolerance: "float | None" = 0.05,
              progress: Progress = None) -> "SolidHits":
         """Where `profile`, placed on `frame`, pierces this solid's faces, and the
         pieces its loops cut into, as a :class:`SolidHits`. Neither is changed.
@@ -4487,7 +5149,7 @@ class Solid:
         segment that is not an evaluable NURBS curve."""
         lib = _lib()
         cb, _keep = _progress(progress)
-        h = lib.cadaclysm_blacksmith_solid_profile_hits(self._h(), profile._handle, _frame(frame), tolerance, cb, None)
+        h = lib.cadaclysm_blacksmith_solid_profile_hits(self._h(), profile._handle, _frame(frame), _tolerance(tolerance), cb, None)
         if not h:
             _fail("solid_profile_hits")
         try:
@@ -4534,24 +5196,24 @@ class Solid:
             _fail("box")
         return tuple(lo), tuple(hi)
 
-    def bounds_at(self, tolerance: float) -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
+    def bounds_at(self, tolerance: "float | None") -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
         """The solid's axis-aligned bounds, over the positions of its cached
         tessellation at `tolerance` (the same cache `mesh` fills and reuses,
         so a second call at the same tolerance is free): `((min_x, min_y,
         min_z), (max_x, max_y, max_z))`."""
         lo, hi = (c_double * 3)(), (c_double * 3)()
-        if not _lib().cadaclysm_blacksmith_bounds(self._h(), tolerance, lo, hi):
+        if not _lib().cadaclysm_blacksmith_bounds(self._h(), _tolerance(tolerance), lo, hi):
             _fail("bounds")
         return tuple(lo), tuple(hi)
 
-    def bounds64(self, tolerance: float = 0.05) -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
+    def bounds64(self, tolerance: "float | None" = 0.05) -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
         """`bounds` from the float64 positions: exact far from the origin."""
         lo, hi = (c_double * 3)(), (c_double * 3)()
-        if not _lib().cadaclysm_blacksmith_bounds64(self._h(), tolerance, lo, hi):
+        if not _lib().cadaclysm_blacksmith_bounds64(self._h(), _tolerance(tolerance), lo, hi):
             _fail("bounds64")
         return tuple(lo), tuple(hi)
 
-    def leaked_edges(self, tolerance: float = 0.05) -> int:
+    def leaked_edges(self, tolerance: "float | None" = 0.05) -> int:
         """How many edges of `mesh(tolerance)` -- the triangles `mesh` and
         `face_triangles` hand out -- are bound by anything other than exactly
         two triangles -- zero for a closed solid. A hole, a fold, and a seam
@@ -4559,12 +5221,12 @@ class Solid:
         `unpaired_edges` is the check that lets the seam pass. A body past its
         triangle ceiling leaves faces empty, and those open the edges they
         share with faces that meshed."""
-        n = _lib().cadaclysm_blacksmith_leaked_edges(self._h(), tolerance)
+        n = _lib().cadaclysm_blacksmith_leaked_edges(self._h(), _tolerance(tolerance))
         if n == NONE:
             _fail("leaked_edges")
         return n
 
-    def unpaired_edges(self, tolerance: float = 0.05) -> int:
+    def unpaired_edges(self, tolerance: "float | None" = 0.05) -> int:
         """How many edges of the mesh at `tolerance` have directed triangle
         uses that do not cancel out -- zero for a closed, consistently
         oriented solid. Where `leaked_edges` asks for exactly two triangles
@@ -4572,12 +5234,12 @@ class Solid:
         share along a line pairs off and is *not* counted here even though
         four triangles meet there, while a fold -- two triangles running the
         same way -- is."""
-        n = _lib().cadaclysm_blacksmith_unpaired_edges(self._h(), tolerance)
+        n = _lib().cadaclysm_blacksmith_unpaired_edges(self._h(), _tolerance(tolerance))
         if n == NONE:
             _fail("unpaired_edges")
         return n
 
-    def is_watertight(self, tolerance: float = 0.05) -> bool:
+    def is_watertight(self, tolerance: "float | None" = 0.05) -> bool:
         """`leaked_edges(tolerance) == 0`."""
         return self.leaked_edges(tolerance) == 0
 
@@ -4694,24 +5356,53 @@ class Solid:
             _fail("edge_tolerance")
         return None if math.isnan(t) else float(t)
 
-    def bounds_box(self, tolerance: float = 0.05) -> "Box":
+    @property
+    def tolerances(self) -> Tolerances:
+        """What this solid declares about its own precision: `Tolerances(absolute, angular)`,
+        read from its file, inherited through every verb from the loosest of its inputs, or
+        set by `with_tolerances`; None in a field nothing declared. A verb given
+        `tolerance=None` works at `effective_tolerance(self)`, which takes it into account."""
+        absolute, angular = c_double(), c_double()
+        if not _lib().cadaclysm_blacksmith_solid_tolerances(self._h(), ctypes.byref(absolute), ctypes.byref(angular)):
+            _fail("solid_tolerances")
+        return Tolerances(_declared(absolute.value), _declared(angular.value))
+
+    def with_tolerances(self, absolute: "float | None" = None, angular: "float | None" = None) -> "Solid":
+        """A new solid: this one declaring `absolute` (a length) and `angular` (radians)
+        instead of what it declared, its name, paint and marks kept. None (or 0) declares
+        nothing for that field. Raises `BuildError` for a negative or infinite value."""
+        return Solid(_checked(_lib().cadaclysm_blacksmith_solid_with_tolerances(self._h(), _tolerance(absolute), _tolerance(angular)),
+                              "solid_with_tolerances"))
+
+    def vertex_tolerance(self, point: Point3) -> "float | None":
+        """How loose this solid's vertex at `point` is, where its producer said (an OCCT `.brep`
+        records one per vertex): the tolerance of the nearest recorded vertex within its own
+        tolerance of `point`. None where none is recorded there."""
+        x, y, z = _point3(point, "vertex_tolerance")
+        lib = _lib()
+        t = lib.cadaclysm_blacksmith_vertex_tolerance(self._h(), x, y, z)
+        if math.isnan(t) and _text(lib.cadaclysm_blacksmith_last_error()):
+            _fail("vertex_tolerance")
+        return _declared(t)
+
+    def bounds_box(self, tolerance: "float | None" = 0.05) -> "Box":
         """This solid's box at `tolerance`: its boolean mesh, padded by twice that
         -- the broad phase's own bound, cheaper to move and test than the solid
         itself (`Collider` builds one per part at construction)."""
         out = _Box()
-        if not _lib().cadaclysm_blacksmith_solid_bounds_box(self._h(), tolerance, ctypes.byref(out)):
+        if not _lib().cadaclysm_blacksmith_solid_bounds_box(self._h(), _tolerance(tolerance), ctypes.byref(out)):
             _fail("solid_bounds_box")
         return _box_of(out)
 
     # -- out
-    def mesh(self, tolerance: float = 0.05) -> "tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]":
+    def mesh(self, tolerance: "float | None" = 0.05) -> "tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]":
         """`(positions, normals, indices)` as read-only numpy arrays (float32
         (n,3), float32 (n,3), uint32 (m,)): read-only numpy views owned by a held
         tessellation of the solid at `tolerance`: nothing invalidates them -- not a
         re-mesh at another tolerance, not the solid's `close()` (copies under
         Pyodide) -- see the module docs."""
         if _WASM:
-            m = _lib().cadaclysm_blacksmith_mesh(self._h(), tolerance)
+            m = _lib().cadaclysm_blacksmith_mesh(self._h(), _tolerance(tolerance))
             if not m.positions:
                 _fail("mesh")
             n = m.vertex_count
@@ -4724,13 +5415,13 @@ class Solid:
         return (_view(held, m.positions, (n, 3), "f4"), _view(held, m.normals, (n, 3), "f4"),
                 _view(held, m.indices, (m.index_count,), "u4"))
 
-    def mesh64(self, tolerance: float = 0.05) -> "tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]":
+    def mesh64(self, tolerance: "float | None" = 0.05) -> "tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]":
         """`mesh` in float64: the same tessellation (the same indices), positions and
         normals unnarrowed: read-only numpy views owned by a held tessellation of the
         solid at `tolerance`: nothing invalidates them -- not a re-mesh at another
         tolerance, not the solid's `close()` (copies under Pyodide)."""
         if _WASM:
-            m = _lib().cadaclysm_blacksmith_mesh64(self._h(), tolerance)
+            m = _lib().cadaclysm_blacksmith_mesh64(self._h(), _tolerance(tolerance))
             if not m.positions:
                 _fail("mesh64")
             n = m.vertex_count
@@ -4743,7 +5434,7 @@ class Solid:
         return (_view(held, m.positions, (n, 3), "f8"), _view(held, m.normals, (n, 3), "f8"),
                 _view(held, m.indices, (m.index_count,), "u4"))
 
-    def face_triangles(self, tolerance: float = 0.05) -> "numpy.ndarray":
+    def face_triangles(self, tolerance: "float | None" = 0.05) -> "numpy.ndarray":
         """How many triangles each face meshed to at `tolerance`, a read-only
         uint32 array with one count per face in face order: the triangles of
         `mesh(tolerance)` run face by face, so face `f`'s are the `counts[f]`
@@ -4753,7 +5444,7 @@ class Solid:
         invalidates them -- not a re-mesh at another tolerance, not the solid's
         `close()` (copies under Pyodide)."""
         if _WASM:
-            t = _lib().cadaclysm_blacksmith_mesh_face_triangles(self._h(), tolerance)
+            t = _lib().cadaclysm_blacksmith_mesh_face_triangles(self._h(), _tolerance(tolerance))
             if not t.counts:
                 _fail("mesh_face_triangles")
             return _copied(t.counts, (t.face_count,), "u4")
@@ -4761,13 +5452,13 @@ class Solid:
         t = _lib().cadaclysm_blacksmith_tessellation_face_triangles(held._handle_)
         return _view(held, t.counts, (t.face_count,), "u4")
 
-    def edge_polylines(self, tolerance: float = 0.05) -> "list[numpy.ndarray]":
+    def edge_polylines(self, tolerance: "float | None" = 0.05) -> "list[numpy.ndarray]":
         """The feature edges as a list of float32 (k,3) read-only arrays: read-only
         numpy views owned by a held tessellation of the solid at `tolerance`: nothing
         invalidates them -- not a re-mesh at another tolerance, not the solid's
         `close()` (copies under Pyodide)."""
         if _WASM:
-            p = _lib().cadaclysm_blacksmith_edge_polylines(self._h(), tolerance)
+            p = _lib().cadaclysm_blacksmith_edge_polylines(self._h(), _tolerance(tolerance))
             if not p.offsets:
                 _fail("edge_polylines")
             points = _copied(p.points, (p.point_count, 3), "f4")
@@ -4873,6 +5564,15 @@ class Solid:
         """`sat_text` written to `path` by the library itself."""
         write_sat(path, [self], unit)
 
+    def rhino3dm_bytes(self, unit: Unit = "mm") -> bytes:
+        """The solid as a Rhino `.3dm` (`rhino3dm_bytes`): its exact brep, named and
+        coloured as the solid is."""
+        return rhino3dm_bytes([self], unit)
+
+    def write_3dm(self, path: FilePath, unit: Unit = "mm") -> None:
+        """`rhino3dm_bytes` written to `path` by the library itself."""
+        write_3dm(path, [self], unit)
+
     def svg(self, path: FilePath | None = None, **words: Any) -> "str | None":
         """This solid's wireframe as SVG, from the camera the keywords describe --
         `show`'s words, read by the library itself rather than a viewer. With
@@ -4927,8 +5627,10 @@ class Solid:
 
     def document_body(self) -> "dict[str, Any]":
         """This solid as a `solid.body` node holds it: the kernel's own B-rep as a dict of its
-        tables (surfaces, curves, trims, loops, faces), every number as it is, so the node
-        gives back exactly this body. `Document.add_solid` puts it in a document."""
+        tables (surfaces, curves, trims, loops, faces), every number as it is, and its colours
+        (`colour`, `face_colours`, `edges_colour`, `edge_colours`, each only where set), so the
+        node gives back exactly this body, drawn as it was. `Document.add_solid` puts it in a
+        document."""
         return json.loads(_owned_text(_lib().cadaclysm_blacksmith_document_solid_body(self._handle), "document_solid_body"))
 
     def brep_text(self) -> str:
@@ -5026,25 +5728,25 @@ class Solid:
         return _samples("edge_divide_by_length", _lib().cadaclysm_blacksmith_edge_divide_by_length(
             self._h(), index, float(step), float(accuracy)))
 
-    def contains(self, point: Point3, tolerance: float = 0.05) -> str:
+    def contains(self, point: Point3, tolerance: "float | None" = 0.05) -> str:
         """Where `point` is relative to this closed solid: `"inside"`, `"outside"`, or `"on"`
         within `tolerance` of its boundary -- absolute, in model units (default 0.05). Meshes
         the body every call -- for
         more than a few points build a `classifier` once. Raises `BuildError` for an open body,
         a point not finite, or a `tolerance` not positive and finite."""
         out = c_uint32(NONE)
-        if not _lib().cadaclysm_blacksmith_contains(self._h(), _point3(point, "contains"), float(tolerance),
+        if not _lib().cadaclysm_blacksmith_contains(self._h(), _point3(point, "contains"), _tolerance(tolerance),
                                                      ctypes.byref(out)):
             _fail("contains")
         return _containment(out.value, "contains")
 
-    def classifier(self, tolerance: float = 0.05) -> "Classifier":
+    def classifier(self, tolerance: "float | None" = 0.05) -> "Classifier":
         """A `Classifier` for this closed solid at `tolerance` -- absolute, in model units
         (default 0.05): the body meshed once, then asked point after point. It keeps its own
         reference to the body, so it goes on answering after this solid is closed."""
         return Classifier(self, tolerance)
 
-    def closest(self, other: "Solid", tolerance: float = 0.05, progress: Progress = None) -> "Closest":
+    def closest(self, other: "Solid", tolerance: "float | None" = 0.05, progress: Progress = None) -> "Closest":
         """The closest points between this solid's boundary and `other`'s, to `tolerance` --
         absolute, in model units (default 0.05) -- as a `Closest`; this solid is side `a`.
         Boundaries are measured, not volumes: a solid inside another is its gap to the outer
@@ -5053,13 +5755,13 @@ class Solid:
         Raises `BuildError` for a `tolerance` not positive and finite or a solid with no faces."""
         cb, _keep = _progress(progress)
         out = _Closest()
-        if not _lib().cadaclysm_blacksmith_closest(self._h(), other._h(), float(tolerance), cb, None,
+        if not _lib().cadaclysm_blacksmith_closest(self._h(), other._h(), _tolerance(tolerance), cb, None,
                                                     ctypes.byref(out)):
             _fail("closest")
         return Closest(out)
 
     def thickness_at_face(self, face: int, at: Point3 | None = None, *, maximum: float,
-                          tolerance: float = 0.01) -> "FaceThickness | None":
+                          tolerance: "float | None" = 0.01) -> "FaceThickness | None":
         """One thickness for face `face` of this solid alone, on a
         `ThicknessGauge` meshed at `tolerance` (default 0.01), used once and freed -- build the
         gauge yourself to ask more than once. `None` where nothing is found; see
@@ -5082,7 +5784,7 @@ class Solid:
             _fail("face_ref")
         return tuple(out)
 
-    def find_face(self, face_ref: Sequence[float], hint: int | None = None, tolerance: float = 1e-3) -> "int | None":
+    def find_face(self, face_ref: Sequence[float], hint: int | None = None, tolerance: "float | None" = 1e-3) -> "int | None":
         """The face `face_ref` (from `face_ref`) refers to: among the faces of
         that kind whose surface passes through the point, facing the same way,
         the one the point lies in -- or, where it lies in none (the face shrank
@@ -5094,10 +5796,252 @@ class Solid:
         values = [float(v) for v in face_ref]
         if len(values) != 8:
             raise BuildError("find_face: a face reference is eight numbers")
-        found = _lib().cadaclysm_blacksmith_find_face(self._h(), (c_double * 8)(*values), -1 if hint is None else int(hint), tolerance)
+        found = _lib().cadaclysm_blacksmith_find_face(self._h(), (c_double * 8)(*values), -1 if hint is None else int(hint), _tolerance(tolerance))
         if found == -2:
             _fail("find_face")
         return None if found < 0 else int(found)
+
+    def edge_ref(self, edge: int) -> "tuple[float, ...]":
+        """Edge `edge` (an index into `edges`) by what it is, fifteen floats: its kind (line 0,
+        circle 1, ellipse 2, B-spline 3, other 4), its midpoint (x, y, z), its unit tangent
+        there (x, y, z), its length, the outward normals there of the two faces meeting on it
+        (x, y, z each; an open sheet's rim gives the one face's twice), and its span -- how far
+        from the midpoint `find_edge` may find it on a resized solid. `face_ref`'s twin: a
+        reference to find the edge again with `find_edge` once the solid has been rebuilt. Raises
+        `BuildError` for an edge past the table or one with no length to measure."""
+        out = (c_double * 15)()
+        if not _lib().cadaclysm_blacksmith_edge_ref(self._h(), edge, out):
+            _fail("edge_ref")
+        return tuple(out)
+
+    def find_edge(self, edge_ref: Sequence[float], tolerance: "float | None" = 1e-3) -> "int | None":
+        """The edge `edge_ref` (from `edge_ref`) refers to: of the edges of that kind passing
+        within `tolerance` of its midpoint and running the same way, the one of nearest length;
+        where none does (the solid was resized), the edge of that kind running the same way
+        between faces facing the same two ways, the only one or the one clearly nearest, no
+        farther than the span. None where the edge is gone. Raises `BuildError` for a
+        malformed reference or a tolerance not positive."""
+        values = [float(v) for v in edge_ref]
+        if len(values) != 15:
+            raise BuildError("find_edge: an edge reference is fifteen finite numbers")
+        found = _lib().cadaclysm_blacksmith_find_edge(self._h(), (c_double * 15)(*values), _tolerance(tolerance))
+        if found == -2:
+            _fail("find_edge")
+        return None if found < 0 else int(found)
+
+    @property
+    def vertex_count(self) -> int:
+        """How many vertices this solid has: its edges' ends, welded, in the order
+        `vertex_ref` and `find_vertex` index."""
+        n = _lib().cadaclysm_blacksmith_vertex_count(self._h())
+        if n == 0 and _text(_lib().cadaclysm_blacksmith_last_error()):
+            _fail("vertex_count")
+        return n
+
+    def vertex_ref(self, vertex: int) -> "tuple[float, float, float]":
+        """Vertex `vertex` by where it is: (x, y, z). Raises `BuildError` for a vertex the
+        solid does not have."""
+        out = (c_double * 3)()
+        if not _lib().cadaclysm_blacksmith_vertex_ref(self._h(), vertex, out):
+            _fail("vertex_ref")
+        return (out[0], out[1], out[2])
+
+    def find_vertex(self, vertex_ref: Sequence[float], tolerance: "float | None" = 1e-3) -> "int | None":
+        """The vertex nearest `vertex_ref` (any point: a `vertex_ref`, or one picked) within
+        `tolerance`; None where no vertex is that near. Raises `BuildError` for a point that is
+        not three finite numbers or a tolerance not positive."""
+        values = [float(v) for v in vertex_ref]
+        if len(values) != 3:
+            raise BuildError("find_vertex: a vertex reference is three finite numbers")
+        found = _lib().cadaclysm_blacksmith_find_vertex(self._h(), (c_double * 3)(*values), _tolerance(tolerance))
+        if found == -2:
+            _fail("find_vertex")
+        return None if found < 0 else int(found)
+
+    # -- identity: ids on faces and edges, where each came from, and a verb's history
+    def tracked(self) -> "Solid":
+        """This solid tracked: its faces numbered 1..n in face order and its edges 1..m in the
+        edge table's order, each its own origin. Tracking is opt-in and rides on from here: a
+        verb on a tracked solid gives a tracked result, its faces keeping the ids of the faces
+        they lie on, and naming those as their origins. A tracked solid comes back as it is."""
+        return Solid(_lib().cadaclysm_blacksmith_solid_tracked(self._h()))
+
+    @property
+    def is_tracked(self) -> bool:
+        """Whether this solid carries face and edge ids (`tracked`, or made from a tracked
+        solid, or given an attribute)."""
+        tracked = _lib().cadaclysm_blacksmith_solid_is_tracked(self._h())
+        if not tracked and _text(_lib().cadaclysm_blacksmith_last_error()):
+            _fail("solid_is_tracked")
+        return bool(tracked)
+
+    def _id_of(self, call, index: int, what: str) -> "int | None":
+        id_ = call(self._h(), index)
+        if id_ == 0:
+            if _text(_lib().cadaclysm_blacksmith_last_error()):
+                _fail(what)
+            return None
+        return int(id_)
+
+    def face_id(self, face: int) -> "int | None":
+        """Face `face`'s id, None where this solid is untracked. An id stays with its face
+        through every verb that keeps the face -- a move, a boolean, a fillet of another edge --
+        so it names "the same face, through my edits" within a session; a piece split off, a
+        later operand's face whose id an earlier one already has, and a face on no input get
+        fresh ids, the same run after run. Ids are not written to files: to find a face on a
+        model rebuilt or read again, use `face_ref`. Raises `BuildError` for a face the solid
+        does not have."""
+        return self._id_of(_lib().cadaclysm_blacksmith_face_id, face, "face_id")
+
+    def face_with_id(self, id: int) -> "int | None":  # noqa: A002
+        """The face whose id is `id`, None where no face has it (an untracked solid, a face a
+        verb deleted)."""
+        found = _lib().cadaclysm_blacksmith_face_with_id(self._h(), _id(id, "face_with_id"))
+        if found == NONE:
+            if _text(_lib().cadaclysm_blacksmith_last_error()):
+                _fail("face_with_id")
+            return None
+        return int(found)
+
+    def _origins(self, count, at, index: int, what: str) -> "list[tuple[int, int]]":
+        n = count(self._h(), index)
+        if n == NONE:
+            _fail(what + "_origin_count")
+        operand, id_ = c_uint32(), c_uint64()
+        out = []
+        for i in range(n):
+            _ok(at(self._h(), index, i, ctypes.byref(operand), ctypes.byref(id_)), what + "_origin_at")
+            out.append((operand.value, id_.value))
+        return out
+
+    def face_origins(self, face: int) -> "list[tuple[int, int]]":
+        """The input faces face `face` came from, as `(operand, id)`: the operand its input's
+        index in the verb's operand order (a boolean's target 0, its tool 1), the id that
+        input face's `face_id`. The face it lies on most first; empty for a face the verb
+        generated (a fillet's round, a split's cut face) or an untracked solid; more than one
+        for a face merged from several (`join(merge=True)`). Raises `BuildError` for a face the
+        solid does not have."""
+        lib = _lib()
+        return self._origins(lib.cadaclysm_blacksmith_face_origin_count, lib.cadaclysm_blacksmith_face_origin_at, face, "face")
+
+    def edge_id(self, edge: int) -> "int | None":
+        """Edge `edge`'s id (an index into `edges`), as `face_id`."""
+        return self._id_of(_lib().cadaclysm_blacksmith_edge_id, edge, "edge_id")
+
+    def edge_with_id(self, id: int) -> "int | None":  # noqa: A002
+        """The edge whose id is `id`, None where no edge has it."""
+        found = _lib().cadaclysm_blacksmith_edge_with_id(self._h(), _id(id, "edge_with_id"))
+        if found == NONE:
+            if _text(_lib().cadaclysm_blacksmith_last_error()):
+                _fail("edge_with_id")
+            return None
+        return int(found)
+
+    def edge_origins(self, edge: int) -> "list[tuple[int, int]]":
+        """The input edge edge `edge` lies on, as `face_origins`: one `(operand, id)`, or
+        none for a new edge (edge merges are not seen)."""
+        lib = _lib()
+        return self._origins(lib.cadaclysm_blacksmith_edge_origin_count, lib.cadaclysm_blacksmith_edge_origin_at, edge, "edge")
+
+    def _history(self, what: str, inputs: "tuple[Solid, ...]") -> History:
+        lib = _lib()
+        handles = (c_void_p * max(len(inputs), 1))(*[s._h() for s in inputs])
+        h = getattr(lib, "cadaclysm_blacksmith_" + what)(self._h(), handles, len(inputs))
+        if not h:
+            _fail(what)
+        try:
+            return _read_history(lib, h)
+        finally:
+            lib.cadaclysm_blacksmith_history_free(h)
+
+    def history(self, *inputs: "Solid") -> History:
+        """What the verb that made this solid did to the faces of `inputs` -- passed in its
+        operand order (`a.cut(b).history(a, b)`) -- read off this solid's ids and origins
+        alone, as a `History`. Raises `BuildError` where this solid or an input is untracked,
+        or an origin names an operand past the inputs."""
+        return self._history("history", inputs)
+
+    def edge_history(self, *inputs: "Solid") -> History:
+        """`history` for the edges, by edge id."""
+        return self._history("edge_history", inputs)
+
+    # -- attributes: text on a solid (written to STEP files) and on its faces (in memory)
+    @property
+    def attributes(self) -> "_abc.Mapping[str, str]":
+        """This solid's attributes, a read-only mapping in key order. A solid's attributes go
+        with it through every verb (a verb's result takes its first operand's) and are written
+        to STEP files as user-defined attributes."""
+        if self._attributes is None:
+            lib, h = _lib(), self._h()
+            n = lib.cadaclysm_blacksmith_attribute_count(h)
+            if n == 0 and _text(lib.cadaclysm_blacksmith_last_error()):
+                _fail("attribute_count")
+            self._attributes = _attribute_map(n, lib.cadaclysm_blacksmith_attribute_key_at, lib.cadaclysm_blacksmith_attribute_value_at, h)
+        return self._attributes
+
+    def attribute(self, key: str) -> "str | None":
+        """Attribute `key`, None where this solid has none."""
+        raw = _lib().cadaclysm_blacksmith_attribute(self._h(), _key(key, "attribute"))
+        if raw is None:
+            if _text(_lib().cadaclysm_blacksmith_last_error()):
+                _fail("attribute")
+            return None
+        return raw.decode("utf-8")
+
+    def with_attribute(self, key: str, value: str) -> "Solid":
+        """This solid with attribute `key` set to `value`, over any it had: a new solid, tracked
+        if this one was not. Keys and values are text (no NUL); an empty key is refused."""
+        return Solid(_lib().cadaclysm_blacksmith_with_attribute(self._h(), _key(key, "with_attribute"), _value(value, "with_attribute")))
+
+    def with_attributes(self, **attributes: str) -> "Solid":
+        """This solid with every attribute given set, in key order."""
+        out = self
+        for key in sorted(attributes):
+            out = out.with_attribute(key, attributes[key])
+        return out
+
+    def without_attribute(self, key: str) -> "Solid":
+        """This solid without attribute `key`: a new solid, equal to this one where it had none."""
+        return Solid(_lib().cadaclysm_blacksmith_without_attribute(self._h(), _key(key, "without_attribute")))
+
+    def face_attributes(self, face: int) -> "_abc.Mapping[str, str]":
+        """Face `face`'s attributes, a read-only mapping in key order. A face's attributes
+        follow its id: kept through a verb, and copied to every face that names it as an origin
+        (each piece of a split face has its parent's). They stay in memory: no file carries
+        them. Raises `BuildError` for a face the solid does not have."""
+        lib, h = _lib(), self._h()
+        n = lib.cadaclysm_blacksmith_face_attribute_count(h, face)
+        if n == NONE:
+            _fail("face_attribute_count")
+        return _attribute_map(n, lib.cadaclysm_blacksmith_face_attribute_key_at, lib.cadaclysm_blacksmith_face_attribute_value_at, h, face)
+
+    def face_attribute(self, face: int, key: str) -> "str | None":
+        """Face `face`'s attribute `key`, None where it has none. Raises `BuildError` for a
+        face the solid does not have."""
+        raw = _lib().cadaclysm_blacksmith_face_attribute(self._h(), face, _key(key, "face_attribute"))
+        if raw is None:
+            if _text(_lib().cadaclysm_blacksmith_last_error()):
+                _fail("face_attribute")
+            return None
+        return raw.decode("utf-8")
+
+    def with_face_attribute(self, face: int, key: str, value: str) -> "Solid":
+        """This solid with face `face`'s attribute `key` set to `value`: a new solid, tracked if
+        this one was not. Refused as `with_attribute`, and for a face the solid does not have."""
+        what = "with_face_attribute"
+        return Solid(_lib().cadaclysm_blacksmith_with_face_attribute(self._h(), face, _key(key, what), _value(value, what)))
+
+    def with_face_attributes(self, face: int, **attributes: str) -> "Solid":
+        """This solid with every attribute given set on face `face`, in key order."""
+        out = self
+        for key in sorted(attributes):
+            out = out.with_face_attribute(face, key, attributes[key])
+        return out
+
+    def without_face_attribute(self, face: int, key: str) -> "Solid":
+        """This solid without face `face`'s attribute `key`: a new solid, equal to this one where
+        the face had none."""
+        return Solid(_lib().cadaclysm_blacksmith_without_face_attribute(self._h(), face, _key(key, "without_face_attribute")))
 
     # -- colour
     def coloured(self, colour: Colour, face: int | None = None) -> "Solid":
@@ -5144,11 +6088,11 @@ class Solid:
             _fail("edge_colour")
         return None
 
-    def edge_polyline_colours(self, tolerance: float = 0.05) -> "list[tuple[float, float, float] | None]":
+    def edge_polyline_colours(self, tolerance: "float | None" = 0.05) -> "list[tuple[float, float, float] | None]":
         """A colour per polyline of `edge_polylines(tolerance)`, as drawn: (r, g, b),
         or None for a polyline on no coloured edge; an empty list where the solid has
         no edge paint at all. Copied out, as every solid array is."""
-        c = _lib().cadaclysm_blacksmith_edge_polyline_colours(self._h(), tolerance)
+        c = _lib().cadaclysm_blacksmith_edge_polyline_colours(self._h(), _tolerance(tolerance))
         if not c.rgb:
             if _text(_lib().cadaclysm_blacksmith_last_error()):
                 _fail("edge_polyline_colours")
@@ -5201,31 +6145,41 @@ class Solid:
             return None
         _fail("edge_curve")
 
-    def fillet(self, edges: Iterable[Edge | int], radius: float, tolerance: float = 1e-6,
+    def fillet(self, edges: Iterable[Edge | int], radius: "float | Sequence[float]", tolerance: "float | None" = 1e-6,
                progress: Progress = None, radius_end: "float | None" = None) -> "Solid":
         """`edges`: `Edge` objects or their indices. A spline edge -- the crease between two
-        faces on NURBS surfaces, running from one free edge of the shell to another, as between
-        a fender patch and a door patch -- is rounded by a ball rolled along it, in a call of its
-        own (not with straight or circular edges); `tolerance` is then the fillet surface's fit,
-        floored at a millionth of the body. `radius_end` (spline edges only) runs the radius
-        linearly from `radius` to it in arc length along the edge, `radius` at the end where the
-        edge's curve starts."""
+        faces on NURBS surfaces, as between a fender patch and a door patch -- is rounded by a
+        ball rolled along it, in a call of its own (not with straight or circular edges);
+        `tolerance` is then the fillet surface's fit, floored at a millionth of the body. Its ends
+        lie on the shell's free edges, or at a corner where three or more creases meet, every one
+        of them picked in the same call: the corner between their fillets is blended. `radius`
+        a list (spline edges only) gives each edge its own, in the order of `edges`. `radius_end`
+        (spline edges only) runs the radius linearly from `radius` to it in arc length along the
+        edge, `radius` at the end where the edge's curve starts."""
         which = _indices(edges, "fillet", "edges", edges=True)
         arr = (c_uint32 * len(which))(*which)
+        if not isinstance(radius, numbers.Real):
+            radii = [float(r) for r in radius]
+            if len(radii) != len(which):
+                raise ValueError(f"fillet: {len(radii)} radii for {len(which)} edges")
+            if radius_end is not None:
+                raise ValueError("fillet: radius_end runs one radius; with a radius for each edge leave it out")
+            _native("Solid.fillet(radius=[...])")
+            rs = (c_double * len(radii))(*radii)
+            return Solid(_lib().cadaclysm_blacksmith_fillet_each(self._h(), arr, rs, len(which), _tolerance(tolerance)))
         if radius_end is not None and radius_end != radius:
-            _native("Solid.fillet(radius_end)")
-            return Solid(_lib().cadaclysm_blacksmith_fillet_varying(self._h(), arr, len(which), radius, radius_end, tolerance))
+            return Solid(_lib().cadaclysm_blacksmith_fillet_varying(self._h(), arr, len(which), radius, radius_end, _tolerance(tolerance)))
         cb, _keep = _progress(progress)
-        return Solid(_lib().cadaclysm_blacksmith_fillet(self._h(), arr, len(which), radius, tolerance, cb, None))
+        return Solid(_lib().cadaclysm_blacksmith_fillet(self._h(), arr, len(which), radius, _tolerance(tolerance), cb, None))
 
-    def chamfer(self, edges: Iterable[Edge | int], distance: float, tolerance: float = 1e-6) -> "Solid":
+    def chamfer(self, edges: Iterable[Edge | int], distance: float, tolerance: "float | None" = 1e-6) -> "Solid":
         """`fillet` with a flat bevel: each edge cut back `distance` along both
         its faces. `edges`: `Edge` objects or their indices."""
         which = _indices(edges, "chamfer", "edges", edges=True)
         arr = (c_uint32 * len(which))(*which)
-        return Solid(_lib().cadaclysm_blacksmith_chamfer(self._h(), arr, len(which), distance, tolerance))
+        return Solid(_lib().cadaclysm_blacksmith_chamfer(self._h(), arr, len(which), distance, _tolerance(tolerance)))
 
-    def push_pull(self, face: int | Iterable[int], distance: float, tolerance: float = 0.05,
+    def push_pull(self, face: int | Iterable[int], distance: float, tolerance: "float | None" = 0.05,
                   progress: Progress = None) -> "Solid":
         """Face `face` pushed out by `distance` along its outward normal (pulled in,
         negative) as a face extrude does it: the prism over it joined on
@@ -5247,49 +6201,54 @@ class Solid:
             k = operator.index(face)
             if not 0 <= k <= 0xFFFFFFFF:
                 raise ValueError(f"push_pull: face must be a face index or a list of indices, not {k}")
-            return Solid(_lib().cadaclysm_blacksmith_push_pull(self._h(), k, distance, tolerance, cb, None))
+            return Solid(_lib().cadaclysm_blacksmith_push_pull(self._h(), k, distance, _tolerance(tolerance), cb, None))
         if face is None or isinstance(face, (bool, str, bytes, Edge)) or isinstance(face, numbers.Number):
             thing = "an Edge" if isinstance(face, Edge) else repr(face)
             raise TypeError(f"push_pull: face must be a face index or a list of indices, not {thing}")
         which = _indices(face, "push_pull", "face")
         arr = (c_uint32 * len(which))(*which)
-        return Solid(_lib().cadaclysm_blacksmith_push_pull_faces(self._h(), arr, len(which), distance, tolerance, cb, None))
+        return Solid(_lib().cadaclysm_blacksmith_push_pull_faces(self._h(), arr, len(which), distance, _tolerance(tolerance), cb, None))
 
-    def split(self, tool: "Solid", tolerance: float = 0.05, progress: Progress = None) -> "list[Solid]":
+    def split(self, tool: "Solid", tolerance: "float | None" = 0.05, progress: Progress = None) -> "list[Solid]":
         """This solid split by `tool` into bodies: a
         closed `tool` gives the parts outside it, then the parts inside; a flat
         sheet (a `face`) splits by the whole plane it lies on. Each connected
         part is a body of its own, so a U cut across both arms is three. The
-        new faces are pieces of the tool's; colours carry over."""
+        new faces are pieces of the tool's; colours carry over. On a tracked solid each
+        body's faces name this solid as operand 0 and the tool as 1, as the split made
+        them (`face_origins`, `history`)."""
         cb, _keep = _progress(progress)
-        return Solid(_lib().cadaclysm_blacksmith_split(self._h(), tool._h(), tolerance, cb, None)).lumps()
+        return Solid(_lib().cadaclysm_blacksmith_split(self._h(), tool._h(), _tolerance(tolerance), cb, None)).lumps()
 
-    def split_by_plane(self, plane: FrameLike, tolerance: float = 0.05, progress: Progress = None) -> "list[Solid]":
+    def split_by_plane(self, plane: FrameLike, tolerance: "float | None" = 0.05, progress: Progress = None) -> "list[Solid]":
         """This solid split by the plane through `plane`'s origin, square to its
-        z: the bodies in front of it (on z's side) first, then those behind."""
+        z: the bodies in front of it (on z's side) first, then those behind. On a tracked
+        solid each body's faces name this solid as operand 0: a face cut in two is a piece
+        in each body, one keeping its id; the cut faces are generated."""
         cb, _keep = _progress(progress)
-        return Solid(_lib().cadaclysm_blacksmith_split_by_plane(self._h(), _frame(plane), tolerance, cb, None)).lumps()
+        return Solid(_lib().cadaclysm_blacksmith_split_by_plane(self._h(), _frame(plane), _tolerance(tolerance), cb, None)).lumps()
 
-    def split_by_profile(self, profile: "Profile", frame: FrameLike, tolerance: float = 0.05, progress: Progress = None) -> "list[Solid]":
+    def split_by_profile(self, profile: "Profile", frame: FrameLike, tolerance: "float | None" = 0.05, progress: Progress = None) -> "list[Solid]":
         """This solid split by the closed `profile` drawn on `frame`, pushed straight
         through it along the frame's z both ways -- a split by a sketch
         profile: the bodies outside the profile first, then those inside. Where the
         plane lies along z does not matter, only the outline across it."""
         cb, _keep = _progress(progress)
-        return Solid(_lib().cadaclysm_blacksmith_split_by_profile(self._h(), profile._handle, _frame(frame), tolerance, cb, None)).lumps()
+        return Solid(_lib().cadaclysm_blacksmith_split_by_profile(self._h(), profile._handle, _frame(frame), _tolerance(tolerance), cb, None)).lumps()
 
     def lumps(self) -> "list[Solid]":
         """This solid's connected bodies, each a solid of its own -- faces
         sharing an edge are one body. One body comes back as itself; a boolean
         that leaves two parts, or a split, gives several, in the order of
-        their first faces."""
+        their first faces. A body is some of this solid's faces, not a solid made from
+        it: each face and edge keeps its id and its origins as this solid has them."""
         h = self._h()
         n = _lib().cadaclysm_blacksmith_lump_count(h)
         if n == 0:
             _fail("lump_count")
         return [Solid(_lib().cadaclysm_blacksmith_lump(h, i)) for i in range(n)]
 
-    def merge(self, other: "Solid", tolerance: float = 0.05, progress: Progress = None) -> "Solid":
+    def merge(self, other: "Solid", tolerance: "float | None" = 0.05, progress: Progress = None) -> "Solid":
         """This solid and `other` as one body that keeps every piece -- a union that keeps the
         inside pieces: its regions are this solid less `other`, the two together, and `other`
         less this one (those that are not empty), and the walls between them are faces of both.
@@ -5300,7 +6259,7 @@ class Solid:
         Built exactly: both solids closed, every face a plane, cylinder, cone, sphere or torus.
         Walls of the two lying on one another in part are a case it refuses, in words."""
         cb, _keep = _progress(progress)
-        return Solid(_lib().cadaclysm_blacksmith_merge(self._h(), other._h(), tolerance, cb, None))
+        return Solid(_lib().cadaclysm_blacksmith_merge(self._h(), other._h(), _tolerance(tolerance), cb, None))
 
     def regions(self) -> "list[Region]":
         """The regions of space this solid's faces bound, region 0 the infinite one: two for an
@@ -5315,23 +6274,23 @@ class Solid:
         the infinite one, is refused."""
         return Solid(_lib().cadaclysm_blacksmith_region_solid(self._h(), region))
 
-    def refillet(self, face: int, radius: float, tolerance: float = 1e-6) -> "Solid":
+    def refillet(self, face: int, radius: float, tolerance: "float | None" = 1e-6) -> "Solid":
         """The round `face` belongs to -- a fillet's bands, balls and rim bands joined
         to that face -- made again at `radius`, as a press-pull on a fillet
         face: taken back to the sharp edges it replaced, and those rounded again.
         Rounds of straight edges between planes and of circular rims beside a plane."""
-        return Solid(_lib().cadaclysm_blacksmith_refillet(self._h(), face, radius, tolerance))
+        return Solid(_lib().cadaclysm_blacksmith_refillet(self._h(), face, radius, _tolerance(tolerance)))
 
     def unfillet(self, face: int) -> "Solid":
         """The round `face` belongs to taken off, the faces beside it sharp again --
         the delete of a fillet face. The same rounds as `refillet`."""
         return Solid(_lib().cadaclysm_blacksmith_unfillet(self._h(), face))
 
-    def rechamfer(self, face: int, distance: float, tolerance: float = 1e-6) -> "Solid":
+    def rechamfer(self, face: int, distance: float, tolerance: "float | None" = 1e-6) -> "Solid":
         """The chamfer `face` belongs to -- its bevels, flat or round a rim, and the
         corner triangles joined to that face -- cut again at `distance`, as a press-pull on a chamfer face: taken back to the sharp edges it cut, and those
         bevelled again."""
-        return Solid(_lib().cadaclysm_blacksmith_rechamfer(self._h(), face, distance, tolerance))
+        return Solid(_lib().cadaclysm_blacksmith_rechamfer(self._h(), face, distance, _tolerance(tolerance)))
 
     def unchamfer(self, face: int) -> "Solid":
         """The chamfer `face` belongs to taken off, the faces beside it sharp again --
@@ -5344,21 +6303,21 @@ class Solid:
         edge taken out -- the seams a `join` leaves where two parts are flush."""
         return Solid(_lib().cadaclysm_blacksmith_merge_flush(self._h()))
 
-    def shell(self, thickness: float, open: Iterable[int] = (), tolerance: float = 1e-6,  # noqa: A002
+    def shell(self, thickness: float, open: Iterable[int] = (), tolerance: "float | None" = 1e-6,  # noqa: A002
               progress: Progress = None) -> "Solid":
         """`open`: face indices removed so the hollow is reachable."""
         which = _indices(open, "shell", "open")
         arr = (c_uint32 * len(which))(*which)
         cb, _keep = _progress(progress)
-        return Solid(_lib().cadaclysm_blacksmith_shell(self._h(), thickness, arr, len(which), tolerance, cb, None))
+        return Solid(_lib().cadaclysm_blacksmith_shell(self._h(), thickness, arr, len(which), _tolerance(tolerance), cb, None))
 
-    def thicken(self, thickness: float, tolerance: float = 1e-6, progress: Progress = None) -> "Solid":
+    def thicken(self, thickness: float, tolerance: "float | None" = 1e-6, progress: Progress = None) -> "Solid":
         """This sheet made a solid `thickness` thick: its faces,
         their twins moved `thickness` along the faces' normals (against them for a
         negative thickness), and a wall round every open edge. A closed sheet thickens
         to a hollow."""
         cb, _keep = _progress(progress)
-        return Solid(_lib().cadaclysm_blacksmith_thicken(self._h(), thickness, tolerance, cb, None))
+        return Solid(_lib().cadaclysm_blacksmith_thicken(self._h(), thickness, _tolerance(tolerance), cb, None))
 
     def to_scene(self, schema: Schema = None) -> "cadaclysm.Scene":
         """This solid as a reader `Scene`, through STEP text and `cadaclysm.open_memory`
@@ -5618,7 +6577,7 @@ class Assembly:
 
     def swept_clash(self,
                     keyframes: Iterable[Mapping[JointKey, float | Sequence[float]] | Iterable[tuple[JointKey, float | Sequence[float]]]],
-                    clearance: float = 0.0, tolerance: float = 0.05, resolution: float = 1e-3, max_steps: int = 100000,
+                    clearance: float = 0.0, tolerance: "float | None" = 0.05, resolution: float = 1e-3, max_steps: int = 100000,
                     allowed: Iterable[tuple[int, int]] = (), ground: str | None = None,
                     joined: bool = False) -> "list[SweptClash]":
         """Every pair of this assembly's solids (indexed as `parts()` lists them) that
@@ -5674,7 +6633,7 @@ class Assembly:
         allowed_arr = (c_uint32 * len(pairs))(*pairs)
         ground_raw = ground.encode("utf-8") if ground is not None else None
         h = _lib().cadaclysm_blacksmith_assembly_swept_clash(
-            self._h(), raw_keys, raw_counts, len(keys), raw_values, len(rows), ground_raw, tolerance, clearance,
+            self._h(), raw_keys, raw_counts, len(keys), raw_values, len(rows), ground_raw, _tolerance(tolerance), clearance,
             resolution, max_steps, allowed_arr, len(pairs) // 2, bool(joined))
         if not h:
             _fail("assembly_swept_clash")
@@ -5704,6 +6663,33 @@ class Assembly:
     def step(self, path: FilePath, schema: Schema = None, unit: Unit = "mm") -> None:
         """`step_text` written to `path`."""
         _FsPath(path).write_text(self.step_text(schema, unit), encoding="utf-8")
+
+    def rhino3dm_bytes(self, unit: Unit = "mm") -> bytes:
+        """This assembly, and everything placed under it, as one Rhino `.3dm`: each
+        distinct part (as `step_text` counts them) a block holding its body, each
+        sub-assembly a block of references to what it places -- nested assemblies are
+        nested blocks -- and this assembly's own placements references at the top of the
+        file, on a layer named after it. Each reference is named as its placement was;
+        block names are made ones Rhino takes and numbered past any taken, regardless of
+        case. `unit` and the warnings as `rhino3dm_bytes`. Refused (`BuildError`) as
+        `step_text` is, for an assembly reachable from this one that places nothing."""
+        if unit not in UNITS:
+            raise BuildError(f"unit must be one of {sorted(UNITS)}")
+        length = c_size_t(0)
+        raw = _lib().cadaclysm_blacksmith_assembly_3dm_bytes(self._h(), UNITS[unit], ctypes.byref(length))
+        return _taken_3dm(raw, length, "assembly_3dm_bytes")
+
+    def write_3dm(self, path: FilePath, unit: Unit = "mm") -> None:
+        """`rhino3dm_bytes` written to `path` by the library itself, which names the
+        file in its refusal when it cannot."""
+        if _WASM:
+            _write_3dm_bytes(path, self.rhino3dm_bytes(unit), "assembly_3dm")
+            return
+        if unit not in UNITS:
+            raise BuildError(f"unit must be one of {sorted(UNITS)}")
+        if not _lib().cadaclysm_blacksmith_assembly_3dm(self._h(), os.fsencode(str(path)), UNITS[unit]):
+            _fail("assembly_3dm")
+        _warn_3dm()
 
     def to_scene(self, schema: Schema = None) -> "cadaclysm.Scene":
         """This assembly as a reader `Scene`, through STEP text and
@@ -6038,6 +7024,27 @@ class Continuity:
         return f"Continuity(gap={self.gap:.3g}, angle={self.angle:.3g}, curvature={self.curvature:.3g})"
 
 
+class PatchReport:
+    """How well an N-sided patch (:meth:`Solid.n_sided_patch`) meets: `faces` sub-patches, the
+    worst `boundary` :class:`Continuity` against the neighbours (the gap over every side, the
+    angle over those met at G1 or G2, the curvature jump over those at G2), the worst `internal`
+    one across the patch's own spokes, and `corner_angle` (radians), the most a corner of the hole
+    leaves no patch able to meet: zero where the neighbours meet each other at G1."""
+
+    faces: int
+    boundary: "Continuity"
+    internal: "Continuity"
+    corner_angle: float
+
+    def __init__(self, raw: "_PatchReport"):
+        self.faces = int(raw.faces)
+        self.boundary, self.internal = Continuity(raw.boundary), Continuity(raw.internal)
+        self.corner_angle = float(raw.corner_angle)
+
+    def __repr__(self) -> str:
+        return f"PatchReport(faces={self.faces}, boundary={self.boundary!r}, internal={self.internal!r}, corner_angle={self.corner_angle:.3g})"
+
+
 _SHEET_SIDES = {"u0": 0, "u1": 1, "v0": 2, "v1": 3}
 
 
@@ -6052,6 +7059,10 @@ def _curve_array(curves: "Iterable[NurbsCurve]") -> "tuple[Any, int]":
     caller's list for the call."""
     handles = [c._handle for c in curves]
     return (c_void_p * max(len(handles), 1))(*handles), len(handles)
+
+
+# `NurbsCurve.tween`'s methods, as `cadaclysm_blacksmith_nurbs_curve_tween` numbers them.
+_TWEEN_METHODS = {"plain": 0, "matching": 1, "sampling": 2}
 
 
 def _native(what: str) -> None:
@@ -6070,8 +7081,7 @@ class NurbsCurve:
     :meth:`from_edge` turns an edge into one of these.
 
     A face here is its whole surface: projecting onto, pulling to and crossing a face ignore
-    its trims. Native Python only for now: under Pyodide every builder raises `BuildError`
-    ("not in the web build yet")."""
+    its trims."""
 
     __slots__ = ("_handle", "fit_error")
 
@@ -6084,7 +7094,6 @@ class NurbsCurve:
         (`len(points) + degree + 1` values, non-decreasing) or None for clamped and uniform."""
         self._handle = None
         self.fit_error = None
-        _native("NurbsCurve")
         xyz, n = _xyz(points, "nurbs_curve_new")
         w = None if weights is None else [float(x) for x in weights]
         k = None if knots is None else [float(x) for x in knots]
@@ -6116,27 +7125,24 @@ class NurbsCurve:
         parametrised. `closed=True` closes it back to the first point, smooth across the seam;
         an open curve may leave along `start_tangent` and arrive along `end_tangent`
         (directions; their length does not matter)."""
-        _native("NurbsCurve.through")
         xyz, n = _xyz(points, "nurbs_curve_through")
         return cls._of(_lib().cadaclysm_blacksmith_nurbs_curve_through(
             xyz, n, _u32(degree, "nurbs_curve_through: degree"), bool(closed), _vec3(start_tangent), _vec3(end_tangent)),
             "nurbs_curve_through")
 
     @classmethod
-    def fit(cls, points: "Iterable[Point3]", degree: int = 3, tolerance: float = 1e-3) -> "NurbsCurve":
+    def fit(cls, points: "Iterable[Point3]", degree: int = 3, tolerance: "float | None" = 1e-3) -> "NurbsCurve":
         """A curve of `degree` within `tolerance` of every point, through the first and the last
         (least squares); its `fit_error` is the largest distance from a point to it."""
-        _native("NurbsCurve.fit")
         xyz, n = _xyz(points, "nurbs_curve_fit")
         err = c_double(0.0)
-        h = _lib().cadaclysm_blacksmith_nurbs_curve_fit(xyz, n, _u32(degree, "nurbs_curve_fit: degree"), float(tolerance), ctypes.byref(err))
+        h = _lib().cadaclysm_blacksmith_nurbs_curve_fit(xyz, n, _u32(degree, "nurbs_curve_fit: degree"), _tolerance(tolerance), ctypes.byref(err))
         return cls._of(h, "nurbs_curve_fit", err.value)
 
     @classmethod
     def from_edge(cls, solid: "Solid", edge: "Edge | int") -> "NurbsCurve":
         """Edge `edge` of `solid` as an exact NURBS over the edge's own span of its curve,
         running the way the edge runs."""
-        _native("NurbsCurve.from_edge")
         e = edge.index if isinstance(edge, Edge) else edge
         return cls._of(_lib().cadaclysm_blacksmith_nurbs_curve_from_edge(solid._handle, _u32(e, "nurbs_curve_from_edge: edge")),
                        "nurbs_curve_from_edge")
@@ -6145,7 +7151,6 @@ class NurbsCurve:
     def isocurve(cls, solid: "Solid", face: int, along_u: bool, at: float) -> "NurbsCurve":
         """The isocurve of face `face` of `solid`'s surface: along `u` at `v = at` when
         `along_u`, else along `v` at `u = at`. NURBS faces only."""
-        _native("NurbsCurve.isocurve")
         return cls._of(_lib().cadaclysm_blacksmith_nurbs_curve_from_face_isocurve(
             solid._handle, _u32(face, "nurbs_curve_from_face_isocurve: face"), bool(along_u), float(at)),
             "nurbs_curve_from_face_isocurve")
@@ -6156,10 +7161,51 @@ class NurbsCurve:
         """The curve bridging `a` (at its end when `a_end`, else its start) to `b` (at its end
         when `b_end`, else its start): `continuity` 1 matches position and tangent (a cubic),
         2 also the curvature (a quintic); `bulge` (positive) scales how far the tangents reach."""
-        _native("NurbsCurve.blend")
         return cls._of(_lib().cadaclysm_blacksmith_nurbs_curve_blend(
             a._handle, bool(a_end), b._handle, bool(b_end), _u32(continuity, "nurbs_curve_blend: continuity"), float(bulge)),
             "nurbs_curve_blend")
+
+    @classmethod
+    def joined(cls, curves: "Iterable[NurbsCurve]", tolerance: float = 1e-6) -> "NurbsCurve":
+        """`curves` joined end to end into one curve (Rhino's JoinCurves): in the order given,
+        each turned where needed so its start meets the previous one's end within `tolerance`
+        (the joint placed at the midpoint of the two ends). All are raised to the highest
+        degree among them and each runs over `k..k + 1`, joined C0 -- a corner stays a corner;
+        a rational curve keeps its points. One curve gives a copy; none, or a gap past
+        `tolerance`, raises `BuildError` naming the two curves."""
+        arr, n = _curve_array(curves)
+        return cls._of(_lib().cadaclysm_blacksmith_nurbs_curve_joined(arr, n, float(tolerance)), "nurbs_curve_joined")
+
+    def tween(self, other: "NurbsCurve", count: int, method: str = "matching", samples: "int | None" = None,
+              align: bool = True, tolerance: "float | None" = None) -> "list[NurbsCurve]":
+        """`count` curves blending evenly from this curve to `other` (Rhino's CreateTweenCurves
+        family), tween `i` at the fraction `(i + 1) / (count + 1)`. `method`:
+
+        - ``"plain"``: control point by control point; the curves must already share one
+          structure (degree, control-point count, knots), as Rhino's CreateTweenCurves needs.
+        - ``"matching"``: the curves made compatible exactly (degree elevation, knot merging),
+          then blended in homogeneous coordinates -- rational curves stay rational.
+        - ``"sampling"``: both divided by arc length into `samples` pieces (required here,
+          refused otherwise), and a cubic interpolated through the blended samples.
+
+        `align` turns `other`, and moves a closed curve's seam, to line it up with this one
+        first (Rhino's calls leave that to the caller). `tolerance` None: the inputs' effective
+        tolerance. A count of 0, one curve closed and the other open, plain on curves that are
+        not compatible, or too few samples raises `BuildError`."""
+        if method not in _TWEEN_METHODS:
+            raise ValueError(f"nurbs_curve_tween: method must be one of {', '.join(_TWEEN_METHODS)}, not {method!r}")
+        if method == "sampling":
+            if samples is None:
+                raise ValueError("nurbs_curve_tween: sampling needs samples")
+        elif samples is not None:
+            raise ValueError(f"nurbs_curve_tween: samples is read only by sampling, not {method}")
+        n = _u32(count, "nurbs_curve_tween: count")
+        out = (c_void_p * max(n, 1))()
+        if not _lib().cadaclysm_blacksmith_nurbs_curve_tween(
+                self._handle, other._handle, n, _TWEEN_METHODS[method],
+                _u32(samples or 0, "nurbs_curve_tween: samples"), bool(align), _tolerance(tolerance), out):
+            _fail("nurbs_curve_tween")
+        return [NurbsCurve._of(out[i], "nurbs_curve_tween") for i in range(n)]
 
     # ---- edits ----------------------------------------------------------------------------
 
@@ -6169,23 +7215,37 @@ class NurbsCurve:
         return NurbsCurve._of(_lib().cadaclysm_blacksmith_nurbs_curve_projected_to_plane(
             self._handle, _vec3(origin), _vec3(normal), _vec3(direction)), "nurbs_curve_projected_to_plane")
 
-    def projected_to_face(self, solid: "Solid", face: int, direction: "Point3", tolerance: float = 1e-3) -> "NurbsCurve":
+    def projected_to_face(self, solid: "Solid", face: int, direction: "Point3", tolerance: "float | None" = 1e-3) -> "NurbsCurve":
         """This curve projected along `direction` onto face `face` of `solid` (its whole
         surface), fitted within `tolerance`; the result's `fit_error` is the largest distance
         between it and the surface. Raises `BuildError` where a point's ray misses."""
         err = c_double(0.0)
         h = _lib().cadaclysm_blacksmith_nurbs_curve_projected_to_face(
             self._handle, solid._handle, _u32(face, "nurbs_curve_projected_to_face: face"), _vec3(direction),
-            float(tolerance), ctypes.byref(err))
+            _tolerance(tolerance), ctypes.byref(err))
         return NurbsCurve._of(h, "nurbs_curve_projected_to_face", err.value)
 
-    def pulled_to_face(self, solid: "Solid", face: int, tolerance: float = 1e-3) -> "NurbsCurve":
+    def pulled_to_face(self, solid: "Solid", face: int, tolerance: "float | None" = 1e-3) -> "NurbsCurve":
         """This curve pulled onto face `face` of `solid` (its whole surface): every point to
         its nearest surface point, fitted within `tolerance` (`fit_error` as for the projection)."""
         err = c_double(0.0)
         h = _lib().cadaclysm_blacksmith_nurbs_curve_pulled_to_face(
-            self._handle, solid._handle, _u32(face, "nurbs_curve_pulled_to_face: face"), float(tolerance), ctypes.byref(err))
+            self._handle, solid._handle, _u32(face, "nurbs_curve_pulled_to_face: face"), _tolerance(tolerance), ctypes.byref(err))
         return NurbsCurve._of(h, "nurbs_curve_pulled_to_face", err.value)
+
+    def offset_on_sheet(self, solid: "Solid", distance: float, tolerance: "float | None" = 1e-3) -> "NurbsCurve":
+        """This curve, lying on the sheet `solid` (any of its faces, within ten times
+        `tolerance`), offset `distance` along it: every point walked that far across the sheet,
+        square to the curve -- left of its run seen from the outward normal for a positive
+        `distance` -- crossing the seams of a joined sheet, onto the surface continued past its
+        edge where it leaves it -- and fitted within `tolerance`. The result's `fit_error` is the
+        larger of the fit's error and its distance off the sheet. Raises `BuildError` where the
+        curve does not lie on the sheet."""
+        _native("NurbsCurve.offset_on_sheet")
+        err = c_double(0.0)
+        h = _lib().cadaclysm_blacksmith_nurbs_curve_offset_on_sheet(
+            self._handle, solid._handle, float(distance), _tolerance(tolerance), ctypes.byref(err))
+        return NurbsCurve._of(h, "nurbs_curve_offset_on_sheet", err.value)
 
     def reversed(self) -> "NurbsCurve":
         """The same curve run the other way over the same domain."""
@@ -6209,8 +7269,7 @@ class NurbsCurve:
 
     def transformed(self, t: "Transform | Sequence[float]") -> "NurbsCurve":
         """This curve through the affine map `t`: its control points mapped, weights and knots
-        kept -- exact. A singular map (a projection) is allowed. Native Python only for now."""
-        _native("nurbs_curve_transformed")
+        kept -- exact. A singular map (a projection) is allowed."""
         return NurbsCurve._of(_lib().cadaclysm_blacksmith_nurbs_curve_transformed(self._handle, _matrix(t, "nurbs_curve_transformed")),
                               "nurbs_curve_transformed")
 
@@ -6304,11 +7363,11 @@ class NurbsCurve:
         return _samples("nurbs_curve_plane_hits", _lib().cadaclysm_blacksmith_nurbs_curve_plane_hits(
             self._handle, _vec3(origin), _vec3(normal)))
 
-    def face_hits(self, solid: "Solid", face: int, tolerance: float = 1e-3) -> "list[At]":
+    def face_hits(self, solid: "Solid", face: int, tolerance: "float | None" = 1e-3) -> "list[At]":
         """Where the curve crosses face `face` of `solid` (its whole surface), within
         `tolerance` of it, in parameter order (`error` each point's distance from the surface)."""
         return _samples("nurbs_curve_face_hits", _lib().cadaclysm_blacksmith_nurbs_curve_face_hits(
-            self._handle, solid._handle, _u32(face, "nurbs_curve_face_hits: face"), float(tolerance)))
+            self._handle, solid._handle, _u32(face, "nurbs_curve_face_hits: face"), _tolerance(tolerance)))
 
     def comb(self, n: int = 64, scale: float = 1.0) -> "list[tuple[tuple[float, float, float], tuple[float, float, float]]]":
         """A curvature comb to draw: at `n + 1` even parameters, the curve point and that point
@@ -7019,8 +8078,8 @@ class Classifier:
 
     __slots__ = ("_handle",)
 
-    def __init__(self, solid: Solid, tolerance: float = 0.05):
-        self._handle = _checked(_lib().cadaclysm_blacksmith_classifier_new(solid._h(), float(tolerance)),
+    def __init__(self, solid: Solid, tolerance: "float | None" = 0.05):
+        self._handle = _checked(_lib().cadaclysm_blacksmith_classifier_new(solid._h(), _tolerance(tolerance)),
                                 "classifier_new")
 
     def __enter__(self) -> "Classifier":
@@ -7062,7 +8121,7 @@ class Collider:
 
     __slots__ = ("_handle",)
 
-    def __init__(self, solids: Iterable[Solid], tolerance: float = 0.05, groups: Sequence[int] | None = None,
+    def __init__(self, solids: Iterable[Solid], tolerance: "float | None" = 0.05, groups: Sequence[int] | None = None,
                  allowed: Iterable[int] = ()):
         handles = [s._h() for s in solids]
         if groups is not None and len(groups) != len(handles):
@@ -7071,7 +8130,7 @@ class Collider:
         groups_arr = None if groups is None else (c_uint32 * len(groups))(*[int(g) for g in groups])
         allowed = [int(v) for v in allowed]
         allowed_arr = (c_uint32 * len(allowed))(*allowed)
-        h = _lib().cadaclysm_blacksmith_collider_new(parts, len(handles), tolerance, groups_arr, allowed_arr, len(allowed) // 2)
+        h = _lib().cadaclysm_blacksmith_collider_new(parts, len(handles), _tolerance(tolerance), groups_arr, allowed_arr, len(allowed) // 2)
         self._handle = _checked(h, "collider_new")
 
     def __enter__(self) -> "Collider":
@@ -7194,7 +8253,7 @@ class Collider:
 
 
 def clash(parts: Iterable[Solid], others: Iterable[Solid] | None = None, clearance: float = 0.0,
-          tolerance: float = 0.05, allowed: Iterable[tuple[int, int]] = ()) -> "list[Clash]":
+          tolerance: "float | None" = 0.05, allowed: Iterable[tuple[int, int]] = ()) -> "list[Clash]":
     """Every pair of `parts` -- or, with `others`, every part of `parts` against every part of
     `others` -- that penetrates, touches or lies within `clearance` of the other, as `Clash`
     rows, the solids as they stand. `tolerance` is the meshing tolerance, absolute (default
@@ -7223,7 +8282,7 @@ def clash(parts: Iterable[Solid], others: Iterable[Solid] | None = None, clearan
     b_arr = None if second is None else (c_void_p * len(second))(*second)
     allowed_arr = (c_uint32 * len(pairs))(*pairs)
     h = _lib().cadaclysm_blacksmith_clash(a_arr, len(first), b_arr, 0 if second is None else len(second),
-                                          tolerance, clearance, allowed_arr, len(pairs) // 2)
+                                          _tolerance(tolerance), clearance, allowed_arr, len(pairs) // 2)
     if not h:
         _fail("clash")
     return _clashes_of(h)
@@ -7282,7 +8341,7 @@ def _swept_clashes_of(h) -> "list[SweptClash]":
 
 
 def swept_clash(parts: Iterable[Solid], poses: Iterable[Iterable[FrameLike]], others: Iterable[Solid] | None = None,
-                other_poses: Iterable[Iterable[FrameLike]] | None = None, clearance: float = 0.0, tolerance: float = 0.05,
+                other_poses: Iterable[Iterable[FrameLike]] | None = None, clearance: float = 0.0, tolerance: "float | None" = 0.05,
                 resolution: float = 1e-3, max_steps: int = 100000,
                 allowed: Iterable[tuple[int, int]] = ()) -> "list[SweptClash]":
     """Every pair of `parts` -- or, with `others`, every part of `parts` against every part of
@@ -7332,7 +8391,7 @@ def swept_clash(parts: Iterable[Solid], poses: Iterable[Iterable[FrameLike]], ot
         b_arr, poses_b = (c_void_p * len(second))(*second), (c_double * len(flat_b))(*flat_b)
     allowed_arr = (c_uint32 * len(pairs))(*pairs)
     h = _lib().cadaclysm_blacksmith_swept_clash(a_arr, len(first), poses_a, b_arr, 0 if second is None else len(second),
-                                                poses_b, len(frames_a), tolerance, clearance, resolution, max_steps,
+                                                poses_b, len(frames_a), _tolerance(tolerance), clearance, resolution, max_steps,
                                                 allowed_arr, len(pairs) // 2)
     if not h:
         _fail("swept_clash")
@@ -7487,11 +8546,11 @@ class ThicknessGauge:
 
     __slots__ = ("_handle", "_solids")
 
-    def __init__(self, solids: Iterable[Solid], tolerance: float = 0.01):
+    def __init__(self, solids: Iterable[Solid], tolerance: "float | None" = 0.01):
         self._solids = tuple(solids)
         handles = [s._h() for s in self._solids]
         parts = (c_void_p * len(handles))(*handles)
-        self._handle = _checked(_lib().cadaclysm_blacksmith_thickness_gauge_new(parts, len(handles), float(tolerance)),
+        self._handle = _checked(_lib().cadaclysm_blacksmith_thickness_gauge_new(parts, len(handles), _tolerance(tolerance)),
                                 "thickness_gauge_new")
 
     def __enter__(self) -> "ThicknessGauge":
@@ -7579,7 +8638,7 @@ class ThicknessGauge:
 
 
 def thickness(solids: Iterable[Solid], maximum: float, sharp_angle: float = 0.0,
-              tolerance: float = 0.01) -> "list[Thickness]":
+              tolerance: "float | None" = 0.01) -> "list[Thickness]":
     """`ThicknessGauge(solids, tolerance).thickness(maximum, sharp_angle)` on a gauge used once
     and freed: every reading within `maximum` on the solids, measured against each other."""
     with ThicknessGauge(solids, tolerance) as gauge:
@@ -7817,12 +8876,12 @@ class Sketch:
         self._handle = _checked(_lib().cadaclysm_blacksmith_sketch_new(), "sketch_new")
 
     @classmethod
-    def from_profile(cls, profile: Profile, infer: bool = True, tolerance: float = 1e-6) -> "Sketch":
+    def from_profile(cls, profile: Profile, infer: bool = True, tolerance: "float | None" = 1e-6) -> "Sketch":
         """A sketch of `profile`'s lines, arcs and curves joined end to end, holes
         included; with `infer` the obvious constraints (horizontal, vertical, tangent
         joints, ...) too. Ends within `tolerance` count as joined."""
         s = cls.__new__(cls)
-        s._handle = _checked(_lib().cadaclysm_blacksmith_sketch_from_profile(profile._handle, bool(infer), float(tolerance)),
+        s._handle = _checked(_lib().cadaclysm_blacksmith_sketch_from_profile(profile._handle, bool(infer), _tolerance(tolerance)),
                              "sketch_from_profile")
         return s
 
@@ -8203,14 +9262,14 @@ class Sketch:
                                  _named(_SKETCH_STATES, _exact(part[2], "sketch_dof_part"), "sketch_dof_part"), *lists))
         return Dof(free, state, redundant, conflicting, free_entities, parts)
 
-    def profiles(self, tolerance: float = 1e-6) -> list[Profile]:
+    def profiles(self, tolerance: "float | None" = 1e-6) -> list[Profile]:
         """The closed loops as profiles (nested loops become holes; construction
         geometry left out); ends within `tolerance` join."""
-        return _profile_list(_lib().cadaclysm_blacksmith_sketch_profiles(self._h(), float(tolerance)), "sketch_profiles")
+        return _profile_list(_lib().cadaclysm_blacksmith_sketch_profiles(self._h(), _tolerance(tolerance)), "sketch_profiles")
 
-    def open_chains(self, tolerance: float = 1e-6) -> list[Profile]:
+    def open_chains(self, tolerance: "float | None" = 1e-6) -> list[Profile]:
         """The paths that do not close, as profiles; ends within `tolerance` join."""
-        return _profile_list(_lib().cadaclysm_blacksmith_sketch_open_chains(self._h(), float(tolerance)), "sketch_open_chains")
+        return _profile_list(_lib().cadaclysm_blacksmith_sketch_open_chains(self._h(), _tolerance(tolerance)), "sketch_open_chains")
 
 
 def _rtree_number(v) -> bool:
@@ -9077,12 +10136,13 @@ class Document:
         carrying the kernel's own B-rep (`Solid.document_body()`), in this document's units.
         Fillets and other references are taken off it as off any node; replacing its body later
         (`set(id, body=other.document_body())`) re-finds them by geometry. Its id is returned;
-        `id=`, `name=` and `message=` as for `add`. Colours and names are not kept."""
+        `id=`, `name=` and `message=` as for `add`. Its colours are kept -- the solid's, each
+        face's and each edge's -- its name is not."""
         return self.add("sheet.body" if sheet else "solid.body", body=solid.document_body(), **fields)
 
     def add_profile(self, profile: "Profile", **fields: "Any") -> str:
         """A `profile.path` node holding `profile` exactly (`Profile.document_path()`: arcs and NURBS
-        as they are, holes included), in this document's units. Its id is returned; `id=`,
+        as they are, holes included, its colour kept), in this document's units. Its id is returned; `id=`,
         `name=` and `message=` as for `add`."""
         return self.add("profile.path", path=profile.document_path(), **fields)
 
@@ -9693,7 +10753,7 @@ class _Tessellation:
     __slots__ = ("_handle_", "__weakref__")
 
     def __init__(self, solid, tolerance, what):
-        self._handle_ = _lib().cadaclysm_blacksmith_tessellation(solid._h(), tolerance)
+        self._handle_ = _lib().cadaclysm_blacksmith_tessellation(solid._h(), _tolerance(tolerance))
         if not self._handle_:
             _fail_tessellation(what)
 
@@ -11110,6 +12170,7 @@ class SurfaceFoot(NamedTuple):
 # CADACLYSM_BLACKSMITH_VALUE_*: the kind each value array is tagged with.
 _VALUE_LINE, _VALUE_CIRCLE, _VALUE_ARC, _VALUE_ELLIPSE, _VALUE_SPHERE = 0, 1, 2, 3, 4
 _VALUE_CYLINDER, _VALUE_CONE, _VALUE_TORUS, _VALUE_CUBOID = 5, 6, 7, 8
+_VALUE_RECTANGLE, _VALUE_TRIANGLE, _VALUE_RAY = 9, 10, 11
 
 
 def _value_array(values) -> "ctypes.Array[c_double]":
@@ -11169,8 +12230,9 @@ class _Value:
 
     def transform(self, t: "Transform | Sequence[float]"):
         """This value under `t` (a `Transform`, or 16 numbers), a value of the same type. A line
-        takes any map keeping its ends apart, an ellipse any keeping it an ellipse; the rest
-        only a similarity (`Ellipse.from_circle` first for a circle)."""
+        takes any map keeping its ends apart, an ellipse any keeping it an ellipse, a triangle
+        any keeping it a triangle, a ray any keeping its direction, a rectangle any keeping its
+        sides square; the rest only a similarity (`Ellipse.from_circle` first for a circle)."""
         return type(self)._of(_value_call("value_transform", self._KIND, self._v, _matrix(t, "value_transform"), out=len(self._v)))
 
     def __iter__(self) -> Iterator[float]:
@@ -11212,9 +12274,7 @@ class _CurveValue(_Value):
         return math.dist(foot.point, [float(c) for c in p])
 
     def to_nurbs(self) -> "NurbsCurve":
-        """The exact NURBS form. Native Python only: `NurbsCurve` is not in the web build."""
-        if isinstance(_lib(), _WasmLibrary):
-            raise BuildError("to_nurbs: NurbsCurve is not in the web build")
+        """The exact NURBS form."""
         return NurbsCurve._of(_lib().cadaclysm_blacksmith_curve_value_to_nurbs(self._KIND, _value_array(self._v)), "curve_value_to_nurbs")
 
 
@@ -11530,6 +12590,159 @@ class Cuboid(_SolidValue):
         return _value_call("cuboid_closest_point", None, self._v, _point3(p, "cuboid_closest_point"), out=3)
 
 
+class Rectangle(_CurveValue):
+    """The rectangle over `x` and `y` (increasing `Interval`s, or pairs) in its frame's x-y
+    plane -- Rhino's `Rectangle3d`. As a curve it is its boundary: `t` runs 0..4, one unit a
+    side from corner 0 counter-clockwise about the frame's z (clamped outside, as Rhino's
+    `PointAt`); `closest_point` is the boundary's, not unique on a tie (the centre)."""
+
+    __slots__ = ()
+    _KIND = _VALUE_RECTANGLE
+    _FIELDS = ("frame", "x", "y")
+
+    def __init__(self, frame: FrameLike, x: "Interval | Iterable[float]", y: "Interval | Iterable[float]"):
+        x, y = Interval.of(x), Interval.of(y)
+        self._set([*_frame(frame), x.t0, x.t1, y.t0, y.t1])
+
+    @property
+    def frame(self) -> "Frame":
+        """The frame the rectangle lies on: its ranges run along the frame's x and y."""
+        return Frame.of(self._v[0:12])
+
+    @property
+    def x(self) -> Interval:
+        return Interval(self._v[12], self._v[13])
+
+    @property
+    def y(self) -> Interval:
+        return Interval(self._v[14], self._v[15])
+
+    def corners(self) -> "list[tuple[float, float, float]]":
+        """The four corners in Rhino's `Corner(i)` order: `(x0,y0) (x1,y0) (x1,y1) (x0,y1)`."""
+        c = _value_call("rectangle_corners", None, self._v, out=12)
+        return [c[k:k + 3] for k in range(0, 12, 3)]
+
+    def area(self) -> float:
+        return _value_call("rectangle_area", None, self._v, out=1)[0]
+
+    def closest_point_in(self, p: Point3, include_interior: bool = True) -> "tuple[float, float, float]":
+        """Rhino's `ClosestPoint(p, includeInterior)`: `p` projected onto the plane and clamped
+        into the filled rectangle with the interior, else the boundary's closest point."""
+        what = "rectangle_closest_point"
+        return _value_call(what, None, self._v, _point3(p, what), bool(include_interior), out=3)
+
+    def contains(self, p: Point3, tolerance: "float | None" = None) -> str:
+        """Where `p`, projected onto the plane, lies (Rhino's `Contains`): `"inside"`,
+        `"outside"`, or `"on"` within `tolerance` of the boundary. None (or NaN) is unset: the
+        rectangle's own effective tolerance (`tolerance.relative` times its diagonal); 0 is
+        exact."""
+        what = "rectangle_contains"
+        r = _lib().cadaclysm_blacksmith_rectangle_contains(_value_array(self._v), _point3(p, what), _tolerance(tolerance))
+        if r == NONE:
+            _fail(what)
+        return _containment(r, what)
+
+    def to_sheet(self) -> "Solid":
+        """The filled rectangle as a one-face planar sheet facing the frame's z."""
+        return Solid(_checked(_lib().cadaclysm_blacksmith_rectangle_to_sheet(_value_array(self._v)), "rectangle_to_sheet"))
+
+
+class Triangle(_Value):
+    """The triangle `a`, `b`, `c` -- Rhino's `Triangle3d`. A degenerate one (collinear or
+    coincident points) is refused."""
+
+    __slots__ = ()
+    _KIND = _VALUE_TRIANGLE
+    _FIELDS = ("a", "b", "c")
+
+    def __init__(self, a: Point3, b: Point3, c: Point3):
+        self._set([*_point3(a, "Triangle"), *_point3(b, "Triangle"), *_point3(c, "Triangle")])
+
+    @property
+    def a(self) -> "tuple[float, float, float]":
+        return self._v[0:3]
+
+    @property
+    def b(self) -> "tuple[float, float, float]":
+        return self._v[3:6]
+
+    @property
+    def c(self) -> "tuple[float, float, float]":
+        return self._v[6:9]
+
+    def area(self) -> float:
+        return _value_call("triangle_area", None, self._v, out=1)[0]
+
+    def perimeter(self) -> float:
+        return _value_call("triangle_perimeter", None, self._v, out=1)[0]
+
+    def centroid(self) -> "tuple[float, float, float]":
+        """The area centroid, the vertices' mean (Rhino's `AreaCenter`)."""
+        return _value_call("triangle_centroid", None, self._v, out=3)
+
+    def circumcircle(self) -> Circle:
+        """The circle through `a`, `b`, `c`: x toward `a`, the normal turning them counter-clockwise."""
+        return Circle._of(_value_call("triangle_circumcircle", None, self._v, out=13))
+
+    def point_at(self, wa: float, wb: float, wc: float) -> "tuple[float, float, float]":
+        """The point of barycentric weights `wa`, `wb`, `wc`, used as given."""
+        return _value_call("triangle_point_at", None, self._v, float(wa), float(wb), float(wc), out=3)
+
+    def barycentric(self, p: Point3) -> "tuple[float, float, float]":
+        """The weights `(wa, wb, wc)`, summing to 1, of `p` projected onto the plane."""
+        return _value_call("triangle_barycentric", None, self._v, _point3(p, "triangle_barycentric"), out=3)
+
+    def closest_point(self, p: Point3) -> "tuple[float, float, float]":
+        """The closest point of the filled triangle."""
+        return _value_call("triangle_closest_point", None, self._v, _point3(p, "triangle_closest_point"), out=3)
+
+    def distance_to(self, p: Point3) -> float:
+        return math.dist(self.closest_point(p), [float(c) for c in p])
+
+    def edge(self, i: int) -> Line:
+        """Edge `i` as a line: 0 `a` to `b`, 1 `b` to `c`, 2 `c` to `a`."""
+        return Line._of(_value_call("triangle_edge", None, self._v, int(i), out=6))
+
+    def to_sheet(self) -> "Solid":
+        """The filled triangle as a one-face planar sheet, its normal turning `a`, `b`, `c`
+        counter-clockwise."""
+        return Solid(_checked(_lib().cadaclysm_blacksmith_triangle_to_sheet(_value_array(self._v)), "triangle_to_sheet"))
+
+
+class Ray(_Value):
+    """The half-line from `position` along `direction` -- Rhino's `Ray3d`; the direction is
+    kept as given, not unitised, so `t` counts lengths of it. A ray has no `bounds`: the
+    library refuses it."""
+
+    __slots__ = ()
+    _KIND = _VALUE_RAY
+    _FIELDS = ("position", "direction")
+
+    def __init__(self, position: Point3, direction: Point3):
+        self._set([*_point3(position, "Ray"), *_point3(direction, "Ray")])
+
+    @property
+    def position(self) -> "tuple[float, float, float]":
+        return self._v[0:3]
+
+    @property
+    def direction(self) -> "tuple[float, float, float]":
+        return self._v[3:6]
+
+    def point_at(self, t: float) -> "tuple[float, float, float]":
+        """`position + t * direction`, any `t` (behind the start too, as Rhino's `PointAt`)."""
+        return _value_call("ray_point_at", None, self._v, float(t), out=3)
+
+    def closest_point(self, p: Point3) -> CurveFoot:
+        """The closest point on the ray, `t` clamped at 0 (behind the start: the start).
+        Always unique."""
+        f = _value_call("ray_closest_point", None, self._v, _point3(p, "ray_closest_point"), out=4)
+        return CurveFoot(f[0], f[1:4], True)
+
+    def distance_to(self, p: Point3) -> float:
+        return math.dist(self.closest_point(p).point, [float(c) for c in p])
+
+
 class Workplane:
     """The fluent chain, mirroring the Rust `Workplane`: a frame, the solid built
     so far, and the face last picked. A build call *replaces* the solid (as
@@ -11749,6 +12962,63 @@ def write_sat(path: FilePath, solids: Sequence[Solid], unit: Unit = "mm") -> Non
     handles = (c_void_p * len(solids))(*[s._h() for s in solids])
     if not _lib().cadaclysm_blacksmith_sat(handles, len(solids), os.fsencode(str(path)), UNITS[unit]):
         _fail("sat")
+
+
+def _warn_3dm() -> None:
+    """What a `.3dm` write did not write as itself -- `last_error` on success, a line
+    each -- said as one `UserWarning` per line."""
+    for line in filter(None, _text(_lib().cadaclysm_blacksmith_last_error()).split("\n")):
+        warnings.warn(f"3dm: {line}", stacklevel=3)
+
+
+def _taken_3dm(raw, length: c_size_t, what: str) -> bytes:
+    """The bytes a `.3dm` call handed over, copied out and released, its notes warned."""
+    if not raw:
+        _fail(what)
+    _warn_3dm()
+    if _WASM:
+        return raw   # the wasm returns the bytes themselves, nothing to free
+    try:
+        return ctypes.string_at(raw, length.value)
+    finally:
+        _lib().cadaclysm_blacksmith_bytes_free(raw, length.value)
+
+
+def _write_3dm_bytes(path: FilePath, data: bytes, what: str) -> None:
+    """The notebook's file form: Pyodide's own filesystem, refused in the C writer's words."""
+    try:
+        _FsPath(path).write_bytes(data)
+    except OSError as e:
+        raise BuildError(f"{what}: {path}: {e.strerror or e}") from None
+
+
+def rhino3dm_bytes(solids: Sequence[Solid], unit: Unit = "mm") -> bytes:
+    """Several solids as one Rhino `.3dm` (version 8, which Rhino 8 and 9 open), one
+    object each: its exact brep, or -- where a body has no exact form there -- its mesh,
+    with a `UserWarning` saying so. Each object is named as its solid is, coloured with
+    the solid's own colour (a face's or an edge's own is left out) and carries the
+    solid's attributes as user text. `unit` is the file's: the numbers written are the
+    numbers held."""
+    if unit not in UNITS:
+        raise BuildError(f"unit must be one of {sorted(UNITS)}")
+    handles = (c_void_p * len(solids))(*[s._h() for s in solids])
+    length = c_size_t(0)
+    raw = _lib().cadaclysm_blacksmith_3dm_bytes(handles, len(solids), UNITS[unit], ctypes.byref(length))
+    return _taken_3dm(raw, length, "3dm_bytes")
+
+
+def write_3dm(path: FilePath, solids: Sequence[Solid], unit: Unit = "mm") -> None:
+    """`rhino3dm_bytes` written to `path` by the library itself, which names the file in
+    its refusal when it cannot."""
+    if _WASM:
+        _write_3dm_bytes(path, rhino3dm_bytes(solids, unit), "3dm")
+        return
+    if unit not in UNITS:
+        raise BuildError(f"unit must be one of {sorted(UNITS)}")
+    handles = (c_void_p * len(solids))(*[s._h() for s in solids])
+    if not _lib().cadaclysm_blacksmith_3dm(handles, len(solids), os.fsencode(str(path)), UNITS[unit]):
+        _fail("3dm")
+    _warn_3dm()
 
 
 def svg(things: Sequence[Solid | Profile], path: FilePath | None = None, **words: Any) -> "str | None":

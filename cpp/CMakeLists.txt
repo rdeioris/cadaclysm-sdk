@@ -165,6 +165,26 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_arc_length_test>")
   add_test(NAME arc_length COMMAND cadaclysm_arc_length_test ${CADACLYSM_LICENSE})
 
+  # NurbsCurve, Curvature and to_nurbs() on the curve values, at parity with the Python reference's
+  # NurbsCurve tests. No sample file.
+  add_executable(cadaclysm_nurbs_curve_test tests/nurbs_curve_test.cpp)
+  target_link_libraries(cadaclysm_nurbs_curve_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_nurbs_curve_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_nurbs_curve_test>")
+  add_test(NAME nurbs_curve COMMAND cadaclysm_nurbs_curve_test ${CADACLYSM_LICENSE})
+
+  # Sheets from curves (loft_curves ... join_sheets) and their records, at parity with the Python
+  # reference's tests. No sample file.
+  add_executable(cadaclysm_curve_sheets_test tests/curve_sheets_test.cpp)
+  target_link_libraries(cadaclysm_curve_sheets_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_curve_sheets_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_curve_sheets_test>")
+  add_test(NAME curve_sheets COMMAND cadaclysm_curve_sheets_test ${CADACLYSM_LICENSE})
+
   # RTree, closest_points and k_neighbors, at parity with the Python reference's R-tree tests.
   # No sample file.
   add_executable(cadaclysm_rtree_test tests/rtree_test.cpp)
@@ -195,6 +215,16 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_swept_clash_test>")
   add_test(NAME swept_clash COMMAND cadaclysm_swept_clash_test ${CADACLYSM_LICENSE})
+
+  # Face and edge ids, origins, History, attributes and the edge and vertex references, at
+  # parity with the Python reference's TestIdentity tests (identity plan C3). No sample file.
+  add_executable(cadaclysm_identity_test tests/identity_test.cpp)
+  target_link_libraries(cadaclysm_identity_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_identity_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_identity_test>")
+  add_test(NAME identity COMMAND cadaclysm_identity_test ${CADACLYSM_LICENSE})
 
   # ThicknessGauge, the Thickness rows, thickness(), mesh_thickness() and Solid::thickness_at_face,
   # at parity with the Python reference's test_thickness_* and test_mesh_thickness_* tests (wall
@@ -268,6 +298,17 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_posed_test>")
   add_test(NAME posed COMMAND cadaclysm_posed_test ${CADACLYSM_LICENSE})
+
+  # Document over the cadaclysm_blacksmith_document_* and cadaclysm_bim_* calls, at parity with the
+  # Python reference's document tests (document plan, 2026-11-06), on the JSON-text shape. Writes
+  # two small files in its working directory (the build directory) and removes them.
+  add_executable(cadaclysm_document_test tests/document_test.cpp)
+  target_link_libraries(cadaclysm_document_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_document_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_document_test>")
+  add_test(NAME document COMMAND cadaclysm_document_test ${CADACLYSM_LICENSE})
   # to_arcs, offset, section, Tool, Stock and Job over the pocketed block and the plate
   # fixtures, plus face/contour/pocket/drill driven by hand and a closed job's refusal.
   # Needs a license, as assembly does; no sample file.

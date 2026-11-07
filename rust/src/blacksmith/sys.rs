@@ -40,6 +40,12 @@ pub const CADACLYSM_BLACKSMITH_VALUE_CONE: u32 = 6;
 pub const CADACLYSM_BLACKSMITH_VALUE_TORUS: u32 = 7;
 /// A box, `frame[12] x0 x1 y0 y1 z0 z1`.
 pub const CADACLYSM_BLACKSMITH_VALUE_CUBOID: u32 = 8;
+/// A rectangle, `frame[12] x0 x1 y0 y1`; as a curve its boundary, `t` in 0..4.
+pub const CADACLYSM_BLACKSMITH_VALUE_RECTANGLE: u32 = 9;
+/// A triangle, `a[3] b[3] c[3]`.
+pub const CADACLYSM_BLACKSMITH_VALUE_TRIANGLE: u32 = 10;
+/// A ray, `position[3] direction[3]`.
+pub const CADACLYSM_BLACKSMITH_VALUE_RAY: u32 = 11;
 
 /// A solid (or open sheet). Opaque; freed with `cadaclysm_blacksmith_solid_free`.
 #[repr(C)]
@@ -167,6 +173,80 @@ pub struct CadaclysmBlacksmithAt {
     pub segment: u32,
     pub error: f64,
     pub from_polyline: i32,
+}
+
+/// A curve's bending at a parameter (`cadaclysm_blacksmith_nurbs_curve_curvature`): `kappa`
+/// (1 / radius), the unit tangent, the unit normal toward the centre, the binormal and the
+/// centre of the osculating circle. On a straight piece `kappa` is 0, `normal` and `binormal`
+/// are zero and `has_centre` is 0.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CadaclysmBlacksmithCurvature {
+    pub kappa: f64,
+    pub tangent: [f64; 3],
+    pub normal: [f64; 3],
+    pub binormal: [f64; 3],
+    pub centre: [f64; 3],
+    pub has_centre: i32,
+}
+
+/// How well two faces meet along their sides (`cadaclysm_blacksmith_continuity`): the largest
+/// gap, the largest angle between the normals and the largest curvature difference, each with
+/// where it was found, and how many points were asked.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CadaclysmBlacksmithContinuity {
+    pub gap: f64,
+    pub gap_at: [f64; 3],
+    pub angle: f64,
+    pub angle_at: [f64; 3],
+    pub curvature: f64,
+    pub curvature_at: [f64; 3],
+    pub samples: u32,
+}
+
+/// One side of the hole `cadaclysm_blacksmith_n_sided_patch` fills: a sheet's side, or (where
+/// `sheet` is NULL) a curve met at G0.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CadaclysmBlacksmithPatchBoundary {
+    pub sheet: *const CadaclysmBlacksmithSolid,
+    pub face: u32,
+    pub side: u32,
+    pub from: f64,
+    pub to: f64,
+    pub level: u32,
+    pub curve: *const CadaclysmBlacksmithNurbsCurve,
+}
+
+/// How well an N-sided patch meets (`cadaclysm_blacksmith_n_sided_patch`'s `report_out`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CadaclysmBlacksmithPatchReport {
+    pub faces: u32,
+    pub boundary: CadaclysmBlacksmithContinuity,
+    pub internal: CadaclysmBlacksmithContinuity,
+    pub corner_angle: f64,
+}
+
+/// What `cadaclysm_blacksmith_join_sheets` did.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CadaclysmBlacksmithJoinReport {
+    pub sewn: u32,
+    pub naked_before: u32,
+    pub naked_after: u32,
+    pub refused: u32,
+    pub turned: u32,
+    pub worst_gap: f64,
+    pub closed: i32,
+}
+
+/// A curve in space, always a NURBS. Opaque, immutable; freed with
+/// `cadaclysm_blacksmith_nurbs_curve_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithNurbsCurve {
+    _private: [u8; 0],
 }
 
 /// The samples of one divide call. Opaque; read with `cadaclysm_blacksmith_samples_at`,
@@ -497,6 +577,13 @@ pub struct CadaclysmBlacksmithHealth {
 /// the solid. Opaque; freed with `cadaclysm_blacksmith_heal_free`.
 #[repr(C)]
 pub struct CadaclysmBlacksmithHeal {
+    _private: [u8; 0],
+}
+
+/// What a verb did to its inputs' faces (or edges), read off the result's ids alone
+/// (`cadaclysm_blacksmith_history`). Opaque; freed with `cadaclysm_blacksmith_history_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithHistory {
     _private: [u8; 0],
 }
 
@@ -950,6 +1037,13 @@ pub struct CadaclysmBlacksmithFemVertex {
     pub has_position: bool,
 }
 
+/// A blacksmith document: nodes, parameters, history, branches and an evaluation cache.
+/// Opaque, mutable, one thread at a time; freed with `cadaclysm_blacksmith_document_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithDocument {
+    _private: [u8; 0],
+}
+
 /// `CadaclysmBlacksmithProgress`: `(phase, done, total, user)`, or null for none.
 pub type CadaclysmBlacksmithProgress = Option<unsafe extern "C" fn(*const c_char, usize, usize, *mut c_void)>;
 
@@ -961,6 +1055,7 @@ type SweepPath = CadaclysmBlacksmithSweepPath;
 type Progress = CadaclysmBlacksmithProgress;
 type Hits = CadaclysmBlacksmithHits;
 type Samples = CadaclysmBlacksmithSamples;
+type NurbsCurve = CadaclysmBlacksmithNurbsCurve;
 type Intersection = CadaclysmBlacksmithIntersection;
 type ProfileList = CadaclysmBlacksmithProfileList;
 type Tool = CadaclysmBlacksmithTool;
@@ -985,10 +1080,12 @@ type Thicknesses = CadaclysmBlacksmithThicknesses;
 type MeshThicknesses = CadaclysmBlacksmithMeshThicknesses;
 type Health = CadaclysmBlacksmithHealth;
 type Heal = CadaclysmBlacksmithHeal;
+type History = CadaclysmBlacksmithHistory;
 type Subd = CadaclysmBlacksmithSubd;
 type Sketch = CadaclysmBlacksmithSketch;
 type BoxShape = CadaclysmBlacksmithBox;
 type Tessellation = CadaclysmBlacksmithTessellation;
+type Document = CadaclysmBlacksmithDocument;
 
 entry_points! {
     Api, ENTRY_POINTS;
@@ -1167,7 +1264,7 @@ entry_points! {
     fn cadaclysm_blacksmith_quaternion_slerp(a: *const f64, b: *const f64, s: f64, out: *mut f64) -> bool;
 
     // Value geometry: every value a flat array of doubles tagged with a kind
-    // (`CADACLYSM_BLACKSMITH_VALUE_*`); `curve_value_to_nurbs` waits for NurbsCurve.
+    // (`CADACLYSM_BLACKSMITH_VALUE_*`).
     fn cadaclysm_blacksmith_value_size(kind: u32) -> u32;
     fn cadaclysm_blacksmith_value_check(kind: u32, value: *const f64, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_value_bounds(kind: u32, value: *const f64, out: *mut f64) -> bool;
@@ -1176,6 +1273,7 @@ entry_points! {
     fn cadaclysm_blacksmith_curve_value_tangent_at(kind: u32, value: *const f64, t: f64, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_curve_value_length(kind: u32, value: *const f64, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_curve_value_closest_point(kind: u32, value: *const f64, point: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_curve_value_to_nurbs(kind: u32, value: *const f64) -> *mut NurbsCurve;
     fn cadaclysm_blacksmith_circle_through(a: *const f64, b: *const f64, c: *const f64, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_arc_through(a: *const f64, b: *const f64, c: *const f64, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_arc_from_start_tangent_end(a: *const f64, tangent: *const f64, c: *const f64, out: *mut f64) -> bool;
@@ -1195,6 +1293,23 @@ entry_points! {
     fn cadaclysm_blacksmith_cuboid_point_at(value: *const f64, sx: f64, sy: f64, sz: f64, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_cuboid_closest_point(value: *const f64, point: *const f64, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_frame_fit(xyz: *const f64, count: usize, out: *mut f64, deviation_out: *mut f64) -> bool;
+    // The rectangle, the triangle and the ray (value kinds 9-11, plan B4).
+    fn cadaclysm_blacksmith_rectangle_corners(value: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_rectangle_area(value: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_rectangle_closest_point(value: *const f64, point: *const f64, include_interior: bool, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_rectangle_contains(value: *const f64, point: *const f64, tolerance: f64) -> u32;
+    fn cadaclysm_blacksmith_rectangle_to_sheet(value: *const f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_triangle_area(value: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_triangle_perimeter(value: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_triangle_centroid(value: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_triangle_circumcircle(value: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_triangle_point_at(value: *const f64, wa: f64, wb: f64, wc: f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_triangle_barycentric(value: *const f64, point: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_triangle_closest_point(value: *const f64, point: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_triangle_edge(value: *const f64, index: u32, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_triangle_to_sheet(value: *const f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_ray_point_at(value: *const f64, t: f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_ray_closest_point(value: *const f64, point: *const f64, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_coloured(solid: *const Solid, face: u32, r: f64, g: f64, b: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_edges_coloured(solid: *const Solid, edges: *const u32, count: usize, r: f64, g: f64, b: f64) -> *mut Solid;
 
@@ -1290,6 +1405,47 @@ entry_points! {
     fn cadaclysm_blacksmith_face_frame(solid: *const Solid, face: u32, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_face_ref(solid: *const Solid, face: u32, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_find_face(solid: *const Solid, face_ref: *const f64, hint: i32, tolerance: f64) -> i32;
+    fn cadaclysm_blacksmith_edge_ref(solid: *const Solid, edge: u32, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_find_edge(solid: *const Solid, edge_ref: *const f64, tolerance: f64) -> i32;
+    fn cadaclysm_blacksmith_vertex_count(solid: *const Solid) -> u32;
+    fn cadaclysm_blacksmith_vertex_ref(solid: *const Solid, vertex: u32, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_find_vertex(solid: *const Solid, vertex_ref: *const f64, tolerance: f64) -> i32;
+    fn cadaclysm_blacksmith_solid_tracked(solid: *const Solid) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_is_tracked(solid: *const Solid) -> bool;
+    fn cadaclysm_blacksmith_face_id(solid: *const Solid, face: u32) -> u64;
+    fn cadaclysm_blacksmith_face_with_id(solid: *const Solid, id: u64) -> u32;
+    fn cadaclysm_blacksmith_face_origin_count(solid: *const Solid, face: u32) -> u32;
+    fn cadaclysm_blacksmith_face_origin_at(solid: *const Solid, face: u32, i: u32, operand: *mut u32, id: *mut u64) -> bool;
+    fn cadaclysm_blacksmith_edge_id(solid: *const Solid, edge: u32) -> u64;
+    fn cadaclysm_blacksmith_edge_with_id(solid: *const Solid, id: u64) -> u32;
+    fn cadaclysm_blacksmith_edge_origin_count(solid: *const Solid, edge: u32) -> u32;
+    fn cadaclysm_blacksmith_edge_origin_at(solid: *const Solid, edge: u32, i: u32, operand: *mut u32, id: *mut u64) -> bool;
+    fn cadaclysm_blacksmith_origins_through(out: *const Solid, via: *const Solid) -> *mut Solid;
+    fn cadaclysm_blacksmith_with_attribute(solid: *const Solid, key: *const c_char, value: *const c_char) -> *mut Solid;
+    fn cadaclysm_blacksmith_without_attribute(solid: *const Solid, key: *const c_char) -> *mut Solid;
+    fn cadaclysm_blacksmith_attribute(solid: *const Solid, key: *const c_char) -> *const c_char;
+    fn cadaclysm_blacksmith_attribute_count(solid: *const Solid) -> u32;
+    fn cadaclysm_blacksmith_attribute_key_at(solid: *const Solid, i: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_attribute_value_at(solid: *const Solid, i: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_with_face_attribute(solid: *const Solid, face: u32, key: *const c_char, value: *const c_char) -> *mut Solid;
+    fn cadaclysm_blacksmith_without_face_attribute(solid: *const Solid, face: u32, key: *const c_char) -> *mut Solid;
+    fn cadaclysm_blacksmith_face_attribute(solid: *const Solid, face: u32, key: *const c_char) -> *const c_char;
+    fn cadaclysm_blacksmith_face_attribute_count(solid: *const Solid, face: u32) -> u32;
+    fn cadaclysm_blacksmith_face_attribute_key_at(solid: *const Solid, face: u32, i: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_face_attribute_value_at(solid: *const Solid, face: u32, i: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_history(out: *const Solid, inputs: *const *const Solid, count: usize) -> *mut History;
+    fn cadaclysm_blacksmith_edge_history(out: *const Solid, inputs: *const *const Solid, count: usize) -> *mut History;
+    fn cadaclysm_blacksmith_history_free(history: *mut History);
+    fn cadaclysm_blacksmith_history_kept_count(history: *const History) -> u32;
+    fn cadaclysm_blacksmith_history_kept_at(history: *const History, i: u32, operand: *mut u32, id: *mut u64, out_id: *mut u64) -> bool;
+    fn cadaclysm_blacksmith_history_modified_count(history: *const History) -> u32;
+    fn cadaclysm_blacksmith_history_modified_at(history: *const History, i: u32, operand: *mut u32, id: *mut u64) -> bool;
+    fn cadaclysm_blacksmith_history_modified_output_count(history: *const History, i: u32) -> u32;
+    fn cadaclysm_blacksmith_history_modified_output_at(history: *const History, i: u32, j: u32) -> u64;
+    fn cadaclysm_blacksmith_history_generated_count(history: *const History) -> u32;
+    fn cadaclysm_blacksmith_history_generated_at(history: *const History, i: u32) -> u64;
+    fn cadaclysm_blacksmith_history_deleted_count(history: *const History) -> u32;
+    fn cadaclysm_blacksmith_history_deleted_at(history: *const History, i: u32, operand: *mut u32, id: *mut u64) -> bool;
     fn cadaclysm_blacksmith_colour(solid: *const Solid, face: u32, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_edge_colour(solid: *const Solid, edge: u32, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_parse_colour(text: *const c_char, out: *mut f64) -> bool;
@@ -1323,6 +1479,10 @@ entry_points! {
     fn cadaclysm_blacksmith_heal_fixes(h: *const Heal, items: *mut u32, sizes: *mut f64) -> u32;
     fn cadaclysm_blacksmith_heal_refused(h: *const Heal, items: *mut u32, sizes: *mut f64) -> u32;
     fn cadaclysm_blacksmith_edge_tolerance(solid: *const Solid, edge: u32) -> f64;
+    fn cadaclysm_blacksmith_effective_tolerance(solids: *const *const Solid, count: usize) -> f64;
+    fn cadaclysm_blacksmith_solid_tolerances(solid: *const Solid, absolute: *mut f64, angular: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_solid_with_tolerances(solid: *const Solid, absolute: f64, angular: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_vertex_tolerance(solid: *const Solid, x: f64, y: f64, z: f64) -> f64;
     fn cadaclysm_blacksmith_mass_properties(solid: *const Solid, accuracy: f64,
                                            out: *mut CadaclysmBlacksmithMassProperties) -> bool;
     fn cadaclysm_blacksmith_oriented_box(solid: *const Solid, accuracy: f64, out: *mut CadaclysmBlacksmithOrientedBox) -> bool;
@@ -1337,6 +1497,137 @@ entry_points! {
     fn cadaclysm_blacksmith_samples_count(samples: *const Samples) -> u32;
     fn cadaclysm_blacksmith_samples_at(samples: *const Samples, i: u32, out: *mut CadaclysmBlacksmithAt) -> bool;
     fn cadaclysm_blacksmith_samples_free(samples: *mut Samples);
+
+    // NurbsCurve: curves in space.
+    fn cadaclysm_blacksmith_nurbs_curve_new(xyz: *const f64, count: usize, weights: *const f64, degree: u32, knots: *const f64, knot_count: usize) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_through(xyz: *const f64, count: usize, degree: u32, closed: bool, start: *const f64, end: *const f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_fit(xyz: *const f64, count: usize, degree: u32, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_from_edge(solid: *const Solid, edge: u32) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_from_face_isocurve(solid: *const Solid, face: u32, along_u: bool, at: f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_blend(a: *const NurbsCurve, a_end: bool, b: *const NurbsCurve, b_end: bool, continuity: u32, bulge: f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_projected_to_plane(curve: *const NurbsCurve, origin: *const f64, normal: *const f64, direction: *const f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_projected_to_face(curve: *const NurbsCurve, solid: *const Solid, face: u32, direction: *const f64, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_pulled_to_face(curve: *const NurbsCurve, solid: *const Solid, face: u32, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_reversed(curve: *const NurbsCurve) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_trimmed(curve: *const NurbsCurve, t0: f64, t1: f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_extended(curve: *const NurbsCurve, at_start: bool, length: f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_elevated(curve: *const NurbsCurve, by: u32) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_joined(curves: *const *const NurbsCurve, count: usize, tolerance: f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_tween(a: *const NurbsCurve, b: *const NurbsCurve, count: u32, method: u32, samples: u32, align: bool, tolerance: f64, out: *mut *mut NurbsCurve) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_transformed(curve: *const NurbsCurve, matrix: *const f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_clone(curve: *const NurbsCurve) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_free(curve: *mut NurbsCurve);
+    fn cadaclysm_blacksmith_nurbs_curve_degree(curve: *const NurbsCurve) -> u32;
+    fn cadaclysm_blacksmith_nurbs_curve_control_count(curve: *const NurbsCurve) -> u32;
+    fn cadaclysm_blacksmith_nurbs_curve_knot_count(curve: *const NurbsCurve) -> u32;
+    fn cadaclysm_blacksmith_nurbs_curve_control_points(curve: *const NurbsCurve, xyz: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_weights(curve: *const NurbsCurve, w: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_knots(curve: *const NurbsCurve, k: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_is_rational(curve: *const NurbsCurve) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_is_closed(curve: *const NurbsCurve) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_domain(curve: *const NurbsCurve, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_point(curve: *const NurbsCurve, t: f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_derivatives(curve: *const NurbsCurve, t: f64, order: u32, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_curvature(curve: *const NurbsCurve, t: f64, out: *mut CadaclysmBlacksmithCurvature) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_length(curve: *const NurbsCurve, accuracy: f64, out: *mut CadaclysmBlacksmithLength) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_point_at_length(curve: *const NurbsCurve, s: f64, accuracy: f64, out: *mut CadaclysmBlacksmithAt) -> bool;
+    fn cadaclysm_blacksmith_nurbs_curve_divide_by_count(curve: *const NurbsCurve, n: u32, accuracy: f64) -> *mut Samples;
+    fn cadaclysm_blacksmith_nurbs_curve_divide_by_length(curve: *const NurbsCurve, step: f64, accuracy: f64) -> *mut Samples;
+    fn cadaclysm_blacksmith_nurbs_curve_plane_hits(curve: *const NurbsCurve, origin: *const f64, normal: *const f64) -> *mut Samples;
+    fn cadaclysm_blacksmith_nurbs_curve_face_hits(curve: *const NurbsCurve, solid: *const Solid, face: u32, tolerance: f64) -> *mut Samples;
+    fn cadaclysm_blacksmith_loft_curves(sections: *const *const NurbsCurve, count: usize, degree: u32, loose: bool, closed: bool) -> *mut Solid;
+    fn cadaclysm_blacksmith_sweep_rail(
+        rail: *const NurbsCurve,
+        sections: *const *const NurbsCurve,
+        count: usize,
+        frame: u32,
+        up: *const f64,
+        tolerance: f64,
+        error_out: *mut f64
+    ) -> *mut Solid;
+    fn cadaclysm_blacksmith_sweep_two_rails(
+        rail_a: *const NurbsCurve,
+        rail_b: *const NurbsCurve,
+        sections: *const *const NurbsCurve,
+        count: usize,
+        tolerance: f64,
+        error_out: *mut f64
+    ) -> *mut Solid;
+    fn cadaclysm_blacksmith_edge_surface(curves: *const *const NurbsCurve, count: usize, tolerance: f64, error_out: *mut f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_network_surface(
+        u_curves: *const *const NurbsCurve,
+        u_count: usize,
+        v_curves: *const *const NurbsCurve,
+        v_count: usize,
+        tolerance: f64,
+        error_out: *mut f64
+    ) -> *mut Solid;
+    fn cadaclysm_blacksmith_continuity(
+        a: *const Solid,
+        face_a: u32,
+        side_a: u32,
+        b: *const Solid,
+        face_b: u32,
+        side_b: u32,
+        samples: u32,
+        out: *mut CadaclysmBlacksmithContinuity
+    ) -> bool;
+    fn cadaclysm_blacksmith_match_side(a: *const Solid, face_a: u32, side_a: u32, b: *const Solid, face_b: u32, side_b: u32, level: u32) -> *mut Solid;
+    fn cadaclysm_blacksmith_blend_sides(
+        a: *const Solid,
+        face_a: u32,
+        side_a: u32,
+        b: *const Solid,
+        face_b: u32,
+        side_b: u32,
+        level: u32,
+        bulge: f64
+    ) -> *mut Solid;
+    fn cadaclysm_blacksmith_n_sided_patch(
+        boundaries: *const CadaclysmBlacksmithPatchBoundary,
+        count: usize,
+        bulge: f64,
+        tolerance: f64,
+        report_out: *mut CadaclysmBlacksmithPatchReport
+    ) -> *mut Solid;
+    fn cadaclysm_blacksmith_fillet_surfaces(
+        a: *const Solid,
+        face_a: u32,
+        b: *const Solid,
+        face_b: u32,
+        radius_start: f64,
+        radius_end: f64,
+        flip_a: bool,
+        flip_b: bool,
+        tolerance: f64,
+        rail_a: *mut *mut NurbsCurve,
+        rail_b: *mut *mut NurbsCurve,
+        error_out: *mut f64
+    ) -> *mut Solid;
+    fn cadaclysm_blacksmith_fillet_varying(solid: *const Solid, edges: *const u32, count: usize, radius_start: f64, radius_end: f64, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_split_by_curve(sheet: *const Solid, curve: *const NurbsCurve, direction: *const f64, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_trim_by_curve(sheet: *const Solid, curve: *const NurbsCurve, direction: *const f64, keep_inside: bool, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_join_sheets(sheets: *const *const Solid, count: usize, tolerance: f64, report: *mut CadaclysmBlacksmithJoinReport) -> *mut Solid;
+    fn cadaclysm_blacksmith_flange(
+        sheet: *const Solid,
+        edges: *const u32,
+        count: usize,
+        section: *const NurbsCurve,
+        tolerance: f64,
+        join: bool,
+        error_out: *mut f64
+    ) -> *mut Solid;
+    fn cadaclysm_blacksmith_extrude_to(
+        sheet: *const Solid,
+        edges: *const u32,
+        count: usize,
+        direction: *const f64,
+        target: *const Solid,
+        tolerance: f64,
+        join: bool,
+        error_out: *mut f64
+    ) -> *mut Solid;
+    fn cadaclysm_blacksmith_recess(sheet: *const Solid, outline: *const NurbsCurve, depth: f64, draft: f64, fillet: f64, pane: bool, tolerance: f64, faces_out: *mut u32) -> *mut Solid;
     fn cadaclysm_blacksmith_classifier_new(solid: *const Solid, tolerance: f64) -> *mut Classifier;
     fn cadaclysm_blacksmith_classifier_contains(classifier: *const Classifier, point: *const f64, out: *mut u32) -> bool;
     fn cadaclysm_blacksmith_classifier_free(classifier: *mut Classifier);
@@ -1392,6 +1683,13 @@ entry_points! {
     fn cadaclysm_blacksmith_step(solids: *const *const Solid, count: usize, schema: *const c_char, unit: u32) -> *mut c_char;
     fn cadaclysm_blacksmith_sat_text(solids: *const *const Solid, count: usize, unit: u32) -> *mut c_char;
     fn cadaclysm_blacksmith_sat(solids: *const *const Solid, count: usize, path: *const c_char, unit: u32) -> bool;
+    // A `.3dm`: OWNED bytes, `*len` of them, freed with `bytes_free` and that same length --
+    // never `string_free`. On success a non-null `last_error` holds the writer's notes.
+    fn cadaclysm_blacksmith_3dm_bytes(solids: *const *const Solid, count: usize, unit: u32, len: *mut usize) -> *mut u8;
+    fn cadaclysm_blacksmith_3dm(solids: *const *const Solid, count: usize, path: *const c_char, unit: u32) -> bool;
+    fn cadaclysm_blacksmith_assembly_3dm_bytes(assembly: *const Assembly, unit: u32, len: *mut usize) -> *mut u8;
+    fn cadaclysm_blacksmith_assembly_3dm(assembly: *const Assembly, path: *const c_char, unit: u32) -> bool;
+    fn cadaclysm_blacksmith_bytes_free(bytes: *mut u8, len: usize);
     fn cadaclysm_blacksmith_brep_text(solids: *const *const Solid, count: usize) -> *mut c_char;
     fn cadaclysm_blacksmith_brep(solids: *const *const Solid, count: usize, path: *const c_char) -> bool;
     fn cadaclysm_blacksmith_svg_options_init(options: *mut CadaclysmBlacksmithSvgOptions);
@@ -1833,11 +2131,50 @@ entry_points! {
     fn cadaclysm_blacksmith_operations_param_name(l: *const Operations, i: u32, k: u32) -> *const c_char;
     fn cadaclysm_blacksmith_operations_param_value(l: *const Operations, i: u32, k: u32) -> f64;
     fn cadaclysm_blacksmith_operations_free(l: *mut Operations);
+
+    fn cadaclysm_blacksmith_document_new(units: *const c_char) -> *mut Document;
+    fn cadaclysm_blacksmith_document_load(text: *const c_char) -> *mut Document;
+    fn cadaclysm_blacksmith_document_free(doc: *mut Document);
+    fn cadaclysm_blacksmith_document_save(doc: *const Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_apply(doc: *mut Document, op: *const c_char, message: *const c_char) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_undo(doc: *mut Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_redo(doc: *mut Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_params(doc: *const Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_evaluate(doc: *mut Document, cheap_only: bool) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_result_kind(doc: *const Document, id: *const c_char) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_result_solid(doc: *const Document, id: *const c_char) -> *mut Solid;
+    fn cadaclysm_blacksmith_document_result_profile(doc: *const Document, id: *const c_char) -> *mut Profile;
+    fn cadaclysm_blacksmith_document_result_profile_count(doc: *const Document, id: *const c_char) -> u32;
+    fn cadaclysm_blacksmith_document_result_profile_at(doc: *const Document, id: *const c_char, i: u32) -> *mut Profile;
+    fn cadaclysm_blacksmith_document_value(doc: *const Document, id: *const c_char) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_errors(doc: *const Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_kinds() -> *mut c_char;
+    fn cadaclysm_blacksmith_document_solid_body(solid: *const Solid) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_profile_path(profile: *const Profile) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_preview(doc: *mut Document, op: *const c_char) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_preview_begin(doc: *mut Document) -> bool;
+    fn cadaclysm_blacksmith_document_end_preview(doc: *mut Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_batch_begin(doc: *mut Document, message: *const c_char) -> bool;
+    fn cadaclysm_blacksmith_document_batch_end(doc: *mut Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_batch_abort(doc: *mut Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_result_nurbs_curve(doc: *const Document, id: *const c_char) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_document_result_subd(doc: *const Document, id: *const c_char) -> *mut Subd;
+    fn cadaclysm_blacksmith_document_branch_new(doc: *mut Document, name: *const c_char, at: *const c_char) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_branch_switch(doc: *mut Document, name_or_commit_id: *const c_char) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_tips(doc: *const Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_branch_rename(doc: *mut Document, old: *const c_char, new_: *const c_char) -> bool;
+    fn cadaclysm_blacksmith_document_branch_delete(doc: *mut Document, name: *const c_char) -> bool;
+    fn cadaclysm_blacksmith_document_branch_list(doc: *const Document) -> *mut c_char;
+    fn cadaclysm_blacksmith_document_log(doc: *const Document, branch: *const c_char) -> *mut c_char;
+    fn cadaclysm_bim_document_new(units: *const c_char) -> *mut Document;
+    fn cadaclysm_bim_document_load(text: *const c_char) -> *mut Document;
+    fn cadaclysm_bim_kinds() -> *mut c_char;
+    fn cadaclysm_bim_document_export_ifc(doc: *mut Document, options_json: *const c_char) -> *mut c_char;
 }
 
 // ---- loading --------------------------------------------------------------------
 
-static LIBRARY: Loader<Api> = Loader::new("cadaclysm_blacksmith", "CADACLYSM_BLACKSMITH_LIBRARY", Api::bind);
+static LIBRARY: Loader<Api> = Loader::new("cadaclysm_blacksmith", "CADACLYSM_BLACKSMITH_LIBRARY", Api::bind, ENTRY_POINTS);
 
 /// The kernel library's file name on this platform.
 pub fn library_name() -> String {
@@ -1847,13 +2184,25 @@ pub fn library_name() -> String {
 /// Where the kernel library would be loaded from, without loading it: the reader's
 /// search ([`crate::sys::find_library`]) under `CADACLYSM_BLACKSMITH_LIBRARY`. The
 /// reader's variable is never consulted -- the two are separate libraries.
+///
+/// A copy the process already holds comes first, ahead of all of these, when the library
+/// is loaded ([`load`] without a path): see [`use_loaded`].
 pub fn find_library() -> Result<PathBuf, String> {
     LIBRARY.find()
 }
 
-/// Load the kernel library at `path` (or where [`find_library`] finds it), once.
+/// Load the kernel library at `path` once. Without a `path`, the copy the process already
+/// holds (found by file name, as the View finds it) is bound if there is one, and only
+/// otherwise is one loaded from where [`find_library`] finds it.
 pub fn load(path: Option<&Path>) -> Result<&'static Api, String> {
     LIBRARY.load(path)
+}
+
+/// Bind the kernel library the process already holds -- an embedded Python's
+/// `cadaclysm_blacksmith`, say -- and never load one: an error where none is held, or
+/// where this crate already bound another copy.
+pub fn use_loaded() -> Result<&'static Api, String> {
+    LIBRARY.use_loaded()
 }
 
 /// The path the kernel library was loaded from, or `None` before anything loaded it.

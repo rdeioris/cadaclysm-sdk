@@ -399,6 +399,23 @@ local function main()
   -- The FEM surface mesh: this node's body meshed for a solver.
   if first_meshed then fem_reader(cad, first_meshed, true) end
 
+  -- The scene saved as a Rhino .3dm (its meshes), read back to the same meshable nodes.
+  local function meshable(s)
+    local n = 0
+    for node in s:walk() do if node.can_mesh then n = n + 1 end end
+    return n
+  end
+  local scene_rhino = tmp("cadaclysm-smoke-lua.3dm")
+  scene:save(scene_rhino, "3dm")
+  local saved_rhino = cad.open(scene_rhino)
+  local saved_meshable = meshable(saved_rhino)
+  if saved_meshable == 0 or saved_meshable ~= meshable(scene) then
+    error("save 3dm: the scene reads back with " .. saved_meshable .. " meshable nodes")
+  end
+  saved_rhino:close()
+  os.remove(scene_rhino)
+  say(("save 3dm: %d meshable node(s) read back"):format(saved_meshable))
+
   scene:close()
   if sample:match("cube%.scad$") then
     for i = 1, 3 do
@@ -507,6 +524,63 @@ local function main()
   built:close()
   if got ~= "10,20,30" then error("the cuboid did not come back 10 x 20 x 30, but " .. got) end
 
+  -- A Rhino .3dm, bytes and file, read back through the reader -- the file with
+  -- `Solid.open_all`, the bytes with `open_memory` and `Solid.from_node` -- to a box's six
+  -- faces and its volume; then two solids in metres and a nested assembly.
+  local magic = "3D Geometry File Format "
+  local function brick_check(s, what)
+    local volume = s:mass().volume
+    if s.faces ~= 6 or math.abs(volume - 6000) > 6e-6 then
+      error(("3dm: %s reads back as %d faces, volume %s"):format(what, s.faces, tostring(volume)))
+    end
+  end
+  local brick = bs.Solid.cuboid(10, 20, 30)
+  local rhino = brick:rhino3dm_bytes()
+  if rhino:sub(1, #magic) ~= magic then error("3dm: the bytes are not an openNURBS file") end
+  local rhino_path = tmp("cadaclysm-smoke-lua-brick.3dm")
+  brick:write_3dm(rhino_path)
+  local rf = assert(io.open(rhino_path, "rb"))
+  local rhino_file = rf:read("*a")
+  rf:close()
+  if rhino_file ~= rhino then error("3dm: the file is not the bytes") end
+  local back = bs.Solid.open_all(rhino_path)
+  if #back ~= 1 then error("3dm: the file reads back as " .. #back .. " solids") end
+  brick_check(back[1], "the file")
+  back[1]:close()
+  local memory = cad.open_memory(rhino, "3dm", nil, "brick.3dm")
+  local bodies = {}
+  for node in memory:walk() do if node.can_mesh then bodies[#bodies + 1] = node end end
+  if #bodies ~= 1 then error("3dm: the bytes open as " .. #bodies .. " meshable nodes") end
+  local from_bytes = bs.Solid.from_node(memory, bodies[1])
+  brick_check(from_bytes, "the bytes")
+  from_bytes:close()
+  memory:close()
+  local moved = bs.Solid.cylinder(4, 10):translate(40, 0, 0)
+  bs.write_3dm(rhino_path, { brick, moved }, "m")
+  local two_faces = {}
+  for _, s in ipairs(bs.Solid.open_all(rhino_path)) do two_faces[#two_faces + 1] = s.faces; s:close() end
+  if table.concat(two_faces, ",") ~= "6,3" then error("3dm: two solids read back with faces " .. table.concat(two_faces, ",")) end
+  if bs.rhino3dm_bytes({ brick, moved }, "in"):sub(1, #magic) ~= magic then error("3dm: the module bytes are not an openNURBS file") end
+  if pcall(function() return brick:rhino3dm_bytes("furlong") end) then error("3dm: a furlong was taken") end
+  local XY0 = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }
+  local bolt = bs.Solid.cuboid(1, 1, 1)
+  local arm, rig = bs.Assembly("arm"), bs.Assembly("rig")
+  arm:place(bolt, XY0)
+  arm:place(bolt, { 2, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+  rig:place(arm, XY0)
+  rig:place(bolt, { 10, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+  if rig:rhino3dm_bytes():sub(1, #magic) ~= magic then error("3dm: the assembly bytes are not an openNURBS file") end
+  rig:write_3dm(rhino_path)
+  local placed = bs.Solid.open_all(rhino_path)
+  for _, s in ipairs(placed) do
+    if s.faces ~= 6 then error("3dm: an assembly placement reads back with " .. s.faces .. " faces") end
+    s:close()
+  end
+  if #placed ~= 3 then error("3dm: the assembly reads back as " .. #placed .. " solids") end
+  os.remove(rhino_path)
+  brick:close(); moved:close(); bolt:close()
+  say(("3dm: %d bytes, read back to 6 faces and 6000 mm3; an assembly of 3 placements"):format(#rhino))
+
   -- Hits: two radius-5 circles six apart cross at two points, (3, -4) and (3, 4). At
   -- (3, 4) the first circle's upper arc is at t 0.2952 and the moved one's at 0.7048;
   -- at (3, -4) the other way round -- which catches the two sides read swapped.
@@ -534,9 +608,9 @@ local function main()
   local lens_faces = bs.Solid.extrude(lenses[1], { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }, 1).faces
   if lens_faces ~= 6 then error("common: the lens extrudes to " .. lens_faces .. " faces, not 6") end
   if #left:common(right:translate(100, 0)) ~= 0 then error("common: circles 100 apart share a region") end
-  local ok, err = pcall(function() left:common(right, 0) end)
+  local ok, err = pcall(function() left:common(right, -1) end)
   if ok or not tostring(err):find("profile_common: tolerance must be positive and finite", 1, true) then
-    error("common: a zero tolerance was accepted or refused in other words: " .. tostring(err))
+    error("common: a negative tolerance was accepted or refused in other words: " .. tostring(err))
   end
   say(("common: one lens, %d faces extruded"):format(lens_faces))
   -- Edge curves: a cylinder's rims are circles of its radius about a cap centre, a whole turn
@@ -598,9 +672,9 @@ local function main()
   if ellipses == 0 then error("intersect: two equal pipes cross on ellipses") end
   local apart = pipe_a:intersect(pipe_b:translate(10, 0, 0))
   if #apart.chains ~= 0 or #apart.overlaps ~= 0 then error("intersect: pipes apart read " .. tostring(apart)) end
-  local ok_tol, err_tol = pcall(function() return pipe_a:intersect(pipe_b, 0.0) end)
+  local ok_tol, err_tol = pcall(function() return pipe_a:intersect(pipe_b, -1.0) end)
   if ok_tol or not tostring(err_tol):find("intersect: tolerance must be positive and finite", 1, true) then
-    error("intersect: a zero tolerance was accepted or refused in other words: " .. tostring(err_tol))
+    error("intersect: a negative tolerance was accepted or refused in other words: " .. tostring(err_tol))
   end
   local shared = bs.Solid.cylinder(1, 4):intersect(bs.Solid.cylinder(1, 4):translate(0, 0, 2), tol)
   if #shared.overlaps < 1 or #shared.overlaps[1].loops < 1 then error("intersect: the coaxial pipes read " .. tostring(shared)) end
@@ -659,6 +733,45 @@ local function main()
 
   -- The kernel's FEM mesh: a solid meshed for a solver, and an open sheet's rim.
   fem_kernel(bs)
+
+  -- Tolerances: hole2.3dm (a root sample beside samples/, scripts/link-samples.py) declares an
+  -- absolute 0.01 and one degree; a boolean given a tolerance of 0 works at the inputs'
+  -- effective one, declares nothing for built primitives, and is the explicit-effective boolean.
+  local root = sample:gsub("\\", "/"):match("^(.*)/[^/]*/[^/]*$") or "."
+  local hole2 = root .. "/hole2.3dm"
+  local found = io.open(hole2, "rb")
+  if found then
+    found:close()
+    local declared = cad.open(hole2)
+    local d = declared.tolerances
+    if d.absolute ~= 0.01 or d.angular ~= 0.017453292519943295 then
+      error(("hole2.3dm declares %s, %s"):format(tostring(d.absolute), tostring(d.angular)))
+    end
+    declared:close()
+  elseif (os.getenv("CADACLYSM_SAMPLES_OPTIONAL") or "") == "" then
+    error(hole2 .. " is missing: run scripts/link-samples.py")
+  end
+  local block = bs.Solid.cuboid(10, 10, 10)
+  local pin = bs.Solid.cylinder(3, 20):translate(0, 0, -5)
+  local at = bs.effective_tolerance(block, pin)
+  if not (math.abs(at - 1e-4 * 20) < 1e-3) then error("effective_tolerance reads " .. at) end
+  local unset, explicit = block:cut(pin, 0), block:cut(pin, at)
+  local none = unset.tolerances
+  if none.absolute ~= nil or none.angular ~= nil then error("an unset cut declares a tolerance") end
+  if unset:mass(1e-7).volume ~= explicit:mass(1e-7).volume then error("an unset cut is not the explicit-effective one") end
+  local _, _, unset_indices = unset:mesh(0)
+  local _, _, explicit_indices = explicit:mesh(bs.effective_tolerance(explicit))
+  if unset_indices.shape[1] ~= explicit_indices.shape[1] then error("an unset mesh is not the explicit-effective one") end
+  local loose = block:with_tolerances(0.1)
+  if loose.tolerances.absolute ~= 0.1 or loose.tolerances.angular ~= nil or bs.effective_tolerance(loose, pin) ~= 0.1 then
+    error("with_tolerances: 0.1 is not declared")
+  end
+  if block:with_tolerances(0.1):cut(pin, 0 / 0).tolerances.absolute ~= 0.1 then error("a cut does not inherit the loosest declaration") end
+  if block:vertex_tolerance({ 5, 5, 5 }) ~= nil then error("a built cuboid records a vertex tolerance") end
+  local refused, why = pcall(function() return block:with_tolerances(-1) end)
+  if refused or not tostring(why.message):match("^solid_with_tolerances: ") then error("with_tolerances: -1 is not refused") end
+  if bs.effective_tolerance() ~= 0 then error("effective_tolerance of nothing is not 0") end
+  say(("tolerances: effective %s, an unset cut is the explicit one"):format(at))
 end
 
 local ok, err = pcall(main)

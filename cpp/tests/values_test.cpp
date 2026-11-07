@@ -47,11 +47,14 @@ using bs::Ellipse;
 using bs::Frame;
 using bs::Interval;
 using bs::Line;
+using bs::Ray;
+using bs::Rectangle;
 using bs::Solid;
 using bs::Sphere;
 using bs::SurfaceFoot;
 using bs::Torus;
 using bs::Transform;
+using bs::Triangle;
 using bs::Vec2;
 using bs::Vec3;
 
@@ -704,6 +707,155 @@ static void boxes_match_rhino() {
     }
 }
 
+// ---- 6. The rectangle, the triangle and the ray (plan B4, TestPlanarValues) --------------
+
+static const std::array<double, 16> SHEAR = {1, 0.5, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+static void a_rectangle_is_a_curve_with_calls_of_its_own() {
+    Rectangle r = must(Rectangle::make(XY, {1, 4}, iv(0, 4)), "rectangle");
+    check(r.x() == iv(1, 4) && r.y() == iv(0, 4) && r.frame() == must(Frame::of(XY), "xy"), "the rectangle's fields");
+    const bs::CurveValueBase& curve = r;
+    check(must(curve.point_at(2.25), "point_at") == Vec3{3.25, 4, 0} && must(r.point_at(9), "point_at") == Vec3{1, 0, 0},
+          "point_at, clamped past 4");
+    check(must(r.tangent_at(1.5), "tangent_at") == Vec3{0, 1, 0} && must(r.length(), "length") == 14.0, "tangent_at and length");
+    check(must(r.closest_point({2, -1, 7}), "closest_point") == CurveFoot{1.0 / 3, {2, 0, 0}, true}, "the boundary's closest point");
+    Rectangle square = must(Rectangle::make(XY, {0, 2}, {0, 2}), "rectangle");
+    check(!must(square.closest_point({1, 1, 0}), "closest_point").unique, "the centre is a pick");
+    std::array<Vec3, 4> corners = must(r.corners(), "corners");
+    check(corners[0] == Vec3{1, 0, 0} && corners[1] == Vec3{4, 0, 0} && corners[2] == Vec3{4, 4, 0} && corners[3] == Vec3{1, 4, 0},
+          "the corners");
+    check(must(r.area(), "area") == 12.0, "the area");
+    check(must(r.closest_point_in({2, 1, 5}), "closest_point_in") == Vec3{2, 1, 0}, "closest_point_in, filled");
+    check(must(r.closest_point_in({2, 1, 5}, false), "closest_point_in") == Vec3{1, 1, 0}, "closest_point_in, the boundary");
+    std::pair<Vec3, Vec3> b = must(r.bounds(), "bounds");
+    check(b.first == Vec3{1, 0, 0} && b.second == Vec3{4, 4, 0}, "the bounds");
+    refused(Rectangle::make(XY, {1, 1}, {0, 4}), "value_check: the x range must increase", "an empty x range");
+    std::vector<double> fifteen = vec(XY);
+    fifteen.insert(fifteen.end(), {1, 4, 0});
+    refused(Rectangle::from_array(fifteen), "value_check: a rectangle is 16 numbers, got 15", "15 numbers");
+    refused(r.transform(must(Transform::from_rows(SHEAR), "shear")),
+            "value_transform: a rectangle takes only a map that keeps its sides square (no shear in its plane)", "a shear");
+    Rectangle scaled = must(r.transform(must(Transform::scale_xyz(XY, 2, 3, 1), "scale_xyz")), "transform");
+    check(scaled == must(Rectangle::make(XY, {2, 8}, {0, 12}), "rectangle"), "the scaled rectangle");
+    Solid sheet = must(r.to_sheet(), "to_sheet");
+    check(sheet.faces() == 1 && rel(must(sheet.mass(1e-9), "mass").area, 12.0, 1e-9), "the sheet");
+    bs::NurbsCurve ring = must(r.to_nurbs(), "to_nurbs");
+    std::pair<double, double> rd = must(ring.domain(), "domain");
+    check(ring.degree() == 1 && ring.is_closed() && !ring.is_rational() && rd.first == 0 && rd.second == 4, "the boundary's curve");
+    Vec3 rp = must(ring.point(2.25), "point");
+    check(std::fabs(rp[0] - 3.25) + std::fabs(rp[1] - 4) + std::fabs(rp[2]) <= 1e-12, "its parameter is t");
+}
+
+static void rectangle_contains_takes_none_as_its_effective_tolerance_and_zero_as_exact() {
+    Rectangle r = must(Rectangle::make(XY, {1, 4}, {0, 4}), "rectangle");  // diagonal 5: effective 5e-4
+    check(must(r.contains({2, 2, 9}, 0.0), "contains") == "inside", "inside, exact");
+    check(must(r.contains({0, 2, 0}, 0.0), "contains") == "outside", "outside, exact");
+    check(must(r.contains({1, 2, 0}, 0.0), "contains") == "on", "on, exact");
+    Vec3 near = {1 - 4e-4, 2, 0};
+    check(must(r.contains(near, 0.0), "contains") == "outside" && must(r.contains(near, 1e-3), "contains") == "on", "named tolerances");
+    check(must(r.contains(near), "contains") == "on" && must(r.contains(near, std::numeric_limits<double>::quiet_NaN()), "contains") == "on",
+          "unset");
+    check(must(r.contains({1 - 6e-4, 2, 0}), "contains") == "outside", "unset, past the effective tolerance");
+    refused(r.contains({0, 0, 0}, -1.0), "rectangle_contains: the tolerance must be finite and not negative", "a negative tolerance");
+    double eff = 1e-4 * 4 * std::sqrt(3.0);
+    double nan = std::numeric_limits<double>::quiet_NaN();
+    Sphere ball = must(Sphere::make(XY, 2), "sphere");
+    check(must(ball.contains({2 + 0.9 * eff, 0, 0}, nan), "contains") && !must(ball.contains({2 + 0.9 * eff, 0, 0}), "contains") &&
+              !must(ball.contains({2 + 1.1 * eff, 0, 0}, nan), "contains"),
+          "a sphere's contains takes NaN as unset");
+}
+
+static void a_triangle_answers_its_closed_forms() {
+    Triangle t = must(Triangle::make({0, 0, 0}, {4, 0, 0}, {0, 3, 0}), "triangle");
+    check(t.a() == Vec3{0, 0, 0} && t.b() == Vec3{4, 0, 0} && t.c() == Vec3{0, 3, 0}, "the vertices");
+    check(must(t.area(), "area") == 6.0 && must(t.perimeter(), "perimeter") == 12.0, "area and perimeter");
+    close(vec(must(t.centroid(), "centroid")), {4.0 / 3, 1, 0}, 1e-15, "centroid");
+    Circle cc = must(t.circumcircle(), "circumcircle");
+    close(vec(cc.frame().origin()), {2, 1.5, 0}, 1e-15, "the circumcircle's centre");
+    check(within(cc.radius(), 2.5, 1e-15), "the circumcircle's radius");
+    check(must(t.point_at(0.5, 0.25, 0.25), "point_at") == Vec3{1, 0.75, 0}, "point_at");
+    close(vec(must(t.barycentric({1, 0.75, 5}), "barycentric")), {0.5, 0.25, 0.25}, 1e-15, "barycentric");
+    check(must(t.closest_point({2, -1, 0}), "closest_point") == Vec3{2, 0, 0} && must(t.closest_point({1, 1, 3}), "closest_point") == Vec3{1, 1, 0},
+          "closest_point");
+    check(must(t.distance_to({1, 1, 3}), "distance_to") == 3.0, "distance_to");
+    check(must(t.edge(1), "edge") == must(Line::make({4, 0, 0}, {0, 3, 0}), "line"), "edge 1");
+    refused(t.edge(3), "triangle_edge: edge 3 is not 0, 1 or 2", "edge 3");
+    refused(Triangle::make({0, 0, 0}, {1, 1, 1}, {2, 2, 2}), "value_check: the triangle is degenerate (its points are collinear or coincident)",
+            "a degenerate triangle");
+    refused(Triangle::from_array({0, 0, 0, 4, 0, 0, 0, 3}), "value_check: a triangle is 9 numbers, got 8", "8 numbers");
+    Triangle sheared = must(t.transform(must(Transform::from_rows(SHEAR), "shear")), "transform");
+    check(sheared == must(Triangle::make({0, 0, 0}, {4, 0, 0}, {1.5, 3, 0}), "triangle"), "any affine map");
+    Solid sheet = must(t.to_sheet(), "to_sheet");
+    check(rel(must(sheet.mass(1e-9), "mass").area, 6.0, 1e-9), "the sheet's area");
+    Triangle reordered = must(Triangle::make({0, 0, 0}, {0, 3, 0}, {4, 0, 0}), "triangle");
+    Triangle again = must(Triangle::make(t.a(), t.b(), t.c()), "triangle");
+    check(t != reordered && std::hash<Triangle>()(t) == std::hash<Triangle>()(again), "equality and hashing");
+}
+
+static void a_ray_holds_to_its_half_line_only_in_closest_point() {
+    Ray ray = must(Ray::make({1, 2, 3}, {0, 0, 2}), "ray");
+    check(ray.values() == std::vector<double>{1, 2, 3, 0, 0, 2} && ray.position() == Vec3{1, 2, 3} && ray.direction() == Vec3{0, 0, 2},
+          "kept as given");
+    check(must(ray.point_at(1.5), "point_at") == Vec3{1, 2, 6} && must(ray.point_at(-1), "point_at") == Vec3{1, 2, 1}, "point_at");
+    check(must(ray.closest_point({5, 2, 7}), "closest_point") == CurveFoot{2, {1, 2, 7}, true}, "the closest point");
+    check(must(ray.closest_point({5, 2, -7}), "closest_point") == CurveFoot{0, {1, 2, 3}, true}, "behind: the start");
+    check(within(must(ray.distance_to({5, 2, -7}), "distance_to"), std::sqrt(116.0), 1e-12), "distance_to");
+    refused(ray.bounds(), "value_bounds: a ray has no box (it is unbounded)", "a ray's bounds");
+    refused(Ray::make({0, 0, 0}, {0, 0, 0}), "value_check: the ray's direction is zero", "a zero direction");
+    refused(Ray::from_array({0, 0, 0, 1, 0, 0, 0}), "value_check: a ray is 6 numbers, got 7", "7 numbers");
+    Ray scaled = must(ray.transform(must(Transform::scale_xyz(XY, 1, 1, 3), "scale_xyz")), "transform");
+    check(scaled == must(Ray::make({1, 2, 9}, {0, 0, 6}), "ray"), "the scaled ray");
+}
+
+static void rectangles_triangles_and_rays_match_rhino() {
+    const Records* r = vectors();
+    if (!r) return;
+    std::vector<double> ranges = nums(*r, "rectangle", "ranges");
+    Rectangle rect = must(Rectangle::make(raw12(nums(*r, "rectangle", "frame")), {ranges[0], ranges[1]}, {ranges[2], ranges[3]}), "rectangle");
+    std::vector<double> corners = nums(*r, "rectangle", "corners");
+    std::array<Vec3, 4> got = must(rect.corners(), "corners");
+    for (std::size_t k = 0; k < 4; ++k) close(vec(got[k]), {corners[3 * k], corners[3 * k + 1], corners[3 * k + 2]}, EXACT, "corner " + std::to_string(k));
+    close({must(rect.area(), "area"), must(rect.length(), "length")}, {nums(*r, "rectangle", "area")[0], nums(*r, "rectangle", "circumference")[0]},
+          EXACT, "area and circumference");
+    for (int k = 0; k < 9; ++k) {
+        std::string c = "rectangle_at_" + std::to_string(k);
+        std::vector<double> n = nums(*r, c, "point");
+        close(vec(must(rect.point_at(n[0]), "point_at")), {n[1], n[2], n[3]}, EXACT, c);
+    }
+    std::map<std::string, std::string> said = {{"Inside", "inside"}, {"Outside", "outside"}, {"Coincident", "on"}};
+    for (const char* shape : {"rectangle", "rectangle_in"}) {
+        for (const std::pair<std::string, Vec3>& q : queries(*r, shape)) {
+            close(vec(must(rect.closest_point(q.second), "closest_point").point), nums(*r, q.first, "boundary"), EXACT, q.first + " boundary");
+            close(vec(must(rect.closest_point_in(q.second, true), "closest_point_in")), nums(*r, q.first, "filled"), EXACT, q.first + " filled");
+            check(must(rect.contains(q.second, 0.0), "contains") == said[words(*r, q.first, "contains")[0]], q.first + " contains");
+        }
+    }
+    std::vector<double> p = nums(*r, "triangle", "points");
+    Triangle tri = must(Triangle::make(v3(p, 0), v3(p, 3), v3(p, 6)), "triangle");
+    close({must(tri.area(), "area"), must(tri.perimeter(), "perimeter")}, {nums(*r, "triangle", "area")[0], nums(*r, "triangle", "perimeter")[0]},
+          EXACT, "area and perimeter");
+    close(vec(must(tri.centroid(), "centroid")), nums(*r, "triangle", "centroid"), EXACT, "centroid");
+    close(must(tri.circumcircle(), "circumcircle").values(), nums(*r, "triangle", "circumcircle"), EXACT, "circumcircle");
+    for (const char* shape : {"triangle", "triangle_in"}) {
+        for (const std::pair<std::string, Vec3>& q : queries(*r, shape)) {
+            Vec3 w = must(tri.barycentric(q.second), "barycentric");
+            std::vector<double> rw = nums(*r, q.first, "barycentric");
+            close({w[1], w[2]}, {rw[0], rw[1]}, EXACT, q.first + " barycentric");
+            close(vec(must(tri.point_at(w[0], w[1], w[2]), "point_at")), nums(*r, q.first, "projected"), EXACT, q.first + " projected");
+            if (std::min(w[0], std::min(w[1], w[2])) < 0) {
+                close(vec(must(tri.closest_point(q.second), "closest_point")), nums(*r, q.first, "boundary"), EXACT, q.first + " closest");
+            }
+        }
+    }
+    std::vector<double> rn = nums(*r, "ray", "ray");
+    Ray ray = must(Ray::make(v3(rn, 0), v3(rn, 3)), "ray");
+    for (int k = 0; k < 4; ++k) {
+        std::string c = "ray_at_" + std::to_string(k);
+        std::vector<double> n = nums(*r, c, "point");
+        close(vec(must(ray.point_at(n[0]), "point_at")), {n[1], n[2], n[3]}, EXACT, c);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) {
         Result<void> loaded = bs::license(argv[1]);
@@ -737,6 +889,12 @@ int main(int argc, char** argv) {
         {"cuboid_construction_bounds_and_around", cuboid_construction_bounds_and_around},
         {"each_cuboid_call_answers_b1s_figures", each_cuboid_call_answers_b1s_figures},
         {"boxes_match_rhino", boxes_match_rhino},
+        {"a_rectangle_is_a_curve_with_calls_of_its_own", a_rectangle_is_a_curve_with_calls_of_its_own},
+        {"rectangle_contains_takes_none_as_its_effective_tolerance_and_zero_as_exact",
+         rectangle_contains_takes_none_as_its_effective_tolerance_and_zero_as_exact},
+        {"a_triangle_answers_its_closed_forms", a_triangle_answers_its_closed_forms},
+        {"a_ray_holds_to_its_half_line_only_in_closest_point", a_ray_holds_to_its_half_line_only_in_closest_point},
+        {"rectangles_triangles_and_rays_match_rhino", rectangles_triangles_and_rays_match_rhino},
     };
     for (const Test& t : tests) {
         int before = failures;

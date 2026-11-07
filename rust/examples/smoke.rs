@@ -239,7 +239,52 @@ fn run() -> Result<(), String> {
 
     check(cadaclysm_sdk::open("no/such/file.stp").is_err(), "a missing file opened")?;
     kernel(license.as_deref())?;
+    tolerances(&path, is_cube, &scene)?;
     println!("OK");
+    Ok(())
+}
+
+/// Tolerances: hole2.3dm (a root sample beside samples/, scripts/link-samples.py) declares an
+/// absolute 0.01 and one degree; a boolean given a tolerance of 0 works at the inputs'
+/// effective one, declares nothing for built primitives, and is the explicit-effective boolean.
+fn tolerances(path: &str, is_cube: bool, scene: &Scene) -> Result<(), String> {
+    let e = |e: cadaclysm_sdk::Error| format!("tolerances: {e}");
+    let root = std::fs::canonicalize(path).map_err(|err| err.to_string())?;
+    let hole2 = root.parent().and_then(Path::parent).ok_or("no root above the sample")?.join("hole2.3dm");
+    if hole2.exists() {
+        let declared = cadaclysm_sdk::open(&hole2).map_err(e)?;
+        let want = cadaclysm_sdk::Tolerances { absolute: Some(0.01), angular: Some(0.017453292519943295) };
+        check(declared.tolerances() == want, &format!("hole2.3dm declares {:?}", declared.tolerances()))?;
+    } else if std::env::var("CADACLYSM_SAMPLES_OPTIONAL").map_or(true, |v| v.is_empty()) {
+        return Err(format!("{} is missing: run scripts/link-samples.py", hole2.display()));
+    }
+    if is_cube {
+        check(scene.tolerances() == cadaclysm_sdk::Tolerances::default(), "cube.scad declares a tolerance")?;
+    }
+    let block = Solid::cuboid(10.0, 10.0, 10.0).map_err(e)?;
+    let pin = Solid::cylinder(3.0, 20.0).map_err(e)?.translate(0.0, 0.0, -5.0).map_err(e)?;
+    let at = blacksmith::effective_tolerance(&[&block, &pin]).map_err(e)?;
+    check((at - 1e-4 * 20.0).abs() < 1e-3, &format!("effective_tolerance reads {at}"))?;
+    let mut unset = block.cut(&pin, 0.0).map_err(e)?;
+    let mut explicit = block.cut(&pin, at).map_err(e)?;
+    check(unset.tolerances().map_err(e)? == cadaclysm_sdk::Tolerances::default(), "an unset cut declares a tolerance")?;
+    let (vu, ve) = (unset.mass(1e-7).map_err(e)?.volume, explicit.mass(1e-7).map_err(e)?.volume);
+    check(vu == ve, &format!("unset cut volume {vu} against the explicit {ve}"))?;
+    let mesh_at = blacksmith::effective_tolerance(&[&explicit]).map_err(e)?;
+    let explicit_triangles = explicit.mesh(mesh_at).map_err(e)?.triangle_count();
+    check(unset.mesh(0.0).map_err(e)?.triangle_count() == explicit_triangles, "an unset mesh is not the explicit-effective one")?;
+    let loose = block.with_tolerances(0.1, 0.0).map_err(e)?;
+    check(loose.tolerances().map_err(e)? == cadaclysm_sdk::Tolerances { absolute: Some(0.1), angular: None }, "with_tolerances: 0.1 is not declared")?;
+    check(blacksmith::effective_tolerance(&[&loose, &pin]).map_err(e)? == 0.1, "effective_tolerance over a 0.1 declaration")?;
+    let loose_cut = loose.cut(&pin, f64::NAN).map_err(e)?;
+    check(loose_cut.tolerances().map_err(e)?.absolute == Some(0.1), "a cut does not inherit the loosest declaration")?;
+    check(block.vertex_tolerance([5.0, 5.0, 5.0]).map_err(e)?.is_none(), "a built cuboid records a vertex tolerance")?;
+    check(
+        block.with_tolerances(-1.0, 0.0).is_err_and(|err| err.to_string().starts_with("solid_with_tolerances: ")),
+        "with_tolerances: -1 is not refused",
+    )?;
+    check(blacksmith::effective_tolerance(&[]).map_err(e)? == 0.0, "effective_tolerance of nothing is not 0")?;
+    println!("tolerances: effective {at}, an unset cut is the explicit one");
     Ok(())
 }
 
@@ -293,9 +338,9 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     check(lens_faces == 6, &format!("common: the lens extrudes to {lens_faces} faces, not 6"))?;
     let far = right.translate(100.0, 0.0).map_err(e)?;
     check(left.common(&far, 1e-6).map_err(e)?.is_empty(), "common: circles 100 apart share a region")?;
-    match left.common(&right, 0.0) {
+    match left.common(&right, -1.0) {
         Err(err) if err.to_string().contains("profile_common: tolerance must be positive and finite") => {}
-        other => return Err(format!("common: a zero tolerance was accepted or refused in other words: {other:?}")),
+        other => return Err(format!("common: a negative tolerance was accepted or refused in other words: {other:?}")),
     }
     println!("common: one lens, {lens_faces} faces extruded");
     // Edge curves: a cylinder's rims are circles of its radius about a cap centre in a unit
@@ -352,7 +397,7 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     );
 
     // Intersect: two equal pipes crossing at right angles meet on ellipse chains whose points
-    // lie on both pipes; apart, nothing; a zero tolerance refused in the kernel's words. Two
+    // lie on both pipes; apart, nothing; a negative tolerance refused in the kernel's words. Two
     // coaxial pipes overlapping in height share a wall band: an overlap whose rings lie on it.
     let tol = 1e-3;
     let off_a = |p: [f64; 3]| ((p[0] * p[0] + p[1] * p[1]).sqrt() - 1.0).abs();
@@ -379,9 +424,9 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     check(ellipses > 0, "intersect: two equal pipes cross on ellipses")?;
     let apart = pipe_a.intersect(&pipe_b.translate(10.0, 0.0, 0.0).map_err(e)?, DEFAULT_TOLERANCE).map_err(e)?;
     check(apart == Intersection::default(), &format!("intersect: pipes apart read {apart:?}"))?;
-    match pipe_a.intersect(&pipe_b, 0.0) {
+    match pipe_a.intersect(&pipe_b, -1.0) {
         Err(err) if err.to_string().contains("intersect: tolerance must be positive and finite") => {}
-        other => return Err(format!("intersect: a zero tolerance was accepted or refused in other words: {other:?}")),
+        other => return Err(format!("intersect: a negative tolerance was accepted or refused in other words: {other:?}")),
     }
     let lower = Solid::cylinder(1.0, 4.0).map_err(e)?;
     let upper = Solid::cylinder(1.0, 4.0).map_err(e)?.translate(0.0, 0.0, 2.0).map_err(e)?;
@@ -433,7 +478,7 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
 
     // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
     // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no
-    // hit cuts is one piece; an open sheet has no pieces; a zero tolerance refused verbatim.
+    // hit cuts is one piece; an open sheet has no pieces; a negative tolerance refused verbatim.
     let xy = Frame::xy([0.0; 3]);
     let cuboid = Solid::cuboid(10.0, 20.0, 30.0).map_err(e)?;
     let line = Outline::begin([-20.0, 0.0]).and_then(|p| p.line_to(20.0, 0.0)).and_then(|p| p.end_open()).map_err(e)?;
@@ -462,9 +507,9 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     let upright = Outline::begin([0.0, -20.0]).and_then(|p| p.line_to(0.0, 20.0)).and_then(|p| p.end_open()).map_err(e)?;
     let across = flat.hits(&upright, &Frame::xz([0.0; 3]), DEFAULT_TOLERANCE).map_err(e)?;
     check(!across.hits.is_empty() && across.pieces.is_empty(), &format!("solid hits: a line across a sheet reads {:?}, {} pieces", across.hits, across.pieces.len()))?;
-    match cuboid.hits(&line, &xy, 0.0) {
+    match cuboid.hits(&line, &xy, -1.0) {
         Err(err) if err.to_string() == "solid_profile_hits: tolerance must be positive and finite" => {}
-        other => return Err(format!("solid hits: a zero tolerance was accepted or refused in other words: {:?}", other.map(|f| f.hits))),
+        other => return Err(format!("solid hits: a negative tolerance was accepted or refused in other words: {:?}", other.map(|f| f.hits))),
     }
     println!("solid hits: {} hits, {} pieces; the middle {:?}", found.hits.len(), found.pieces.len(), spots[1]);
 
@@ -676,6 +721,7 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
         "the SAT did not read back as the plate with its pin",
     )?;
 
+    rhino3dm_checks()?;
     // The OCCT .brep writer, and its reader.
     let brep = std::env::temp_dir().join("cadaclysm-smoke-rust.brep");
     rounded.brep(&brep).map_err(e)?;
@@ -2175,5 +2221,67 @@ fn save_checks(scene: &Scene) -> Result<(), String> {
     scene.save(&glb, "glb").map_err(e)?;
     let head = std::fs::read(&glb).map_err(|err| err.to_string())?;
     check(head.starts_with(b"glTF"), "save wrote something that is not a binary glTF")?;
+
+    // The scene saved as a Rhino .3dm (its meshes), read back to the same meshable nodes.
+    let rhino = std::env::temp_dir().join(format!("cadaclysm-smoke-rust-{}.3dm", std::process::id()));
+    scene.save(&rhino, "3dm").map_err(e)?;
+    let saved = cadaclysm_sdk::open(&rhino).map_err(e)?;
+    let meshable = saved.walk().filter(|n| n.can_mesh()).count();
+    check(meshable > 0 && meshable == scene.walk().filter(|n| n.can_mesh()).count(), "save 3dm: the scene reads back with other meshable nodes")?;
+    println!("save 3dm: {meshable} meshable node(s) read back");
+    drop(saved);
+    let _ = std::fs::remove_file(&rhino);
+    Ok(())
+}
+
+/// A box as a Rhino .3dm, bytes and file, read back through the reader -- the file with
+/// `Solid::open_all`, the bytes with `open_memory` and `Solid::from_node` -- to its six
+/// faces and its volume; then two solids in metres and a nested assembly.
+fn rhino3dm_checks() -> Result<(), String> {
+    let e = |e: cadaclysm_sdk::Error| format!("3dm: {e}");
+    const MAGIC: &[u8] = b"3D Geometry File Format ";
+    let boxed = |s: &Solid, what: &str| -> Result<(), String> {
+        let volume = s.mass(0.0).map_err(e)?.volume;
+        let faces = s.faces().map_err(e)?;
+        check(faces == 6 && (volume - 6000.0).abs() <= 6e-6, &format!("3dm: {what} reads back as {faces} faces, volume {volume}"))
+    };
+    let brick = Solid::cuboid(10.0, 20.0, 30.0).map_err(e)?;
+    let data = brick.rhino3dm_bytes(Unit::Millimetre).map_err(e)?;
+    check(data.starts_with(MAGIC), "3dm: the bytes are not an openNURBS file")?;
+    let out = std::env::temp_dir().join(format!("cadaclysm-smoke-rust-brick-{}.3dm", std::process::id()));
+    let result = (|| -> Result<(), String> {
+        brick.write_3dm(&out, Unit::Millimetre).map_err(e)?;
+        check(std::fs::read(&out).map_err(|err| err.to_string())? == data, "3dm: the file is not the bytes")?;
+        let back = Solid::open_all(&out).map_err(e)?;
+        check(back.len() == 1, &format!("3dm: the file reads back as {} solids", back.len()))?;
+        boxed(&back[0], "the file")?;
+        let memory = OpenOptions::new().name("brick.3dm").open_memory(&data, "3dm").map_err(e)?;
+        let bodies: Vec<Node<'_>> = memory.walk().filter(|n| n.can_mesh()).collect();
+        check(bodies.len() == 1, &format!("3dm: the bytes open as {} meshable nodes", bodies.len()))?;
+        boxed(&Solid::from_node(&bodies[0], true).map_err(e)?, "the bytes")?;
+
+        let moved = Solid::cylinder(4.0, 10.0).map_err(e)?.translate(40.0, 0.0, 0.0).map_err(e)?;
+        blacksmith::write_3dm(&out, &[&brick, &moved], Unit::Metre).map_err(e)?;
+        let faces = Solid::open_all(&out).map_err(e)?.iter().map(|s| s.faces()).collect::<Result<Vec<_>, _>>().map_err(e)?;
+        check(faces == vec![6, 3], &format!("3dm: two solids read back with faces {faces:?}"))?;
+        check(blacksmith::rhino3dm_bytes(&[&brick, &moved], Unit::Inch).map_err(e)?.starts_with(MAGIC), "3dm: the module bytes are not an openNURBS file")?;
+
+        let bolt = Solid::cuboid(1.0, 1.0, 1.0).map_err(e)?;
+        let arm = Assembly::new("arm").map_err(e)?;
+        let rig = Assembly::new("rig").map_err(e)?;
+        arm.place_solid(&bolt, &Frame::xy([0.0; 3]), None).map_err(e)?;
+        arm.place_solid(&bolt, &Frame::xy([2.0, 0.0, 0.0]), None).map_err(e)?;
+        rig.place_assembly(&arm, &Frame::xy([0.0; 3]), None).map_err(e)?;
+        rig.place_solid(&bolt, &Frame::xy([10.0, 0.0, 0.0]), None).map_err(e)?;
+        check(rig.rhino3dm_bytes(Unit::Millimetre).map_err(e)?.starts_with(MAGIC), "3dm: the assembly bytes are not an openNURBS file")?;
+        rig.write_3dm(&out, Unit::Millimetre).map_err(e)?;
+        let placed = Solid::open_all(&out).map_err(e)?;
+        let boxes = placed.iter().all(|s| s.faces().ok() == Some(6));
+        check(placed.len() == 3 && boxes, &format!("3dm: the assembly reads back as {} solids", placed.len()))?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&out);
+    result?;
+    println!("3dm: {} bytes, read back to 6 faces and 6000 mm3; an assembly of 3 placements", data.len());
     Ok(())
 }

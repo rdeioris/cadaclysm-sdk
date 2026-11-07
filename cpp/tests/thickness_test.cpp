@@ -263,7 +263,7 @@ static void two_triangles_one_apart_read_one_across() {
 // 8. Every refusal the wrapper's types can carry, with the call's prefix.
 static void refusals_carry_the_calls_prefix() {
     bs::Solid p = plate();
-    refused(bs::ThicknessGauge::make({p}, 0.0), "thickness_gauge_new: the tolerance must be positive and finite", "tolerance 0");
+    refused(bs::ThicknessGauge::make({p}, -1.0), "thickness_gauge_new: the tolerance must be positive and finite", "tolerance -1");
     bs::ThicknessGauge g = must(bs::ThicknessGauge::make({p}), "ThicknessGauge::make");
     refused(g.thickness(0.0), "thickness_gauge_measure: the maximum must be positive and finite", "maximum 0");
     refused(g.thickness(10.0, -0.1), "thickness_gauge_measure: the sharp angle must be zero or positive and finite", "sharp angle -0.1");
@@ -286,7 +286,7 @@ static void refusals_carry_the_calls_prefix() {
     refused(live.thickness(10.0), "thickness_gauge: closed", "thickness on a moved-from gauge");
     // the conveniences refuse with the gauge call's own prefix
     refused(bs::thickness({p}, -1.0), "thickness_gauge_measure: the maximum must be positive and finite", "thickness() maximum -1");
-    refused(bs::thickness({p}, 10.0, 0.0, std::nan("")), "thickness_gauge_new: the tolerance must be positive and finite", "thickness() NaN tolerance");
+    refused(bs::thickness({p}, 10.0, 0.0, std::numeric_limits<double>::infinity()), "thickness_gauge_new: the tolerance must be positive and finite", "thickness() infinite tolerance");
     refused(p.thickness_at_face(99, 10.0), "thickness_gauge_face: no face 99", "Solid::thickness_at_face face 99");
     // mesh_thickness: the kernel's refusals (the pair and point shapes cannot be wrong here)
     std::vector<bs::ThicknessInputMesh> meshes = {lower(), upper()};

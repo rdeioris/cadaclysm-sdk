@@ -136,10 +136,10 @@ final class BlacksmithMeasureTests: XCTestCase {
         let nan2 = refusal { _ = try classifier.contains([.nan, 0, 0]) }
         XCTAssertTrue(nan2?.hasPrefix("classifier_contains: ") ?? false, nan2 ?? "no error")
         XCTAssertTrue(nan2?.contains("not finite") ?? false, nan2 ?? "")
-        let zero1 = refusal { _ = try box.contains([0, 0, 0], tolerance: 0) }
+        let zero1 = refusal { _ = try box.contains([0, 0, 0], tolerance: -1) }
         XCTAssertTrue(zero1?.hasPrefix("contains: ") ?? false, zero1 ?? "no error")
         XCTAssertTrue(zero1?.contains("positive and finite") ?? false, zero1 ?? "")
-        let zero2 = refusal { _ = try box.classifier(tolerance: 0) }
+        let zero2 = refusal { _ = try box.classifier(tolerance: -1) }
         XCTAssertTrue(zero2?.hasPrefix("classifier_new: ") ?? false, zero2 ?? "no error")
         XCTAssertTrue(zero2?.contains("positive and finite") ?? false, zero2 ?? "")
         XCTAssertFalse(classifier.isClosed)
@@ -193,7 +193,7 @@ final class BlacksmithMeasureTests: XCTestCase {
     func testClosestRefusesAZeroTolerance() throws {
         let a = try Solid.sphere(1)
         let b = try Solid.sphere(1).translate(5, 0, 0)
-        let message = refusal { _ = try a.closest(b, tolerance: 0) }
+        let message = refusal { _ = try a.closest(b, tolerance: -1) }
         XCTAssertTrue(message?.hasPrefix("closest: ") ?? false, message ?? "no error")
     }
 }

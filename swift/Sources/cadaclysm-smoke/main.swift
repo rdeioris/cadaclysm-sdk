@@ -107,6 +107,16 @@ must("save_mesh") { try first.saveMesh(stl, format: "stl") }
 let size = (try? FileManager.default.attributesOfItem(atPath: stl)[.size] as? Int) ?? 0
 check(size >= 84, "save_mesh wrote no triangles")
 
+// The scene saved as a Rhino .3dm (its meshes), read back to the same meshable nodes.
+let sceneRhino = temp.appendingPathComponent("cadaclysm-smoke-swift-\(ProcessInfo.processInfo.processIdentifier).3dm").path
+must("save 3dm") { try scene.save(sceneRhino, format: "3dm") }
+let savedRhino: Scene = must("save 3dm read back") { try Cadaclysm.open(sceneRhino) }
+let savedMeshable = savedRhino.walk().filter { $0.canMesh }.count
+check(savedMeshable > 0 && savedMeshable == scene.walk().filter { $0.canMesh }.count, "save 3dm: the scene reads back with \(savedMeshable) meshable nodes")
+print("save 3dm: \(savedMeshable) meshable node(s) read back")
+savedRhino.close()
+try? FileManager.default.removeItem(atPath: sceneRhino)
+
 // The scene's and a node's wireframe as SVG: the library's own camera, no viewer.
 let svgText = must("svg_text") { try scene.svgText() }
 check(svgText.hasPrefix("<svg") && svgText.contains("<path"), "scene SVG text did not look like an SVG wireframe")
@@ -382,6 +392,64 @@ check(abs(satBounds.max.x - 40) <= 0.01 && abs(satBounds.max.y - 20) <= 0.01 && 
       "the SAT did not read back as the plate with its pin")
 satBack.close()
 
+// A box as a Rhino .3dm, bytes and file, read back through the reader -- the file with
+// `Solid.openAll`, the bytes with `openMemory` and `Solid.fromNode` -- to its six faces and
+// its volume; then two solids in metres and a nested assembly.
+do {
+    let magic = Array("3D Geometry File Format ".utf8)
+    func brickCheck(_ s: Solid, _ what: String) {
+        let volume = must("3dm mass") { () throws -> Mass in try s.mass() }.volume
+        let faces = must("3dm faces") { try s.faces }
+        check(faces == 6 && abs(volume - 6000) <= 6e-6, "3dm: \(what) reads back as \(faces) faces, volume \(volume)")
+    }
+    let brick = must("3dm cuboid") { try Solid.cuboid(10, 20, 30) }
+    let rhino = must("3dm bytes") { try brick.rhino3dmBytes() }
+    check(Array(rhino.prefix(magic.count)) == magic, "3dm: the bytes are not an openNURBS file")
+    let rhinoPath = temp.appendingPathComponent("cadaclysm-smoke-swift-brick-\(ProcessInfo.processInfo.processIdentifier).3dm").path
+    defer { try? FileManager.default.removeItem(atPath: rhinoPath) }
+    must("3dm write") { try brick.write3dm(rhinoPath) }
+    let written = must("3dm read") { try Data(contentsOf: URL(fileURLWithPath: rhinoPath)) }
+    check(Array(written) == rhino, "3dm: the file is not the bytes")
+    let back = must("3dm open_all") { try Solid.openAll(rhinoPath) }
+    check(back.count == 1, "3dm: the file reads back as \(back.count) solids")
+    brickCheck(back[0], "the file")
+    let memory = must("3dm open_memory") { try Cadaclysm.openMemory(rhino, format: "3dm", name: "brick.3dm") }
+    let bodies = memory.walk().filter { $0.canMesh }
+    check(bodies.count == 1, "3dm: the bytes open as \(bodies.count) meshable nodes")
+    brickCheck(must("3dm from_node") { try Solid.fromNode(memory, bodies[0]) }, "the bytes")
+    memory.close()
+
+    let moved = must("3dm cylinder") { try Solid.cylinder(4, 10).translate(40, 0, 0) }
+    must("3dm two") { try Blacksmith.write3dm(rhinoPath, [brick, moved], unit: "m") }
+    let twoFaces = must("3dm two back") { try Solid.openAll(rhinoPath) }.map { s in must("3dm faces") { try s.faces } }
+    check(twoFaces == [6, 3], "3dm: two solids read back with faces \(twoFaces)")
+    check(Array(must("3dm inches") { try Blacksmith.rhino3dmBytes([brick, moved], unit: "in") }.prefix(magic.count)) == magic,
+          "3dm: the module bytes are not an openNURBS file")
+    do {
+        _ = try brick.rhino3dmBytes(unit: "furlong")
+        fail("3dm: a furlong was taken")
+    } catch let error as BuildError {
+        check("\(error)".contains("unit must be one of"), "3dm: a furlong was refused as \(error)")
+    } catch {
+        fail("3dm: a furlong was refused as \(error)")
+    }
+
+    let bolt = must("3dm bolt") { try Solid.cuboid(1, 1, 1) }
+    let arm = must("3dm arm") { try Assembly("arm") }
+    let rig = must("3dm rig") { try Assembly("rig") }
+    must("3dm place") {
+        _ = try arm.place(bolt, try Frame.xy())
+        _ = try arm.place(bolt, try Frame.xy(SIMD3(2, 0, 0)))
+        _ = try rig.place(arm, try Frame.xy())
+        _ = try rig.place(bolt, try Frame.xy(SIMD3(10, 0, 0)))
+    }
+    check(Array(must("3dm assembly bytes") { try rig.rhino3dmBytes() }.prefix(magic.count)) == magic, "3dm: the assembly bytes are not an openNURBS file")
+    must("3dm assembly write") { try rig.write3dm(rhinoPath) }
+    let placed = must("3dm assembly back") { try Solid.openAll(rhinoPath) }
+    check(placed.count == 3 && placed.allSatisfy { s in must("3dm faces") { try s.faces } == 6 }, "3dm: the assembly reads back as \(placed.count) solids")
+    print("3dm: \(rhino.count) bytes, read back to 6 faces and 6000 mm3; an assembly of 3 placements")
+}
+
 // And back into the kernel: the read body's brep, shared with the scene rather than copied,
 // as a solid that outlives the scene it came from.
 var body: Node?
@@ -415,7 +483,53 @@ for i in 0..<3 {
 rounded.close()
 check(madeScene.bounds == sb, "closing the solid changed the scene made from it")
 print("to_scene: bounds max=\(sb.max), still readable after the solid is closed")
+tolerances(path, scene)
 print("OK")
+
+// ---- tolerances ----------------------------------------------------------------------------
+
+/// hole2.3dm (a root sample beside samples/, scripts/link-samples.py) declares an absolute 0.01 and
+/// one degree; a boolean given a nil tolerance works at the inputs' effective one, declares nothing
+/// for built primitives, and is the explicit-effective boolean.
+func tolerances(_ path: String, _ scene: Scene) {
+    let root = URL(fileURLWithPath: path).standardizedFileURL.deletingLastPathComponent().deletingLastPathComponent()
+    let hole2 = root.appendingPathComponent("hole2.3dm").path
+    if FileManager.default.fileExists(atPath: hole2) {
+        let declared = must("open hole2.3dm") { try Cadaclysm.open(hole2) }
+        check(declared.tolerances == Tolerances(absolute: 0.01, angular: 0.017453292519943295), "hole2.3dm declares \(declared.tolerances)")
+    } else if (ProcessInfo.processInfo.environment["CADACLYSM_SAMPLES_OPTIONAL"] ?? "").isEmpty {
+        fail("\(hole2) is missing: run scripts/link-samples.py")
+    }
+    if URL(fileURLWithPath: path).lastPathComponent == "cube.scad" {
+        check(scene.tolerances == Tolerances(absolute: nil, angular: nil), "cube.scad declares \(scene.tolerances)")
+    }
+    let block = must("cuboid") { try Solid.cuboid(10, 10, 10) }
+    let pin = must("cylinder") { try Solid.cylinder(3, 20).translate(0, 0, -5) }
+    let at = must("effective_tolerance") { try effectiveTolerance(block, pin) }
+    check(abs(at - 1e-4 * 20) < 1e-3, "effective_tolerance reads \(at)")
+    let unset = must("cut") { try block.cut(pin, tolerance: nil) }
+    let explicit = must("cut") { try block.cut(pin, tolerance: at) }
+    check(must("tolerances") { try unset.tolerances } == Tolerances(absolute: nil, angular: nil), "an unset cut declares a tolerance")
+    let (vu, ve) = (must("mass") { (try unset.mass(1e-7) as Mass).volume }, must("mass") { (try explicit.mass(1e-7) as Mass).volume })
+    check(vu == ve, "unset cut volume \(vu) against the explicit \(ve)")
+    let meshAt = must("effective_tolerance") { try effectiveTolerance(explicit) }
+    check(must("mesh") { try unset.mesh(tolerance: nil).triangleCount } == must("mesh") { try explicit.mesh(tolerance: meshAt).triangleCount },
+          "an unset mesh is not the explicit-effective one")
+    let loose = must("with_tolerances") { try block.withTolerances(absolute: 0.1) }
+    check(must("tolerances") { try loose.tolerances } == Tolerances(absolute: 0.1, angular: nil), "with_tolerances: 0.1 is not declared")
+    check(must("effective_tolerance") { try effectiveTolerance(loose, pin) } == 0.1, "effective_tolerance over a 0.1 declaration")
+    let looseCut = must("cut") { try loose.cut(pin, tolerance: 0) }
+    check(must("tolerances") { try looseCut.tolerances }.absolute == 0.1, "a cut does not inherit the loosest declaration")
+    check(must("vertex_tolerance") { try block.vertexTolerance([5, 5, 5]) } == nil, "a built cuboid records a vertex tolerance")
+    do {
+        _ = try block.withTolerances(absolute: -1)
+        fail("with_tolerances: -1 was accepted")
+    } catch {
+        check("\(error)".contains("solid_with_tolerances: "), "with_tolerances: -1 was refused in other words: \(error)")
+    }
+    check(must("effective_tolerance") { try effectiveTolerance() } == 0, "effective_tolerance of nothing is not 0")
+    print("tolerances: effective \(at), an unset cut is the explicit one")
+}
 
 // ---- mechanism -------------------------------------------------------------------------
 

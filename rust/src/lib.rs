@@ -3124,6 +3124,13 @@ pub struct Task<'s> {
     pub time: TaskTime,
 }
 
+impl Task<'_> {
+    /// The index of the work schedule this task belongs to (`scene.schedules()[i]`).
+    pub fn schedule_index(&self) -> u32 {
+        self.schedule
+    }
+}
+
 // Identity is the triple, so the same task from two lookups is equal.
 impl PartialEq for Task<'_> {
     fn eq(&self, other: &Self) -> bool {
@@ -4137,6 +4144,25 @@ fn build_svg_options(api: &Api, options: &SvgOptions, default_up: Up) -> Result<
 
 // ---- the scene --------------------------------------------------------------------
 
+/// What a file ([`Scene::tolerances`]) or a kernel solid
+/// ([`blacksmith::Solid::tolerances`]) declares about its own precision: `absolute`, a length
+/// in the model's own units, and `angular`, in radians -- each `None` where the source said
+/// nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Tolerances {
+    /// A length: how far apart two things may be and still be one.
+    pub absolute: Option<f64>,
+    /// Radians: how far two directions may differ and still be one.
+    pub angular: Option<f64>,
+}
+
+impl Tolerances {
+    pub(crate) fn from_raw(absolute: f64, angular: f64) -> Tolerances {
+        let declared = |v: f64| if v.is_nan() { None } else { Some(v) };
+        Tolerances { absolute: declared(absolute), angular: declared(angular) }
+    }
+}
+
 /// An open document, closed when dropped. Everything it hands back borrows from it.
 pub struct Scene {
     handle: NonNull<sys::CadaclysmScene>,
@@ -4248,6 +4274,18 @@ impl Scene {
     /// What one length in the file is worth in metres, or 1 where it did not say.
     pub fn metres_per_unit(&self) -> f64 {
         unsafe { (self.api.cadaclysm_metres_per_unit)(self.raw()) }
+    }
+
+    /// What the file declares about its own precision, as [`Tolerances`]: the absolute
+    /// tolerance in the file's own unit (beside [`metres_per_unit`](Self::metres_per_unit),
+    /// whatever convention the scene was opened into) and the angular one in radians, `None`
+    /// for one it does not declare -- a 3dm's units and tolerances, STEP's uncertainty, SAT's
+    /// `resabs`, IGES's resolution; other formats declare nothing. Each body read from the
+    /// file carries a copy, which the kernel's verbs given a tolerance of 0 work from.
+    pub fn tolerances(&self) -> Tolerances {
+        let (mut absolute, mut angular) = (f64::NAN, f64::NAN);
+        unsafe { (self.api.cadaclysm_tolerances)(self.raw(), &mut absolute, &mut angular) };
+        Tolerances::from_raw(absolute, angular)
     }
 
     /// Everything the model covers, **in world coordinates** -- the one figure here
@@ -5380,6 +5418,7 @@ mod tests {
         assert_eq!((slab.kind, shed.kind, topping.kind), (TaskKind::Construction, TaskKind::Demolition, TaskKind::NotDefined));
         assert_eq!(slab.kind.name(), "construction");
         assert!(topping.milestone && !slab.milestone);
+        assert!(tasks.iter().all(|t| t.schedule_index() == 0 && t.schedule_index() == s.index));
         assert_eq!((slab.identification.as_str(), slab.status.as_str()), ("T1", "COMPLETED"));
         assert_eq!((slab.time.schedule_start, slab.time.schedule_finish, slab.time.duration), (Some(T0), None, Some(10.0 * DAY)));
         assert_eq!((slab.time.actual_start, slab.time.actual_finish), (Some(T0), Some(T0 + 8.0 * DAY)));

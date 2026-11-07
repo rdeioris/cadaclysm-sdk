@@ -875,6 +875,7 @@ internal static class Loader
         var assembly = Assembly.GetExecutingAssembly().Location;
         var here = Path.GetDirectoryName(assembly);
         if (here is not null) candidates.AddRange(files.Select(f => Path.Combine(here, f)));
+        foreach (var dir in PackageDirectories(here)) candidates.AddRange(files.Select(f => Path.Combine(dir, f)));
         for (var dir = here; dir is not null; dir = Path.GetDirectoryName(dir))
         {
             candidates.AddRange(files.Select(f => Path.Combine(dir, "lib", f)));
@@ -885,6 +886,29 @@ internal static class Loader
             if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out var handle))
                 return handle;
         return NativeLibrary.TryLoad(libraryName, out var fallback) ? fallback : IntPtr.Zero;
+    }
+
+    /// <summary>Where the `Cadaclysm` NuGet package's libraries land, searched right after
+    /// beside the assembly by every library this binding loads: `runtimes/{rid}/native/`
+    /// beside it (a portable app's build output; the package ships macOS's universal
+    /// libraries under the bare `osx`), then every directory the host put one of the app's
+    /// native assets in (`NATIVE_DLL_SEARCH_DIRECTORIES`), less the runtime's own folder.</summary>
+    internal static List<string> PackageDirectories(string? here)
+    {
+        var runtime = Path.GetDirectoryName(typeof(object).Assembly.Location);
+        var os = OperatingSystem.IsWindows() ? "win" : OperatingSystem.IsMacOS() ? "osx" : "linux";
+        var arch = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
+        var dirs = new List<string>();
+        if (!string.IsNullOrEmpty(here))
+            foreach (var rid in new[] { RuntimeInformation.RuntimeIdentifier, $"{os}-{arch}", os }.Distinct())
+                dirs.Add(Path.Combine(here, "runtimes", rid, "native"));
+        if (AppContext.GetData("NATIVE_DLL_SEARCH_DIRECTORIES") is string probed)
+            foreach (var dir in probed.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var trimmed = Path.TrimEndingDirectorySeparator(dir);
+                if (trimmed != here && trimmed != runtime && !dirs.Contains(trimmed)) dirs.Add(trimmed);
+            }
+        return dirs;
     }
 }
 
@@ -926,6 +950,8 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_schema(SceneHandle scene);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_schema_read(SceneHandle scene);
     [DllImport(Lib)] internal static extern double cadaclysm_metres_per_unit(SceneHandle scene);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_tolerances(SceneHandle scene, out double absolute, out double angular);
     [DllImport(Lib)] internal static extern RawBounds cadaclysm_bounds(SceneHandle scene);
     [DllImport(Lib)] internal static extern RawBounds64 cadaclysm_bounds64(SceneHandle scene);
     [DllImport(Lib)] internal static extern uint cadaclysm_node_parent(SceneHandle scene, uint node);
@@ -1249,6 +1275,11 @@ public readonly struct Bounds64
         (Min[0] + Max[0]) / 2, (Min[1] + Max[1]) / 2, (Min[2] + Max[2]) / 2,
     };
 }
+
+/// <summary>What a file (<see cref="Scene.Tolerances"/>) or a kernel solid declares about its own
+/// precision: <c>Absolute</c>, a length in the model's own units, and <c>Angular</c>, in radians --
+/// each null where the source said nothing.</summary>
+public readonly record struct Tolerances(double? Absolute, double? Angular);
 
 /// <summary>One thing the file said about a node.</summary>
 /// <remarks><see cref="Value"/> is this value in .NET's own natural rendering — the nearest
@@ -2212,6 +2243,9 @@ public sealed class ScheduleTask : IEquatable<ScheduleTask>
     public WorkSchedule Schedule { get; }
     public uint Index { get; }
 
+    /// <summary>The index of the work schedule this task belongs to (<c>scene.Schedules[i]</c>).</summary>
+    public uint ScheduleIndex => Schedule.Index;
+
     internal ScheduleTask(WorkSchedule schedule, uint index)
     {
         Schedule = schedule;
@@ -2460,12 +2494,12 @@ public sealed class Pose
     /// <summary>Draw this pose's scene as Scene.Show does -- by handle -- with every node's posed
     /// transform handed to the view (cadaclysm_view_set_node_transforms). An unposed pose draws
     /// exactly what Scene.Show does.</summary>
-    public void Show(global::Cadaclysm.Viewing.ShowOptions? options = null) =>
-        global::Cadaclysm.Viewing.View.Present(_scene, options, false, _transforms);
+    public void Show(global::Cadaclysm.Viewer.ShowOptions? options = null) =>
+        global::Cadaclysm.Viewer.View.Present(_scene, options, false, _transforms);
 
     /// <summary>Pose.Show's orbiting twin; returns what Scene.View returns.</summary>
-    public global::Cadaclysm.Viewing.Camera View(global::Cadaclysm.Viewing.ShowOptions? options = null) =>
-        global::Cadaclysm.Viewing.View.Present(_scene, options, true, _transforms)!;
+    public global::Cadaclysm.Viewer.Camera View(global::Cadaclysm.Viewer.ShowOptions? options = null) =>
+        global::Cadaclysm.Viewer.View.Present(_scene, options, true, _transforms)!;
 
     public override string ToString() => $"<Pose ground={Ground}>";
 }
@@ -3293,12 +3327,12 @@ public sealed class Node : IEquatable<Node>
     }
 
     /// <summary>Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still.
-    /// Choose the library with <see cref="Cadaclysm.Viewing.ViewLibrary"/> before the first view.</summary>
-    public void Show(global::Cadaclysm.Viewing.ShowOptions? options = null) => global::Cadaclysm.Viewing.View.Present(this, options, false);
+    /// Choose the library with <see cref="Cadaclysm.Viewer.ViewLibrary"/> before the first view.</summary>
+    public void Show(global::Cadaclysm.Viewer.ShowOptions? options = null) => global::Cadaclysm.Viewer.View.Present(this, options, false);
 
     /// <summary>Orbit until the window is closed; the camera it was left at and the last pick.</summary>
-    public global::Cadaclysm.Viewing.Camera View(global::Cadaclysm.Viewing.ShowOptions? options = null) =>
-        global::Cadaclysm.Viewing.View.Present(this, options, true)!;
+    public global::Cadaclysm.Viewer.Camera View(global::Cadaclysm.Viewer.ShowOptions? options = null) =>
+        global::Cadaclysm.Viewer.View.Present(this, options, true)!;
 
     public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_node_name(Scene.Handle, Index)) ?? "";
 
@@ -3896,7 +3930,7 @@ public sealed class Scene : IDisposable
     /// library needs a shown scene open until its item is gone.</remarks>
     public void Close()
     {
-        if (!_handle.IsClosed) global::Cadaclysm.Viewing.View.Release(this);
+        if (!_handle.IsClosed) global::Cadaclysm.Viewer.View.Release(this);
         _handle.Dispose();
     }
 
@@ -3905,12 +3939,12 @@ public sealed class Scene : IDisposable
     public void Dispose() => Close();
 
     /// <summary>Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still.
-    /// Choose the library with <see cref="Cadaclysm.Viewing.ViewLibrary"/> before the first view.</summary>
-    public void Show(global::Cadaclysm.Viewing.ShowOptions? options = null) => global::Cadaclysm.Viewing.View.Present(this, options, false);
+    /// Choose the library with <see cref="Cadaclysm.Viewer.ViewLibrary"/> before the first view.</summary>
+    public void Show(global::Cadaclysm.Viewer.ShowOptions? options = null) => global::Cadaclysm.Viewer.View.Present(this, options, false);
 
     /// <summary>Orbit until the window is closed; the camera it was left at and the last pick.</summary>
-    public global::Cadaclysm.Viewing.Camera View(global::Cadaclysm.Viewing.ShowOptions? options = null) =>
-        global::Cadaclysm.Viewing.View.Present(this, options, true)!;
+    public global::Cadaclysm.Viewer.Camera View(global::Cadaclysm.Viewer.ShowOptions? options = null) =>
+        global::Cadaclysm.Viewer.View.Present(this, options, true)!;
 
     /// <summary>The version of the library that read it.</summary>
     public string Version => Cadaclysm.Version();
@@ -3938,6 +3972,22 @@ public sealed class Scene : IDisposable
     /// <summary>What one length in the file is worth in metres, or 1 where it did not say.
     /// </summary>
     public double MetresPerUnit => Native.cadaclysm_metres_per_unit(Handle);
+
+    /// <summary>What the file declares about its own precision, as <see cref="Cadaclysm.Tolerances"/>:
+    /// the absolute tolerance in the file's own unit (beside <see cref="MetresPerUnit"/>, whatever
+    /// convention the scene was opened into) and the angular one in radians, null for one it does
+    /// not declare -- a 3dm's units and tolerances, STEP's uncertainty, SAT's <c>resabs</c>, IGES's
+    /// resolution; other formats declare nothing. Each body read from the file carries a copy,
+    /// which the kernel's verbs given a null tolerance work from.</summary>
+    public Tolerances Tolerances
+    {
+        get
+        {
+            if (!Native.cadaclysm_tolerances(Handle, out var absolute, out var angular))
+                throw new CadaclysmException("tolerances: the scene is closed");
+            return new Tolerances(double.IsNaN(absolute) ? null : absolute, double.IsNaN(angular) ? null : angular);
+        }
+    }
 
     /// <summary>Everything the model covers, in world coordinates. This meshes all of it,
     /// being the only way to know how far it reaches.</summary>

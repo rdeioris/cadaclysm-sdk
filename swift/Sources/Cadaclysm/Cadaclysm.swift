@@ -198,7 +198,7 @@ public func license(_ textOrPath: String) throws {
     }
 }
 
-/// One line about the licence in use -- `customer=… expiry=… entitlements=…` -- or
+/// One line about the licence in use -- `customer=… expiry=… scope=…` -- or
 /// `unlicensed` (`unlicensed -- <reason>` when one was found but did not verify). Never empty.
 public func licenseInfo() -> String {
     let info = borrowed(cadaclysm_license_info())
@@ -211,6 +211,21 @@ public func licenseNoticeCount() -> Int { Int(clamping: cadaclysm_license_notice
 
 /// How many coarser levels `Node.meshLod` offers above the mesh itself (level 0).
 public func lodLevels() -> Int { Int(cadaclysm_lod_levels()) }
+
+/// What a file (`Scene.tolerances`) or a kernel solid (`Solid.tolerances`) declares about its own
+/// precision: `absolute`, a length in the model's own units, and `angular`, in radians -- each nil
+/// where the source said nothing.
+public struct Tolerances: Hashable, Sendable {
+    /// A length: how far apart two things may be and still be one.
+    public let absolute: Double?
+    /// Radians: how far two directions may differ and still be one.
+    public let angular: Double?
+
+    public init(absolute: Double?, angular: Double?) {
+        self.absolute = absolute
+        self.angular = angular
+    }
+}
 
 /// One format `Node.saveMesh` writes: its name, the extension it writes (not always the
 /// same word: `stl-ascii` writes a `.stl`), and a label for a menu (`STL (binary)`).
@@ -1774,6 +1789,9 @@ public struct ScheduleTask: Hashable, CustomStringConvertible {
     public let schedule: WorkSchedule
     /// Its index in `WorkSchedule.tasks`.
     public let index: Int
+
+    /// The index of the work schedule this task belongs to (`scene.schedules[i]`).
+    public var scheduleIndex: Int { schedule.index }
 
     fileprivate init(_ schedule: WorkSchedule, _ index: Int) {
         self.schedule = schedule
@@ -3548,6 +3566,18 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
 
     /// What one length unit in the file is worth in metres; 1 where the file did not say.
     public var metresPerUnit: Double { cadaclysm_metres_per_unit(live()) }
+
+    /// What the file declares about its own precision, as `Tolerances`: the absolute tolerance in
+    /// the file's own unit (beside `metresPerUnit`, whatever convention the scene was opened into)
+    /// and the angular one in radians, nil for one it does not declare -- a 3dm's units and
+    /// tolerances, STEP's uncertainty, SAT's `resabs`, IGES's resolution; other formats declare
+    /// nothing. Each body read from the file carries a copy, which the kernel's verbs given a nil
+    /// tolerance work from.
+    public var tolerances: Tolerances {
+        var absolute = Double.nan, angular = Double.nan
+        _ = cadaclysm_tolerances(live(), &absolute, &angular)
+        return Tolerances(absolute: absolute.isNaN ? nil : absolute, angular: angular.isNaN ? nil : angular)
+    }
 
     /// Everything the model covers, in world coordinates -- the one figure not in a node's own
     /// frame. This meshes the whole model; to frame a view quickly use the built nodes' bounds.

@@ -197,7 +197,7 @@ final class BlacksmithInterpolatorMergeTests: XCTestCase {
         XCTAssertEqual(refusal { _ = try m.regionSolid(4) }, "region_solid: region 4 is not below 4")
         XCTAssertEqual(refusal { _ = try m.regionSolid(-1) }, "region_solid: region is out of range: -1")
         XCTAssertEqual(refusal { _ = try m.regionSolid(1 << 32) }, "region_solid: region is out of range: 4294967296")
-        check("merge: tolerance must be positive and finite") { _ = try a.merge(a, tolerance: 0) }
+        check("merge: tolerance must be positive and finite") { _ = try a.merge(a, tolerance: -1) }
         // A cell is an ordinary solid again.
         XCTAssertGreaterThan(try m.regionSolid(1).join(a, tolerance: mergeTolerance).faces, 0)
         // An ordinary solid has two regions: outside in front of every face, inside behind.

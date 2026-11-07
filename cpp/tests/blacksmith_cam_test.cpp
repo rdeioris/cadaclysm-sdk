@@ -87,10 +87,10 @@ static Result<void> test_profile_to_arcs_fits_a_spline_within_tolerance() {
     CADACLYSM_TRY(fitted, spline.to_arcs(0.01));
     CADACLYSM_TRY(expected, footprint(spline));
     CADACLYSM_TRY_VOID(check_footprint(fitted, expected, 0.011));
-    Result<bs::Profile> failed = spline.to_arcs(0);
-    check(!failed, "to_arcs(0) was accepted");
+    Result<bs::Profile> failed = spline.to_arcs(-1);
+    check(!failed, "to_arcs(-1) was accepted");
     if (!failed) check(failed.error().message == "profile_to_arcs: tolerance must be positive and finite",
-                       "to_arcs(0) message is '" + failed.error().message + "'");
+                       "to_arcs(-1) message is '" + failed.error().message + "'");
     return {};
 }
 

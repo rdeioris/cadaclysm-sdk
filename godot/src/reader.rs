@@ -102,6 +102,14 @@ pub(crate) fn aabb(min: [f32; 3], max: [f32; 3]) -> Aabb {
     Aabb::new(vector3(min), vector3(max) - vector3(min))
 }
 
+/// A declaration as `{absolute, angular}`, `NAN` for a field it does not declare.
+pub(crate) fn tolerances_dict(t: sdk::Tolerances) -> VarDictionary {
+    crate::dict(&[
+        ("absolute", t.absolute.unwrap_or(f64::NAN).to_variant()),
+        ("angular", t.angular.unwrap_or(f64::NAN).to_variant()),
+    ])
+}
+
 fn bounds(b: sdk::Bounds) -> Aabb {
     aabb(b.min, b.max)
 }
@@ -650,6 +658,8 @@ pub struct CadaclysmScene {
     convention: PhantomVar<i64>,
     #[var(get = get_metres_per_unit, no_set)]
     metres_per_unit: PhantomVar<f64>,
+    #[var(get = get_tolerances, no_set)]
+    tolerances: PhantomVar<VarDictionary>,
     #[var(get = get_bounds, no_set)]
     bounds: PhantomVar<Aabb>,
     #[var(get = get_surface_matrix, no_set)]
@@ -698,6 +708,7 @@ impl CadaclysmScene {
             substituted: PhantomVar::default(),
             convention: PhantomVar::default(),
             metres_per_unit: PhantomVar::default(),
+            tolerances: PhantomVar::default(),
             bounds: PhantomVar::default(),
             surface_matrix: PhantomVar::default(),
             diagnostics: PhantomVar::default(),
@@ -818,6 +829,17 @@ impl CadaclysmScene {
     #[func]
     fn get_metres_per_unit(&self) -> f64 {
         with_scene(&self.shared, |s| s.metres_per_unit()).unwrap_or_default()
+    }
+
+    /// What the file declares about its own precision, as a Dictionary: `absolute`, in the
+    /// file's own unit (beside `metres_per_unit`, whatever convention the scene was opened into),
+    /// and `angular`, in radians, each `NAN` where the file did not say (Godot has no null
+    /// number) -- a 3dm's units and tolerances, STEP's uncertainty, SAT's `resabs`, IGES's
+    /// resolution; other formats declare nothing. Each body read from the file carries a copy,
+    /// which the kernel's verbs given a tolerance of 0 work from.
+    #[func]
+    fn get_tolerances(&self) -> VarDictionary {
+        with_scene(&self.shared, |s| tolerances_dict(s.tolerances())).unwrap_or_default()
     }
 
     /// The box around every placement, in the convention's space.
@@ -2400,6 +2422,8 @@ pub struct CadaclysmTask {
     index: u32,
     #[var(rename = index, get = get_index, no_set)]
     index_: PhantomVar<i64>,
+    #[var(get = get_schedule_index, no_set)]
+    schedule_index: PhantomVar<i64>,
     #[var(get = get_name, no_set)]
     name: PhantomVar<GString>,
     #[var(get = get_identification, no_set)]
@@ -2427,6 +2451,7 @@ impl CadaclysmTask {
             schedule,
             index,
             index_: PhantomVar::default(),
+            schedule_index: PhantomVar::default(),
             name: PhantomVar::default(),
             identification: PhantomVar::default(),
             kind: PhantomVar::default(),
@@ -2453,6 +2478,12 @@ impl CadaclysmTask {
     #[func]
     fn get_index(&self) -> i64 {
         self.index as i64
+    }
+
+    /// The index of the work schedule this task belongs to (`scene.schedules[i]`).
+    #[func]
+    fn get_schedule_index(&self) -> i64 {
+        self.schedule as i64
     }
 
     /// Its name.

@@ -959,6 +959,8 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(topping.kind, "notdefined")
         XCTAssertTrue(topping.milestone)
         XCTAssertFalse(slab.milestone)
+        XCTAssertEqual(s.tasks.map { $0.scheduleIndex }, [0, 0, 0, 0, 0, 0, 0])
+        XCTAssertEqual(fit.scheduleIndex, s.index)
         XCTAssertEqual(slab.identification, "T1")
         XCTAssertEqual(slab.status, "COMPLETED")
         XCTAssertEqual(slab.time.scheduleStart, t0)

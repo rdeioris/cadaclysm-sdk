@@ -406,6 +406,7 @@ entry_points! {
     fn cadaclysm_schema(scene: *const CadaclysmScene) -> *const c_char;
     fn cadaclysm_schema_read(scene: *const CadaclysmScene) -> *const c_char;
     fn cadaclysm_metres_per_unit(scene: *const CadaclysmScene) -> f64;
+    fn cadaclysm_tolerances(scene: *const CadaclysmScene, absolute: *mut f64, angular: *mut f64) -> bool;
     fn cadaclysm_bounds(scene: *const CadaclysmScene) -> CadaclysmBounds;
     fn cadaclysm_bounds64(scene: *const CadaclysmScene) -> CadaclysmBounds64;
     fn cadaclysm_node_parent(scene: *const CadaclysmScene, node: u32) -> u32;
@@ -653,7 +654,7 @@ entry_points! {
 
 // ---- loading --------------------------------------------------------------------
 
-static LIBRARY: Loader<Api> = Loader::new("cadaclysm_capi", "CADACLYSM_LIBRARY", Api::bind);
+static LIBRARY: Loader<Api> = Loader::new("cadaclysm_capi", "CADACLYSM_LIBRARY", Api::bind, ENTRY_POINTS);
 
 /// The library's file name on this platform.
 pub fn library_name() -> String {

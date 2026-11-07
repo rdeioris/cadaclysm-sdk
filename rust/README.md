@@ -61,13 +61,17 @@ fn main() -> cadaclysm_sdk::Result<()> {
 
 ## Where it finds the libraries
 
-1. `CADACLYSM_LIBRARY` for the reader, `CADACLYSM_BLACKSMITH_LIBRARY` for the
+1. the copy your process already holds: a program that embeds Python and has
+   imported the `cadaclysm` wheel has its libraries loaded, and the View reads solids
+   through that copy, so the crate binds it rather than loading a second beside it
+   (`blacksmith::use_loaded()` binds it explicitly, and fails rather than load one);
+2. `CADACLYSM_LIBRARY` for the reader, `CADACLYSM_BLACKSMITH_LIBRARY` for the
    kernel -- the library itself, or its directory. Each reads only its own;
-2. beside your executable -- where the download puts them;
-3. where the build downloaded them;
-4. a `lib/` directory in any ancestor of the executable or the working directory
+3. beside your executable -- where the download puts them;
+4. where the build downloaded them;
+5. a `lib/` directory in any ancestor of the executable or the working directory
    (the SDK layout -- `python fetch.py` puts the libraries there);
-5. `target/release` or `target/debug` in any of those ancestors (this repository).
+6. `target/release` or `target/debug` in any of those ancestors (this repository).
 
 Or call `cadaclysm_sdk::load(path)` / `cadaclysm_sdk::blacksmith::load(path)`
 before anything else. When shipping, put the libraries beside your executable.
@@ -94,6 +98,11 @@ wrappers document that; here the compiler enforces it.
   takes `&self`: the library keeps the state. A refusal's `Error::ids()` names the
   constraints or entities it ran into (empty for any other error); kinds, senses and
   ends are `&'static str`s, and dropping the sketch frees it.
+- A `blacksmith::Document` loads the text any wrapper's `Document.save` wrote and
+  reads each node back as an ordinary `Solid` or `Profile` (`result_kind`, then
+  `result_solid` / `result_profile`), colours and all; `add_solid` and
+  `add_profile` put the ones you have in. The crate reads no JSON: ops, statuses,
+  errors and values are JSON text, as the C ABI has them. `Send`, not `Sync`.
 
 ## Drawing
 

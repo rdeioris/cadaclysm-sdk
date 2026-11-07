@@ -26,10 +26,17 @@
 //! }
 //! ```
 //!
-//! A second shared library, loaded on first use like the reader's: from
+//! A second shared library, loaded on first use like the reader's: the copy the process
+//! already holds, if one is loaded (a Python wheel's, say: see [`use_loaded`]); else from
 //! `CADACLYSM_BLACKSMITH_LIBRARY`, else beside the executable, else a `lib/` or
 //! `target/release` in an ancestor directory -- see [`sys::find_library`]. It keeps
 //! its own license state, so [`license`] is its own call.
+//!
+//! # Documents
+//!
+//! A [`Document`] is a model as data, as the other wrappers' is: load the text a
+//! `Document.save` wrote (in any language) and read each node's result back as an ordinary
+//! [`Solid`] or [`Profile`], colours and all.
 //!
 //! # Solids are immutable, and not for two threads at once
 //!
@@ -75,6 +82,17 @@
 //! `join`/`cut`/`common` take a tolerance, [`DEFAULT_TOLERANCE`] being what the
 //! kernel's own boolean tests run at; `fillet`, `chamfer` and `shell` want the
 //! tighter [`FILLET_TOLERANCE`].
+//!
+//! # Tolerances
+//!
+//! A tolerance of 0 (or NaN) given to a verb that takes a distance tolerance -- a
+//! boolean, fillet, shell, split, section, hit test, mesh, curve fit or profile verb --
+//! opts into the model's own: [`effective_tolerance`], the larger of the loosest absolute
+//! tolerance the inputs declare and the option `tolerance.relative` (default `1e-4`)
+//! times their size. A solid declares what its file said ([`Solid::tolerances`], `None`
+//! for what it did not say; [`crate::Scene::tolerances`] is the file's), every verb's
+//! result inherits the loosest of its inputs', and [`Solid::with_tolerances`] sets it.
+//! `tolerance.angular` (default one degree) stands in where nothing declares an angle.
 
 use std::collections::BTreeMap;
 use std::ffi::{c_char, CString};
@@ -88,7 +106,7 @@ use std::sync::Mutex;
 
 use crate::{
     borrowed, groups, groups64, heal_from, health_from, text, Beziers64Data, Error, FreedomAxis, HealKinds, HealReport, HealthReport, Manifold, Mesh, Mesh64, Motion, Node, OpenOptions, PairKind, Result, Scene,
-    StateValue, SvgOptions, SvgView, Up,
+    StateValue, SvgOptions, SvgView, Tolerances, Up,
 };
 use crate::view::objects::{polyline_segments, present, Shown};
 use crate::view::{current, Camera, ViewOptions};
@@ -225,6 +243,21 @@ pub fn load(path: impl AsRef<FsPath>) -> Result<()> {
     sys::load(Some(path.as_ref())).map(|_| ()).map_err(Error::new)
 }
 
+/// Bind the kernel library this process already holds -- the Python wheel's
+/// `cadaclysm_blacksmith`, when the program embeds Python and a script has imported it --
+/// and answer the file it was loaded from. An error where the process holds none, or where
+/// this crate already bound another copy.
+///
+/// A solid handle is good only to the copy of the kernel that made it, and a viewer reads
+/// solids through the copy already loaded, so an app with two copies hands the View solids
+/// it cannot read. The first call that needs the kernel binds the held copy anyway, ahead of
+/// every other place it looks ([`sys::find_library`]); this makes that choice explicit, and
+/// fails rather than loading a second copy when nothing holds one yet.
+pub fn use_loaded() -> Result<PathBuf> {
+    sys::use_loaded().map_err(Error::new)?;
+    library_path()
+}
+
 /// Where the kernel library is: the one loaded, or the one the next call would load.
 pub fn library_path() -> Result<PathBuf> {
     match sys::loaded_path() {
@@ -258,9 +291,14 @@ pub fn license(text_or_path: impl AsRef<std::ffi::OsStr>) -> Result<()> {
 }
 
 /// Set a kernel option, by its name, for the whole process from the next call on:
-/// `"boolean.mesh_budget"`, `"boolean.finest_tolerance"`, `"profile_boolean.point_budget"`
-/// or `"measure.default_accuracy"`. An error -- and nothing changed -- for a name that is
-/// not an option or a value it does not take, saying which and what it takes.
+/// `"boolean.mesh_budget"`, `"boolean.finest_tolerance"`, `"profile_boolean.point_budget"`,
+/// `"measure.default_accuracy"`, `"step.validation_properties"`,
+/// `"step.validation_accuracy"`, `"tolerance.relative"` or
+/// `"tolerance.angular"`. An error -- and nothing changed -- for a name that is
+/// not an option or a value it does not take, saying which and what it takes. The last two
+/// stamp a written STEP part file with each body's measured area, volume and centroid, there
+/// for the kernel that reads the file to check the transfer against; off by default, since it
+/// measures every body in the file at `"step.validation_accuracy"` (1e-5).
 pub fn set_option(name: &str, value: f64) -> Result<()> {
     let api = api()?;
     let given = c_text("option name", name)?;
@@ -282,6 +320,21 @@ pub fn option(name: &str) -> Result<f64> {
     } else {
         Err(fail(api, &format!("no option {name:?}")))
     }
+}
+
+/// The tolerance a verb given a tolerance of 0 (or NaN) works at over `solids`: the larger of
+/// the loosest absolute tolerance they declare ([`Solid::tolerances`]) and
+/// `option("tolerance.relative")` times the largest of their sizes, never finer than their
+/// coordinates can represent. 0 for no solids, or solids with nothing to size by -- which a
+/// verb refuses.
+pub fn effective_tolerance(solids: &[&Solid]) -> Result<f64> {
+    let api = api()?;
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let t = unsafe { (api.cadaclysm_blacksmith_effective_tolerance)(handles.as_ptr(), handles.len()) };
+    if t.is_nan() {
+        return Err(fail(api, "effective_tolerance"));
+    }
+    Ok(t)
 }
 
 /// One line about the license the kernel is running under, or `"unlicensed"`.
@@ -1289,6 +1342,13 @@ impl Line {
 value_traits!(Line);
 
 impl Line {
+    /// The exact NURBS form of this curve.
+    pub fn to_nurbs(&self) -> Result<NurbsCurve> {
+        curve_to_nurbs(Line::KIND, &self.v)
+    }
+}
+
+impl Line {
     /// Refused for two equal ends.
     pub fn new(start: [f64; 3], end: [f64; 3]) -> Result<Line> {
         Line::from_values(&[start[0], start[1], start[2], end[0], end[1], end[2]])
@@ -1378,6 +1438,13 @@ impl Circle {
 value_traits!(Circle);
 
 impl Circle {
+    /// The exact NURBS form of this curve.
+    pub fn to_nurbs(&self) -> Result<NurbsCurve> {
+        curve_to_nurbs(Circle::KIND, &self.v)
+    }
+}
+
+impl Circle {
     pub fn new(frame: &Frame, radius: f64) -> Result<Circle> {
         Circle::from_values(&on_frame(frame, &[radius]))
     }
@@ -1456,6 +1523,13 @@ impl Arc {
 }
 
 value_traits!(Arc);
+
+impl Arc {
+    /// The exact NURBS form of this curve.
+    pub fn to_nurbs(&self) -> Result<NurbsCurve> {
+        curve_to_nurbs(Arc::KIND, &self.v)
+    }
+}
 
 impl Arc {
     /// `angle` an [`Interval`] or a pair.
@@ -1568,6 +1642,13 @@ impl Ellipse {
 value_traits!(Ellipse);
 
 impl Ellipse {
+    /// The exact NURBS form of this curve.
+    pub fn to_nurbs(&self) -> Result<NurbsCurve> {
+        curve_to_nurbs(Ellipse::KIND, &self.v)
+    }
+}
+
+impl Ellipse {
     pub fn new(frame: &Frame, r1: f64, r2: f64) -> Result<Ellipse> {
         Ellipse::from_values(&on_frame(frame, &[r1, r2]))
     }
@@ -1624,8 +1705,9 @@ impl Sphere {
     }
 
     /// Whether `p` lies inside the closed shape or within `tolerance` of it
-    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). Refused for a tolerance
-    /// negative or not finite.
+    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). NaN is unset, the shape's own
+    /// effective tolerance (`tolerance.relative` times its diagonal); 0 is exact. Refused for a
+    /// tolerance negative or infinite.
     pub fn contains(&self, p: [f64; 3], tolerance: f64) -> Result<bool> {
         solid_contains(Sphere::KIND, &self.v, p, tolerance)
     }
@@ -1726,8 +1808,9 @@ impl Cylinder {
     }
 
     /// Whether `p` lies inside the closed shape or within `tolerance` of it
-    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). Refused for a tolerance
-    /// negative or not finite.
+    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). NaN is unset, the shape's own
+    /// effective tolerance (`tolerance.relative` times its diagonal); 0 is exact. Refused for a
+    /// tolerance negative or infinite.
     pub fn contains(&self, p: [f64; 3], tolerance: f64) -> Result<bool> {
         solid_contains(Cylinder::KIND, &self.v, p, tolerance)
     }
@@ -1834,8 +1917,9 @@ impl Cone {
     }
 
     /// Whether `p` lies inside the closed shape or within `tolerance` of it
-    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). Refused for a tolerance
-    /// negative or not finite.
+    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). NaN is unset, the shape's own
+    /// effective tolerance (`tolerance.relative` times its diagonal); 0 is exact. Refused for a
+    /// tolerance negative or infinite.
     pub fn contains(&self, p: [f64; 3], tolerance: f64) -> Result<bool> {
         solid_contains(Cone::KIND, &self.v, p, tolerance)
     }
@@ -1940,8 +2024,9 @@ impl Torus {
     }
 
     /// Whether `p` lies inside the closed shape or within `tolerance` of it
-    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). Refused for a tolerance
-    /// negative or not finite.
+    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). NaN is unset, the shape's own
+    /// effective tolerance (`tolerance.relative` times its diagonal); 0 is exact. Refused for a
+    /// tolerance negative or infinite.
     pub fn contains(&self, p: [f64; 3], tolerance: f64) -> Result<bool> {
         solid_contains(Torus::KIND, &self.v, p, tolerance)
     }
@@ -2046,8 +2131,9 @@ impl Cuboid {
     }
 
     /// Whether `p` lies inside the closed shape or within `tolerance` of it
-    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). Refused for a tolerance
-    /// negative or not finite.
+    /// ([`CONTAINS_TOLERANCE`] is the other wrappers' default). NaN is unset, the shape's own
+    /// effective tolerance (`tolerance.relative` times its diagonal); 0 is exact. Refused for a
+    /// tolerance negative or infinite.
     pub fn contains(&self, p: [f64; 3], tolerance: f64) -> Result<bool> {
         solid_contains(Cuboid::KIND, &self.v, p, tolerance)
     }
@@ -2120,14 +2206,306 @@ impl Cuboid {
     }
 }
 
+/// The rectangle over `x` and `y` (increasing ranges) in its frame's x-y plane. As a curve it
+/// is its boundary: `t` runs 0..4, one unit a side from corner `(x0, y0)` counter-clockwise
+/// about the frame's z, clamped outside that range; [`Rectangle::closest_point`] is the
+/// boundary's, not unique on a tie (the centre). Its array is `frame[12] x0 x1 y0 y1`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rectangle {
+    v: [f64; 16],
+}
+
+impl Rectangle {
+    /// The kind its array is tagged with.
+    pub const KIND: u32 = sys::CADACLYSM_BLACKSMITH_VALUE_RECTANGLE;
+
+    /// A rectangle from its raw array of 16 numbers, checked and squared up by the library:
+    /// refused for another count or a bad value.
+    pub fn from_values(values: &[f64]) -> Result<Rectangle> {
+        Ok(Rectangle { v: checked_value::<16>(Rectangle::KIND, "rectangle", values)? })
+    }
+
+    /// Each range an [`Interval`] or a pair.
+    pub fn new(frame: &Frame, x: impl IntervalLike, y: impl IntervalLike) -> Result<Rectangle> {
+        let (x, y) = (x.interval()?, y.interval()?);
+        Rectangle::from_values(&on_frame(frame, &[x.t0(), x.t1(), y.t0(), y.t1()]))
+    }
+
+    /// The canonical array, as the library squared it up.
+    pub fn values(&self) -> [f64; 16] {
+        self.v
+    }
+
+    /// The frame the rectangle lies on: its ranges run along the frame's x and y.
+    pub fn frame(&self) -> Frame {
+        first_frame(&self.v)
+    }
+
+    pub fn x(&self) -> Interval {
+        Interval::of_finite(self.v[12], self.v[13])
+    }
+
+    pub fn y(&self) -> Interval {
+        Interval::of_finite(self.v[14], self.v[15])
+    }
+
+    /// The world box of the four corners, `(min, max)`.
+    pub fn bounds(&self) -> Result<([f64; 3], [f64; 3])> {
+        value_bounds(Rectangle::KIND, &self.v)
+    }
+
+    /// This rectangle under `t`: any map keeping its sides square (no shear in its plane).
+    pub fn transform(&self, t: &Transform) -> Result<Rectangle> {
+        Ok(Rectangle { v: value_transform(Rectangle::KIND, &self.v, t)? })
+    }
+
+    /// The boundary's point at `t`: side `k` for `t` in `k..k+1`, clamped outside 0..4.
+    pub fn point_at(&self, t: f64) -> Result<[f64; 3]> {
+        curve_point_at(Rectangle::KIND, &self.v, t)
+    }
+
+    /// The unit direction of `t`'s side.
+    pub fn tangent_at(&self, t: f64) -> Result<[f64; 3]> {
+        curve_tangent_at(Rectangle::KIND, &self.v, t)
+    }
+
+    /// The boundary's length, the circumference.
+    pub fn length(&self) -> Result<f64> {
+        curve_length(Rectangle::KIND, &self.v)
+    }
+
+    /// The [`CurveFoot`] on the boundary nearest `p` (projected onto the plane first).
+    pub fn closest_point(&self, p: [f64; 3]) -> Result<CurveFoot> {
+        curve_closest_point(Rectangle::KIND, &self.v, p)
+    }
+
+    /// How far `p` lies from the boundary.
+    pub fn distance_to(&self, p: [f64; 3]) -> Result<f64> {
+        Ok(distance(self.closest_point(p)?.point, p))
+    }
+
+    /// The four corners: `(x0, y0)`, `(x1, y0)`, `(x1, y1)`, `(x0, y1)`.
+    pub fn corners(&self) -> Result<[[f64; 3]; 4]> {
+        let c = written::<12>("rectangle_corners", |api, out| unsafe { (api.cadaclysm_blacksmith_rectangle_corners)(self.v.as_ptr(), out) })?;
+        Ok(std::array::from_fn(|k| [c[3 * k], c[3 * k + 1], c[3 * k + 2]]))
+    }
+
+    /// The filled rectangle's area.
+    pub fn area(&self) -> Result<f64> {
+        Ok(written::<1>("rectangle_area", |api, out| unsafe { (api.cadaclysm_blacksmith_rectangle_area)(self.v.as_ptr(), out) })?[0])
+    }
+
+    /// `p` projected onto the plane and clamped into the filled rectangle when
+    /// `include_interior` (the other wrappers' default), else the boundary's closest point.
+    pub fn closest_point_in(&self, p: [f64; 3], include_interior: bool) -> Result<[f64; 3]> {
+        written::<3>("rectangle_closest_point", |api, out| unsafe {
+            (api.cadaclysm_blacksmith_rectangle_closest_point)(self.v.as_ptr(), p.as_ptr(), include_interior, out)
+        })
+    }
+
+    /// Where `p`, projected onto the plane, lies: `"inside"`, `"outside"`, or `"on"` within
+    /// `tolerance` of the boundary. `None` (or NaN) is unset, the rectangle's own effective
+    /// tolerance (`tolerance.relative` times its diagonal); `Some(0.0)` is exact.
+    pub fn contains(&self, p: [f64; 3], tolerance: Option<f64>) -> Result<&'static str> {
+        let api = api()?;
+        match unsafe { (api.cadaclysm_blacksmith_rectangle_contains)(self.v.as_ptr(), p.as_ptr(), tolerance.unwrap_or(f64::NAN)) } {
+            NONE => Err(fail(api, "rectangle_contains")),
+            code => containment("rectangle_contains", code),
+        }
+    }
+
+    /// The filled rectangle as a one-face planar sheet facing the frame's z.
+    pub fn to_sheet(&self) -> Result<Solid> {
+        let api = api()?;
+        Solid::wrap(api, unsafe { (api.cadaclysm_blacksmith_rectangle_to_sheet)(self.v.as_ptr()) }, "rectangle_to_sheet")
+    }
+
+    /// The boundary as its exact closed degree-1 NURBS curve, a knot at each corner, so its
+    /// parameter is `t`.
+    pub fn to_nurbs(&self) -> Result<NurbsCurve> {
+        curve_to_nurbs(Rectangle::KIND, &self.v)
+    }
+}
+
+value_traits!(Rectangle);
+
+/// The triangle `a`, `b`, `c`; a degenerate one (collinear or coincident points) is refused.
+/// Its array is `a[3] b[3] c[3]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Triangle {
+    v: [f64; 9],
+}
+
+impl Triangle {
+    /// The kind its array is tagged with.
+    pub const KIND: u32 = sys::CADACLYSM_BLACKSMITH_VALUE_TRIANGLE;
+
+    /// A triangle from its raw array of 9 numbers, checked by the library: refused for another
+    /// count or a degenerate triangle.
+    pub fn from_values(values: &[f64]) -> Result<Triangle> {
+        Ok(Triangle { v: checked_value::<9>(Triangle::KIND, "triangle", values)? })
+    }
+
+    pub fn new(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Result<Triangle> {
+        Triangle::from_values(&[a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]])
+    }
+
+    /// The canonical array.
+    pub fn values(&self) -> [f64; 9] {
+        self.v
+    }
+
+    pub fn a(&self) -> [f64; 3] {
+        [self.v[0], self.v[1], self.v[2]]
+    }
+
+    pub fn b(&self) -> [f64; 3] {
+        [self.v[3], self.v[4], self.v[5]]
+    }
+
+    pub fn c(&self) -> [f64; 3] {
+        [self.v[6], self.v[7], self.v[8]]
+    }
+
+    /// The world box of the three vertices, `(min, max)`.
+    pub fn bounds(&self) -> Result<([f64; 3], [f64; 3])> {
+        value_bounds(Triangle::KIND, &self.v)
+    }
+
+    /// This triangle under `t`: any affine map keeping it a triangle.
+    pub fn transform(&self, t: &Transform) -> Result<Triangle> {
+        Ok(Triangle { v: value_transform(Triangle::KIND, &self.v, t)? })
+    }
+
+    pub fn area(&self) -> Result<f64> {
+        Ok(written::<1>("triangle_area", |api, out| unsafe { (api.cadaclysm_blacksmith_triangle_area)(self.v.as_ptr(), out) })?[0])
+    }
+
+    /// The sum of the three sides.
+    pub fn perimeter(&self) -> Result<f64> {
+        Ok(written::<1>("triangle_perimeter", |api, out| unsafe { (api.cadaclysm_blacksmith_triangle_perimeter)(self.v.as_ptr(), out) })?[0])
+    }
+
+    /// The area centroid, the vertices' mean.
+    pub fn centroid(&self) -> Result<[f64; 3]> {
+        written::<3>("triangle_centroid", |api, out| unsafe { (api.cadaclysm_blacksmith_triangle_centroid)(self.v.as_ptr(), out) })
+    }
+
+    /// The circle through `a`, `b` and `c`: its x toward `a`, turning them counter-clockwise.
+    pub fn circumcircle(&self) -> Result<Circle> {
+        Ok(Circle { v: written::<13>("triangle_circumcircle", |api, out| unsafe { (api.cadaclysm_blacksmith_triangle_circumcircle)(self.v.as_ptr(), out) })? })
+    }
+
+    /// The point of barycentric weights `wa`, `wb`, `wc`, used as given.
+    pub fn point_at(&self, wa: f64, wb: f64, wc: f64) -> Result<[f64; 3]> {
+        written::<3>("triangle_point_at", |api, out| unsafe { (api.cadaclysm_blacksmith_triangle_point_at)(self.v.as_ptr(), wa, wb, wc, out) })
+    }
+
+    /// The weights `[wa, wb, wc]`, summing to 1, of `p` projected onto the plane.
+    pub fn barycentric(&self, p: [f64; 3]) -> Result<[f64; 3]> {
+        written::<3>("triangle_barycentric", |api, out| unsafe { (api.cadaclysm_blacksmith_triangle_barycentric)(self.v.as_ptr(), p.as_ptr(), out) })
+    }
+
+    /// The closest point of the filled triangle to `p`, exact.
+    pub fn closest_point(&self, p: [f64; 3]) -> Result<[f64; 3]> {
+        written::<3>("triangle_closest_point", |api, out| unsafe { (api.cadaclysm_blacksmith_triangle_closest_point)(self.v.as_ptr(), p.as_ptr(), out) })
+    }
+
+    /// How far `p` lies from the filled triangle.
+    pub fn distance_to(&self, p: [f64; 3]) -> Result<f64> {
+        Ok(distance(self.closest_point(p)?, p))
+    }
+
+    /// Edge `i` as a line: 0 `a` to `b`, 1 `b` to `c`, 2 `c` to `a`.
+    pub fn edge(&self, i: u32) -> Result<Line> {
+        Ok(Line { v: written::<6>("triangle_edge", |api, out| unsafe { (api.cadaclysm_blacksmith_triangle_edge)(self.v.as_ptr(), i, out) })? })
+    }
+
+    /// The filled triangle as a one-face planar sheet, its normal turning `a`, `b`, `c`
+    /// counter-clockwise.
+    pub fn to_sheet(&self) -> Result<Solid> {
+        let api = api()?;
+        Solid::wrap(api, unsafe { (api.cadaclysm_blacksmith_triangle_to_sheet)(self.v.as_ptr()) }, "triangle_to_sheet")
+    }
+}
+
+value_traits!(Triangle);
+
+/// The half-line from `position` along `direction`. The direction is kept as given, not
+/// unitised, so `t` counts lengths of it. A ray has no box: [`Ray::bounds`] is the library's
+/// refusal. Its array is `position[3] direction[3]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ray {
+    v: [f64; 6],
+}
+
+impl Ray {
+    /// The kind its array is tagged with.
+    pub const KIND: u32 = sys::CADACLYSM_BLACKSMITH_VALUE_RAY;
+
+    /// A ray from its raw array of 6 numbers, checked by the library: refused for another
+    /// count or a zero direction.
+    pub fn from_values(values: &[f64]) -> Result<Ray> {
+        Ok(Ray { v: checked_value::<6>(Ray::KIND, "ray", values)? })
+    }
+
+    pub fn new(position: [f64; 3], direction: [f64; 3]) -> Result<Ray> {
+        Ray::from_values(&[position[0], position[1], position[2], direction[0], direction[1], direction[2]])
+    }
+
+    /// The canonical array.
+    pub fn values(&self) -> [f64; 6] {
+        self.v
+    }
+
+    pub fn position(&self) -> [f64; 3] {
+        [self.v[0], self.v[1], self.v[2]]
+    }
+
+    pub fn direction(&self) -> [f64; 3] {
+        [self.v[3], self.v[4], self.v[5]]
+    }
+
+    /// The library's refusal: a ray has no box.
+    pub fn bounds(&self) -> Result<([f64; 3], [f64; 3])> {
+        value_bounds(Ray::KIND, &self.v)
+    }
+
+    /// This ray under `t`: any affine map keeping its direction.
+    pub fn transform(&self, t: &Transform) -> Result<Ray> {
+        Ok(Ray { v: value_transform(Ray::KIND, &self.v, t)? })
+    }
+
+    /// `position + t * direction`, any `t` (behind the start too).
+    pub fn point_at(&self, t: f64) -> Result<[f64; 3]> {
+        written::<3>("ray_point_at", |api, out| unsafe { (api.cadaclysm_blacksmith_ray_point_at)(self.v.as_ptr(), t, out) })
+    }
+
+    /// The [`CurveFoot`] on the ray nearest `p`: `t` clamped at 0, so a point behind the start
+    /// answers the start. Always unique.
+    pub fn closest_point(&self, p: [f64; 3]) -> Result<CurveFoot> {
+        let f = written::<4>("ray_closest_point", |api, out| unsafe { (api.cadaclysm_blacksmith_ray_closest_point)(self.v.as_ptr(), p.as_ptr(), out) })?;
+        Ok(CurveFoot { t: f[0], point: [f[1], f[2], f[3]], unique: true })
+    }
+
+    /// How far `p` lies from the ray.
+    pub fn distance_to(&self, p: [f64; 3]) -> Result<f64> {
+        Ok(distance(self.closest_point(p)?.point, p))
+    }
+}
+
+value_traits!(Ray);
+
 /// A curve value of any kind: what [`Curve::value`] gives an edge's line, circle, arc or
-/// ellipse. Equality and hashing are the value's own, so two kinds never compare equal.
+/// ellipse, or a [`Rectangle`]'s boundary. Equality and hashing are the value's own, so two
+/// kinds never compare equal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CurveValue {
     Line(Line),
     Circle(Circle),
     Arc(Arc),
     Ellipse(Ellipse),
+    Rectangle(Rectangle),
 }
 
 impl CurveValue {
@@ -2137,6 +2515,7 @@ impl CurveValue {
             CurveValue::Circle(c) => (Circle::KIND, &c.v),
             CurveValue::Arc(c) => (Arc::KIND, &c.v),
             CurveValue::Ellipse(c) => (Ellipse::KIND, &c.v),
+            CurveValue::Rectangle(c) => (Rectangle::KIND, &c.v),
         }
     }
 
@@ -2180,6 +2559,12 @@ impl CurveValue {
         value_bounds(kind, v)
     }
 
+    /// The exact NURBS form of this curve.
+    pub fn to_nurbs(&self) -> Result<NurbsCurve> {
+        let (kind, v) = self.parts();
+        curve_to_nurbs(kind, v)
+    }
+
     /// This curve under `t`, of the same kind.
     pub fn transform(&self, t: &Transform) -> Result<CurveValue> {
         Ok(match self {
@@ -2187,6 +2572,7 @@ impl CurveValue {
             CurveValue::Circle(c) => CurveValue::Circle(c.transform(t)?),
             CurveValue::Arc(c) => CurveValue::Arc(c.transform(t)?),
             CurveValue::Ellipse(c) => CurveValue::Ellipse(c.transform(t)?),
+            CurveValue::Rectangle(c) => CurveValue::Rectangle(c.transform(t)?),
         })
     }
 }
@@ -2212,6 +2598,12 @@ impl From<Arc> for CurveValue {
 impl From<Ellipse> for CurveValue {
     fn from(c: Ellipse) -> CurveValue {
         CurveValue::Ellipse(c)
+    }
+}
+
+impl From<Rectangle> for CurveValue {
+    fn from(c: Rectangle) -> CurveValue {
+        CurveValue::Rectangle(c)
     }
 }
 
@@ -2568,6 +2960,14 @@ impl Profile {
             return Err(fail(self.api, "profile_colour"));
         }
         Ok(None)
+    }
+
+    /// This profile as the `path` field of a `profile.path` document node holds it, as JSON
+    /// text: its exact segments (lines, arcs, Beziers, conics, NURBS), holes and colour,
+    /// `{"start", "segments", "holes", "colour"}`. How [`Document::add_profile`] puts a
+    /// profile in a document, drawn as it was.
+    pub fn document_path(&self) -> Result<String> {
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_profile_path)(self.raw()) }, "document_profile_path")
     }
 
     /// The outline, then each hole, as polylines at z = 0 within `tolerance` of its arcs
@@ -3424,6 +3824,1041 @@ fn samples_of(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithSamples, what
     Ok(out)
 }
 
+// ---- NurbsCurve: curves in space ----------------------------------------------------
+
+/// The tolerance [`NurbsCurve::fit`], [`NurbsCurve::projected_to_face`],
+/// [`NurbsCurve::pulled_to_face`] and [`NurbsCurve::face_hits`] are usually given: pass it as
+/// `Some(NURBS_CURVE_TOLERANCE)`. `None` (or 0 or NaN) asks for the inputs' effective tolerance.
+pub const NURBS_CURVE_TOLERANCE: f64 = 1e-3;
+
+/// A curve's bending at a parameter ([`NurbsCurve::curvature`]): `kappa` (1 / radius), the unit
+/// `tangent`, the unit `normal` toward the centre and the `binormal` (`tangent x normal`), and
+/// the `centre` of the osculating circle -- `None` on a straight piece, where `kappa` is 0 and
+/// `normal`, `binormal` are zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Curvature {
+    pub kappa: f64,
+    pub tangent: [f64; 3],
+    pub normal: [f64; 3],
+    pub binormal: [f64; 3],
+    pub centre: Option<[f64; 3]>,
+}
+
+impl From<sys::CadaclysmBlacksmithCurvature> for Curvature {
+    fn from(r: sys::CadaclysmBlacksmithCurvature) -> Curvature {
+        Curvature {
+            kappa: r.kappa,
+            tangent: r.tangent,
+            normal: r.normal,
+            binormal: r.binormal,
+            centre: (r.has_centre != 0).then_some(r.centre),
+        }
+    }
+}
+
+/// How [`NurbsCurve::tween`] blends two curves (Rhino's CreateTweenCurves family).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TweenMethod {
+    /// Control point by control point; the curves must already share one structure (degree,
+    /// control-point count, knots).
+    Plain,
+    /// The curves made compatible exactly (degree elevation, knot merging), then blended in
+    /// homogeneous coordinates -- rational curves stay rational.
+    Matching,
+    /// Both divided by arc length into `samples` pieces (required here, refused otherwise), and
+    /// a cubic interpolated through the blended samples.
+    Sampling,
+}
+
+impl TweenMethod {
+    fn code(self) -> u32 {
+        match self {
+            TweenMethod::Plain => 0,
+            TweenMethod::Matching => 1,
+            TweenMethod::Sampling => 2,
+        }
+    }
+
+    /// The method named `"plain"`, `"matching"` or `"sampling"`; another word is refused.
+    pub fn parse(name: &str) -> Result<TweenMethod> {
+        match name {
+            "plain" => Ok(TweenMethod::Plain),
+            "matching" => Ok(TweenMethod::Matching),
+            "sampling" => Ok(TweenMethod::Sampling),
+            other => Err(Error::new(format!("nurbs_curve_tween: method must be one of plain, matching, sampling, not '{other}'"))),
+        }
+    }
+}
+
+/// `points` as the flat C array of three doubles each.
+fn flat_points(points: &[[f64; 3]]) -> Vec<f64> {
+    points.iter().flatten().copied().collect()
+}
+
+/// An optional vector as the C ABI's pointer: NULL for none.
+fn opt_ptr(v: &Option<[f64; 3]>) -> *const f64 {
+    v.as_ref().map_or(ptr::null(), |v| v.as_ptr())
+}
+
+/// A tolerance as the library takes it: NaN (the inputs' effective tolerance) for none.
+fn tol_arg(tolerance: Option<f64>) -> f64 {
+    tolerance.unwrap_or(f64::NAN)
+}
+
+/// A curve in space -- always a NURBS, so a line, an arc or a conic is an exact rational one --
+/// to model with: built through points, read off an edge or a face, projected onto a plane or a
+/// face, trimmed, extended and blended; asked for its points, derivatives, curvature, length and
+/// crossings. Immutable: every edit returns a new curve. Dropping it frees it; [`Clone`] is the
+/// library's `nurbs_curve_clone`.
+///
+/// A face here is its whole surface: projecting onto, pulling to and crossing a face ignore its
+/// trims. The `fit_error` is set only on curves from [`fit`](Self::fit),
+/// [`projected_to_face`](Self::projected_to_face) and [`pulled_to_face`](Self::pulled_to_face).
+pub struct NurbsCurve {
+    handle: NonNull<sys::CadaclysmBlacksmithNurbsCurve>,
+    api: &'static Api,
+    fit_error: Option<f64>,
+}
+
+// Immutable once built, and the library's curve owns its data outright (as `Profile` does).
+unsafe impl Send for NurbsCurve {}
+unsafe impl Sync for NurbsCurve {}
+
+impl Drop for NurbsCurve {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for NurbsCurve {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NurbsCurve({:p})", self.handle)
+    }
+}
+
+impl Clone for NurbsCurve {
+    /// A copy of this curve (the library's `nurbs_curve_clone`).
+    fn clone(&self) -> NurbsCurve {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_clone)(self.raw()) };
+        let mut copy = NurbsCurve::wrap(self.api, raw, "nurbs_curve_clone").unwrap_or_else(|e| panic!("{e}"));
+        copy.fit_error = self.fit_error;
+        copy
+    }
+}
+
+impl NurbsCurve {
+    fn wrap(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithNurbsCurve, what: &str) -> Result<NurbsCurve> {
+        NonNull::new(raw).map(|handle| NurbsCurve { handle, api, fit_error: None }).ok_or_else(|| fail(api, what))
+    }
+
+    fn raw(&self) -> *const sys::CadaclysmBlacksmithNurbsCurve {
+        self.handle.as_ptr()
+    }
+
+    /// A curve with the `fit_error` the library wrote (the three calls that fit).
+    fn fitted(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithNurbsCurve, error: f64, what: &str) -> Result<NurbsCurve> {
+        let mut curve = NurbsCurve::wrap(api, raw, what)?;
+        curve.fit_error = Some(error);
+        Ok(curve)
+    }
+
+    // ---- building ---------------------------------------------------------------------
+
+    /// The curve with control points `points`, of `degree` (1 to 7), `weights` one per point
+    /// (positive) or `None`, and the full knot vector `knots` (`points.len() + degree + 1`
+    /// values, non-decreasing) or `None` for clamped and uniform.
+    pub fn new(points: &[[f64; 3]], degree: u32, weights: Option<&[f64]>, knots: Option<&[f64]>) -> Result<NurbsCurve> {
+        let api = api()?;
+        if let Some(w) = weights {
+            if w.len() != points.len() {
+                return Err(Error::new(format!("nurbs_curve_new: {} weights for {} points; give one per point", w.len(), points.len())));
+            }
+        }
+        let xyz = flat_points(points);
+        let raw = unsafe {
+            (api.cadaclysm_blacksmith_nurbs_curve_new)(
+                xyz.as_ptr(),
+                points.len(),
+                weights.map_or(ptr::null(), |w| w.as_ptr()),
+                degree,
+                knots.map_or(ptr::null(), |k| k.as_ptr()),
+                knots.map_or(0, |k| k.len()),
+            )
+        };
+        NurbsCurve::wrap(api, raw, "nurbs_curve_new")
+    }
+
+    /// The curve of `degree` (1 to 7) through `points` in order, chord-length parametrised.
+    /// `closed` closes it back to the first point, smooth across the seam; an open curve may
+    /// leave along `start_tangent` and arrive along `end_tangent` (directions; their length does
+    /// not matter).
+    pub fn through(points: &[[f64; 3]], degree: u32, closed: bool, start_tangent: Option<[f64; 3]>, end_tangent: Option<[f64; 3]>) -> Result<NurbsCurve> {
+        let api = api()?;
+        let xyz = flat_points(points);
+        let raw = unsafe {
+            (api.cadaclysm_blacksmith_nurbs_curve_through)(xyz.as_ptr(), points.len(), degree, closed, opt_ptr(&start_tangent), opt_ptr(&end_tangent))
+        };
+        NurbsCurve::wrap(api, raw, "nurbs_curve_through")
+    }
+
+    /// A curve of `degree` within `tolerance` of every point, through the first and the last
+    /// (least squares); its [`fit_error`](Self::fit_error) is the largest distance from a point
+    /// to it. `None` asks for the inputs' effective tolerance; see [`NURBS_CURVE_TOLERANCE`].
+    pub fn fit(points: &[[f64; 3]], degree: u32, tolerance: Option<f64>) -> Result<NurbsCurve> {
+        let api = api()?;
+        let xyz = flat_points(points);
+        let mut error = 0.0;
+        let raw = unsafe { (api.cadaclysm_blacksmith_nurbs_curve_fit)(xyz.as_ptr(), points.len(), degree, tol_arg(tolerance), &mut error) };
+        NurbsCurve::fitted(api, raw, error, "nurbs_curve_fit")
+    }
+
+    /// Edge `edge` (an [`Edge::index`]) of `solid` as an exact NURBS over the edge's own span of
+    /// its curve, running the way the edge runs.
+    pub fn from_edge(solid: &Solid, edge: u32) -> Result<NurbsCurve> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_nurbs_curve_from_edge)(solid.raw(), edge) };
+        NurbsCurve::wrap(api, raw, "nurbs_curve_from_edge")
+    }
+
+    /// The isocurve of face `face` of `solid`'s surface: along `u` at `v = at` when `along_u`,
+    /// else along `v` at `u = at`. NURBS faces only.
+    pub fn isocurve(solid: &Solid, face: u32, along_u: bool, at: f64) -> Result<NurbsCurve> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_nurbs_curve_from_face_isocurve)(solid.raw(), face, along_u, at) };
+        NurbsCurve::wrap(api, raw, "nurbs_curve_from_face_isocurve")
+    }
+
+    /// The curve bridging `a` (at its end when `a_end`, else its start) to `b` (at its end when
+    /// `b_end`, else its start): `continuity` 1 matches position and tangent (a cubic), 2 also
+    /// the curvature (a quintic; the usual choice); `bulge` (positive, usually 1) scales how far
+    /// the tangents reach.
+    pub fn blend(a: &NurbsCurve, a_end: bool, b: &NurbsCurve, b_end: bool, continuity: u32, bulge: f64) -> Result<NurbsCurve> {
+        let raw = unsafe { (a.api.cadaclysm_blacksmith_nurbs_curve_blend)(a.raw(), a_end, b.raw(), b_end, continuity, bulge) };
+        NurbsCurve::wrap(a.api, raw, "nurbs_curve_blend")
+    }
+
+    /// `curves` joined end to end into one curve (Rhino's JoinCurves): in the order given, each
+    /// turned where needed so its start meets the previous one's end within `tolerance` (usually
+    /// `1e-6`; the joint placed at the midpoint of the two ends). All are raised to the highest
+    /// degree among them and each runs over `k..k + 1`, joined C0 -- a corner stays a corner; a
+    /// rational curve keeps its points. One curve gives a copy; none, or a gap past `tolerance`,
+    /// is refused naming the two curves.
+    pub fn joined(curves: &[&NurbsCurve], tolerance: f64) -> Result<NurbsCurve> {
+        let api = api()?;
+        let handles: Vec<*const sys::CadaclysmBlacksmithNurbsCurve> = curves.iter().map(|c| c.raw()).collect();
+        let raw = unsafe { (api.cadaclysm_blacksmith_nurbs_curve_joined)(handles.as_ptr(), handles.len(), tolerance) };
+        NurbsCurve::wrap(api, raw, "nurbs_curve_joined")
+    }
+
+    /// `count` curves blending evenly from this curve to `other` (Rhino's CreateTweenCurves
+    /// family), tween `i` at the fraction `(i + 1) / (count + 1)`. `samples` is required by
+    /// [`TweenMethod::Sampling`] and refused for the others. `align` turns `other`, and moves a
+    /// closed curve's seam, to line it up with this one first. `tolerance` `None`: the inputs'
+    /// effective tolerance. A count of 0, one curve closed and the other open, plain on curves
+    /// that are not compatible, or too few samples is refused.
+    pub fn tween(&self, other: &NurbsCurve, count: u32, method: TweenMethod, samples: Option<u32>, align: bool, tolerance: Option<f64>) -> Result<Vec<NurbsCurve>> {
+        match (method, samples) {
+            (TweenMethod::Sampling, None) => return Err(Error::new("nurbs_curve_tween: sampling needs samples")),
+            (TweenMethod::Plain, Some(_)) => return Err(Error::new("nurbs_curve_tween: samples is read only by sampling, not plain")),
+            (TweenMethod::Matching, Some(_)) => return Err(Error::new("nurbs_curve_tween: samples is read only by sampling, not matching")),
+            _ => {}
+        }
+        let mut out: Vec<*mut sys::CadaclysmBlacksmithNurbsCurve> = vec![ptr::null_mut(); (count as usize).max(1)];
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_nurbs_curve_tween)(self.raw(), other.raw(), count, method.code(), samples.unwrap_or(0), align, tol_arg(tolerance), out.as_mut_ptr())
+        };
+        if !ok {
+            return Err(fail(self.api, "nurbs_curve_tween"));
+        }
+        // Wrap every handle first, so each is freed whatever the others do.
+        let wrapped: Vec<Result<NurbsCurve>> = out.iter().take(count as usize).map(|&raw| NurbsCurve::wrap(self.api, raw, "nurbs_curve_tween")).collect();
+        wrapped.into_iter().collect()
+    }
+
+    // ---- edits ------------------------------------------------------------------------
+
+    /// This curve projected onto the plane through `origin` with `normal`, along `direction`
+    /// (`None`: the normal). Exact.
+    pub fn projected_to_plane(&self, origin: [f64; 3], normal: [f64; 3], direction: Option<[f64; 3]>) -> Result<NurbsCurve> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_projected_to_plane)(self.raw(), origin.as_ptr(), normal.as_ptr(), opt_ptr(&direction)) };
+        NurbsCurve::wrap(self.api, raw, "nurbs_curve_projected_to_plane")
+    }
+
+    /// This curve projected along `direction` onto face `face` of `solid` (its whole surface),
+    /// fitted within `tolerance`; the result's [`fit_error`](Self::fit_error) is the largest
+    /// distance between it and the surface. Refused where a point's ray misses.
+    pub fn projected_to_face(&self, solid: &Solid, face: u32, direction: [f64; 3], tolerance: Option<f64>) -> Result<NurbsCurve> {
+        let mut error = 0.0;
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_nurbs_curve_projected_to_face)(self.raw(), solid.raw(), face, direction.as_ptr(), tol_arg(tolerance), &mut error)
+        };
+        NurbsCurve::fitted(self.api, raw, error, "nurbs_curve_projected_to_face")
+    }
+
+    /// This curve pulled onto face `face` of `solid` (its whole surface): every point to its
+    /// nearest surface point, fitted within `tolerance` (`fit_error` as for the projection).
+    pub fn pulled_to_face(&self, solid: &Solid, face: u32, tolerance: Option<f64>) -> Result<NurbsCurve> {
+        let mut error = 0.0;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_pulled_to_face)(self.raw(), solid.raw(), face, tol_arg(tolerance), &mut error) };
+        NurbsCurve::fitted(self.api, raw, error, "nurbs_curve_pulled_to_face")
+    }
+
+    /// The same curve run the other way over the same domain.
+    pub fn reversed(&self) -> Result<NurbsCurve> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_reversed)(self.raw()) };
+        NurbsCurve::wrap(self.api, raw, "nurbs_curve_reversed")
+    }
+
+    /// The part from `t0` to `t1` (`t0 < t1`, inside the domain), over `t0..t1`.
+    pub fn trimmed(&self, t0: f64, t1: f64) -> Result<NurbsCurve> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_trimmed)(self.raw(), t0, t1) };
+        NurbsCurve::wrap(self.api, raw, "nurbs_curve_trimmed")
+    }
+
+    /// This curve continued `length` past its end (or its start when `at_start`) along its own
+    /// end polynomial -- position, tangent and curvature there unchanged, every old parameter
+    /// its old point.
+    pub fn extended(&self, length: f64, at_start: bool) -> Result<NurbsCurve> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_extended)(self.raw(), at_start, length) };
+        NurbsCurve::wrap(self.api, raw, "nurbs_curve_extended")
+    }
+
+    /// The same curve at degree `degree + by` (at most 12).
+    pub fn elevated(&self, by: u32) -> Result<NurbsCurve> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_elevated)(self.raw(), by) };
+        NurbsCurve::wrap(self.api, raw, "nurbs_curve_elevated")
+    }
+
+    /// This curve through the affine map `t`: its control points mapped, weights and knots kept
+    /// -- exact. A singular map (a projection) is allowed.
+    pub fn transformed(&self, t: &Transform) -> Result<NurbsCurve> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_transformed)(self.raw(), t.rows.as_ptr()) };
+        NurbsCurve::wrap(self.api, raw, "nurbs_curve_transformed")
+    }
+
+    // ---- reading ----------------------------------------------------------------------
+
+    /// The largest distance from a fitted-to point or surface to this curve: set only on curves
+    /// from [`fit`](Self::fit), [`projected_to_face`](Self::projected_to_face) and
+    /// [`pulled_to_face`](Self::pulled_to_face).
+    pub fn fit_error(&self) -> Option<f64> {
+        self.fit_error
+    }
+
+    pub fn degree(&self) -> u32 {
+        unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_degree)(self.raw()) }
+    }
+
+    pub fn control_points(&self) -> Result<Vec<[f64; 3]>> {
+        let n = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_control_count)(self.raw()) } as usize;
+        let mut out = vec![0.0; 3 * n];
+        if !unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_control_points)(self.raw(), out.as_mut_ptr()) } {
+            return Err(fail(self.api, "nurbs_curve_control_points"));
+        }
+        Ok(out.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect())
+    }
+
+    /// One weight per control point (all 1 for a non-rational curve).
+    pub fn weights(&self) -> Result<Vec<f64>> {
+        let n = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_control_count)(self.raw()) } as usize;
+        let mut out = vec![0.0; n];
+        if !unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_weights)(self.raw(), out.as_mut_ptr()) } {
+            return Err(fail(self.api, "nurbs_curve_weights"));
+        }
+        Ok(out)
+    }
+
+    pub fn knots(&self) -> Result<Vec<f64>> {
+        let n = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_knot_count)(self.raw()) } as usize;
+        let mut out = vec![0.0; n];
+        if !unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_knots)(self.raw(), out.as_mut_ptr()) } {
+            return Err(fail(self.api, "nurbs_curve_knots"));
+        }
+        Ok(out)
+    }
+
+    pub fn domain(&self) -> Result<(f64, f64)> {
+        let d = written::<2>("nurbs_curve_domain", |api, out| unsafe { (api.cadaclysm_blacksmith_nurbs_curve_domain)(self.raw(), out) })?;
+        Ok((d[0], d[1]))
+    }
+
+    pub fn is_rational(&self) -> bool {
+        unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_is_rational)(self.raw()) }
+    }
+
+    /// Whether the curve closes on itself (the answer, not a flag).
+    pub fn is_closed(&self) -> bool {
+        unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_is_closed)(self.raw()) }
+    }
+
+    /// The point at parameter `t`, inside the domain.
+    pub fn point(&self, t: f64) -> Result<[f64; 3]> {
+        written::<3>("nurbs_curve_point", |api, out| unsafe { (api.cadaclysm_blacksmith_nurbs_curve_point)(self.raw(), t, out) })
+    }
+
+    /// The point and its derivatives at `t` up to `order` (at most 8): `[C, C', C'', ...]`, so
+    /// `order + 1` vectors.
+    pub fn derivatives(&self, t: f64, order: u32) -> Result<Vec<[f64; 3]>> {
+        let mut out = vec![0.0; 3 * (order.min(8) as usize + 1)];
+        if !unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_derivatives)(self.raw(), t, order, out.as_mut_ptr()) } {
+            return Err(fail(self.api, "nurbs_curve_derivatives"));
+        }
+        Ok(out.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect())
+    }
+
+    /// The curvature and Frenet frame at `t`.
+    pub fn curvature(&self, t: f64) -> Result<Curvature> {
+        let mut raw = sys::CadaclysmBlacksmithCurvature::default();
+        if !unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_curvature)(self.raw(), t, &mut raw) } {
+            return Err(fail(self.api, "nurbs_curve_curvature"));
+        }
+        Ok(raw.into())
+    }
+
+    /// The curve's length, to the relative `accuracy` (0 asks for the default).
+    pub fn length(&self, accuracy: f64) -> Result<Length> {
+        let mut raw = sys::CadaclysmBlacksmithLength::default();
+        if !unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_length)(self.raw(), accuracy, &mut raw) } {
+            return Err(fail(self.api, "nurbs_curve_length"));
+        }
+        Ok(raw.into())
+    }
+
+    /// The point at arc length `s` from the curve's start.
+    pub fn point_at_length(&self, s: f64, accuracy: f64) -> Result<At> {
+        let mut raw = sys::CadaclysmBlacksmithAt::default();
+        if !unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_point_at_length)(self.raw(), s, accuracy, &mut raw) } {
+            return Err(fail(self.api, "nurbs_curve_point_at_length"));
+        }
+        Ok(raw.into())
+    }
+
+    /// The curve in `n` pieces of equal arc length: `n + 1` samples, `n` for a closed curve.
+    pub fn divide_by_count(&self, n: u32, accuracy: f64) -> Result<Vec<At>> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_divide_by_count)(self.raw(), n, accuracy) };
+        samples_of(self.api, raw, "nurbs_curve_divide_by_count")
+    }
+
+    /// Samples every `step` of arc length from the start; a closed curve never repeats it.
+    pub fn divide_by_length(&self, step: f64, accuracy: f64) -> Result<Vec<At>> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_divide_by_length)(self.raw(), step, accuracy) };
+        samples_of(self.api, raw, "nurbs_curve_divide_by_length")
+    }
+
+    /// Where the curve crosses the plane through `origin` with `normal`, in parameter order
+    /// (`error` each point's distance from the plane). Refused for a curve lying in the plane; a
+    /// touch that does not cross is not listed.
+    pub fn plane_hits(&self, origin: [f64; 3], normal: [f64; 3]) -> Result<Vec<At>> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_plane_hits)(self.raw(), origin.as_ptr(), normal.as_ptr()) };
+        samples_of(self.api, raw, "nurbs_curve_plane_hits")
+    }
+
+    /// Where the curve crosses face `face` of `solid` (its whole surface), within `tolerance` of
+    /// it, in parameter order (`error` each point's distance from the surface).
+    pub fn face_hits(&self, solid: &Solid, face: u32, tolerance: Option<f64>) -> Result<Vec<At>> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_face_hits)(self.raw(), solid.raw(), face, tol_arg(tolerance)) };
+        samples_of(self.api, raw, "nurbs_curve_face_hits")
+    }
+
+    /// A curvature comb to draw: at `n + 1` even parameters (`max(n, 1)` steps), the curve point
+    /// and that point moved by `-scale * kappa * normal` (out of the bend). Straight stretches
+    /// give zero teeth.
+    pub fn comb(&self, n: u32, scale: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
+        let (lo, hi) = self.domain()?;
+        let steps = n.max(1);
+        let mut out = Vec::with_capacity(steps as usize + 1);
+        for i in 0..=steps {
+            let t = lo + (hi - lo) * f64::from(i) / f64::from(steps);
+            let k = self.curvature(t)?;
+            let p = self.point(t)?;
+            out.push((p, [p[0] - scale * k.kappa * k.normal[0], p[1] - scale * k.kappa * k.normal[1], p[2] - scale * k.kappa * k.normal[2]]));
+        }
+        Ok(out)
+    }
+}
+
+// ---- Sheets from curves: lofts, sweeps, Coons and Gordon sheets, matching, trimming, joining ----
+
+/// The tolerance the fitted sheets ([`Solid::sweep_rail`], [`Solid::sweep_two_rails`],
+/// [`Solid::edge_surface`], [`Solid::network_surface`], [`Solid::fillet_surfaces`]) are usually
+/// given; `None` asks for the inputs' effective tolerance.
+pub const SHEET_TOLERANCE: f64 = 1e-3;
+
+/// A side of a NURBS face: a boundary isocurve of its surface (`"u0"`, `"u1"`, `"v0"`, `"v1"`
+/// parse to the four).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SheetSide {
+    /// The `u = 0` isocurve.
+    U0,
+    /// The `u = 1` isocurve.
+    U1,
+    /// The `v = 0` isocurve.
+    V0,
+    /// The `v = 1` isocurve.
+    V1,
+}
+
+impl SheetSide {
+    fn code(self) -> u32 {
+        match self {
+            SheetSide::U0 => 0,
+            SheetSide::U1 => 1,
+            SheetSide::V0 => 2,
+            SheetSide::V1 => 3,
+        }
+    }
+}
+
+impl std::str::FromStr for SheetSide {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<SheetSide> {
+        match s {
+            "u0" => Ok(SheetSide::U0),
+            "u1" => Ok(SheetSide::U1),
+            "v0" => Ok(SheetSide::V0),
+            "v1" => Ok(SheetSide::V1),
+            other => Err(Error::new(format!("a side is 'u0', 'u1', 'v0' or 'v1', not '{other}'"))),
+        }
+    }
+}
+
+/// The frame [`Solid::sweep_rail`] carries its sections by (`"rmf"` and `"fixed"` parse to them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SweepFrame {
+    /// Rotation-minimising.
+    Rmf,
+    /// Keeping the given `up` upright.
+    Fixed,
+}
+
+impl SweepFrame {
+    fn code(self) -> u32 {
+        match self {
+            SweepFrame::Rmf => 0,
+            SweepFrame::Fixed => 1,
+        }
+    }
+}
+
+impl std::str::FromStr for SweepFrame {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<SweepFrame> {
+        match s {
+            "rmf" => Ok(SweepFrame::Rmf),
+            "fixed" => Ok(SweepFrame::Fixed),
+            other => Err(Error::new(format!("sweep_rail: frame is 'rmf' or 'fixed', not '{other}'"))),
+        }
+    }
+}
+
+/// Which side [`Solid::trim_by_curve`] keeps (`"outside"`, `"inside"`, `"left"`, `"right"` parse
+/// to them): `Inside` and `Left` are the island a closed curve bounds / the side left of an open
+/// curve's run, `Outside` and `Right` the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TrimKeep {
+    Outside,
+    Inside,
+    Left,
+    Right,
+}
+
+impl TrimKeep {
+    fn keep_inside(self) -> bool {
+        matches!(self, TrimKeep::Inside | TrimKeep::Left)
+    }
+}
+
+impl std::str::FromStr for TrimKeep {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<TrimKeep> {
+        match s {
+            "outside" => Ok(TrimKeep::Outside),
+            "inside" => Ok(TrimKeep::Inside),
+            "left" => Ok(TrimKeep::Left),
+            "right" => Ok(TrimKeep::Right),
+            other => Err(Error::new(format!("trim_by_curve: keep must be 'outside', 'inside', 'left' or 'right', not '{other}'"))),
+        }
+    }
+}
+
+/// How well two faces meet along their sides ([`Solid::continuity`]): the largest `gap` between
+/// the sides (G0), the largest `angle` between their normals in radians (G1), the largest
+/// difference of normal `curvature` across the edge (G2), each with where it was found
+/// (`gap_at`, `angle_at`, `curvature_at`), and how many points were asked (`samples`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Continuity {
+    pub gap: f64,
+    pub gap_at: [f64; 3],
+    pub angle: f64,
+    pub angle_at: [f64; 3],
+    pub curvature: f64,
+    pub curvature_at: [f64; 3],
+    pub samples: u32,
+}
+
+impl From<sys::CadaclysmBlacksmithContinuity> for Continuity {
+    fn from(r: sys::CadaclysmBlacksmithContinuity) -> Continuity {
+        Continuity {
+            gap: r.gap,
+            gap_at: r.gap_at,
+            angle: r.angle,
+            angle_at: r.angle_at,
+            curvature: r.curvature,
+            curvature_at: r.curvature_at,
+            samples: r.samples,
+        }
+    }
+}
+
+/// How well an N-sided patch ([`Solid::n_sided_patch`]) meets: `faces` sub-patches, the worst
+/// `boundary` against the neighbours (the gap over every side, the angle over those met at G1
+/// or G2, the curvature jump over those at G2), the worst `internal` across the patch's own
+/// spokes, and `corner_angle` (radians), the most a corner of the hole leaves no patch able to
+/// meet: zero where the neighbours meet each other at G1.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PatchReport {
+    pub faces: u32,
+    pub boundary: Continuity,
+    pub internal: Continuity,
+    pub corner_angle: f64,
+}
+
+impl From<sys::CadaclysmBlacksmithPatchReport> for PatchReport {
+    fn from(r: sys::CadaclysmBlacksmithPatchReport) -> PatchReport {
+        PatchReport { faces: r.faces, boundary: r.boundary.into(), internal: r.internal.into(), corner_angle: r.corner_angle }
+    }
+}
+
+/// What [`Solid::join_sheets`] did: `sewn` edges (each two naked edges become one shared edge),
+/// the widest `worst_gap` between two sewn edges (0 where all met exactly), the naked edges --
+/// bordered by one face -- `naked_before` (once the T-junctions are cut) and `naked_after`,
+/// `refused` groups of naked edges that share both ends but were left apart, faces `turned`, and
+/// whether the result is `closed`: a solid.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JoinReport {
+    pub sewn: u32,
+    pub worst_gap: f64,
+    pub naked_before: u32,
+    pub naked_after: u32,
+    pub refused: u32,
+    pub turned: u32,
+    pub closed: bool,
+}
+
+impl From<sys::CadaclysmBlacksmithJoinReport> for JoinReport {
+    fn from(r: sys::CadaclysmBlacksmithJoinReport) -> JoinReport {
+        JoinReport {
+            sewn: r.sewn,
+            worst_gap: r.worst_gap,
+            naked_before: r.naked_before,
+            naked_after: r.naked_after,
+            refused: r.refused,
+            turned: r.turned,
+            closed: r.closed != 0,
+        }
+    }
+}
+
+/// One boundary of the hole [`Solid::n_sided_patch`] fills: a side of a sheet's face met at
+/// G`level` (0, 1 or 2; [`PatchBoundary::side`] gives 2), over `range` of the side's parameter
+/// (`(0, 1)` the whole side, `(1, 0)` backwards), or a [`NurbsCurve`] met at G0.
+#[derive(Clone, Copy, Debug)]
+pub enum PatchBoundary<'a> {
+    Side { sheet: &'a Solid, face: u32, side: SheetSide, range: (f64, f64), level: u32 },
+    Curve(&'a NurbsCurve),
+}
+
+impl<'a> PatchBoundary<'a> {
+    /// Face 0 of `sheet`, its side `side`, the whole side, met at G2.
+    pub fn side(sheet: &'a Solid, side: SheetSide) -> PatchBoundary<'a> {
+        PatchBoundary::Side { sheet, face: 0, side, range: (0.0, 1.0), level: 2 }
+    }
+
+    /// `curve`, met at G0.
+    pub fn curve(curve: &'a NurbsCurve) -> PatchBoundary<'a> {
+        PatchBoundary::Curve(curve)
+    }
+
+    /// Met at G`level` (a curve boundary is always G0: unchanged).
+    pub fn level(mut self, to: u32) -> PatchBoundary<'a> {
+        if let PatchBoundary::Side { level, .. } = &mut self {
+            *level = to;
+        }
+        self
+    }
+
+    /// On face `to` of the sheet (unchanged for a curve).
+    pub fn face(mut self, to: u32) -> PatchBoundary<'a> {
+        if let PatchBoundary::Side { face, .. } = &mut self {
+            *face = to;
+        }
+        self
+    }
+
+    /// Over `from..to` of the side's parameter (unchanged for a curve).
+    pub fn range(mut self, from: f64, to: f64) -> PatchBoundary<'a> {
+        if let PatchBoundary::Side { range, .. } = &mut self {
+            *range = (from, to);
+        }
+        self
+    }
+
+    fn raw(&self) -> sys::CadaclysmBlacksmithPatchBoundary {
+        match *self {
+            PatchBoundary::Side { sheet, face, side, range, level } => sys::CadaclysmBlacksmithPatchBoundary {
+                sheet: sheet.handle.as_ptr(),
+                face,
+                side: side.code(),
+                from: range.0,
+                to: range.1,
+                level,
+                curve: ptr::null(),
+            },
+            PatchBoundary::Curve(curve) => sys::CadaclysmBlacksmithPatchBoundary {
+                sheet: ptr::null(),
+                face: 0,
+                side: 0,
+                from: 0.0,
+                to: 1.0,
+                level: 0,
+                curve: curve.raw(),
+            },
+        }
+    }
+}
+
+impl<'a> From<&'a NurbsCurve> for PatchBoundary<'a> {
+    fn from(curve: &'a NurbsCurve) -> PatchBoundary<'a> {
+        PatchBoundary::Curve(curve)
+    }
+}
+
+/// The handles of a curve list, for the C calls (the curves stay borrowed for the call).
+fn curve_handles(curves: &[&NurbsCurve]) -> Vec<*const sys::CadaclysmBlacksmithNurbsCurve> {
+    curves.iter().map(|c| c.raw()).collect()
+}
+
+impl Solid {
+    /// This sheet with the fit error the library wrote.
+    fn fitted(raw: Result<Solid>, error: f64) -> Result<Solid> {
+        let mut sheet = raw?;
+        sheet.sheet_error = Some(error);
+        Ok(sheet)
+    }
+
+    /// On a sheet from [`sweep_rail`](Self::sweep_rail), [`sweep_two_rails`](Self::sweep_two_rails),
+    /// [`edge_surface`](Self::edge_surface), [`network_surface`](Self::network_surface),
+    /// [`fillet_surfaces`](Self::fillet_surfaces), [`flange`](Self::flange) or
+    /// [`extrude_to`](Self::extrude_to), how close the fitted sheet is to what it was
+    /// asked to be (the largest distance to the curves given, or the fit error); `None` on every
+    /// other solid.
+    pub fn sheet_error(&self) -> Option<f64> {
+        self.sheet_error
+    }
+
+    /// On the sheet [`n_sided_patch`](Self::n_sided_patch) made, how well it meets its
+    /// neighbours; `None` on every other solid.
+    pub fn patch_report(&self) -> Option<&PatchReport> {
+        self.patch_report.as_ref()
+    }
+
+    /// The sheet lofted through `sections`, `degree` across them (lowered to fit); `loose`
+    /// shapes it by them instead, through the first and last only; `closed` makes it periodic
+    /// across them, the last section back to the first. One face on one NURBS surface.
+    pub fn loft_curves(sections: &[&NurbsCurve], degree: u32, loose: bool, closed: bool) -> Result<Solid> {
+        let api = api()?;
+        let handles = curve_handles(sections);
+        let raw = unsafe { (api.cadaclysm_blacksmith_loft_curves)(handles.as_ptr(), handles.len(), degree, loose, closed) };
+        Solid::wrap(api, raw, "loft_curves")
+    }
+
+    /// `sections` swept along `rail`, each carried by the rail's frame from the rail point
+    /// nearest its centre and blended between: [`SweepFrame::Rmf`] rotation-minimising,
+    /// [`SweepFrame::Fixed`] keeping `up` upright. Fitted within `tolerance`
+    /// ([`SHEET_TOLERANCE`] usually); the sheet's [`sheet_error`](Self::sheet_error) says how close.
+    pub fn sweep_rail(rail: &NurbsCurve, sections: &[&NurbsCurve], frame: SweepFrame, up: Option<[f64; 3]>, tolerance: Option<f64>) -> Result<Solid> {
+        let api = api()?;
+        let handles = curve_handles(sections);
+        let mut error = 0.0;
+        let raw = unsafe {
+            (api.cadaclysm_blacksmith_sweep_rail)(rail.raw(), handles.as_ptr(), handles.len(), frame.code(), opt_ptr(&up), tol_arg(tolerance), &mut error)
+        };
+        Solid::fitted(Solid::wrap(api, raw, "sweep_rail"), error)
+    }
+
+    /// `sections` swept between two rails: each section's first end on `rail_a` and last on
+    /// `rail_b`, carried by the rotation and uniform scale that keep them there, the rails
+    /// matched by arc length. Fitted within `tolerance` ([`sheet_error`](Self::sheet_error)).
+    pub fn sweep_two_rails(rail_a: &NurbsCurve, rail_b: &NurbsCurve, sections: &[&NurbsCurve], tolerance: Option<f64>) -> Result<Solid> {
+        let api = api()?;
+        let handles = curve_handles(sections);
+        let mut error = 0.0;
+        let raw = unsafe {
+            (api.cadaclysm_blacksmith_sweep_two_rails)(rail_a.raw(), rail_b.raw(), handles.as_ptr(), handles.len(), tol_arg(tolerance), &mut error)
+        };
+        Solid::fitted(Solid::wrap(api, raw, "sweep_two_rails"), error)
+    }
+
+    /// The Coons sheet of 2, 3 or 4 boundary curves meeting end to end within `tolerance` (in
+    /// order round the boundary, each either way round): exact for non-rational boundaries,
+    /// rational ones fitted first ([`sheet_error`](Self::sheet_error)).
+    pub fn edge_surface(curves: &[&NurbsCurve], tolerance: Option<f64>) -> Result<Solid> {
+        let api = api()?;
+        let handles = curve_handles(curves);
+        let mut error = 0.0;
+        let raw = unsafe { (api.cadaclysm_blacksmith_edge_surface)(handles.as_ptr(), handles.len(), tol_arg(tolerance), &mut error) };
+        Solid::fitted(Solid::wrap(api, raw, "edge_surface"), error)
+    }
+
+    /// The Gordon sheet of a curve network: `u_curves` (in order across the other way) and
+    /// `v_curves`, every one of the first crossing every one of the second within `tolerance`.
+    /// [`sheet_error`](Self::sheet_error) is the largest distance from the sheet to the curves.
+    pub fn network_surface(u_curves: &[&NurbsCurve], v_curves: &[&NurbsCurve], tolerance: Option<f64>) -> Result<Solid> {
+        let api = api()?;
+        let (u, v) = (curve_handles(u_curves), curve_handles(v_curves));
+        let mut error = 0.0;
+        let raw = unsafe {
+            (api.cadaclysm_blacksmith_network_surface)(u.as_ptr(), u.len(), v.as_ptr(), v.len(), tol_arg(tolerance), &mut error)
+        };
+        Solid::fitted(Solid::wrap(api, raw, "network_surface"), error)
+    }
+
+    /// How well face `face` of this solid, along `side`, meets face `other_face` of `other`
+    /// along `other_side`, from `samples` points along the first side (64 usually): the largest
+    /// gap, angle between the normals and difference of curvature, with where each is.
+    pub fn continuity(&self, side: SheetSide, other: &Solid, other_side: SheetSide, face: u32, other_face: u32, samples: u32) -> Result<Continuity> {
+        let mut out = sys::CadaclysmBlacksmithContinuity::default();
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_continuity)(self.raw(), face, side.code(), other.raw(), other_face, other_side.code(), samples, &mut out)
+        };
+        if ok {
+            Ok(out.into())
+        } else {
+            Err(fail(self.api, "continuity"))
+        }
+    }
+
+    /// Face `face` as a sheet of its own, its side `side` bent to meet `other`'s `other_side` at
+    /// G`level` (2 usually): 0 position, 1 tangent plane, 2 curvature. The opposite side stays
+    /// where it was.
+    pub fn matched(&self, side: SheetSide, other: &Solid, other_side: SheetSide, level: u32, face: u32, other_face: u32) -> Result<Solid> {
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_match_side)(self.raw(), face, side.code(), other.raw(), other_face, other_side.code(), level)
+        };
+        self.next(raw, "match_side")
+    }
+
+    /// A sheet spanning from `a`'s side to `b`'s, meeting each at G`level` (1 or 2); `bulge`
+    /// (1 usually) scales how far it leaves each edge along its neighbour's tangent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn blend_sides(a: &Solid, side_a: SheetSide, b: &Solid, side_b: SheetSide, level: u32, bulge: f64, face_a: u32, face_b: u32) -> Result<Solid> {
+        let raw = unsafe {
+            (a.api.cadaclysm_blacksmith_blend_sides)(a.raw(), face_a, side_a.code(), b.raw(), face_b, side_b.code(), level, bulge)
+        };
+        a.next(raw, "blend_sides")
+    }
+
+    /// The sheet filling a hole of 3 or more sides: N four-sided NURBS faces round a central
+    /// point, G1 or G2 to each other. Each boundary, in order round the hole and either way
+    /// round, is a [`PatchBoundary`]: a sheet's side, or a [`NurbsCurve`] met at G0. They must
+    /// meet end to end within `tolerance` (0.01 usually); `bulge` (1 usually) scales how far the
+    /// patch leaves each neighbour along its tangent. Face `i` meets boundary `i`'s second half
+    /// along its `V0` side and boundary `i + 1`'s first half along its `U1`, so
+    /// [`continuity`](Self::continuity) measures each neighbour; the result's
+    /// [`patch_report`](Self::patch_report) holds the worst of them, measured the same way.
+    pub fn n_sided_patch(boundaries: &[PatchBoundary<'_>], bulge: f64, tolerance: Option<f64>) -> Result<Solid> {
+        let api = api()?;
+        let rows: Vec<sys::CadaclysmBlacksmithPatchBoundary> = boundaries.iter().map(PatchBoundary::raw).collect();
+        let mut report = sys::CadaclysmBlacksmithPatchReport::default();
+        let raw = unsafe { (api.cadaclysm_blacksmith_n_sided_patch)(rows.as_ptr(), rows.len(), bulge, tol_arg(tolerance), &mut report) };
+        let mut patch = Solid::wrap(api, raw, "n_sided_patch")?;
+        patch.patch_report = Some(report.into());
+        Ok(patch)
+    }
+
+    /// The rolling-ball fillet between face `face_a` of `a` and face `face_b` of `b` (their
+    /// whole NURBS surfaces): the ball on the side each face's normal points to (`flip_a` /
+    /// `flip_b`: the other side), of `radius`, or running linearly from `radius` to `radius_end`
+    /// along the fillet. Returns the fillet sheet (its [`sheet_error`](Self::sheet_error) set)
+    /// and the contact curves on `a` and `b`, to trim them back with
+    /// [`trim_by_curve`](Self::trim_by_curve) and join with [`join_sheets`](Self::join_sheets).
+    /// The curves are the caller's, and outlive the sheets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fillet_surfaces(
+        a: &Solid,
+        b: &Solid,
+        radius: f64,
+        radius_end: Option<f64>,
+        flip_a: bool,
+        flip_b: bool,
+        tolerance: Option<f64>,
+        face_a: u32,
+        face_b: u32,
+    ) -> Result<(Solid, NurbsCurve, NurbsCurve)> {
+        let api = a.api;
+        let mut rail_a: *mut sys::CadaclysmBlacksmithNurbsCurve = ptr::null_mut();
+        let mut rail_b: *mut sys::CadaclysmBlacksmithNurbsCurve = ptr::null_mut();
+        let mut error = 0.0;
+        let raw = unsafe {
+            (api.cadaclysm_blacksmith_fillet_surfaces)(
+                a.raw(),
+                face_a,
+                b.raw(),
+                face_b,
+                radius,
+                radius_end.unwrap_or(radius),
+                flip_a,
+                flip_b,
+                tol_arg(tolerance),
+                &mut rail_a,
+                &mut rail_b,
+                &mut error,
+            )
+        };
+        // Own whatever rails came back first, so every path frees them.
+        let own = |raw: *mut sys::CadaclysmBlacksmithNurbsCurve| NonNull::new(raw).map(|handle| NurbsCurve { handle, api, fit_error: None });
+        let (rail_a, rail_b) = (own(rail_a), own(rail_b));
+        let sheet = Solid::fitted(Solid::wrap(api, raw, "fillet_surfaces"), error)?;
+        match (rail_a, rail_b) {
+            (Some(ra), Some(rb)) => Ok((sheet, ra, rb)),
+            _ => Err(Error::new("fillet_surfaces: the library returned no contact curves")),
+        }
+    }
+
+    /// [`fillet`](Self::fillet) with the radius running linearly from `radius` to `radius_end`
+    /// in arc length along each edge, `radius` at the end where the edge's curve starts (spline
+    /// edges only: the crease between two faces on NURBS surfaces). A `radius_end` of `None` or
+    /// equal to `radius` is the constant [`fillet`](Self::fillet).
+    pub fn fillet_varying(&self, edges: &[u32], radius: f64, radius_end: Option<f64>, tolerance: f64) -> Result<Solid> {
+        match radius_end {
+            Some(end) if end != radius => {
+                let raw = unsafe { (self.api.cadaclysm_blacksmith_fillet_varying)(self.raw(), edges.as_ptr(), edges.len(), radius, end, tolerance) };
+                self.next(raw, "fillet_varying")
+            }
+            _ => self.fillet(edges, radius, tolerance),
+        }
+    }
+
+    /// This sheet cut along `curve` -- one lying on it, say projected or pulled onto it -- and
+    /// nothing removed: every face comes back in its pieces outside the cutter, then its pieces
+    /// inside, each a face. The cutter is `curve` run along `direction` (`None`: the mean of the
+    /// sheet's normals along the curve) through the whole sheet. A closed curve's inside is the
+    /// island it bounds; an open curve's is the side left of its run, seen from where
+    /// `direction` points, and an open curve is run on straight past both ends, so it should
+    /// cross the sheet's boundary. `tolerance` (0.05 usually) is the split's meshing tolerance.
+    pub fn split_by_curve(&self, curve: &NurbsCurve, direction: Option<[f64; 3]>, tolerance: Option<f64>) -> Result<Solid> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_split_by_curve)(self.raw(), curve.raw(), opt_ptr(&direction), tol_arg(tolerance)) };
+        self.next(raw, "split_by_curve")
+    }
+
+    /// This sheet cut along `curve` and one side thrown away (see
+    /// [`split_by_curve`](Self::split_by_curve)): [`TrimKeep::Inside`] keeps the island a closed
+    /// curve bounds, [`TrimKeep::Outside`] the sheet with the hole; for an open curve
+    /// [`TrimKeep::Left`] (the same as `Inside`) keeps the side left of its run seen from where
+    /// `direction` points, [`TrimKeep::Right`] the other. Refused where nothing of the sheet lies
+    /// on the kept side.
+    pub fn trim_by_curve(&self, curve: &NurbsCurve, keep: TrimKeep, direction: Option<[f64; 3]>, tolerance: Option<f64>) -> Result<Solid> {
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_trim_by_curve)(self.raw(), curve.raw(), opt_ptr(&direction), keep.keep_inside(), tol_arg(tolerance))
+        };
+        self.next(raw, "trim_by_curve")
+    }
+
+    /// `section` swept along each of `edges` (naked edges of this sheet, indices into
+    /// [`edges`](Self::edges)) on the face's own frame: at every point of the edge the section's
+    /// `x` runs outward from the face -- square to the edge, in the face's tangent plane -- and
+    /// its `y` along the face's normal, so a section from `(0, 0)` to `(0, -10)` turns the edge
+    /// under by 10 all along it however the panel curves, `(0, 0)` to `(10, 0)` carries the face
+    /// on, and a lip stands proud with `y > 0`. `section` is a curve in the plane `z = 0`
+    /// starting at the origin. With `join` the sweeps come back sewn to this sheet (its faces
+    /// first, then one per edge), else alone, sewn to each other. Each sweep is fitted within
+    /// `tolerance` (1e-3 usually); the result's [`sheet_error`](Self::sheet_error) says how
+    /// close. Refused for an edge bordered by two faces, a section not starting at the origin,
+    /// and sweeps that did not sew on.
+    pub fn flange(&self, edges: &[u32], section: &NurbsCurve, tolerance: Option<f64>, join: bool) -> Result<Solid> {
+        let mut error = 0.0;
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_flange)(self.raw(), edges.as_ptr(), edges.len(), section.raw(), tol_arg(tolerance), join, &mut error)
+        };
+        Solid::fitted(self.next(raw, "flange"), error)
+    }
+
+    /// Each of `edges` (naked edges of this sheet, indices into [`edges`](Self::edges)) slid
+    /// along `direction` until it meets `target`: every point of the edge travels along the
+    /// direction to its first hit on `target`'s faces (trimmed, not their whole surfaces). One
+    /// wall per edge -- the edge's own curve swept straight, bounded by the curve through the
+    /// hits, fitted within `tolerance` (1e-3 usually) of every hit
+    /// ([`sheet_error`](Self::sheet_error)) -- so a wheel arch cut in a panel runs in to the
+    /// well's inner wall as its liner. With `join` the walls come back sewn to this sheet (its
+    /// faces first, then one per edge), else alone, sewn to each other. Refused as
+    /// [`flange`](Self::flange) is, for a direction of no length, and naming the point whose
+    /// line misses the target.
+    pub fn extrude_to(&self, edges: &[u32], direction: [f64; 3], target: &Solid, tolerance: Option<f64>, join: bool) -> Result<Solid> {
+        let mut error = 0.0;
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_extrude_to)(
+                self.raw(),
+                edges.as_ptr(),
+                edges.len(),
+                direction.as_ptr(),
+                target.raw(),
+                tol_arg(tolerance),
+                join,
+                &mut error,
+            )
+        };
+        Solid::fitted(self.next(raw, "extrude_to"), error)
+    }
+
+    /// `sheets` joined into one body, their faces in order, and a [`JoinReport`] of what was
+    /// done: every two naked edges whose ends and curves agree within `tolerance` (`None` or 0:
+    /// a rounding of the body's size) sewn into one -- a gap closed is kept as that edge's own
+    /// tolerance -- the faces turned to agree, and a closed result turned to face out, a solid
+    /// the booleans, the measures and the writers take. At a tolerance above 0 a T-junction is
+    /// sewn too: one sheet's edge along part of another's is first cut where the other's
+    /// corner lies on it.
+    pub fn join_sheets(sheets: &[&Solid], tolerance: Option<f64>) -> Result<(Solid, JoinReport)> {
+        let api = api()?;
+        let handles: Vec<*const sys::CadaclysmBlacksmithSolid> = sheets.iter().map(|s| s.raw()).collect();
+        let mut report = sys::CadaclysmBlacksmithJoinReport::default();
+        let raw = unsafe { (api.cadaclysm_blacksmith_join_sheets)(handles.as_ptr(), handles.len(), tol_arg(tolerance), &mut report) };
+        Ok((Solid::wrap(api, raw, "join_sheets")?, report.into()))
+    }
+
+    /// This sheet with an opening recessed into it along `outline` -- a window, a lamp, a grille
+    /// or an air intake set into a panel -- and how many of the result's faces are each part's:
+    /// `(sheet, fillet, walls, pane)`, the faces in that order.
+    ///
+    /// `outline` is a closed curve on the sheet (one face or several joined); each of its points
+    /// is found on the sheet, so it may stand a little off it. The walls run back `depth` along
+    /// the sheet's own normal at every point of the rim -- not along one view -- behind the face
+    /// (against its normal; negative: in front), leaning in toward the opening by `draft` radians
+    /// (negative: out) and meeting on the mitre at the outline's corners. `fillet` above 0 rounds
+    /// the rim between the sheet and the walls (the outline must then be smooth). `pane` closes
+    /// the back with one patch whose four sides end where the outline turns most, so it does not
+    /// twist. Every piece is sewn to the next: only the sheet's own boundary is left naked, and
+    /// the walls' foot without a pane. Refused for an outline that is not closed, a corner with a
+    /// fillet, or a fillet deeper than the walls. Python's defaults: draft 0, fillet 0, pane
+    /// true, tolerance 0.05.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recess(&self, outline: &NurbsCurve, depth: f64, draft: f64, fillet: f64, pane: bool, tolerance: Option<f64>) -> Result<(Solid, (u32, u32, u32, u32))> {
+        let mut faces = [0u32; 4];
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_recess)(self.raw(), outline.raw(), depth, draft, fillet, pane, tol_arg(tolerance), faces.as_mut_ptr())
+        };
+        Ok((self.next(raw, "recess")?, (faces[0], faces[1], faces[2], faces[3])))
+    }
+}
+
+/// The exact NURBS form of a curve value of `kind`.
+fn curve_to_nurbs(kind: u32, v: &[f64]) -> Result<NurbsCurve> {
+    let api = api()?;
+    NurbsCurve::wrap(api, unsafe { (api.cadaclysm_blacksmith_curve_value_to_nurbs)(kind, v.as_ptr()) }, "curve_value_to_nurbs")
+}
+
 /// The closest points between two solids' boundaries ([`Solid::closest`]). `kind_*` is
 /// `"face"`, `"edge"` or `"vertex"`; `index_*` the kernel id of it; `edge_*` the index
 /// [`Solid::fillet`] takes, `None` for a face, a vertex or an edge with no exact curve.
@@ -3524,6 +4959,97 @@ impl Profile {
     }
 }
 
+/// An input face (or edge) a tracked solid's face came from: `(operand, id)`, the operand
+/// its input's index in the verb's operand order (a boolean's target 0, its tool 1), the id
+/// that input face's [`Solid::face_id`] (or [`Solid::edge_id`]).
+pub type Origin = (u32, u64);
+
+/// What a verb did to its inputs' faces (or edges) -- what [`Solid::history`] and
+/// [`Solid::edge_history`] return, read off the result's ids and origins alone. An input is
+/// named by its [`Origin`]. Every list is in `(operand, id)` order, `generated` in id order
+/// -- the shape of OpenCascade's `BRepTools_History`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct History {
+    /// The inputs that became exactly one output and kept their id, each as
+    /// `(input, output id)`.
+    pub kept: Vec<(Origin, u64)>,
+    /// The inputs split (several outputs name them), merged (their output has other origins
+    /// too) or renumbered (a cut's bore, a later operand's clashing id), each as
+    /// `(input, output ids)` -- a split's first piece, which keeps the id, first.
+    pub modified: Vec<(Origin, Vec<u64>)>,
+    /// The outputs with no origin (a fillet's round, the faces a split cuts), in id order.
+    pub generated: Vec<u64>,
+    /// The inputs no output names (a cut tool's caps).
+    pub deleted: Vec<Origin>,
+}
+
+/// The four lists of history handle `h`, read whole; `h` freed on every path, a failed
+/// read's too. Null `h` is the call's refusal, in `last_error`.
+fn read_history(api: &Api, h: *mut sys::CadaclysmBlacksmithHistory, what: &str) -> Result<History> {
+    if h.is_null() {
+        return Err(fail(api, what));
+    }
+    let read = || -> Result<History> {
+        let (mut operand, mut id, mut out) = (0u32, 0u64, 0u64);
+        let mut history = History::default();
+        for i in 0..unsafe { (api.cadaclysm_blacksmith_history_kept_count)(h) } {
+            if !unsafe { (api.cadaclysm_blacksmith_history_kept_at)(h, i, &mut operand, &mut id, &mut out) } {
+                return Err(fail(api, "history_kept_at"));
+            }
+            history.kept.push(((operand, id), out));
+        }
+        for i in 0..unsafe { (api.cadaclysm_blacksmith_history_modified_count)(h) } {
+            if !unsafe { (api.cadaclysm_blacksmith_history_modified_at)(h, i, &mut operand, &mut id) } {
+                return Err(fail(api, "history_modified_at"));
+            }
+            let n = unsafe { (api.cadaclysm_blacksmith_history_modified_output_count)(h, i) };
+            if n == NONE {
+                return Err(fail(api, "history_modified_output_count"));
+            }
+            let outs = (0..n).map(|j| unsafe { (api.cadaclysm_blacksmith_history_modified_output_at)(h, i, j) }).collect();
+            history.modified.push(((operand, id), outs));
+        }
+        let generated = unsafe { (api.cadaclysm_blacksmith_history_generated_count)(h) };
+        history.generated = (0..generated).map(|i| unsafe { (api.cadaclysm_blacksmith_history_generated_at)(h, i) }).collect();
+        for i in 0..unsafe { (api.cadaclysm_blacksmith_history_deleted_count)(h) } {
+            if !unsafe { (api.cadaclysm_blacksmith_history_deleted_at)(h, i, &mut operand, &mut id) } {
+                return Err(fail(api, "history_deleted_at"));
+            }
+            history.deleted.push((operand, id));
+        }
+        Ok(history)
+    };
+    let result = read();
+    unsafe { (api.cadaclysm_blacksmith_history_free)(h) };
+    result
+}
+
+/// The attributes C lists by count and `_at`, in key order, copied out of the strings the
+/// solid lends.
+fn attribute_map(
+    api: &Api,
+    count: u32,
+    key_at: impl Fn(u32) -> *const c_char,
+    value_at: impl Fn(u32) -> *const c_char,
+) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for i in 0..count {
+        let (k, v) = (key_at(i), value_at(i));
+        if k.is_null() || v.is_null() {
+            return Err(fail(api, "attributes"));
+        }
+        out.insert(unsafe { text(k) }, unsafe { text(v) });
+    }
+    Ok(out)
+}
+
+/// `pairs` sorted by key, the order `with_attributes` and `with_face_attributes` set them in.
+fn by_key<K: AsRef<str>, V: AsRef<str>>(pairs: impl IntoIterator<Item = (K, V)>) -> Vec<(K, V)> {
+    let mut pairs: Vec<(K, V)> = pairs.into_iter().collect();
+    pairs.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+    pairs
+}
+
 /// An exact B-rep solid (or open sheet). Immutable: every operation returns a new one.
 /// Dropping it frees it. `Send`, not `Sync` -- see the module docs.
 pub struct Solid {
@@ -3531,6 +5057,10 @@ pub struct Solid {
     api: &'static Api,
     /// What [`Solid::inexact_trims`] reads: written by `transform` / `convert_to_nurbs`.
     inexact_trims: u32,
+    /// What [`Solid::sheet_error`] reads: written by the fitted-sheet verbs.
+    sheet_error: Option<f64>,
+    /// What [`Solid::patch_report`] reads: written by `n_sided_patch`.
+    patch_report: Option<PatchReport>,
 }
 
 // A solid owns its brep reference and its caches outright, so it may move to another
@@ -3555,7 +5085,7 @@ const NO_PROGRESS: sys::CadaclysmBlacksmithProgress = None;
 
 impl Solid {
     fn wrap(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithSolid, what: &str) -> Result<Solid> {
-        NonNull::new(raw).map(|handle| Solid { handle, api, inexact_trims: 0 }).ok_or_else(|| fail(api, what))
+        NonNull::new(raw).map(|handle| Solid { handle, api, inexact_trims: 0, sheet_error: None, patch_report: None }).ok_or_else(|| fail(api, what))
     }
 
     fn raw(&self) -> *const sys::CadaclysmBlacksmithSolid {
@@ -4360,6 +5890,14 @@ impl Solid {
         Ok(None)
     }
 
+    /// This solid as the `body` field of a `solid.body` (or `sheet.body`) document node holds
+    /// it, as JSON text: the kernel's own B-rep, every table and number as they are, and its
+    /// colours (the solid's, each face's, all edges' and each edge's), so the node gives back
+    /// exactly this body as it is drawn. How [`Document::add_solid`] puts a solid in a document.
+    pub fn document_body(&self) -> Result<String> {
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_solid_body)(self.raw()) }, "document_solid_body")
+    }
+
     // -- asking
 
     /// How many faces it has.
@@ -4430,6 +5968,329 @@ impl Solid {
             f if f < 0 => Ok(None),
             f => Ok(Some(f as u32)),
         }
+    }
+
+    /// Edge `edge` (an index into [`Solid::edges`]) by what it is, fifteen doubles: its kind
+    /// (line 0, circle 1, ellipse 2, B-spline 3, other 4), its midpoint (x y z), its unit
+    /// tangent there (x y z), its length, the outward normals there of the two faces meeting
+    /// on it (x y z each; an open sheet's rim gives the one face's twice), and its span --
+    /// how far from the midpoint [`Solid::find_edge`] may find it on a resized solid.
+    /// [`Solid::face_ref`]'s twin: take it before any move you apply to the solid. Refused
+    /// for an edge past the table or one with no length to measure.
+    pub fn edge_ref(&self, edge: u32) -> Result<[f64; 15]> {
+        let mut out = [0.0; 15];
+        if !unsafe { (self.api.cadaclysm_blacksmith_edge_ref)(self.raw(), edge, out.as_mut_ptr()) } {
+            return Err(fail(self.api, "edge_ref"));
+        }
+        Ok(out)
+    }
+
+    /// The edge `edge_ref` (from [`Solid::edge_ref`]) refers to: of the edges of that kind
+    /// passing within `tolerance` of its midpoint and running the same way, the one of
+    /// nearest length; where none does (the solid was resized), the edge of that kind running
+    /// the same way between faces facing the same two ways, the only one or the one clearly
+    /// nearest, no farther than the span. `None` where the edge is gone. Refused for a
+    /// reference that is not fifteen finite numbers or a `tolerance` not positive (Python's
+    /// default is 1e-3).
+    pub fn find_edge(&self, edge_ref: &[f64; 15], tolerance: f64) -> Result<Option<u32>> {
+        let found = unsafe { (self.api.cadaclysm_blacksmith_find_edge)(self.raw(), edge_ref.as_ptr(), tolerance) };
+        match found {
+            -2 => Err(fail(self.api, "find_edge")),
+            e if e < 0 => Ok(None),
+            e => Ok(Some(e as u32)),
+        }
+    }
+
+    /// How many vertices this solid has: its edges' ends, welded, in the order
+    /// [`Solid::vertex_ref`] and [`Solid::find_vertex`] index.
+    pub fn vertex_count(&self) -> Result<u32> {
+        let count = unsafe { (self.api.cadaclysm_blacksmith_vertex_count)(self.raw()) };
+        if count == 0 && failed(self.api) {
+            return Err(fail(self.api, "vertex_count"));
+        }
+        Ok(count)
+    }
+
+    /// Vertex `vertex` by where it is: `[x, y, z]`, in the solid's own coordinates. Refused
+    /// for a vertex the solid does not have.
+    pub fn vertex_ref(&self, vertex: u32) -> Result<[f64; 3]> {
+        let mut out = [0.0; 3];
+        if !unsafe { (self.api.cadaclysm_blacksmith_vertex_ref)(self.raw(), vertex, out.as_mut_ptr()) } {
+            return Err(fail(self.api, "vertex_ref"));
+        }
+        Ok(out)
+    }
+
+    /// The vertex nearest `vertex_ref` (any point: a [`Solid::vertex_ref`], or one picked)
+    /// within `tolerance`; `None` where no vertex is that near. Refused for a point that is
+    /// not three finite numbers or a `tolerance` not positive (Python's default is 1e-3).
+    pub fn find_vertex(&self, vertex_ref: &[f64; 3], tolerance: f64) -> Result<Option<u32>> {
+        let found = unsafe { (self.api.cadaclysm_blacksmith_find_vertex)(self.raw(), vertex_ref.as_ptr(), tolerance) };
+        match found {
+            -2 => Err(fail(self.api, "find_vertex")),
+            v if v < 0 => Ok(None),
+            v => Ok(Some(v as u32)),
+        }
+    }
+
+    // -- identity: ids on faces and edges, where each came from, and a verb's history
+
+    /// This solid tracked: its faces numbered 1..n in face order and its edges 1..m in the
+    /// edge table's order, each its own origin. Tracking is opt-in and rides on from here: a
+    /// verb on a tracked solid gives a tracked result, its faces keeping the ids of the faces
+    /// they lie on and naming those as their origins. A tracked solid comes back as it is.
+    pub fn tracked(&self) -> Result<Solid> {
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_solid_tracked)(self.raw()) }, "solid_tracked")
+    }
+
+    /// Whether this solid carries face and edge ids ([`Solid::tracked`], made from a tracked
+    /// solid, or given an attribute).
+    pub fn is_tracked(&self) -> Result<bool> {
+        let tracked = unsafe { (self.api.cadaclysm_blacksmith_solid_is_tracked)(self.raw()) };
+        if !tracked && failed(self.api) {
+            return Err(fail(self.api, "solid_is_tracked"));
+        }
+        Ok(tracked)
+    }
+
+    /// An id the kernel gave back: `None` for 0 (untracked), the kernel's refusal where it left one.
+    fn id_of(&self, id: u64, what: &str) -> Result<Option<u64>> {
+        if id == 0 {
+            return if failed(self.api) { Err(fail(self.api, what)) } else { Ok(None) };
+        }
+        Ok(Some(id))
+    }
+
+    /// An index found by id: `None` for `NONE` (no such id), the kernel's refusal where it
+    /// left one.
+    fn with_id(&self, found: u32, what: &str) -> Result<Option<u32>> {
+        if found == NONE {
+            return if failed(self.api) { Err(fail(self.api, what)) } else { Ok(None) };
+        }
+        Ok(Some(found))
+    }
+
+    fn origins(
+        &self,
+        count: u32,
+        at: impl Fn(u32, &mut u32, &mut u64) -> bool,
+        what: &str,
+    ) -> Result<Vec<Origin>> {
+        if count == NONE {
+            return Err(fail(self.api, &format!("{what}_origin_count")));
+        }
+        let mut out = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let (mut operand, mut id) = (0u32, 0u64);
+            if !at(i, &mut operand, &mut id) {
+                return Err(fail(self.api, &format!("{what}_origin_at")));
+            }
+            out.push((operand, id));
+        }
+        Ok(out)
+    }
+
+    /// Face `face`'s id, `None` where this solid is untracked. An id stays with its face
+    /// through every verb that keeps the face -- a move, a boolean, a fillet of another edge
+    /// -- so it names "the same face, through my edits" within a session; a piece split off,
+    /// a later operand's face whose id an earlier one already has, and a face on no input get
+    /// fresh ids, the same run after run. Ids are not written to files: to find a face on a
+    /// model rebuilt or read again, use [`Solid::face_ref`]. Refused for a face the solid
+    /// does not have.
+    pub fn face_id(&self, face: u32) -> Result<Option<u64>> {
+        self.id_of(unsafe { (self.api.cadaclysm_blacksmith_face_id)(self.raw(), face) }, "face_id")
+    }
+
+    /// The face whose id is `id`, `None` where no face has it (an untracked solid, an id 0, a
+    /// face a verb deleted).
+    pub fn face_with_id(&self, id: u64) -> Result<Option<u32>> {
+        self.with_id(unsafe { (self.api.cadaclysm_blacksmith_face_with_id)(self.raw(), id) }, "face_with_id")
+    }
+
+    /// The input faces face `face` came from, as [`Origin`]s: the face it lies on most first;
+    /// empty for a face the verb generated (a fillet's round, a split's cut face) or an
+    /// untracked solid; more than one for a face merged from several (a join's flush faces
+    /// through [`Solid::merge_flush`] and [`Solid::origins_through`]). Refused for a face the
+    /// solid does not have.
+    pub fn face_origins(&self, face: u32) -> Result<Vec<Origin>> {
+        let count = unsafe { (self.api.cadaclysm_blacksmith_face_origin_count)(self.raw(), face) };
+        self.origins(
+            count,
+            |i, operand, id| unsafe { (self.api.cadaclysm_blacksmith_face_origin_at)(self.raw(), face, i, operand, id) },
+            "face",
+        )
+    }
+
+    /// Edge `edge`'s id (an index into [`Solid::edges`]), as [`Solid::face_id`].
+    pub fn edge_id(&self, edge: u32) -> Result<Option<u64>> {
+        self.id_of(unsafe { (self.api.cadaclysm_blacksmith_edge_id)(self.raw(), edge) }, "edge_id")
+    }
+
+    /// The edge whose id is `id`, `None` where no edge has it.
+    pub fn edge_with_id(&self, id: u64) -> Result<Option<u32>> {
+        self.with_id(unsafe { (self.api.cadaclysm_blacksmith_edge_with_id)(self.raw(), id) }, "edge_with_id")
+    }
+
+    /// The input edge edge `edge` lies on, as [`Solid::face_origins`]: one [`Origin`], or
+    /// none for a new edge (edge merges are not seen).
+    pub fn edge_origins(&self, edge: u32) -> Result<Vec<Origin>> {
+        let count = unsafe { (self.api.cadaclysm_blacksmith_edge_origin_count)(self.raw(), edge) };
+        self.origins(
+            count,
+            |i, operand, id| unsafe { (self.api.cadaclysm_blacksmith_edge_origin_at)(self.raw(), edge, i, operand, id) },
+            "edge",
+        )
+    }
+
+    /// This solid, made from `via` by a verb of one operand, with its face and edge origins
+    /// read through `via`'s: each origin `(0, id)` replaced by the origins `via`'s face (edge)
+    /// `id` has. Two steps then read as one: `joined.merge_flush()?.origins_through(&joined)?`
+    /// names the join's two inputs, as operands 0 and 1, rather than the join's own faces --
+    /// what Python's `join(merge=True)` does, and what [`Solid::history`] of the merge against
+    /// the join's inputs needs. Ids, attributes and geometry stay this solid's; an untracked
+    /// solid comes back as it is. Refused where `via` is untracked while this solid is not,
+    /// or this solid was not made from `via` alone.
+    pub fn origins_through(&self, via: &Solid) -> Result<Solid> {
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_origins_through)(self.raw(), via.raw()) }, "origins_through")
+    }
+
+    fn read_history(
+        &self,
+        call: unsafe extern "C" fn(
+            *const sys::CadaclysmBlacksmithSolid,
+            *const *const sys::CadaclysmBlacksmithSolid,
+            usize,
+        ) -> *mut sys::CadaclysmBlacksmithHistory,
+        inputs: &[&Solid],
+        what: &str,
+    ) -> Result<History> {
+        let handles: Vec<*const sys::CadaclysmBlacksmithSolid> = inputs.iter().map(|s| s.raw()).collect();
+        read_history(self.api, unsafe { call(self.raw(), handles.as_ptr(), handles.len()) }, what)
+    }
+
+    /// What the verb that made this solid did to the faces of `inputs` -- passed in its
+    /// operand order (`a.cut(&b, t)?.history(&[&a, &b])`) -- read off this solid's ids and
+    /// origins alone, as a [`History`]. Refused where this solid or an input is untracked,
+    /// or an origin names an operand past the inputs.
+    pub fn history(&self, inputs: &[&Solid]) -> Result<History> {
+        self.read_history(self.api.cadaclysm_blacksmith_history, inputs, "history")
+    }
+
+    /// [`Solid::history`] for the edges, by edge id.
+    pub fn edge_history(&self, inputs: &[&Solid]) -> Result<History> {
+        self.read_history(self.api.cadaclysm_blacksmith_edge_history, inputs, "edge_history")
+    }
+
+    // -- attributes: text on a solid (written to STEP files) and on its faces (in memory)
+
+    /// A new handle on this solid, equal to it: what `with_attributes` returns for no
+    /// attributes (removing the empty key, which no solid has, copies the solid).
+    fn copy(&self, what: &str) -> Result<Solid> {
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_without_attribute)(self.raw(), b"\0".as_ptr().cast()) }, what)
+    }
+
+    /// An optional borrowed string: `None` for null with no `last_error`, copied out.
+    fn optional_text(&self, raw: *const c_char, what: &str) -> Result<Option<String>> {
+        if raw.is_null() {
+            return if failed(self.api) { Err(fail(self.api, what)) } else { Ok(None) };
+        }
+        Ok(Some(unsafe { text(raw) }))
+    }
+
+    /// This solid's attributes, in key order. A solid's attributes go with it through every
+    /// verb (a verb's result takes its first operand's) and are written to STEP files as
+    /// user-defined attributes.
+    pub fn attributes(&self) -> Result<BTreeMap<String, String>> {
+        let count = unsafe { (self.api.cadaclysm_blacksmith_attribute_count)(self.raw()) };
+        if count == 0 && failed(self.api) {
+            return Err(fail(self.api, "attribute_count"));
+        }
+        attribute_map(
+            self.api,
+            count,
+            |i| unsafe { (self.api.cadaclysm_blacksmith_attribute_key_at)(self.raw(), i) },
+            |i| unsafe { (self.api.cadaclysm_blacksmith_attribute_value_at)(self.raw(), i) },
+        )
+    }
+
+    /// Attribute `key`, `None` where this solid has none.
+    pub fn attribute(&self, key: &str) -> Result<Option<String>> {
+        let key = c_text("attribute: the key", key)?;
+        self.optional_text(unsafe { (self.api.cadaclysm_blacksmith_attribute)(self.raw(), key.as_ptr()) }, "attribute")
+    }
+
+    /// This solid with attribute `key` set to `value`, over any it had: a new solid, tracked
+    /// if this one was not. Keys and values are text (no NUL); an empty key is refused.
+    pub fn with_attribute(&self, key: &str, value: &str) -> Result<Solid> {
+        let (key, value) = (c_text("with_attribute: the key", key)?, c_text("with_attribute: the value", value)?);
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_with_attribute)(self.raw(), key.as_ptr(), value.as_ptr()) }, "with_attribute")
+    }
+
+    /// This solid with every attribute of `attributes` set, in key order (a key given twice:
+    /// its last value). No attributes: a solid equal to this one.
+    pub fn with_attributes<K: AsRef<str>, V: AsRef<str>>(&self, attributes: impl IntoIterator<Item = (K, V)>) -> Result<Solid> {
+        let mut out: Option<Solid> = None;
+        for (key, value) in by_key(attributes) {
+            out = Some(out.as_ref().unwrap_or(self).with_attribute(key.as_ref(), value.as_ref())?);
+        }
+        out.map_or_else(|| self.copy("with_attributes"), Ok)
+    }
+
+    /// This solid without attribute `key`: a new solid, equal to this one where it had none.
+    pub fn without_attribute(&self, key: &str) -> Result<Solid> {
+        let key = c_text("without_attribute: the key", key)?;
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_without_attribute)(self.raw(), key.as_ptr()) }, "without_attribute")
+    }
+
+    /// Face `face`'s attributes, in key order. A face's attributes follow its id: kept
+    /// through a verb, and copied to every face that names it as an origin (each piece of a
+    /// split face has its parent's). They stay in memory: no file carries them. Refused for
+    /// a face the solid does not have.
+    pub fn face_attributes(&self, face: u32) -> Result<BTreeMap<String, String>> {
+        let count = unsafe { (self.api.cadaclysm_blacksmith_face_attribute_count)(self.raw(), face) };
+        if count == NONE {
+            return Err(fail(self.api, "face_attribute_count"));
+        }
+        attribute_map(
+            self.api,
+            count,
+            |i| unsafe { (self.api.cadaclysm_blacksmith_face_attribute_key_at)(self.raw(), face, i) },
+            |i| unsafe { (self.api.cadaclysm_blacksmith_face_attribute_value_at)(self.raw(), face, i) },
+        )
+    }
+
+    /// Face `face`'s attribute `key`, `None` where it has none. Refused for a face the solid
+    /// does not have.
+    pub fn face_attribute(&self, face: u32, key: &str) -> Result<Option<String>> {
+        let key = c_text("face_attribute: the key", key)?;
+        self.optional_text(unsafe { (self.api.cadaclysm_blacksmith_face_attribute)(self.raw(), face, key.as_ptr()) }, "face_attribute")
+    }
+
+    /// This solid with face `face`'s attribute `key` set to `value`: a new solid, tracked if
+    /// this one was not. Refused as [`Solid::with_attribute`], and for a face the solid does
+    /// not have.
+    pub fn with_face_attribute(&self, face: u32, key: &str, value: &str) -> Result<Solid> {
+        let (key, value) = (c_text("with_face_attribute: the key", key)?, c_text("with_face_attribute: the value", value)?);
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_with_face_attribute)(self.raw(), face, key.as_ptr(), value.as_ptr()) };
+        self.next(raw, "with_face_attribute")
+    }
+
+    /// This solid with every attribute of `attributes` set on face `face`, in key order, as
+    /// [`Solid::with_attributes`].
+    pub fn with_face_attributes<K: AsRef<str>, V: AsRef<str>>(&self, face: u32, attributes: impl IntoIterator<Item = (K, V)>) -> Result<Solid> {
+        let mut out: Option<Solid> = None;
+        for (key, value) in by_key(attributes) {
+            out = Some(out.as_ref().unwrap_or(self).with_face_attribute(face, key.as_ref(), value.as_ref())?);
+        }
+        out.map_or_else(|| self.copy("with_face_attributes"), Ok)
+    }
+
+    /// This solid without face `face`'s attribute `key`: a new solid, equal to this one where
+    /// the face had none. Refused for a face the solid does not have.
+    pub fn without_face_attribute(&self, face: u32, key: &str) -> Result<Solid> {
+        let key = c_text("without_face_attribute: the key", key)?;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_without_face_attribute)(self.raw(), face, key.as_ptr()) };
+        self.next(raw, "without_face_attribute")
     }
 
     /// The solid's axis-aligned box `(min, max)`, at the same cost whatever its size: its
@@ -4598,6 +6459,39 @@ impl Solid {
         }
         if failed(self.api) {
             return Err(fail(self.api, "edge_tolerance"));
+        }
+        Ok(None)
+    }
+
+    /// What this solid declares about its own precision, as [`Tolerances`]: read from its
+    /// file, inherited through every verb from the loosest of its inputs, or set by
+    /// [`with_tolerances`](Self::with_tolerances); `None` in a field nothing declared. A verb
+    /// given a tolerance of 0 works at [`effective_tolerance`], which takes it into account.
+    pub fn tolerances(&self) -> Result<Tolerances> {
+        let (mut absolute, mut angular) = (f64::NAN, f64::NAN);
+        if !unsafe { (self.api.cadaclysm_blacksmith_solid_tolerances)(self.raw(), &mut absolute, &mut angular) } {
+            return Err(fail(self.api, "solid_tolerances"));
+        }
+        Ok(Tolerances::from_raw(absolute, angular))
+    }
+
+    /// A new solid: this one declaring `absolute` (a length) and `angular` (radians) instead of
+    /// what it declared, its name, paint and marks kept. 0 (or NaN) declares nothing for that
+    /// field; a negative or infinite value is the library's refusal.
+    pub fn with_tolerances(&self, absolute: f64, angular: f64) -> Result<Solid> {
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_solid_with_tolerances)(self.raw(), absolute, angular) }, "solid_with_tolerances")
+    }
+
+    /// How loose this solid's vertex at `point` is, where its producer said (an OCCT `.brep`
+    /// records one per vertex): the tolerance of the nearest recorded vertex within its own
+    /// tolerance of `point`. `None` where none is recorded there.
+    pub fn vertex_tolerance(&self, point: [f64; 3]) -> Result<Option<f64>> {
+        let t = unsafe { (self.api.cadaclysm_blacksmith_vertex_tolerance)(self.raw(), point[0], point[1], point[2]) };
+        if !t.is_nan() {
+            return Ok(Some(t));
+        }
+        if failed(self.api) {
+            return Err(fail(self.api, "vertex_tolerance"));
         }
         Ok(None)
     }
@@ -4974,6 +6868,17 @@ impl Solid {
     /// This solid written to a SAT file at `path`, by the library itself.
     pub fn sat(&self, path: impl AsRef<FsPath>, unit: Unit) -> Result<()> {
         write_sat(path, &[self], unit)
+    }
+
+    /// This solid as a Rhino `.3dm`'s bytes: its exact brep, named and coloured as the
+    /// solid is -- see [`rhino3dm_bytes`].
+    pub fn rhino3dm_bytes(&self, unit: Unit) -> Result<Vec<u8>> {
+        rhino3dm_bytes(&[self], unit)
+    }
+
+    /// [`Solid::rhino3dm_bytes`] written to `path` by the library itself.
+    pub fn write_3dm(&self, path: impl AsRef<FsPath>, unit: Unit) -> Result<()> {
+        write_3dm(path, &[self], unit)
     }
 
     /// This solid as OCCT `.brep` text; see [`write_brep_text`].
@@ -8918,6 +10823,31 @@ impl Assembly {
         std::fs::write(path, text).map_err(|e| Error::new(format!("{}: {e}", path.display())))
     }
 
+    /// This assembly, and everything placed under it, as one Rhino `.3dm`: each distinct
+    /// part (as [`Assembly::step_text`] counts them) a block holding its body, each
+    /// sub-assembly a block of references to what it places -- nested assemblies are
+    /// nested blocks -- and this assembly's own placements references at the top of the
+    /// file, on a layer named after it. Each reference is named as its placement was.
+    /// `unit` and the warnings as [`rhino3dm_bytes`]. Refused, as `step_text` is, for an
+    /// assembly reachable from this one that places nothing.
+    pub fn rhino3dm_bytes(&self, unit: Unit) -> Result<Vec<u8>> {
+        let mut len = 0usize;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_assembly_3dm_bytes)(self.raw(), unit as u32, &mut len) };
+        taken_3dm(self.api, raw, len, "assembly_3dm_bytes")
+    }
+
+    /// [`Assembly::rhino3dm_bytes`] written to `path` by the library itself, which names
+    /// the file in its refusal when it cannot.
+    pub fn write_3dm(&self, path: impl AsRef<FsPath>, unit: Unit) -> Result<()> {
+        let path = crate::c_path(path.as_ref())?;
+        let ok = unsafe { (self.api.cadaclysm_blacksmith_assembly_3dm)(self.raw(), path.as_ptr(), unit as u32) };
+        if !ok {
+            return Err(fail(self.api, "assembly_3dm"));
+        }
+        warn_3dm(self.api);
+        Ok(())
+    }
+
     /// This assembly as a reader [`Scene`], through STEP text -- see
     /// [`Solid::to_scene`].
     pub fn to_scene(&self, schema: Option<&str>) -> Result<Scene> {
@@ -8970,6 +10900,477 @@ fn from_brep(node: &Node<'_>, what: &str) -> Result<Option<Solid>> {
 
 fn is_identity(m: &[[f64; 4]; 4]) -> bool {
     (0..4).all(|i| (0..4).all(|j| m[i][j] == if i == j { 1.0 } else { 0.0 }))
+}
+
+// ---- documents --------------------------------------------------------------------
+
+/// The owned text a document call returns, read out and freed; null and `last_error` on a
+/// refusal.
+fn owned_text(api: &'static Api, raw: *mut c_char, what: &str) -> Result<String> {
+    if raw.is_null() {
+        return Err(fail(api, what));
+    }
+    let out = unsafe { text(raw) };
+    unsafe { (api.cadaclysm_blacksmith_string_free)(raw) };
+    Ok(out)
+}
+
+/// The first id of a changed set's `"added"` list, `{"added": ["n1"], ...}`.
+fn first_added(changed: &str) -> Option<String> {
+    let rest = &changed[changed.find("\"added\"")? + "\"added\"".len()..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('[')?.trim_start().strip_prefix('"')?;
+    let mut id = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(id),
+            '\\' => id.push(chars.next()?),
+            c => id.push(c),
+        }
+    }
+    None
+}
+
+/// A model as data: a graph of nodes (`profile.rect`, `solid.extrude`, `measure.mass`, ...),
+/// each a blacksmith verb reading other nodes by id, with named parameters any number can be
+/// an `"=expression"` of, evaluated incrementally, and edited by ops that are undoable and
+/// branch. Every edit is one commit; the whole thing -- nodes, parameters, history, branches
+/// -- saves as JSON text and loads back to the same document. [`Document::kinds`] lists the
+/// node kinds.
+///
+/// ```no_run
+/// use cadaclysm_sdk::blacksmith::{Document, Solid};
+///
+/// fn main() -> cadaclysm_sdk::Result<()> {
+///     let mut doc = Document::new("mm")?;
+///     let held = doc.add_solid(&Solid::cuboid(10.0, 10.0, 10.0)?.coloured("#d33", None)?, false)?;
+///     let text = doc.save()?;
+///
+///     let mut doc = Document::load(&text)?;
+///     assert_eq!(doc.result_kind(&held)?, "solid");
+///     let solid = doc.result_solid(&held)?; // an ordinary Solid, freed when dropped
+///     println!("{} faces, {:?}", solid.faces()?, solid.face_colour(0)?);
+///     Ok(())
+/// }
+/// ```
+///
+/// A refused op is an [`Error`] with the reason, and the document is unchanged. Ops, the
+/// changed sets, the statuses, `errors` and `value` are JSON text, as the C ABI has them:
+/// this crate reads no JSON. `result_*`, `value`, `errors` and `evaluate` bring the nodes up
+/// to date first, so the answer is always the current document's; each [`Solid`] and
+/// [`Profile`] a result gives is the caller's own, outlives later edits and the document,
+/// and draws, meshes and answers like any other. Dropping the document frees it. `Send`,
+/// not `Sync`: one thread at a time.
+pub struct Document {
+    handle: NonNull<sys::CadaclysmBlacksmithDocument>,
+    api: &'static Api,
+}
+
+// The document owns its nodes and cache outright, so it may move to another thread; the
+// kernel's document is a mutable object for one thread at a time, so it is not `Sync`.
+unsafe impl Send for Document {}
+
+impl Drop for Document {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_document_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for Document {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Document({:p})", self.handle)
+    }
+}
+
+impl Document {
+    fn wrap(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithDocument, what: &str) -> Result<Document> {
+        NonNull::new(raw).map(|handle| Document { handle, api }).ok_or_else(|| fail(api, what))
+    }
+
+    fn raw(&self) -> *mut sys::CadaclysmBlacksmithDocument {
+        self.handle.as_ptr()
+    }
+
+    /// An empty document counting lengths in `units` (`mm`, `cm`, `m`, `in` or `ft`).
+    pub fn new(units: &str) -> Result<Document> {
+        let api = api()?;
+        let units = c_text("units", units)?;
+        Document::wrap(api, unsafe { (api.cadaclysm_blacksmith_document_new)(units.as_ptr()) }, "document_new")
+    }
+
+    /// The document [`Document::save`] wrote as `text`: its nodes, parameters, history and
+    /// branches. An error for text that is not a document.
+    pub fn load(text: &str) -> Result<Document> {
+        let api = api()?;
+        let text = c_text("document", text)?;
+        Document::wrap(api, unsafe { (api.cadaclysm_blacksmith_document_load)(text.as_ptr()) }, "document_load")
+    }
+
+    /// The document saved in the file `path`.
+    pub fn open(path: impl AsRef<FsPath>) -> Result<Document> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
+        Document::load(&text)
+    }
+
+    /// Every node kind the library knows, as a JSON array of rows (`name`, `inputs`,
+    /// `output`, `cost`, `help`). Needs no document.
+    pub fn kinds() -> Result<String> {
+        let api = api()?;
+        owned_text(api, unsafe { (api.cadaclysm_blacksmith_document_kinds)() }, "document_kinds")
+    }
+
+    // -- building documents
+
+    /// An empty building document: the blacksmith kinds and the `bim.*` ones, with a hidden
+    /// `bim.project` node (one commit) whose random guid seeds every IFC GlobalId it exports
+    /// ([`Document::export_ifc`]).
+    pub fn new_bim(units: &str) -> Result<Document> {
+        let api = api()?;
+        let units = c_text("units", units)?;
+        Document::wrap(api, unsafe { (api.cadaclysm_bim_document_new)(units.as_ptr()) }, "bim_document_new")
+    }
+
+    /// A saved building document, opened with the `bim.*` kinds.
+    pub fn load_bim(text: &str) -> Result<Document> {
+        let api = api()?;
+        let text = c_text("document", text)?;
+        Document::wrap(api, unsafe { (api.cadaclysm_bim_document_load)(text.as_ptr()) }, "bim_document_load")
+    }
+
+    /// The building document saved in the file `path`.
+    pub fn open_bim(path: impl AsRef<FsPath>) -> Result<Document> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
+        Document::load_bim(&text)
+    }
+
+    /// Every node kind a building document knows, the blacksmith's and the `bim.*` ones, as
+    /// [`Document::kinds`] lists them. Needs no document.
+    pub fn bim_kinds() -> Result<String> {
+        let api = api()?;
+        owned_text(api, unsafe { (api.cadaclysm_bim_kinds)() }, "bim_kinds")
+    }
+
+    /// The building as IFC text; write it to a file yourself. `options` is JSON text,
+    /// `{"schema": "IFC4"|"IFC2X3", "geometry": "parametric"|"exact", "timestamp": <Unix
+    /// seconds>, "name": <IfcProject name>}`, every key optional; `None` is every default
+    /// (IFC4, parametric, now, no name). An error for a document not opened as a building
+    /// document ([`Document::new_bim`], [`Document::load_bim`]), for bad options, and for a
+    /// refused export, whose text is the C ABI's verbatim:
+    /// `bim_document_export_ifc: {"refusals": [{"node": <id>|null, "reason": <text>}]}`.
+    pub fn export_ifc(&mut self, options: Option<&str>) -> Result<String> {
+        let options = options.filter(|o| !o.is_empty()).map(|o| c_text("options", o)).transpose()?;
+        let raw = unsafe {
+            (self.api.cadaclysm_bim_document_export_ifc)(self.raw(), options.as_ref().map_or(ptr::null(), |o| o.as_ptr()))
+        };
+        owned_text(self.api, raw, "bim_document_export_ifc")
+    }
+
+    /// Free it now rather than at the end of scope.
+    pub fn close(self) {}
+
+    // -- saving
+
+    /// The document as JSON text.
+    pub fn save(&self) -> Result<String> {
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_save)(self.raw()) }, "document_save")
+    }
+
+    // -- editing
+
+    /// Applies one op, as JSON text (`{"op": "add", "node": {...}}`, `set`, `remove`,
+    /// `rename`, `param`), and records it as one commit with `message`. The changed set,
+    /// `{"added": [ids], "changed": [ids], "removed": [ids], "params": [names]}`.
+    pub fn apply(&mut self, op: &str, message: Option<&str>) -> Result<String> {
+        let op = c_text("op", op)?;
+        let message = message.filter(|m| !m.is_empty()).map(|m| c_text("message", m)).transpose()?;
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_document_apply)(self.raw(), op.as_ptr(), message.as_ref().map_or(ptr::null(), |m| m.as_ptr()))
+        };
+        owned_text(self.api, raw, "document_apply")
+    }
+
+    /// A node holding `solid` exactly as it is -- one made in code or read from a file -- for
+    /// other nodes to read like any built one: a `solid.body` (a `sheet.body` with `sheet`)
+    /// carrying the kernel's own B-rep ([`Solid::document_body`]), in this document's units.
+    /// Fillets and other references are taken off it as off any node. Its id is returned. Its
+    /// colours are kept -- the solid's, each face's and each edge's -- its name is not.
+    pub fn add_solid(&mut self, solid: &Solid, sheet: bool) -> Result<String> {
+        let kind = if sheet { "sheet.body" } else { "solid.body" };
+        let body = solid.document_body()?;
+        self.add_holding(&format!(r#"{{"op": "add", "node": {{"kind": "{kind}", "body": {body}}}}}"#))
+    }
+
+    /// A `profile.path` node holding `profile` exactly ([`Profile::document_path`]: arcs and
+    /// NURBS as they are, holes included, its colour kept), in this document's units. Its id
+    /// is returned.
+    pub fn add_profile(&mut self, profile: &Profile) -> Result<String> {
+        let path = profile.document_path()?;
+        self.add_holding(&format!(r#"{{"op": "add", "node": {{"kind": "profile.path", "path": {path}}}}}"#))
+    }
+
+    fn add_holding(&mut self, op: &str) -> Result<String> {
+        let changed = self.apply(op, None)?;
+        first_added(&changed).ok_or_else(|| Error::new(format!("document_apply: no node was added ({changed})")))
+    }
+
+    /// Runs `body` as one batch: the ops it applies are live inside it and recorded as one
+    /// commit with `message` when it returns `Ok` (nothing at all when it applied none). When
+    /// it returns `Err` -- or panics -- every op of the batch is taken back and the body's
+    /// own error (or panic) is passed on, never a refused clean-up's. An error, before the
+    /// body runs, while a batch or a preview is already open (`document_batch_begin: ...`).
+    pub fn batch<T, E, F>(&mut self, message: Option<&str>, body: F) -> std::result::Result<T, E>
+    where
+        F: FnOnce(&mut Document) -> std::result::Result<T, E>,
+        E: From<Error>,
+    {
+        let message = message.filter(|m| !m.is_empty()).map(|m| c_text("message", m)).transpose()?;
+        let begun = unsafe {
+            (self.api.cadaclysm_blacksmith_document_batch_begin)(self.raw(), message.as_ref().map_or(ptr::null(), |m| m.as_ptr()))
+        };
+        if !begun {
+            return Err(fail(self.api, "document_batch_begin").into());
+        }
+        let abort = |doc: &mut Document| {
+            // The body's own error is the one to report, not a failed clean-up.
+            let _ = owned_text(doc.api, unsafe { (doc.api.cadaclysm_blacksmith_document_batch_abort)(doc.raw()) }, "document_batch_abort");
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(self))) {
+            Ok(Ok(out)) => {
+                owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_batch_end)(self.raw()) }, "document_batch_end")?;
+                Ok(out)
+            }
+            Ok(Err(e)) => {
+                abort(self);
+                Err(e)
+            }
+            Err(panic) => {
+                abort(self);
+                std::panic::resume_unwind(panic)
+            }
+        }
+    }
+
+    /// Runs `body` as a preview -- a what-if: the ops it applies are applied (and evaluate)
+    /// but never recorded, and are taken back when it returns, `Ok` or `Err`, or panics. The
+    /// body's own error (or panic) is passed on, never a refused clean-up's. An error, before
+    /// the body runs, while a batch or a preview is already open (`document_preview_begin: ...`).
+    /// For an editor's drag, see [`Document::preview_frame`].
+    pub fn preview<T, E, F>(&mut self, body: F) -> std::result::Result<T, E>
+    where
+        F: FnOnce(&mut Document) -> std::result::Result<T, E>,
+        E: From<Error>,
+    {
+        if !unsafe { (self.api.cadaclysm_blacksmith_document_preview_begin)(self.raw()) } {
+            return Err(fail(self.api, "document_preview_begin").into());
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(self))) {
+            Ok(Ok(out)) => {
+                self.end_preview()?;
+                Ok(out)
+            }
+            Ok(Err(e)) => {
+                // The body's own error is the one to report, not a failed clean-up.
+                let _ = self.end_preview();
+                Err(e)
+            }
+            Err(panic) => {
+                let _ = self.end_preview();
+                std::panic::resume_unwind(panic)
+            }
+        }
+    }
+
+    /// One frame of an editor's drag: applies `op` (JSON text, as [`Document::apply`])
+    /// without recording it, after taking back the last frame -- each frame replaces the one
+    /// before, relative to the state before the drag. The changed set, relative to that state.
+    /// Needs no [`Document::preview`] scope; [`Document::end_preview`] ends the drag.
+    pub fn preview_frame(&mut self, op: &str) -> Result<String> {
+        let op = c_text("op", op)?;
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_preview)(self.raw(), op.as_ptr()) }, "document_preview")
+    }
+
+    /// Takes back the open preview -- an editor's drag ([`Document::preview_frame`]) -- leaving
+    /// the document as it was before it; the changed set of doing so.
+    pub fn end_preview(&mut self) -> Result<String> {
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_end_preview)(self.raw()) }, "document_end_preview")
+    }
+
+    // -- history
+
+    /// Takes back the head commit. False when there was nothing to take back.
+    pub fn undo(&mut self) -> Result<bool> {
+        let text = owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_undo)(self.raw()) }, "document_undo")?;
+        Ok(text.trim() != "null")
+    }
+
+    /// Puts back the commit [`Document::undo`] took back. False when there was nothing to put back.
+    pub fn redo(&mut self) -> Result<bool> {
+        let text = owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_redo)(self.raw()) }, "document_redo")?;
+        Ok(text.trim() != "null")
+    }
+
+    /// The parameters as a JSON object, name to value (a number, or an `"=expression"`).
+    /// Set one with a `param` op ([`Document::apply`]).
+    pub fn params(&self) -> Result<String> {
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_params)(self.raw()) }, "document_params")
+    }
+
+    // -- branches
+
+    /// The branches as JSON, `{"branches": {name: tip commit id}, "branch": name|null (null:
+    /// the head is detached), "head": commit id, "unnamed": [commit ids], "can_undo": bool,
+    /// "can_redo": bool}`.
+    pub fn branches(&self) -> Result<String> {
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_branch_list)(self.raw()) }, "document_branch_list")
+    }
+
+    /// A new branch `name`. With `at` `None` it starts at the head and the document switches
+    /// onto it; with `at` (a commit id) it starts there and the head stays where it is.
+    pub fn branch_new(&mut self, name: &str, at: Option<&str>) -> Result<()> {
+        let name = c_text("branch name", name)?;
+        let at = at.filter(|a| !a.is_empty()).map(|a| c_text("commit id", a)).transpose()?;
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_document_branch_new)(self.raw(), name.as_ptr(), at.as_ref().map_or(ptr::null(), |a| a.as_ptr()))
+        };
+        owned_text(self.api, raw, "document_branch_new").map(drop)
+    }
+
+    /// Moves the head to the branch of that name, else to the commit of that id (which
+    /// detaches the head: `"branch"` is then null in [`Document::branches`]). The nodes follow.
+    pub fn switch(&mut self, name_or_commit_id: &str) -> Result<()> {
+        let to = c_text("branch or commit", name_or_commit_id)?;
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_branch_switch)(self.raw(), to.as_ptr()) }, "document_branch_switch")
+            .map(drop)
+    }
+
+    /// Renames branch `old` to `new`; an error when `old` is missing or `new` is taken.
+    pub fn branch_rename(&mut self, old: &str, new: &str) -> Result<()> {
+        let (old, new) = (c_text("branch name", old)?, c_text("branch name", new)?);
+        if !unsafe { (self.api.cadaclysm_blacksmith_document_branch_rename)(self.raw(), old.as_ptr(), new.as_ptr()) } {
+            return Err(fail(self.api, "document_branch_rename"));
+        }
+        Ok(())
+    }
+
+    /// Deletes branch `name`; the current branch is refused. Its commits stay, as tips.
+    pub fn branch_delete(&mut self, name: &str) -> Result<()> {
+        let name = c_text("branch name", name)?;
+        if !unsafe { (self.api.cadaclysm_blacksmith_document_branch_delete)(self.raw(), name.as_ptr()) } {
+            return Err(fail(self.api, "document_branch_delete"));
+        }
+        Ok(())
+    }
+
+    /// The tips of the lines no branch names -- what an undo followed by an edit leaves
+    /// behind -- as JSON, each a whole commit as [`Document::log`] writes it.
+    pub fn tips(&self) -> Result<String> {
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_tips)(self.raw()) }, "document_tips")
+    }
+
+    /// The commits of `branch`'s line, newest first, the root `c0` last, as JSON,
+    /// `[{"id", "parents", "message"?, "author"?, "time"?, "ops"}]`; `None` is the line from
+    /// the head back to the root (its first commit is the head). An error for a branch that
+    /// does not exist.
+    pub fn log(&self, branch: Option<&str>) -> Result<String> {
+        let branch = branch.filter(|b| !b.is_empty()).map(|b| c_text("branch name", b)).transpose()?;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_document_log)(self.raw(), branch.as_ref().map_or(ptr::null(), |b| b.as_ptr())) };
+        owned_text(self.api, raw, "document_log")
+    }
+
+    // -- evaluating and reading back
+
+    /// Evaluates the nodes that are stale (only the cheap kinds with `cheap_only`); the status
+    /// of every node as JSON, `[{"id", "state": "ok"|"error"|"blocked"|"pending", ...}]`.
+    pub fn evaluate(&mut self, cheap_only: bool) -> Result<String> {
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_evaluate)(self.raw(), cheap_only) }, "document_evaluate")
+    }
+
+    fn up_to_date(&mut self) -> Result<()> {
+        self.evaluate(false).map(drop)
+    }
+
+    fn id(id: &str) -> Result<CString> {
+        c_text("node id", id)
+    }
+
+    /// The nodes the evaluation left in error or blocked, as JSON, `[{"id", "state", "message"}]`.
+    pub fn errors(&mut self) -> Result<String> {
+        self.up_to_date()?;
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_errors)(self.raw()) }, "document_errors")
+    }
+
+    /// Node `id`'s value as JSON: a number, a point or list, a record, text. An error for a
+    /// node with none (missing, or in error).
+    pub fn value(&mut self, id: &str) -> Result<String> {
+        self.up_to_date()?;
+        let key = Document::id(id)?;
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_value)(self.raw(), key.as_ptr()) }, "document_value")
+    }
+
+    /// What node `id` evaluated to: `"solid"`, `"sheet"`, `"profile"`, `"profiles"` (a list
+    /// of profiles, or a sketch's outlines), `"nurbs"`, `"subd"`, `"curve"`, `"list"` (a node
+    /// run over a list: its items are `id#0`, `id#1`, ...), `"value"`, or `"none"` (no such
+    /// node, or one that failed). Read a solid or sheet with [`Document::result_solid`], a
+    /// profile with [`Document::result_profile`], profiles with
+    /// [`Document::result_profiles`], a NURBS curve with [`Document::result_nurbs_curve`], a
+    /// cage with [`Document::result_subd`], anything else with [`Document::value`].
+    pub fn result_kind(&mut self, id: &str) -> Result<String> {
+        self.up_to_date()?;
+        let key = Document::id(id)?;
+        owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_result_kind)(self.raw(), key.as_ptr()) }, "document_result_kind")
+    }
+
+    /// Node `id`'s solid or sheet, as a [`Solid`] of the caller's own. An error when `id` is
+    /// not an evaluated solid or sheet: no such node, one that failed, or another kind.
+    pub fn result_solid(&mut self, id: &str) -> Result<Solid> {
+        self.up_to_date()?;
+        let key = Document::id(id)?;
+        Solid::wrap(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_result_solid)(self.raw(), key.as_ptr()) }, "document_result_solid")
+    }
+
+    /// Node `id`'s profile, as a [`Profile`] of the caller's own. An error when `id` is not an
+    /// evaluated profile.
+    pub fn result_profile(&mut self, id: &str) -> Result<Profile> {
+        self.up_to_date()?;
+        let key = Document::id(id)?;
+        Profile::wrap(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_result_profile)(self.raw(), key.as_ptr()) }, "document_result_profile")
+    }
+
+    /// Node `id`'s profiles, when it is a list of profiles (or a sketch), each a [`Profile`] of
+    /// the caller's own. An error otherwise.
+    pub fn result_profiles(&mut self, id: &str) -> Result<Vec<Profile>> {
+        self.up_to_date()?;
+        let key = Document::id(id)?;
+        let count = unsafe { (self.api.cadaclysm_blacksmith_document_result_profile_count)(self.raw(), key.as_ptr()) };
+        if count == NONE {
+            return Err(fail(self.api, "document_result_profile_count"));
+        }
+        (0..count)
+            .map(|i| {
+                let raw = unsafe { (self.api.cadaclysm_blacksmith_document_result_profile_at)(self.raw(), key.as_ptr(), i) };
+                Profile::wrap(self.api, raw, "document_result_profile_at")
+            })
+            .collect()
+    }
+
+    /// Node `id`'s NURBS curve (kind `"nurbs"`), as a [`NurbsCurve`] of the caller's own. An
+    /// error otherwise. (A plane curve, kind `"curve"`, has no handle: read its [`Document::value`].)
+    pub fn result_nurbs_curve(&mut self, id: &str) -> Result<NurbsCurve> {
+        self.up_to_date()?;
+        let key = Document::id(id)?;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_document_result_nurbs_curve)(self.raw(), key.as_ptr()) };
+        NurbsCurve::wrap(self.api, raw, "document_result_nurbs_curve")
+    }
+
+    /// Node `id`'s subdivision cage (kind `"subd"`), as a [`Subd`] of the caller's own. An
+    /// error otherwise.
+    pub fn result_subd(&mut self, id: &str) -> Result<Subd> {
+        self.up_to_date()?;
+        let key = Document::id(id)?;
+        Subd::wrap(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_result_subd)(self.raw(), key.as_ptr()) }, "document_result_subd")
+    }
 }
 
 // ---- the chain --------------------------------------------------------------------
@@ -9559,6 +11960,57 @@ pub fn write_sat(path: impl AsRef<FsPath>, solids: &[&Solid], unit: Unit) -> Res
     if ok { Ok(()) } else { Err(fail(api, "sat")) }
 }
 
+// ---- Rhino 3dm --------------------------------------------------------------------
+
+/// Several solids as one Rhino `.3dm` (version 8, which Rhino 8 and 9 open), one object
+/// each: its exact brep, or -- where a body has no exact form there -- its mesh, with a
+/// warning saying so. Each object is named as its solid is, coloured with the solid's own
+/// colour (a face's or an edge's own is left out) and carries the solid's attributes as
+/// user text. `unit` is the file's: the numbers written are the numbers held. The
+/// warnings -- one a line of what was not written as itself -- go to standard error, each
+/// starting "3dm: ".
+pub fn rhino3dm_bytes(solids: &[&Solid], unit: Unit) -> Result<Vec<u8>> {
+    let api = api()?;
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let mut len = 0usize;
+    let raw = unsafe { (api.cadaclysm_blacksmith_3dm_bytes)(handles.as_ptr(), handles.len(), unit as u32, &mut len) };
+    taken_3dm(api, raw, len, "3dm_bytes")
+}
+
+/// [`rhino3dm_bytes`] written to `path` by the library itself, which names the file in
+/// its refusal when it cannot.
+pub fn write_3dm(path: impl AsRef<FsPath>, solids: &[&Solid], unit: Unit) -> Result<()> {
+    let api = api()?;
+    let path = crate::c_path(path.as_ref())?;
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let ok = unsafe { (api.cadaclysm_blacksmith_3dm)(handles.as_ptr(), handles.len(), path.as_ptr(), unit as u32) };
+    if !ok {
+        return Err(fail(api, "3dm"));
+    }
+    warn_3dm(api);
+    Ok(())
+}
+
+/// What a `.3dm` write did not write as itself -- `last_error` on a success, a line
+/// each -- said on standard error, one line each.
+fn warn_3dm(api: &Api) {
+    let notes = unsafe { text((api.cadaclysm_blacksmith_last_error)()) };
+    for line in notes.split('\n').filter(|l| !l.is_empty()) {
+        eprintln!("3dm: {line}");
+    }
+}
+
+/// The bytes a `.3dm` call handed over, copied out and released with `bytes_free`
+/// (never `string_free`), its notes warned; null is the failure `last_error` names.
+fn taken_3dm(api: &Api, raw: *mut u8, len: usize, what: &str) -> Result<Vec<u8>> {
+    if raw.is_null() {
+        return Err(fail(api, what));
+    }
+    warn_3dm(api);
+    let bytes = unsafe { std::slice::from_raw_parts(raw, len) }.to_vec();
+    unsafe { (api.cadaclysm_blacksmith_bytes_free)(raw, len) };
+    Ok(bytes)
+}
 /// One OCCT `.brep` file's text, each solid its own solid under one compound (one
 /// solid is the file's root): the exact surfaces and curves, with a curve in each
 /// face's own parameters for every edge, so OCCT's `BRepTools::Read` gives a shape
@@ -11245,7 +13697,7 @@ mod tests {
         let spline = Profile::spline(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]], 3, None, true).unwrap();
         let fitted = spline.to_arcs(0.01).unwrap();
         assert_footprint(&fitted, footprint(&spline), 0.011);
-        let err = spline.to_arcs(0.0).unwrap_err();
+        let err = spline.to_arcs(-1.0).unwrap_err();
         assert_eq!(err.to_string(), "profile_to_arcs: tolerance must be positive and finite");
     }
 
@@ -11791,6 +14243,832 @@ mod tests {
         assert!(default.error.is_finite());
     }
 
+    // ---- NurbsCurve (Python's test_a_nurbs_curve_* and its neighbours, trimmed to the marshalling) ----
+
+    /// A quarter of the circle of radius `r` in the xy plane, exact (rational quadratic).
+    fn quarter_circle(r: f64) -> NurbsCurve {
+        NurbsCurve::new(&[[r, 0.0, 0.0], [r, r, 0.0], [0.0, r, 0.0]], 2, Some(&[1.0, 0.5f64.sqrt(), 1.0]), None).unwrap()
+    }
+
+    /// The whole circle of radius `r` about the z axis at height `z`, exact (nine-point rational
+    /// quadratic).
+    fn whole_circle(r: f64, z: f64) -> NurbsCurve {
+        let h = 0.5f64.sqrt();
+        let pts = [[r, 0.0, z], [r, r, z], [0.0, r, z], [-r, r, z], [-r, 0.0, z], [-r, -r, z], [0.0, -r, z], [r, -r, z], [r, 0.0, z]];
+        NurbsCurve::new(
+            &pts,
+            2,
+            Some(&[1.0, h, 1.0, h, 1.0, h, 1.0, h, 1.0]),
+            Some(&[0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0]),
+        )
+        .unwrap()
+    }
+
+    fn ends(c: &NurbsCurve) -> ([f64; 3], [f64; 3]) {
+        let (lo, hi) = c.domain().unwrap();
+        (c.point(lo).unwrap(), c.point(hi).unwrap())
+    }
+
+    /// Each tween's ends are `a`'s and `b`'s blended at `(i + 1) / (len + 1)`.
+    fn ends_blended(a: &NurbsCurve, b: &NurbsCurve, tweens: &[NurbsCurve], tol: f64) {
+        let ((a0, a1), (b0, b1)) = (ends(a), ends(b));
+        for (i, t) in tweens.iter().enumerate() {
+            let f = (i + 1) as f64 / (tweens.len() + 1) as f64;
+            let mix = |p: [f64; 3], q: [f64; 3]| [p[0] + f * (q[0] - p[0]), p[1] + f * (q[1] - p[1]), p[2] + f * (q[2] - p[2])];
+            let (t0, t1) = ends(t);
+            assert!(dist(t0, mix(a0, b0)) < tol && dist(t1, mix(a1, b1)) < tol, "tween {i}: {t0:?} {t1:?}");
+        }
+    }
+
+    #[test]
+    fn a_nurbs_curve_reads_back_what_it_was_built_from() {
+        if !kernel_present() {
+            return;
+        }
+        let pi = std::f64::consts::PI;
+        let h = 0.5f64.sqrt();
+        let c = quarter_circle(2.0);
+        assert_eq!(c.degree(), 2);
+        assert!(c.is_rational() && !c.is_closed());
+        assert_eq!(c.control_points().unwrap(), vec![[2.0, 0.0, 0.0], [2.0, 2.0, 0.0], [0.0, 2.0, 0.0]]);
+        assert_eq!(c.weights().unwrap(), vec![1.0, h, 1.0]);
+        assert_eq!(c.knots().unwrap(), vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(c.domain().unwrap(), (0.0, 1.0));
+        assert_eq!(c.fit_error(), None);
+        near(dist(c.point(0.37).unwrap(), [0.0; 3]), 2.0, 1e-12, "radius");
+        let k = c.curvature(0.5).unwrap();
+        near(k.kappa, 0.5, 1e-12, "kappa");
+        near3(k.centre.expect("a bend has a centre"), [0.0; 3], 1e-12, "centre");
+        near(c.length(0.0).unwrap().length, pi, 1e-9, "length");
+        let at = c.point_at_length(pi / 2.0, 0.0).unwrap();
+        near3(at.point, [h * 2.0, h * 2.0, 0.0], 1e-9, "point at length");
+        assert_eq!(at.segment, None);
+        assert_eq!(c.divide_by_count(4, 0.0).unwrap().len(), 5);
+        assert_eq!(c.divide_by_length(1.0, 0.0).unwrap().len(), 4);
+        let d = c.derivatives(0.0, 2).unwrap();
+        assert_eq!(d.len(), 3);
+        assert_eq!(d[0], [2.0, 0.0, 0.0]);
+        assert!(d[1][0].abs() < 1e-12 && d[1][1] > 0.0, "{d:?}");
+        let line = NurbsCurve::new(&[[0.0; 3], [1.0, 0.0, 0.0]], 1, None, None).unwrap();
+        let straight = line.curvature(0.5).unwrap();
+        assert_eq!(straight.centre, None);
+        assert_eq!(straight.kappa, 0.0);
+        // Clone is the library's copy: it reads alike and outlives the original.
+        let copy = c.clone();
+        drop(c);
+        assert_eq!(copy.control_points().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_curve_through_points_and_its_edits() {
+        if !kernel_present() {
+            return;
+        }
+        let pi = std::f64::consts::PI;
+        let ring: Vec<[f64; 3]> = (0..10)
+            .map(|i| {
+                let a = 2.0 * pi * i as f64 / 10.0;
+                [a.cos(), a.sin(), 0.2 * (3.0 * a).sin()]
+            })
+            .collect();
+        let closed = NurbsCurve::through(&ring, 3, true, None, None).unwrap();
+        assert!(closed.is_closed());
+        assert_eq!(closed.divide_by_count(6, 0.0).unwrap().len(), 6);
+        let pts = [[0.0, 0.0, 0.0], [1.0, 2.0, 0.5], [3.0, 1.0, -0.5], [4.0, 3.0, 1.0], [6.0, 2.0, 0.0]];
+        let c = NurbsCurve::through(&pts, 3, false, Some([0.0, 0.0, 5.0]), None).unwrap();
+        let (lo, hi) = c.domain().unwrap();
+        let d = c.derivatives(lo, 1).unwrap()[1];
+        assert!(d[0].abs() < 1e-9 && d[1].abs() < 1e-9 && d[2] > 0.0, "{d:?}");
+        let sine: Vec<[f64; 3]> = (0..200).map(|t| [t as f64 / 50.0, (t as f64 / 50.0).sin(), 0.0]).collect();
+        let fit = NurbsCurve::fit(&sine, 3, Some(1e-4)).unwrap();
+        let err = fit.fit_error().expect("a fit reports its error");
+        assert!((0.0..=1e-4).contains(&err), "{err}");
+        // A curve built by hand reports none; so does every edit that does not fit.
+        assert_eq!(c.fit_error(), None);
+        assert_eq!(c.reversed().unwrap().fit_error(), None);
+        assert!(dist(c.reversed().unwrap().point(lo).unwrap(), c.point(hi).unwrap()) < 1e-12);
+        let mid = 0.5 * (lo + hi);
+        assert_eq!(c.trimmed(lo, mid).unwrap().domain().unwrap(), (lo, mid));
+        let longer = c.extended(0.5, false).unwrap();
+        assert!(longer.domain().unwrap().1 > hi);
+        assert!(dist(longer.point(hi).unwrap(), c.point(hi).unwrap()) < 1e-9);
+        let before = c.extended(0.5, true).unwrap();
+        assert!(before.domain().unwrap().0 < lo);
+        assert_eq!(c.elevated(2).unwrap().degree(), 5);
+    }
+
+    #[test]
+    fn curves_join_end_to_end() {
+        if !kernel_present() {
+            return;
+        }
+        let lead = NurbsCurve::new(&[[2.0, -3.0, 0.0], [2.0, 0.0, 0.0]], 1, None, None).unwrap();
+        let arc = quarter_circle(2.0);
+        let tail = NurbsCurve::new(
+            &[[0.0, 2.0, 0.0], [-1.0, 2.5, 0.0], [-2.0, 2.0, 1.0], [-3.0, 3.0, 0.0], [-4.0, 2.0, 0.0], [-5.0, 2.0, 2.0]],
+            5,
+            None,
+            None,
+        )
+        .unwrap();
+        let back = arc.reversed().unwrap();
+        let j = NurbsCurve::joined(&[&lead, &back, &tail], 1e-6).unwrap();
+        assert_eq!(j.degree(), 5);
+        assert_eq!(j.domain().unwrap(), (0.0, 3.0));
+        for (t, want) in [(0.0, [2.0, -3.0, 0.0]), (1.0, [2.0, 0.0, 0.0]), (2.0, [0.0, 2.0, 0.0]), (3.0, [-5.0, 2.0, 2.0])] {
+            assert!(dist(j.point(t).unwrap(), want) < 1e-12, "t = {t}");
+        }
+        for i in 0..=20 {
+            let s = i as f64 / 20.0;
+            near(dist(j.point(1.0 + s).unwrap(), [0.0; 3]), 2.0, 1e-12, "on the circle");
+            assert!(dist(j.point(2.0 + s).unwrap(), tail.point(s).unwrap()) < 1e-12);
+        }
+        assert_eq!(NurbsCurve::joined(&[&arc], 1e-6).unwrap().control_points().unwrap(), arc.control_points().unwrap());
+        let gap = message(NurbsCurve::joined(&[&lead, &tail], 1e-6));
+        assert!(gap.starts_with("nurbs_curve_joined: curve 1 ") && gap.contains("curve 0"), "{gap}");
+        assert!(message(NurbsCurve::joined(&[], 1e-6)).starts_with("nurbs_curve_joined: "));
+    }
+
+    fn tween_pair() -> (NurbsCurve, NurbsCurve) {
+        let a = NurbsCurve::new(&[[0.0, 0.0, 0.0], [3.0, 2.0, 0.0], [6.0, -1.0, 0.0], [10.0, 0.0, 0.0]], 3, None, None).unwrap();
+        let b = NurbsCurve::new(&[[0.0, 1.0, 5.0], [4.0, 4.0, 5.0], [7.0, -3.0, 6.0], [10.0, 1.0, 5.0]], 3, None, None).unwrap();
+        (a, b)
+    }
+
+    #[test]
+    fn tweens_blend_from_one_curve_to_another() {
+        if !kernel_present() {
+            return;
+        }
+        let (a, b) = tween_pair();
+        let plain = a.tween(&b, 3, TweenMethod::Plain, None, true, None).unwrap();
+        assert_eq!(plain.len(), 3);
+        ends_blended(&a, &b, &plain, 1e-12);
+        assert!(dist(plain[1].control_points().unwrap()[1], [3.5, 3.0, 2.5]) < 1e-12);
+        let matching = a.tween(&b, 2, TweenMethod::Matching, None, true, None).unwrap();
+        assert_eq!(matching.len(), 2);
+        ends_blended(&a, &b, &matching, 1e-12);
+        let sampled = a.tween(&b, 4, TweenMethod::Sampling, Some(20), true, None).unwrap();
+        assert_eq!(sampled.len(), 4);
+        assert!(sampled.iter().all(|t| t.degree() == 3));
+        ends_blended(&a, &b, &sampled, 1e-9);
+        assert_eq!(a.tween(&b, 1, TweenMethod::Matching, None, true, Some(0.0)).unwrap().len(), 1);
+        // A quadratic against the cubic: plain refuses in the library's words; matching makes one.
+        let q = NurbsCurve::new(&[[0.0, 1.0, 5.0], [5.0, 4.0, 5.0], [10.0, 1.0, 5.0]], 2, None, None).unwrap();
+        let refused = message(a.tween(&q, 2, TweenMethod::Plain, None, true, None));
+        assert!(refused.starts_with("nurbs_curve_tween: ") && refused.contains("compatible"), "{refused}");
+        let mixed = a.tween(&q, 2, TweenMethod::Matching, None, true, None).unwrap();
+        assert_eq!(mixed[0].degree(), 3);
+        ends_blended(&a, &q, &mixed, 1e-12);
+        assert!(message(a.tween(&b, 0, TweenMethod::Matching, None, true, None)).starts_with("nurbs_curve_tween: "));
+    }
+
+    #[test]
+    fn tween_samples_and_method_are_checked() {
+        if !kernel_present() {
+            return;
+        }
+        let (a, b) = tween_pair();
+        assert!(message(a.tween(&b, 2, TweenMethod::Sampling, None, true, None)).contains("sampling needs samples"));
+        let read = message(a.tween(&b, 2, TweenMethod::Matching, Some(10), true, None));
+        assert!(read.starts_with("nurbs_curve_tween: samples is read only by sampling"), "{read}");
+        assert_eq!(TweenMethod::parse("plain").unwrap(), TweenMethod::Plain);
+        let method = message(TweenMethod::parse("loft"));
+        assert_eq!(method, "nurbs_curve_tween: method must be one of plain, matching, sampling, not 'loft'");
+        let few = message(a.tween(&b, 2, TweenMethod::Sampling, Some(1), true, None));
+        assert!(few.starts_with("nurbs_curve_tween: sampling needs at least"), "{few}");
+    }
+
+    #[test]
+    fn tweens_of_two_circles_are_closed_circles() {
+        if !kernel_present() {
+            return;
+        }
+        let (small, big) = (whole_circle(2.0, 0.0), whole_circle(4.0, 6.0));
+        let tweens = small.tween(&big, 3, TweenMethod::Matching, None, true, None).unwrap();
+        assert_eq!(tweens.len(), 3);
+        for (i, t) in tweens.iter().enumerate() {
+            let f = (i + 1) as f64 / 4.0;
+            assert!(t.is_closed(), "tween {i}");
+            let (lo, hi) = t.domain().unwrap();
+            for k in 0..24 {
+                let [x, y, z] = t.point(lo + (hi - lo) * k as f64 / 24.0).unwrap();
+                assert!((x.hypot(y) - (2.0 + 2.0 * f)).abs() < 1e-12 && (z - 6.0 * f).abs() < 1e-12, "tween {i} at {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_curve_from_an_edge_a_plane_and_a_sphere() {
+        if !kernel_present() {
+            return;
+        }
+        let cyl = Solid::cylinder(2.5, 4.0).unwrap();
+        let rims: Vec<NurbsCurve> = cyl
+            .edges()
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "circle")
+            .map(|e| NurbsCurve::from_edge(&cyl, e.index).unwrap())
+            .collect();
+        assert!(rims.len() >= 2);
+        for rim in &rims {
+            let (lo, hi) = rim.domain().unwrap();
+            for t in [lo, 0.5 * (lo + hi), hi] {
+                let [x, y, _] = rim.point(t).unwrap();
+                near(x.hypot(y), 2.5, 1e-12, "rim radius");
+            }
+        }
+        let sphere = Solid::sphere(3.0).unwrap();
+        let line = NurbsCurve::new(&[[-2.0, 0.5, 10.0], [2.0, -0.5, 10.0]], 1, None, None).unwrap();
+        let on = line.projected_to_face(&sphere, 0, [0.0, 0.0, -1.0], Some(1e-4)).unwrap();
+        assert!(on.fit_error().unwrap() <= 1e-4);
+        let (lo, hi) = on.domain().unwrap();
+        near(dist(on.point(0.5 * (lo + hi)).unwrap(), [0.0; 3]), 3.0, 1e-4, "projected onto the sphere");
+        let pulled = line.pulled_to_face(&sphere, 0, Some(1e-4)).unwrap();
+        assert!(pulled.fit_error().is_some());
+        near(dist(pulled.point(pulled.domain().unwrap().0).unwrap(), [0.0; 3]), 3.0, 1e-4, "pulled onto the sphere");
+        let through = NurbsCurve::new(&[[-5.0, 1.0, 1.0], [5.0, 1.0, 1.0]], 1, None, None).unwrap();
+        let hits = through.face_hits(&sphere, 0, Some(1e-6)).unwrap();
+        assert_eq!(hits.len(), 2);
+        near(hits[0].point[0], -7f64.sqrt(), 1e-6, "first crossing");
+        let crossing = through.plane_hits([0.0; 3], [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(crossing.len(), 1);
+        assert!(dist(crossing[0].point, [0.0, 1.0, 1.0]) < 1e-12);
+        let flat = line.projected_to_plane([0.0, 0.0, 1.0], [0.0, 0.0, 1.0], None).unwrap();
+        assert_eq!(flat.point(0.0).unwrap(), [-2.0, 0.5, 1.0]);
+        let q = quarter_circle(2.0);
+        let blend = NurbsCurve::blend(&q, true, &through, false, 2, 1.0).unwrap();
+        assert_eq!(blend.degree(), 5);
+        near(blend.curvature(0.0).unwrap().kappa, 0.5, 1e-9, "blend curvature");
+        let teeth = q.comb(8, 1.0).unwrap();
+        assert_eq!(teeth.len(), 9);
+        assert!(teeth.iter().all(|&(p, t)| (dist(p, t) - 0.5).abs() < 1e-9));
+        // A comb of no steps is one step.
+        assert_eq!(q.comb(0, 1.0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn nurbs_curve_refusals_name_the_call() {
+        if !kernel_present() {
+            return;
+        }
+        let q = quarter_circle(2.0);
+        let two = [[0.0; 3], [1.0, 0.0, 0.0]];
+        let cube = Solid::cuboid(1.0, 1.0, 1.0).unwrap();
+        let rows = [
+            ("nurbs_curve_new", message(NurbsCurve::new(&two, 9, None, None))),
+            ("nurbs_curve_new", message(NurbsCurve::new(&two, 1, Some(&[1.0, -1.0]), None))),
+            ("nurbs_curve_through", message(NurbsCurve::through(&two, 3, false, None, None))),
+            ("nurbs_curve_fit", message(NurbsCurve::fit(&two, 1, Some(-1.0)))),
+            ("nurbs_curve_from_edge", message(NurbsCurve::from_edge(&cube, 999))),
+            ("nurbs_curve_from_face_isocurve", message(NurbsCurve::isocurve(&cube, 0, true, 0.5))),
+            ("nurbs_curve_blend", message(NurbsCurve::blend(&q, true, &q, true, 3, 1.0))),
+            ("nurbs_curve_projected_to_plane", message(q.projected_to_plane([0.0; 3], [0.0, 0.0, 1.0], Some([1.0, 0.0, 0.0])))),
+            ("nurbs_curve_trimmed", message(q.trimmed(0.5, 0.2))),
+            ("nurbs_curve_extended", message(q.extended(0.0, false))),
+            ("nurbs_curve_point", message(q.point(2.0))),
+            ("nurbs_curve_derivatives", message(q.derivatives(0.5, 9))),
+            ("nurbs_curve_divide_by_count", message(q.divide_by_count(0, 0.0))),
+            ("nurbs_curve_plane_hits", message(q.plane_hits([0.0; 3], [0.0, 0.0, 1.0]))),
+        ];
+        for (name, got) in rows {
+            assert!(got.starts_with(&format!("{name}: ")), "{name}: {got}");
+        }
+        let weights = message(NurbsCurve::new(&two, 1, Some(&[1.0, 1.0, 1.0]), None));
+        assert_eq!(weights, "nurbs_curve_new: 3 weights for 2 points; give one per point");
+    }
+
+    #[test]
+    fn a_curve_maps_by_its_control_points_and_values_become_curves() {
+        if !kernel_present() {
+            return;
+        }
+        let c = NurbsCurve::new(&[[0.0; 3], [1.0, 1.0, 1.0], [2.0, 0.0, 0.0]], 2, Some(&[1.0, 0.5, 1.0]), None).unwrap();
+        let moved = c.transformed(&Transform::translation([1.0, 2.0, 3.0]).unwrap()).unwrap();
+        let (was, now) = (c.point(0.5).unwrap(), moved.point(0.5).unwrap());
+        near3(now, [was[0] + 1.0, was[1] + 2.0, was[2] + 3.0], 1e-12, "translated point");
+        assert_eq!(moved.weights().unwrap(), c.weights().unwrap());
+        // A line value is a degree-1 curve through its ends.
+        let line = Line::from_values(&[0.0, 0.0, 0.0, 2.0, 0.0, 0.0]).unwrap().to_nurbs().unwrap();
+        assert_eq!(line.degree(), 1);
+        let (lo, hi) = line.domain().unwrap();
+        near3(line.point(0.5 * (lo + hi)).unwrap(), [1.0, 0.0, 0.0], 1e-12, "middle of the line");
+        // A circle value is a closed rational curve at its radius all the way round.
+        let value = Circle::from_values(&[1.0, -1.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 3.0]).unwrap();
+        let ring = value.to_nurbs().unwrap();
+        assert!(ring.is_rational() && ring.is_closed());
+        let (lo, hi) = ring.domain().unwrap();
+        for k in 0..16 {
+            let p = ring.point(lo + (hi - lo) * k as f64 / 16.0).unwrap();
+            near(dist(p, [1.0, -1.0, 2.0]), 3.0, 1e-12, "circle radius");
+        }
+        // The same through the sum type.
+        let any: CurveValue = value.into();
+        assert!(any.to_nurbs().unwrap().is_closed());
+    }
+
+    #[test]
+    fn curves_outlive_what_they_came_from() {
+        if !kernel_present() {
+            return;
+        }
+        let (a, b) = tween_pair();
+        let tweens = a.tween(&b, 2, TweenMethod::Matching, None, true, None).unwrap();
+        drop(a);
+        drop(b);
+        for t in &tweens {
+            assert_eq!(t.degree(), 3);
+            assert_eq!(t.control_points().unwrap().len(), 4);
+        }
+        let rim = {
+            let cyl = Solid::cylinder(2.5, 4.0).unwrap();
+            let edge = cyl.edges().unwrap().into_iter().find(|e| e.kind == "circle").unwrap();
+            NurbsCurve::from_edge(&cyl, edge.index).unwrap()
+        };
+        let (lo, hi) = rim.domain().unwrap();
+        let [x, y, _] = rim.point(0.5 * (lo + hi)).unwrap();
+        near(x.hypot(y), 2.5, 1e-12, "a rim read after its solid is gone");
+        let shared = std::sync::Arc::new(rim);
+        let other = std::sync::Arc::clone(&shared);
+        std::thread::spawn(move || other.degree()).join().unwrap();
+    }
+
+    // ---- Sheets from curves (Python's test_surfaces_from_curves_are_sheets and its neighbours) ----
+
+    fn seg(a: [f64; 3], b: [f64; 3]) -> NurbsCurve {
+        NurbsCurve::new(&[a, b], 1, None, None).unwrap()
+    }
+
+    /// A `w` by `h` rectangle centred at `origin` in the plane of `x`, `y`, facing `x cross y`.
+    fn rect_sheet(origin: [f64; 3], x: [f64; 3], y: [f64; 3], w: f64, h: f64) -> Solid {
+        let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+        Solid::face(&Profile::rect(w, h).unwrap(), &Frame::new(origin, x, y, z).unwrap()).unwrap()
+    }
+
+    /// The circle of radius `r` about `centre` in its z plane: nine rational quadratic points.
+    fn exact_circle(centre: [f64; 3], r: f64) -> NurbsCurve {
+        let s = 0.5f64.sqrt();
+        let pts: Vec<[f64; 3]> = [(1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (-1.0, 1.0), (-1.0, 0.0), (-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (1.0, 0.0)]
+            .iter()
+            .map(|(a, b)| [centre[0] + r * a, centre[1] + r * b, centre[2]])
+            .collect();
+        NurbsCurve::new(
+            &pts,
+            2,
+            Some(&[1.0, s, 1.0, s, 1.0, s, 1.0, s, 1.0]),
+            Some(&[0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0]),
+        )
+        .unwrap()
+    }
+
+    fn area_of(s: &Solid) -> f64 {
+        s.mass(1e-6).unwrap().area
+    }
+
+    #[test]
+    fn surfaces_from_curves_are_sheets() {
+        if !kernel_present() {
+            return;
+        }
+        let c = [[-1.0, -1.0, 1.0], [1.0, -1.0, -1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, -1.0]];
+        let sides = [seg(c[0], c[1]), seg(c[1], c[2]), seg(c[2], c[3]), seg(c[3], c[0])];
+        let coons = Solid::edge_surface(&[&sides[0], &sides[1], &sides[2], &sides[3]], Some(1e-9)).unwrap();
+        assert_eq!(coons.faces().unwrap(), 1);
+        assert_eq!(coons.sheet_error(), Some(0.0));
+        let (l0, l1) = (seg([0.0; 3], [2.0, 0.0, 0.0]), seg([0.0, 1.0, 1.0], [2.0, 1.0, -1.0]));
+        let loft = Solid::loft_curves(&[&l0, &l1], 3, false, false).unwrap();
+        assert_eq!(loft.faces().unwrap(), 1);
+        assert_eq!(loft.sheet_error(), None);
+        assert!(loft.patch_report().is_none());
+        let plain = Solid::cuboid(1.0, 1.0, 1.0).unwrap();
+        assert!(plain.sheet_error().is_none() && plain.patch_report().is_none());
+        let ring: Vec<[f64; 3]> = (0..8).map(|i| {
+            let t = 2.0 * std::f64::consts::PI * f64::from(i) / 8.0;
+            [t.cos(), t.sin(), 0.0]
+        }).collect();
+        let circle = NurbsCurve::through(&ring, 3, true, None, None).unwrap();
+        let rail = seg([0.0; 3], [0.0, 0.0, 4.0]);
+        let tube = Solid::sweep_rail(&rail, &[&circle], SweepFrame::Rmf, None, Some(1e-5)).unwrap();
+        assert_eq!(tube.faces().unwrap(), 1);
+        let e = tube.sheet_error().expect("a swept sheet reports its fit");
+        assert!((0.0..=1e-5).contains(&e), "{e}");
+        let upright = Solid::sweep_rail(&rail, &[&circle], SweepFrame::Fixed, Some([0.0, 1.0, 0.0]), Some(1e-5)).unwrap();
+        assert_eq!(upright.faces().unwrap(), 1);
+        assert!(upright.sheet_error().is_some());
+        let (ra, rb) = (seg([-1.0, 0.0, 0.0], [-1.0, 5.0, 0.0]), seg([1.0, 0.0, 0.0], [1.0, 5.0, 0.0]));
+        let across = seg([-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        let band = Solid::sweep_two_rails(&ra, &rb, &[&across], Some(1e-6)).unwrap();
+        assert_eq!(band.faces().unwrap(), 1);
+        assert!(band.sheet_error().is_some());
+        let us: Vec<NurbsCurve> = [-1.0, 0.2, 1.0].iter().map(|&y| seg([-1.0, y, -y], [1.0, y, y])).collect();
+        let vs: Vec<NurbsCurve> = [-1.0, 0.3, 1.0].iter().map(|&x| seg([x, -1.0, -x], [x, 1.0, x])).collect();
+        let net = Solid::network_surface(&[&us[0], &us[1], &us[2]], &[&vs[0], &vs[1], &vs[2]], Some(1e-9)).unwrap();
+        assert_eq!(net.faces().unwrap(), 1);
+        assert!(net.sheet_error().unwrap() <= 1e-9);
+        let one = seg([0.0; 3], [1.0, 0.0, 0.0]);
+        let other = seg([0.0; 3], [0.0, 1.0, 0.0]);
+        for (name, got) in [
+            ("loft_curves", message(Solid::loft_curves(&[&circle], 3, false, false))),
+            ("edge_surface", message(Solid::edge_surface(&[&one], Some(1e-3)))),
+            ("network_surface", message(Solid::network_surface(&[&one], &[&other], Some(1e-3)))),
+        ] {
+            assert!(got.starts_with(&format!("{name}: ")), "{name}: {got}");
+        }
+        // The refusals the wrapper makes itself, in Python's words.
+        assert_eq!("twisty".parse::<SweepFrame>().unwrap_err().message(), "sweep_rail: frame is 'rmf' or 'fixed', not 'twisty'");
+        assert_eq!("fixed".parse::<SweepFrame>().unwrap(), SweepFrame::Fixed);
+        assert_eq!("x".parse::<SheetSide>().unwrap_err().message(), "a side is 'u0', 'u1', 'v0' or 'v1', not 'x'");
+        assert_eq!("v1".parse::<SheetSide>().unwrap(), SheetSide::V1);
+        assert_eq!(
+            "middle".parse::<TrimKeep>().unwrap_err().message(),
+            "trim_by_curve: keep must be 'outside', 'inside', 'left' or 'right', not 'middle'"
+        );
+        assert_eq!("left".parse::<TrimKeep>().unwrap(), TrimKeep::Left);
+    }
+
+    #[test]
+    fn a_curve_trims_a_hole_and_an_island_and_they_join_back() {
+        if !kernel_present() {
+            return;
+        }
+        let sheet = rect_sheet([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 20.0, 20.0);
+        let ring = exact_circle([1.0, -2.0, 0.0], 5.0);
+        let pi = std::f64::consts::PI;
+        let holed = sheet.trim_by_curve(&ring, TrimKeep::Outside, Some([0.0, 0.0, -1.0]), Some(0.01)).unwrap();
+        let island = sheet.trim_by_curve(&ring, TrimKeep::Inside, None, Some(0.01)).unwrap();
+        near(area_of(&island), 25.0 * pi, 1e-6, "island area");
+        near(area_of(&holed), 400.0 - 25.0 * pi, 1e-6, "holed area");
+        let split = sheet.split_by_curve(&ring, None, Some(0.01)).unwrap();
+        assert_eq!(split.faces().unwrap(), 2);
+        let (back, report) = Solid::join_sheets(&[&holed, &island], None).unwrap();
+        assert!(report.sewn >= 1 && report.naked_after == report.naked_before - 2 * report.sewn && !report.closed, "{report:?}");
+        assert_eq!(back.faces().unwrap(), 2);
+        assert!(back.sheet_error().is_none() && back.patch_report().is_none());
+    }
+
+    #[test]
+    fn an_open_curve_keeps_its_left_or_right() {
+        if !kernel_present() {
+            return;
+        }
+        let sheet = rect_sheet([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 20.0, 20.0);
+        let line = NurbsCurve::through(&[[-5.0, 1.0, 0.0], [5.0, 1.0, 0.0]], 1, false, None, None).unwrap();
+        let up = Some([0.0, 0.0, 1.0]);
+        let left = sheet.trim_by_curve(&line, TrimKeep::Left, up, Some(0.01)).unwrap();
+        let right = sheet.trim_by_curve(&line, TrimKeep::Right, up, Some(0.01)).unwrap();
+        near(area_of(&left), 180.0, 1e-9, "left");
+        near(area_of(&right), 220.0, 1e-9, "right");
+        let inside = sheet.trim_by_curve(&line, TrimKeep::Inside, Some([0.0, 0.0, -1.0]), Some(0.01)).unwrap();
+        near(area_of(&inside), 220.0, 1e-9, "inside, seen from below");
+        let outside = sheet.trim_by_curve(&line, TrimKeep::Outside, up, Some(0.01)).unwrap();
+        near(area_of(&outside), 220.0, 1e-9, "outside is the right");
+    }
+
+    #[test]
+    fn six_sheets_join_into_a_box_the_kernel_measures_cuts_and_writes() {
+        if !kernel_present() {
+            return;
+        }
+        let (x, y, z) = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+        let faces = [
+            rect_sheet([5.0, 10.0, 0.0], x, y, 10.0, 20.0),
+            rect_sheet([5.0, 10.0, 30.0], x, y, 10.0, 20.0),
+            rect_sheet([0.0, 10.0, 15.0], y, z, 20.0, 30.0),
+            rect_sheet([10.0, 10.0, 15.0], y, z, 20.0, 30.0),
+            rect_sheet([5.0, 0.0, 15.0], z, x, 30.0, 10.0),
+            rect_sheet([5.0, 20.0, 15.0], x, z, 10.0, 30.0),
+        ];
+        let refs: Vec<&Solid> = faces.iter().collect();
+        let (boxed, report) = Solid::join_sheets(&refs, None).unwrap();
+        assert_eq!((report.sewn, report.naked_before, report.naked_after, report.turned, report.closed), (12, 24, 0, 4, true), "{report:?}");
+        let m = boxed.mass(1e-6).unwrap();
+        assert!(m.closed);
+        near(m.volume, 6000.0, 1e-6, "box volume");
+        let bored = boxed.cut(&Solid::cylinder(2.0, 50.0).unwrap().translate(5.0, 10.0, -10.0).unwrap(), 0.01).unwrap();
+        near(bored.mass(1e-6).unwrap().volume, 6000.0 - std::f64::consts::PI * 4.0 * 30.0, 0.05, "bored volume");
+        assert!(boxed.step_text(None, Unit::Millimetre).unwrap().contains("CLOSED_SHELL"));
+        // Two of the faces, one moved a thousandth away: sewn only at a tolerance that covers it.
+        let moved = faces[3].translate(0.0, 0.0, 1e-3).unwrap();
+        let (_, apart) = Solid::join_sheets(&[&faces[1], &moved], None).unwrap();
+        let (_, loose) = Solid::join_sheets(&[&faces[1], &moved], Some(2e-3)).unwrap();
+        assert_eq!((apart.sewn, loose.sewn), (0, 1));
+        near(loose.worst_gap, 1e-3, 1e-9, "worst gap");
+    }
+
+    #[test]
+    fn join_sheets_sews_a_t_junction() {
+        if !kernel_present() {
+            return;
+        }
+        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            let c = [[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]];
+            let s = [seg(c[0], c[1]), seg(c[1], c[2]), seg(c[2], c[3]), seg(c[3], c[0])];
+            Solid::edge_surface(&[&s[0], &s[1], &s[2], &s[3]], Some(1e-3)).unwrap()
+        };
+        // Two unit squares on a 2 x 1 rectangle's long edge: it is cut where they meet on it.
+        let (big, a, b) = (rect(0.0, 0.0, 2.0, 1.0), rect(0.0, 1.0, 1.0, 2.0), rect(1.0, 1.0, 2.0, 2.0));
+        let (_, exact) = Solid::join_sheets(&[&big, &a, &b], None).unwrap();
+        assert_eq!(exact.sewn, 1);
+        let (shell, report) = Solid::join_sheets(&[&big, &a, &b], Some(1e-3)).unwrap();
+        assert_eq!((report.sewn, report.naked_before, report.naked_after, report.closed), (3, 13, 7, false), "{report:?}");
+        assert_eq!(shell.faces().unwrap(), 3);
+    }
+
+    #[test]
+    fn recess_sets_a_square_window_into_a_flat_sheet() {
+        if !kernel_present() {
+            return;
+        }
+        let sheet = rect_sheet([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 20.0, 20.0);
+        let corners = [[-5.0, -5.0, 0.0], [5.0, -5.0, 0.0], [5.0, 5.0, 0.0], [-5.0, 5.0, 0.0], [-5.0, -5.0, 0.0]];
+        let square = NurbsCurve::through(&corners, 1, false, None, None).unwrap();
+        let (window, faces) = sheet.recess(&square, 3.0, 0.0, 0.0, true, Some(0.01)).unwrap();
+        assert_eq!(faces, (1, 0, 4, 1));
+        assert_eq!(window.faces().unwrap(), 6);
+    }
+
+    #[test]
+    fn trim_by_curve_and_join_refuse_by_name() {
+        if !kernel_present() {
+            return;
+        }
+        let sheet = rect_sheet([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 20.0, 20.0);
+        let ring = exact_circle([0.0; 3], 5.0);
+        let far = message(sheet.trim_by_curve(&exact_circle([100.0, 0.0, 0.0], 5.0), TrimKeep::Inside, None, Some(0.05)));
+        assert!(far.starts_with("trim_by_curve: ") && far.contains("nothing of the sheet lies inside"), "{far}");
+        let zero = message(sheet.split_by_curve(&ring, Some([0.0; 3]), Some(0.05)));
+        assert!(zero.starts_with("split_by_curve: ") && zero.contains("direction is zero"), "{zero}");
+        assert!(message(Solid::join_sheets(&[], None)).starts_with("join_sheets: no sheets"));
+        let neg = message(Solid::join_sheets(&[&sheet], Some(-1.0)));
+        assert!(neg.starts_with("join_sheets: ") && neg.contains("tolerance"), "{neg}");
+    }
+
+    /// The 20 x 20 square in z = 0 facing +z with a round hole of radius 5 about (1, -2), and
+    /// the indices of the hole's rim edges.
+    fn holed_sheet() -> (Solid, Vec<u32>) {
+        let sheet = rect_sheet([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 20.0, 20.0);
+        let holed = sheet.trim_by_curve(&exact_circle([1.0, -2.0, 0.0], 5.0), TrimKeep::Outside, Some([0.0, 0.0, -1.0]), Some(0.01)).unwrap();
+        let rim: Vec<u32> = holed
+            .edges()
+            .unwrap()
+            .iter()
+            .filter(|e| e.faces.len() == 1 && e.segments.iter().all(|[a, _]| ((a[0] - 1.0).hypot(a[1] + 2.0) - 5.0).abs() < 1e-6))
+            .map(|e| e.index)
+            .collect();
+        assert!(!rim.is_empty());
+        (holed, rim)
+    }
+
+    #[test]
+    fn a_flange_turns_a_hole_under_and_carries_it_inward() {
+        if !kernel_present() {
+            return;
+        }
+        let pi = std::f64::consts::PI;
+        let (holed, rim) = holed_sheet();
+        let under = seg([0.0; 3], [0.0, -3.0, 0.0]);
+        // Turned under 3 along the face's normal (+z): the hole's own cylinder, 3 deep, below the sheet.
+        let wall = holed.flange(&rim, &under, Some(1e-3), false).unwrap();
+        assert_eq!(wall.faces().unwrap() as usize, rim.len());
+        assert!(wall.sheet_error().unwrap() <= 1e-3, "{:?}", wall.sheet_error());
+        near(area_of(&wall), 2.0 * pi * 5.0 * 3.0, 0.05, "flange area");
+        let (lo, hi) = wall.bounds().unwrap();
+        near(lo[2], -3.0, 1e-3, "flange bottom");
+        near(hi[2], 0.0, 1e-3, "flange top");
+        near(lo[0], 1.0 - 5.0, 1e-2, "flange min x");
+        near(hi[0], 1.0 + 5.0, 1e-2, "flange max x");
+        // Carried on outward from the face 2: into the hole, an annulus from radius 5 in to 3.
+        let ring = holed.flange(&rim, &seg([0.0; 3], [2.0, 0.0, 0.0]), Some(1e-3), false).unwrap();
+        near(area_of(&ring), pi * (25.0 - 9.0), 0.05, "annulus area");
+        // Joined, the sheet's faces come first and the flange is sewn on.
+        let joined = holed.flange(&rim, &under, Some(1e-3), true).unwrap();
+        assert_eq!(joined.faces().unwrap() as usize, holed.faces().unwrap() as usize + rim.len());
+        near(area_of(&joined), area_of(&holed) + 2.0 * pi * 5.0 * 3.0, 0.05, "joined area");
+        // The rim is sewn all the way round: every edge on the hole's circle borders the sheet and the flange.
+        let on_rim: Vec<Edge> = joined
+            .edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.segments.iter().all(|[a, _]| ((a[0] - 1.0).hypot(a[1] + 2.0) - 5.0).abs() < 1e-3 && a[2].abs() < 1e-6))
+            .collect();
+        assert!(!on_rim.is_empty());
+        for e in &on_rim {
+            let mut faces = e.faces.clone();
+            faces.sort_unstable();
+            assert_eq!(faces, vec![0, 1], "{e:?}");
+        }
+    }
+
+    #[test]
+    fn a_liner_runs_a_hole_down_to_a_tilted_floor() {
+        if !kernel_present() {
+            return;
+        }
+        let (holed, rim) = holed_sheet();
+        // The floor z = -7 + 0.1 x, wide enough to catch every point: the wall is 7 - 0.1 x deep,
+        // 6.9 on average round a hole centred at x = 1.
+        let sides = [
+            seg([-20.0, -20.0, -9.0], [20.0, -20.0, -5.0]),
+            seg([20.0, -20.0, -5.0], [20.0, 20.0, -5.0]),
+            seg([20.0, 20.0, -5.0], [-20.0, 20.0, -9.0]),
+            seg([-20.0, 20.0, -9.0], [-20.0, -20.0, -9.0]),
+        ];
+        let floor = Solid::edge_surface(&[&sides[0], &sides[1], &sides[2], &sides[3]], None).unwrap();
+        let wall = holed.extrude_to(&rim, [0.0, 0.0, -1.0], &floor, Some(1e-3), false).unwrap();
+        assert_eq!(wall.faces().unwrap() as usize, rim.len());
+        assert!(wall.sheet_error().unwrap() <= 1e-3, "{:?}", wall.sheet_error());
+        near(area_of(&wall), 2.0 * std::f64::consts::PI * 5.0 * 6.9, 0.05, "liner area");
+        let (lo, hi) = wall.bounds().unwrap();
+        near(lo[2], -7.0 + 0.1 * (1.0 - 5.0), 1e-2, "liner bottom");
+        near(hi[2], 0.0, 1e-6, "liner top");
+        let joined = holed.extrude_to(&rim, [0.0, 0.0, -1.0], &floor, Some(1e-3), true).unwrap();
+        assert_eq!(joined.faces().unwrap() as usize, holed.faces().unwrap() as usize + rim.len());
+        assert!(joined.step_text(None, Unit::Millimetre).unwrap().contains("SURFACE_OF_LINEAR_EXTRUSION"));
+    }
+
+    #[test]
+    fn flange_and_extrude_to_refuse_by_name() {
+        if !kernel_present() {
+            return;
+        }
+        let (holed, rim) = holed_sheet();
+        let under = seg([0.0; 3], [0.0, -3.0, 0.0]);
+        let off = message(holed.flange(&rim, &seg([1.0, 0.0, 0.0], [1.0, -3.0, 0.0]), Some(1e-3), true));
+        assert!(off.starts_with("flange: the section starts at"), "{off}");
+        let none = message(holed.flange(&[], &under, Some(1e-3), true));
+        assert!(none.starts_with("flange: no edges given"), "{none}");
+        let range = message(holed.flange(&[999], &under, Some(1e-3), true));
+        assert!(range.starts_with("flange: no edge 999"), "{range}");
+        let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let two = message(cube.flange(&[0], &under, Some(1e-3), true));
+        assert!(two.starts_with("flange: edge 0 borders 2 faces"), "{two}");
+        let floor = rect_sheet([0.0, 0.0, -7.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 40.0, 40.0);
+        let miss = message(holed.extrude_to(&rim, [0.0, 0.0, 1.0], &floor, Some(1e-3), true));
+        assert!(miss.starts_with("extrude_to: edge ") && miss.contains("misses the target"), "{miss}");
+        let zero = message(holed.extrude_to(&rim, [0.0; 3], &floor, Some(1e-3), true));
+        assert!(zero.starts_with("extrude_to: the direction has no length"), "{zero}");
+    }
+
+    #[test]
+    fn continuity_match_and_blend() {
+        if !kernel_present() {
+            return;
+        }
+        let a = Solid::loft_curves(&[&seg([-1.0, 0.0, 0.0], [0.0; 3]), &seg([-1.0, 1.0, 0.0], [0.0, 1.0, 0.0])], 1, false, false).unwrap();
+        let b = Solid::loft_curves(&[&seg([0.0; 3], [0.0, 0.0, 1.0]), &seg([0.0, 1.0, 0.0], [0.0, 1.0, 1.0])], 1, false, false).unwrap();
+        let r = a.continuity(SheetSide::U1, &b, SheetSide::U0, 0, 0, 32).unwrap();
+        assert!(r.gap <= 1e-12 && (r.angle - std::f64::consts::FRAC_PI_2).abs() <= 1e-9 && r.samples >= 33, "{r:?}");
+        // A gap that grows along the side: where it is largest is the far end, and that is
+        // reported as the gap's place, not the angle's.
+        let tilted = Solid::loft_curves(&[&seg([0.0; 3], [0.0, 0.0, 1.0]), &seg([0.0, 1.0, 0.5], [0.0, 1.0, 1.5])], 1, false, false).unwrap();
+        let t = a.continuity(SheetSide::U1, &tilted, SheetSide::U0, 0, 0, 32).unwrap();
+        near(t.gap, 0.5 / 1.25f64.sqrt(), 1e-9, "tilted gap (the distance to the other side)");
+        near(t.gap_at[1], 1.0, 1e-9, "the gap is largest at y = 1");
+        assert!(t.gap_at[2].abs() <= 1e-9 && t.gap_at[0].abs() <= 1e-9, "{t:?}");
+        let m = a.matched(SheetSide::U1, &b, SheetSide::U0, 1, 0, 0).unwrap();
+        let r = m.continuity(SheetSide::U1, &b, SheetSide::U0, 0, 0, 64).unwrap();
+        assert!(r.gap <= 1e-10 && r.angle <= 1e-8, "{r:?}");
+        let blend = Solid::blend_sides(&a, SheetSide::U0, &b, SheetSide::U1, 2, 1.0, 0, 0).unwrap();
+        let r = blend.continuity(SheetSide::V0, &a, SheetSide::U0, 0, 0, 64).unwrap();
+        assert!(r.gap <= 1e-10 && r.angle <= 1e-8 && r.curvature <= 1e-6, "{r:?}");
+        assert!(message(a.matched(SheetSide::U1, &b, SheetSide::U0, 3, 0, 0)).starts_with("match_side: "));
+    }
+
+    #[test]
+    fn n_sided_patch_fills_a_pentagon_of_strips() {
+        if !kernel_present() {
+            return;
+        }
+        // Five flat strips round a pentagon in z = 0, each lofted from a side outward: the hole's
+        // side is each loft's v0. Given every way the wrapper takes a boundary.
+        let corners: Vec<[f64; 3]> = (0..5)
+            .map(|k| {
+                let a = 2.0 * std::f64::consts::PI * f64::from(k) / 5.0 + 0.1 * (3.0 * f64::from(k)).sin();
+                [a.cos(), a.sin(), 0.0]
+            })
+            .collect();
+        let out = |p: [f64; 3]| [1.6 * p[0], 1.6 * p[1], 0.0];
+        let strips: Vec<Solid> = (0..5)
+            .map(|i| {
+                let (a, b) = (corners[i], corners[(i + 1) % 5]);
+                Solid::loft_curves(&[&seg(a, b), &seg(out(a), out(b))], 1, false, false).unwrap()
+            })
+            .collect();
+        let edge = seg(corners[3], corners[4]);
+        let boundaries = [
+            PatchBoundary::side(&strips[0], SheetSide::V0),
+            PatchBoundary::side(&strips[1], SheetSide::V0).level(1),
+            PatchBoundary::side(&strips[2], SheetSide::V0).range(1.0, 0.0),
+            PatchBoundary::from(&edge),
+            PatchBoundary::side(&strips[4], SheetSide::V0).level(2).face(0),
+        ];
+        let fill = Solid::n_sided_patch(&boundaries, 1.0, Some(1e-6)).unwrap();
+        let r = *fill.patch_report().expect("a patch reports how it meets");
+        assert!(fill.faces().unwrap() == 5 && r.faces == 5, "{r:?}");
+        assert!(r.boundary.gap <= 1e-9 && r.boundary.angle <= 1e-6 && r.internal.angle <= 1e-6 && r.corner_angle <= 1e-9, "{r:?}");
+        assert!(r.boundary.samples > 0 && r.internal.samples > 0);
+        assert!(fill.sheet_error().is_none());
+        // Face 0 meets strip 0's second half along its v0 side, face 4 the first half along u1.
+        for (face, side) in [(0, SheetSide::V0), (4, SheetSide::U1)] {
+            let k = fill.continuity(side, &strips[0], SheetSide::V0, face, 0, 64).unwrap();
+            assert!(k.gap <= 1e-9 && k.angle <= 1e-6, "{face}: {k:?}");
+        }
+        // Into the ring: watertight round the hole but where the curve stood in for strip 3.
+        let (_, report) = Solid::join_sheets(&[&strips[0], &strips[1], &strips[2], &strips[4], &fill], Some(1e-6)).unwrap();
+        // Naked: the four strips' outer sides, the two radial sides beside the gap, the curve's two halves.
+        assert!(report.refused == 0 && report.naked_after == 4 + 2 + 2, "{report:?}");
+        assert!(message(Solid::n_sided_patch(&boundaries[..2], 1.0, Some(0.01))).starts_with("n_sided_patch: "));
+        // A level the kernel refuses is passed on as given, not made G2.
+        let bad: Vec<PatchBoundary> = strips.iter().map(|s| PatchBoundary::side(s, SheetSide::V0).level(3)).collect();
+        let level = message(Solid::n_sided_patch(&bad, 1.0, Some(1e-6)));
+        assert!(level.starts_with("n_sided_patch: ") && level.contains("level 3 is not 0, 1 or 2"), "{level}");
+        // Every boundary a sheet's side: the curve's place taken by strip 3, the same five faces.
+        let whole: Vec<PatchBoundary> = strips.iter().map(|s| PatchBoundary::side(s, SheetSide::V0)).collect();
+        let all = Solid::n_sided_patch(&whole, 1.0, Some(1e-6)).unwrap();
+        assert_eq!(all.faces().unwrap(), 5);
+        assert!(all.patch_report().unwrap().boundary.angle <= 1e-6);
+    }
+
+    #[test]
+    fn fillet_surfaces_rolls_a_ball_between_two_sheets() {
+        if !kernel_present() {
+            return;
+        }
+        let floor = Solid::loft_curves(&[&seg([0.0; 3], [4.0, 0.0, 0.0]), &seg([0.0, 3.0, 0.0], [4.0, 3.0, 0.0])], 1, false, false).unwrap();
+        let wall = Solid::loft_curves(&[&seg([0.0; 3], [0.0, 3.0, 0.0]), &seg([0.0, 0.0, 4.0], [0.0, 3.0, 4.0])], 1, false, false).unwrap();
+        let mut found = None;
+        for (fa, fb) in [(false, false), (true, false), (false, true), (true, true)] {
+            let Ok((sheet, ra, rb)) = Solid::fillet_surfaces(&floor, &wall, 1.0, None, fa, fb, Some(1e-4), 0, 0) else { continue };
+            let p = ra.point(ra.domain().unwrap().0).unwrap();
+            if p[0] > 0.0 && p[2].abs() <= 1e-9 {
+                found = Some((sheet, ra, rb));
+                break;
+            }
+        }
+        let (sheet, ra, rb) = found.expect("one side of each sheet rolls the ball into the corner");
+        assert_eq!(sheet.faces().unwrap(), 1);
+        let e = sheet.sheet_error().expect("a fillet sheet reports its fit");
+        assert!((0.0..=1e-4).contains(&e), "{e}");
+        assert!(sheet.patch_report().is_none());
+        // The contact on the floor is a radius out from the wall, the one on the wall a radius up.
+        near(ra.point(ra.domain().unwrap().0).unwrap()[0], 1.0, 1e-4, "contact on the floor");
+        near(rb.point(rb.domain().unwrap().0).unwrap()[2], 1.0, 1e-4, "contact on the wall");
+        // The rails are the caller's: they outlive both sheets and the fillet.
+        drop(sheet);
+        drop(floor);
+        drop(wall);
+        near(ra.point(ra.domain().unwrap().0).unwrap()[0], 1.0, 1e-4, "a rail read after its sheets are gone");
+        near(rb.point(rb.domain().unwrap().0).unwrap()[2], 1.0, 1e-4, "the other rail too");
+        let flat = Solid::loft_curves(&[&seg([0.0; 3], [4.0, 0.0, 0.0]), &seg([0.0, 3.0, 0.0], [4.0, 3.0, 0.0])], 1, false, false).unwrap();
+        let upright = Solid::loft_curves(&[&seg([0.0; 3], [0.0, 3.0, 0.0]), &seg([0.0, 0.0, 4.0], [0.0, 3.0, 4.0])], 1, false, false).unwrap();
+        assert!(message(Solid::fillet_surfaces(&flat, &upright, 0.0, None, false, false, Some(1e-3), 0, 0)).starts_with("fillet_surfaces: "));
+    }
+
+    /// Two bicubic patches -- a fender's top and a door's side -- sharing the crease row, joined.
+    fn fender_and_door() -> Solid {
+        let length = 400.0;
+        let (mut a_rows, mut b_rows) = (Vec::new(), Vec::new());
+        for y in [0.0, length / 3.0, 2.0 * length / 3.0, length] {
+            let s = (std::f64::consts::PI * y / length).sin();
+            let c = [150.0 + 8.0 * s, y, 6.0 * s];
+            a_rows.push(NurbsCurve::new(&[[0.0, y, 10.0], [50.0, y, 14.0], [100.0, y, 12.0], c], 3, None, None).unwrap());
+            b_rows.push(NurbsCurve::new(&[c, [c[0] + 14.0, y, c[2] - 60.0], [c[0] + 10.0, y, c[2] - 130.0], [c[0] - 4.0, y, c[2] - 200.0]], 3, None, None).unwrap());
+        }
+        let ar: Vec<&NurbsCurve> = a_rows.iter().collect();
+        let br: Vec<&NurbsCurve> = b_rows.iter().collect();
+        let a = Solid::loft_curves(&ar, 3, true, false).unwrap();
+        let b = Solid::loft_curves(&br, 3, true, false).unwrap();
+        let (shell, report) = Solid::join_sheets(&[&a, &b], Some(1e-6)).unwrap();
+        assert_eq!(report.sewn, 1);
+        shell
+    }
+
+    #[test]
+    fn fillet_rounds_a_spline_edge_at_a_constant_and_a_varying_radius() {
+        if !kernel_present() {
+            return;
+        }
+        let shell = fender_and_door();
+        let crease: Vec<u32> = shell.edges().unwrap().into_iter().filter(|e| e.faces.len() == 2).map(|e| e.index).collect();
+        assert_eq!(crease.len(), 1);
+        assert_eq!(shell.edges().unwrap()[crease[0] as usize].kind, "nurbs");
+        let constant = shell.fillet(&crease, 12.0, 1e-3).unwrap();
+        let varying = shell.fillet_varying(&crease, 8.0, Some(20.0), 1e-3).unwrap();
+        assert_eq!((constant.faces().unwrap(), varying.faces().unwrap()), (3, 3));
+        // The fillet cuts the corner off: less area than the sharp shell, and more taken by the
+        // larger ball on average (8 to 20 against 12 all along).
+        assert!(area_of(&varying) < area_of(&constant) && area_of(&constant) < area_of(&shell));
+        // A radius_end of none, or equal to the radius, is the constant fillet.
+        for end in [None, Some(12.0)] {
+            let same = shell.fillet_varying(&crease, 12.0, end, 1e-3).unwrap();
+            assert_eq!(area_of(&same), area_of(&constant));
+        }
+        let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let refused = message(cube.fillet_varying(&[0], 1.0, Some(2.0), FILLET_TOLERANCE));
+        assert!(refused.contains("a varying radius rounds only spline edges"), "{refused}");
+    }
+
     // ---- the R-tree (rtree plan 3): Python's test_rtree_*, trimmed to the marshalling ----
 
     fn cell(x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64) -> Aabb {
@@ -12215,7 +15493,7 @@ mod tests {
         assert!(message(m.mass(0.0)).starts_with("mass_properties: the mass needs a manifold solid"));
         assert_eq!(message(m.region_solid(0)), "region_solid: region 0 is the infinite region");
         assert_eq!(message(m.region_solid(4)), "region_solid: region 4 is not below 4");
-        assert!(message(a.merge(&a, 0.0)).starts_with("merge: tolerance must be positive and finite"));
+        assert!(message(a.merge(&a, -1.0)).starts_with("merge: tolerance must be positive and finite"));
         let cell = m.region_solid(1).unwrap();
         assert!(cell.join(&a, MERGE_TOLERANCE).unwrap().faces().unwrap() > 0, "a cell is an ordinary solid again");
         let ordinary = a.regions().unwrap();
@@ -12223,6 +15501,310 @@ mod tests {
         assert!(ordinary[0].sides.iter().all(|s| s.sense == 1), "the outside is in front of every face");
         assert!(ordinary[1].sides.iter().all(|s| s.sense == -1), "the inside is behind them");
         assert_eq!(ordinary[0].sides.len(), 6);
+    }
+
+    // ---- identity and attributes (identity plan C3): Python's TestIdentity, trimmed to the
+    // marshalling. Python's `join(merge=True)` is `merge_flush()` then `origins_through` here.
+
+    /// A 10-cube centred on the origin and a pin through it (radius 2, along z, z -10..10),
+    /// both tracked -- the kernel's oracle 2 cut.
+    fn block_and_pin() -> (Solid, Solid) {
+        let block = Solid::cuboid(10.0, 10.0, 10.0).unwrap().tracked().unwrap();
+        let pin = Solid::cylinder(2.0, 20.0).unwrap().translate(0.0, 0.0, -10.0).unwrap().tracked().unwrap();
+        (block, pin)
+    }
+
+    /// Face `f`'s outward normal's z, off its reference.
+    fn nz(solid: &Solid, f: u32) -> f64 {
+        solid.face_ref(f).unwrap()[6]
+    }
+
+    fn split_xy(solid: &Solid) -> Vec<Solid> {
+        solid.split_by_plane(&Frame::xy([0.0; 3]), DEFAULT_TOLERANCE).unwrap()
+    }
+
+    #[test]
+    fn identity_tracking_numbers_faces_and_edges_and_an_untracked_solid_has_no_ids() {
+        if !kernel_present() {
+            return;
+        }
+        let plain = Solid::cuboid(1.0, 2.0, 3.0).unwrap();
+        assert!(!plain.is_tracked().unwrap());
+        assert_eq!(plain.face_id(0).unwrap(), None);
+        assert_eq!(plain.edge_id(0).unwrap(), None);
+        assert_eq!(plain.face_origins(0).unwrap(), vec![]);
+        let t = plain.tracked().unwrap();
+        assert!(t.is_tracked().unwrap());
+        assert_eq!(t.tracked().unwrap().face_id(5).unwrap(), Some(6));
+        assert_eq!((0..6).map(|f| t.face_id(f).unwrap()).collect::<Vec<_>>(), (1..=6).map(Some).collect::<Vec<_>>());
+        assert_eq!((0..12).map(|e| t.edge_id(e).unwrap()).collect::<Vec<_>>(), (1..=12).map(Some).collect::<Vec<_>>());
+        assert_eq!((t.face_with_id(4).unwrap(), t.face_with_id(7).unwrap(), t.face_with_id(0).unwrap()), (Some(3), None, None));
+        assert_eq!((t.edge_with_id(12).unwrap(), t.edge_with_id(13).unwrap()), (Some(11), None));
+        assert_eq!(t.face_origins(2).unwrap(), vec![(0, 3)]);
+        assert_eq!(t.edge_origins(11).unwrap(), vec![(0, 12)]);
+        assert_eq!(message(t.face_id(6)), "face_id: face 6 of 6");
+        assert_eq!(message(t.face_origins(6)), "face_origin_count: face 6 of 6");
+        assert_eq!(message(t.edge_id(12)), "edge_id: edge 12 of 12");
+    }
+
+    #[test]
+    fn identity_a_cuts_origins_and_history() {
+        if !kernel_present() {
+            return;
+        }
+        let (block, pin) = block_and_pin();
+        let wall = (0..pin.faces().unwrap()).find(|&f| pin.face_kind(f).unwrap() == "cylinder").unwrap();
+        let wall_id = pin.face_id(wall).unwrap().unwrap();
+        let caps: Vec<Origin> =
+            (0..pin.faces().unwrap()).filter(|&f| f != wall).map(|f| (1, pin.face_id(f).unwrap().unwrap())).collect();
+        let cut = block.cut(&pin, DEFAULT_TOLERANCE).unwrap();
+        let bore = (0..cut.faces().unwrap()).find(|&f| cut.face_kind(f).unwrap() == "cylinder").unwrap();
+        assert_eq!(cut.face_origins(bore).unwrap(), vec![(1, wall_id)], "the bore came from the pin's wall");
+        assert_eq!(cut.face_id(bore).unwrap(), Some(7), "renumbered: the wall's id is the box's");
+        for f in (0..cut.faces().unwrap()).filter(|&f| f != bore) {
+            assert_eq!(cut.face_origins(f).unwrap(), vec![(0, cut.face_id(f).unwrap().unwrap())], "the box's own");
+        }
+        let h = cut.history(&[&block, &pin]).unwrap();
+        assert_eq!(h.kept, (1..=6).map(|k| ((0, k), k)).collect::<Vec<_>>(), "the box's six kept");
+        assert_eq!(h.modified, vec![((1, wall_id), vec![7])], "the bore modified");
+        assert_eq!(h.generated, Vec::<u64>::new());
+        assert_eq!(h.deleted, caps, "the pin's two caps deleted");
+        assert_eq!(h.clone(), h);
+        let e = cut.edge_history(&[&block, &pin]).unwrap();
+        assert_eq!((e.kept.len(), e.deleted.clone(), e.generated.len(), e.modified.clone()), (12, vec![(1, 1), (1, 2), (1, 3)], 3, vec![]));
+        let plain = Solid::cuboid(1.0, 1.0, 1.0).unwrap();
+        assert_eq!(message(cut.history(&[&block, &plain])), "history: input 1 is not tracked");
+        let one = message(cut.history(&[&block]));
+        assert!(one.starts_with("history: face ") && one.contains(" names operand 1"), "{one}");
+        assert_eq!(message(plain.edge_history(&[&block])), "edge_history: the result is not tracked");
+    }
+
+    #[test]
+    fn identity_a_union_renumbers_the_second_operands_clashing_ids() {
+        if !kernel_present() {
+            return;
+        }
+        let a = Solid::cuboid(10.0, 10.0, 10.0).unwrap().tracked().unwrap();
+        let b = Solid::cuboid(10.0, 10.0, 10.0).unwrap().translate(5.0, 5.0, 5.0).unwrap().tracked().unwrap();
+        let joined = a.join(&b, DEFAULT_TOLERANCE).unwrap();
+        assert_eq!(joined.faces().unwrap(), 12);
+        let (mut firsts, mut seconds) = (std::collections::BTreeSet::new(), Vec::new());
+        for f in 0..12 {
+            let (k, id) = joined.face_origins(f).unwrap()[0];
+            let own = joined.face_id(f).unwrap().unwrap();
+            if k == 0 {
+                assert_eq!(own, id);
+                firsts.insert(id);
+            } else {
+                seconds.push((own, id));
+            }
+        }
+        assert_eq!(firsts, (1..=6).collect());
+        assert_eq!(seconds.iter().map(|s| s.0).collect::<Vec<_>>(), (7..=12).collect::<Vec<_>>(), "renumbered in face order");
+        let named: std::collections::BTreeSet<u64> = seconds.iter().map(|s| s.1).collect();
+        assert_eq!(named, (1..=6).collect(), "their origins name operand 1's own ids");
+    }
+
+    #[test]
+    fn identity_a_split_halves_the_sides_and_its_bodies_keep_the_splits_origins() {
+        if !kernel_present() {
+            return;
+        }
+        let block = Solid::cuboid(2.0, 4.0, 6.0).unwrap().tracked().unwrap();
+        let pieces = split_xy(&block);
+        assert_eq!(pieces.len(), 2);
+        let sides: Vec<u64> = (0..6).filter(|&f| nz(&block, f).abs() < 0.5).map(|f| block.face_id(f).unwrap().unwrap()).collect();
+        assert_eq!(sides.len(), 4);
+        let mut halves: BTreeMap<u64, Vec<u64>> = sides.iter().map(|&s| (s, Vec::new())).collect();
+        let (mut cut_faces, mut caps) = (0, 0);
+        for piece in &pieces {
+            for f in 0..piece.faces().unwrap() {
+                let (o, id) = (piece.face_origins(f).unwrap(), piece.face_id(f).unwrap().unwrap());
+                if o.is_empty() {
+                    assert!(id > 6, "a cut face is generated, with a fresh id");
+                    cut_faces += 1;
+                } else if sides.contains(&o[0].1) {
+                    assert_eq!(o, vec![(0, o[0].1)]);
+                    halves.get_mut(&o[0].1).unwrap().push(id);
+                } else {
+                    assert_eq!(o, vec![(0, id)], "a cap is kept");
+                    caps += 1;
+                }
+            }
+        }
+        assert_eq!((cut_faces, caps), (2, 2));
+        for (s, ids) in &halves {
+            assert!(ids.len() == 2 && ids.iter().filter(|&&i| i == *s).count() == 1, "side {s} in two, one half keeping its id: {ids:?}");
+        }
+        for piece in &pieces {
+            let h = piece.history(&[&block]).unwrap();
+            assert_eq!((h.generated.len(), h.deleted.len()), (1, 1));
+        }
+    }
+
+    #[test]
+    fn identity_a_fillets_round_is_generated() {
+        if !kernel_present() {
+            return;
+        }
+        let block = Solid::cuboid(10.0, 10.0, 10.0).unwrap().tracked().unwrap();
+        let rounded = block.fillet(&[0], 1.0, FILLET_TOLERANCE).unwrap();
+        assert_eq!(rounded.faces().unwrap(), 7);
+        let round = (0..7).find(|&f| rounded.face_kind(f).unwrap() != "plane").unwrap();
+        assert_eq!(rounded.face_origins(round).unwrap(), vec![]);
+        assert_eq!(rounded.face_id(round).unwrap(), Some(7));
+        let h = rounded.history(&[&block]).unwrap();
+        assert_eq!((h.generated.clone(), h.kept.len()), (vec![7], 6));
+        assert_eq!(rounded.edge_with_id(1).unwrap(), None, "the rounded edge is gone");
+    }
+
+    #[test]
+    fn identity_a_flush_join_merged_names_one_origin_per_input() {
+        if !kernel_present() {
+            return;
+        }
+        let a = Solid::cuboid(10.0, 10.0, 10.0).unwrap().tracked().unwrap();
+        let b = Solid::cuboid(4.0, 10.0, 10.0).unwrap().translate(7.0, 0.0, 0.0).unwrap().tracked().unwrap();
+        let joined = a.join(&b, DEFAULT_TOLERANCE).unwrap();
+        let merged = joined.merge_flush().unwrap().origins_through(&joined).unwrap();
+        assert_eq!(merged.faces().unwrap(), 6);
+        let mut two = 0;
+        for f in 0..6 {
+            let o = merged.face_origins(f).unwrap();
+            if merged.face_ref(f).unwrap()[4].abs() < 0.5 {
+                assert_eq!(o.iter().map(|&(k, _)| k).collect::<Vec<_>>(), vec![0, 1], "face {f}: {o:?}");
+                assert!(a.face_with_id(o[0].1).unwrap().is_some() && b.face_with_id(o[1].1).unwrap().is_some());
+                two += 1;
+            } else {
+                assert_eq!(o.len(), 1, "face {f}: {o:?}");
+            }
+        }
+        assert_eq!(two, 4);
+        let h = merged.history(&[&a, &b]).unwrap();
+        assert!(h.generated.is_empty() && h.deleted.len() == 2, "the two flush faces: {h:?}");
+        assert_eq!(h.modified.iter().filter(|((k, _), outs)| *k == 1 && outs.len() == 1).count(), 4);
+    }
+
+    #[test]
+    fn identity_the_same_chain_twice_numbers_the_same() {
+        if !kernel_present() {
+            return;
+        }
+        let run = || {
+            let (block, pin) = block_and_pin();
+            let cut = block.cut(&pin, DEFAULT_TOLERANCE).unwrap();
+            let line = cut.edges().unwrap().into_iter().find(|e| e.is_line()).unwrap().index;
+            let r = cut.fillet(&[line], 1.0, FILLET_TOLERANCE).unwrap();
+            let faces: Vec<_> = (0..r.faces().unwrap()).map(|f| r.face_id(f).unwrap()).collect();
+            let edges: Vec<_> = (0..r.edges().unwrap().len() as u32).map(|e| r.edge_id(e).unwrap()).collect();
+            (faces, edges)
+        };
+        let first = run();
+        assert!(first.0.iter().chain(&first.1).all(Option::is_some));
+        assert_eq!(first, run());
+    }
+
+    #[test]
+    fn identity_attributes_are_set_read_listed_and_refused() {
+        if !kernel_present() {
+            return;
+        }
+        let s = Solid::cuboid(1.0, 2.0, 3.0).unwrap().with_attribute("material", "steel").unwrap();
+        assert!(s.is_tracked().unwrap(), "an attribute rides with the ids");
+        assert_eq!(s.attribute("material").unwrap().as_deref(), Some("steel"));
+        assert_eq!(s.attribute("absent").unwrap(), None);
+        let pairs = |m: BTreeMap<String, String>| m.into_iter().collect::<Vec<_>>();
+        let own = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert_eq!(pairs(s.attributes().unwrap()), vec![own("material", "steel")]);
+        let both = s.with_attributes([("zeta", "1"), ("alpha", "2")]).unwrap();
+        assert_eq!(pairs(both.attributes().unwrap()), vec![own("alpha", "2"), own("material", "steel"), own("zeta", "1")]);
+        let text = "acciaio inossidabile è ☃ \u{1f527}";
+        assert_eq!(s.with_attribute("m", text).unwrap().attribute("m").unwrap().as_deref(), Some(text));
+        assert_eq!(s.with_attribute("empty", "").unwrap().attribute("empty").unwrap().as_deref(), Some(""));
+        assert_eq!(message(s.with_attribute("", "x")), "with_attribute: the key is empty");
+        assert_eq!(pairs(s.without_attribute("absent").unwrap().attributes().unwrap()), vec![own("material", "steel")]);
+        assert!(s.without_attribute("material").unwrap().attributes().unwrap().is_empty());
+        assert!(Solid::cuboid(1.0, 1.0, 1.0).unwrap().attributes().unwrap().is_empty());
+        let none: [(&str, &str); 0] = [];
+        assert_eq!(pairs(s.with_attributes(none).unwrap().attributes().unwrap()), vec![own("material", "steel")]);
+    }
+
+    #[test]
+    fn identity_face_attributes_survive_a_translate_and_a_split() {
+        if !kernel_present() {
+            return;
+        }
+        let block = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let side = (0..6).find(|&f| nz(&block, f).abs() < 0.5).unwrap();
+        let s = block.with_face_attribute(side, "finish", "ground").unwrap();
+        assert_eq!(s.face_attribute(side, "finish").unwrap().as_deref(), Some("ground"));
+        let other = (side + 1) % 6;
+        assert_eq!(s.face_attribute(other, "finish").unwrap(), None);
+        assert!(s.face_attributes(other).unwrap().is_empty());
+        let keys = |m: BTreeMap<String, String>| m.into_keys().collect::<Vec<_>>();
+        assert_eq!(keys(s.face_attributes(side).unwrap()), vec!["finish"]);
+        assert_eq!(s.face_attributes(side).unwrap()["finish"], "ground");
+        let two = s.with_face_attributes(side, [("b", "1"), ("a", "2")]).unwrap();
+        assert_eq!(keys(two.face_attributes(side).unwrap()), vec!["a", "b", "finish"]);
+        assert_eq!(two.face_attribute(side, "a").unwrap().as_deref(), Some("2"));
+        assert!(s.without_face_attribute(side, "finish").unwrap().face_attributes(side).unwrap().is_empty());
+        assert_eq!(s.translate(5.0, 0.0, 0.0).unwrap().face_attribute(side, "finish").unwrap().as_deref(), Some("ground"));
+        assert_eq!(message(s.face_attribute(6, "finish")), "face_attribute: face 6 is not one of the solid's 6");
+        assert_eq!(message(s.with_face_attribute(side, "", "x")), "with_face_attribute: the key is empty");
+        // A split face's pieces keep their parent's attributes.
+        let side_id = s.face_id(side).unwrap().unwrap();
+        let mut found = Vec::new();
+        for p in split_xy(&s) {
+            for f in 0..p.faces().unwrap() {
+                if p.face_origins(f).unwrap().contains(&(0, side_id)) {
+                    found.push(p.face_attribute(f, "finish").unwrap());
+                }
+            }
+        }
+        assert_eq!(found, vec![Some("ground".to_string()), Some("ground".to_string())]);
+    }
+
+    #[test]
+    fn identity_a_solids_attributes_reach_step() {
+        if !kernel_present() {
+            return;
+        }
+        let text = Solid::cuboid(1.0, 2.0, 3.0).unwrap().with_attribute("material", "steel").unwrap().step_text(None, Unit::Millimetre).unwrap();
+        assert_eq!(text.matches("PROPERTY_DEFINITION('material','user defined attribute',").count(), 1);
+        assert!(text.contains("DESCRIPTIVE_REPRESENTATION_ITEM('material','steel')"));
+        assert!(text.split("ENDSEC;").next().unwrap().contains("AP242"), "the header names the AP242 schema");
+    }
+
+    #[test]
+    fn identity_edges_are_found_again_after_a_stretch_and_vertices_after_a_move() {
+        if !kernel_present() {
+            return;
+        }
+        let (cube, long) = (Solid::cuboid(10.0, 10.0, 10.0).unwrap(), Solid::cuboid(11.0, 10.0, 10.0).unwrap());
+        let n = cube.edges().unwrap().len() as u32;
+        let refs: Vec<[f64; 15]> = (0..n).map(|e| cube.edge_ref(e).unwrap()).collect();
+        let found: Vec<u32> = refs.iter().map(|r| long.find_edge(r, 1e-3).unwrap().unwrap()).collect();
+        let mut sorted = found.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..n).collect::<Vec<_>>(), "{found:?}");
+        for (r, &g) in refs.iter().zip(&found) {
+            let t = long.edge_ref(g).unwrap();
+            let dot: f64 = (4..7).map(|i| r[i] * t[i]).sum();
+            assert!(dot.abs() > 0.99, "edge {g}: tangents {:?} and {:?}", &r[4..7], &t[4..7]);
+        }
+        // A 14-number reference cannot be passed: the reference is a `[f64; 15]`.
+        let mut bad = refs[0];
+        bad[1] = f64::NAN;
+        assert_eq!(message(cube.find_edge(&bad, 1e-3)), "find_edge: an edge reference is fifteen finite numbers");
+        assert_eq!(message(cube.edge_ref(12)), "edge_ref: edge 12 of 12");
+        assert_eq!(cube.vertex_count().unwrap(), 8);
+        let moved = cube.translate(1e-4, 0.0, 0.0).unwrap();
+        for v in 0..8 {
+            let p = cube.vertex_ref(v).unwrap();
+            assert_eq!(moved.find_vertex(&p, 1e-3).unwrap(), Some(v));
+        }
+        assert_eq!(cube.find_vertex(&[100.0, 0.0, 0.0], 1e-3).unwrap(), None);
+        assert!(message(cube.find_vertex(&[0.0, 0.0, f64::NAN], 1e-3)).starts_with("find_vertex: "));
     }
 
     fn hits(pairs: &[(u32, f64)]) -> Vec<RTreeHit> {
@@ -12344,9 +15926,9 @@ mod tests {
         let c = cuboid.classifier(0.05).unwrap();
         let m = message(c.contains(nan));
         assert!(m.starts_with("classifier_contains: ") && m.contains("not finite"), "{m}");
-        let m = message(cuboid.contains([0.0; 3], 0.0));
+        let m = message(cuboid.contains([0.0; 3], -1.0));
         assert!(m.starts_with("contains: ") && m.contains("positive and finite"), "{m}");
-        let m = message(cuboid.classifier(0.0));
+        let m = message(cuboid.classifier(-1.0));
         assert!(m.starts_with("classifier_new: ") && m.contains("positive and finite"), "{m}");
     }
 
@@ -12394,7 +15976,7 @@ mod tests {
         }
         let a = Solid::sphere(1.0).unwrap();
         let b = Solid::sphere(1.0).unwrap().translate(5.0, 0.0, 0.0).unwrap();
-        assert!(message(a.closest(&b, 0.0)).starts_with("closest: "));
+        assert!(message(a.closest(&b, -1.0)).starts_with("closest: "));
     }
 
     // ---- clash (clash plan 3) ----------------------------------------------------------
@@ -13684,7 +17266,7 @@ mod tests {
             return;
         }
         let plate = Solid::cuboid(10.0, 10.0, 2.0).unwrap();
-        assert!(message(ThicknessGauge::new(&[&plate], 0.0)).starts_with("thickness_gauge_new: the tolerance must be positive and finite"));
+        assert!(message(ThicknessGauge::new(&[&plate], -1.0)).starts_with("thickness_gauge_new: the tolerance must be positive and finite"));
         let g = ThicknessGauge::new(&[&plate], DEFAULT_THICKNESS_TOLERANCE).unwrap();
         let p = [1.0, 2.0, 1.0];
         assert!(message(g.thickness(0.0, 0.0)).starts_with("thickness_gauge_measure: the maximum must be positive and finite"));
@@ -13699,7 +17281,7 @@ mod tests {
         // the conveniences refuse with the gauge call's own prefix
         assert!(message(thickness(&[&plate], -1.0, 0.0, DEFAULT_THICKNESS_TOLERANCE))
             .starts_with("thickness_gauge_measure: the maximum must be positive and finite"));
-        assert!(message(thickness(&[&plate], 10.0, 0.0, f64::NAN)).starts_with("thickness_gauge_new: the tolerance must be positive and finite"));
+        assert!(message(thickness(&[&plate], 10.0, 0.0, f64::INFINITY)).starts_with("thickness_gauge_new: the tolerance must be positive and finite"));
         assert!(message(plate.thickness_at_face(99, None, 10.0, DEFAULT_THICKNESS_TOLERANCE)).starts_with("thickness_gauge_face: no face 99"));
         // mesh_thickness: the kernel's refusals (the types rule out malformed pairs, points and triples)
         let (lower, upper) = (THICKNESS_LOWER, THICKNESS_UPPER);
@@ -14545,6 +18127,163 @@ mod tests {
             }
             for (case, q) in queries(&r, "box") {
                 close(&b.closest_point(q).unwrap(), &nums(&r, &case, "closest"), EXACT, &case);
+            }
+        }
+
+        // -- the rectangle, the triangle and the ray (plan B4, TestPlanarValues)
+
+        const SHEAR: [f64; 16] = [1.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+
+        #[test]
+        fn a_rectangle_is_a_curve_with_calls_of_its_own() {
+            if !kernel_present() {
+                return;
+            }
+            let r = Rectangle::new(&xy(), (1.0, 4.0), iv(0.0, 4.0)).unwrap();
+            assert_eq!((r.x(), r.y(), r.frame()), (iv(1.0, 4.0), iv(0.0, 4.0), xy()));
+            let curve = CurveValue::from(r);
+            assert_eq!(curve.kind(), 9);
+            assert_eq!((curve.point_at(2.25).unwrap(), r.point_at(9.0).unwrap()), ([3.25, 4.0, 0.0], [1.0, 0.0, 0.0]), "clamped to 4");
+            assert_eq!((r.tangent_at(1.5).unwrap(), r.length().unwrap()), ([0.0, 1.0, 0.0], 14.0));
+            assert_eq!(r.closest_point([2.0, -1.0, 7.0]).unwrap(), CurveFoot { t: 1.0 / 3.0, point: [2.0, 0.0, 0.0], unique: true });
+            assert!(!Rectangle::new(&xy(), (0.0, 2.0), (0.0, 2.0)).unwrap().closest_point([1.0, 1.0, 0.0]).unwrap().unique, "the centre is a pick");
+            assert_eq!(r.corners().unwrap(), [[1.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 4.0, 0.0], [1.0, 4.0, 0.0]]);
+            assert_eq!(r.area().unwrap(), 12.0);
+            assert_eq!(r.closest_point_in([2.0, 1.0, 5.0], true).unwrap(), [2.0, 1.0, 0.0]);
+            assert_eq!(r.closest_point_in([2.0, 1.0, 5.0], false).unwrap(), [1.0, 1.0, 0.0]);
+            assert_eq!(r.bounds().unwrap(), ([1.0, 0.0, 0.0], [4.0, 4.0, 0.0]));
+            assert_eq!(refused(Rectangle::new(&xy(), (1.0, 1.0), (0.0, 4.0))), "value_check: the x range must increase");
+            assert_eq!(refused(Rectangle::from_values(&[&XY[..], &[1.0, 4.0, 0.0]].concat())), "value_check: a rectangle is 16 numbers, got 15");
+            assert_eq!(
+                refused(r.transform(&Transform::from_rows(&SHEAR).unwrap())),
+                "value_transform: a rectangle takes only a map that keeps its sides square (no shear in its plane)"
+            );
+            let scaled = r.transform(&Transform::scale_xyz(&xy(), 2.0, 3.0, 1.0).unwrap()).unwrap();
+            assert_eq!(scaled, Rectangle::new(&xy(), (2.0, 8.0), (0.0, 12.0)).unwrap());
+            let sheet = r.to_sheet().unwrap();
+            let area = sheet.mass(1e-9).unwrap().area;
+            assert!(sheet.faces().unwrap() == 1 && (area - 12.0).abs() <= 1e-9 * 12.0, "{area}");
+            let ring = r.to_nurbs().unwrap();
+            assert!(ring.degree() == 1 && ring.is_closed() && !ring.is_rational() && ring.domain().unwrap() == (0.0, 4.0));
+            let p = ring.point(2.25).unwrap();
+            assert!((p[0] - 3.25).abs() + (p[1] - 4.0).abs() + p[2].abs() <= 1e-12, "its parameter is t: {p:?}");
+        }
+
+        #[test]
+        fn rectangle_contains_takes_none_as_its_effective_tolerance_and_zero_as_exact() {
+            if !kernel_present() {
+                return;
+            }
+            let r = Rectangle::new(&xy(), (1.0, 4.0), (0.0, 4.0)).unwrap(); // diagonal 5: effective 5e-4
+            assert_eq!(r.contains([2.0, 2.0, 9.0], Some(0.0)).unwrap(), "inside");
+            assert_eq!(r.contains([0.0, 2.0, 0.0], Some(0.0)).unwrap(), "outside");
+            assert_eq!(r.contains([1.0, 2.0, 0.0], Some(0.0)).unwrap(), "on");
+            let near = [1.0 - 4e-4, 2.0, 0.0];
+            assert_eq!((r.contains(near, Some(0.0)).unwrap(), r.contains(near, Some(1e-3)).unwrap()), ("outside", "on"));
+            assert_eq!((r.contains(near, None).unwrap(), r.contains(near, Some(f64::NAN)).unwrap()), ("on", "on"));
+            assert_eq!(r.contains([1.0 - 6e-4, 2.0, 0.0], None).unwrap(), "outside");
+            assert_eq!(refused(r.contains([0.0; 3], Some(-1.0))), "rectangle_contains: the tolerance must be finite and not negative");
+            let eff = 1e-4 * 4.0 * 3f64.sqrt();
+            let ball = Sphere::new(&xy(), 2.0).unwrap();
+            assert!(ball.contains([2.0 + 0.9 * eff, 0.0, 0.0], f64::NAN).unwrap());
+            assert!(!ball.contains([2.0 + 0.9 * eff, 0.0, 0.0], CONTAINS_TOLERANCE).unwrap());
+            assert!(!ball.contains([2.0 + 1.1 * eff, 0.0, 0.0], f64::NAN).unwrap());
+        }
+
+        #[test]
+        fn a_triangle_answers_its_closed_forms() {
+            if !kernel_present() {
+                return;
+            }
+            let t = Triangle::new([0.0; 3], [4.0, 0.0, 0.0], [0.0, 3.0, 0.0]).unwrap();
+            assert_eq!((t.a(), t.b(), t.c()), ([0.0; 3], [4.0, 0.0, 0.0], [0.0, 3.0, 0.0]));
+            assert_eq!((t.area().unwrap(), t.perimeter().unwrap()), (6.0, 12.0));
+            close(&t.centroid().unwrap(), &[4.0 / 3.0, 1.0, 0.0], 1e-15, "centroid");
+            let cc = t.circumcircle().unwrap();
+            close(&cc.frame().origin(), &[2.0, 1.5, 0.0], 1e-15, "circumcircle centre");
+            close(&[cc.radius()], &[2.5], 1e-15, "circumcircle radius");
+            assert_eq!(t.point_at(0.5, 0.25, 0.25).unwrap(), [1.0, 0.75, 0.0]);
+            close(&t.barycentric([1.0, 0.75, 5.0]).unwrap(), &[0.5, 0.25, 0.25], 1e-15, "barycentric");
+            assert_eq!((t.closest_point([2.0, -1.0, 0.0]).unwrap(), t.closest_point([1.0, 1.0, 3.0]).unwrap()), ([2.0, 0.0, 0.0], [1.0, 1.0, 0.0]));
+            assert_eq!(t.distance_to([1.0, 1.0, 3.0]).unwrap(), 3.0);
+            assert_eq!(t.edge(1).unwrap(), Line::new([4.0, 0.0, 0.0], [0.0, 3.0, 0.0]).unwrap());
+            assert_eq!(refused(t.edge(3)), "triangle_edge: edge 3 is not 0, 1 or 2");
+            assert_eq!(
+                refused(Triangle::new([0.0; 3], [1.0; 3], [2.0; 3])),
+                "value_check: the triangle is degenerate (its points are collinear or coincident)"
+            );
+            assert_eq!(refused(Triangle::from_values(&[0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 3.0])), "value_check: a triangle is 9 numbers, got 8");
+            let sheared = t.transform(&Transform::from_rows(&SHEAR).unwrap()).unwrap();
+            assert_eq!(sheared, Triangle::new([0.0; 3], [4.0, 0.0, 0.0], [1.5, 3.0, 0.0]).unwrap(), "any affine map");
+            let area = t.to_sheet().unwrap().mass(1e-9).unwrap().area;
+            assert!((area - 6.0).abs() <= 1e-9 * 6.0, "{area}");
+            assert_ne!(t, Triangle::new([0.0; 3], [0.0, 3.0, 0.0], [4.0, 0.0, 0.0]).unwrap());
+            assert_eq!(hash_of(&t), hash_of(&Triangle::new(t.a(), t.b(), t.c()).unwrap()));
+        }
+
+        #[test]
+        fn a_ray_holds_to_its_half_line_only_in_closest_point() {
+            if !kernel_present() {
+                return;
+            }
+            let ray = Ray::new([1.0, 2.0, 3.0], [0.0, 0.0, 2.0]).unwrap();
+            assert_eq!((ray.values(), ray.position(), ray.direction()), ([1.0, 2.0, 3.0, 0.0, 0.0, 2.0], [1.0, 2.0, 3.0], [0.0, 0.0, 2.0]));
+            assert_eq!((ray.point_at(1.5).unwrap(), ray.point_at(-1.0).unwrap()), ([1.0, 2.0, 6.0], [1.0, 2.0, 1.0]));
+            assert_eq!(ray.closest_point([5.0, 2.0, 7.0]).unwrap(), CurveFoot { t: 2.0, point: [1.0, 2.0, 7.0], unique: true });
+            assert_eq!(ray.closest_point([5.0, 2.0, -7.0]).unwrap(), CurveFoot { t: 0.0, point: [1.0, 2.0, 3.0], unique: true }, "behind: the start");
+            close(&[ray.distance_to([5.0, 2.0, -7.0]).unwrap()], &[116f64.sqrt()], 1e-12, "distance");
+            assert_eq!(refused(ray.bounds()), "value_bounds: a ray has no box (it is unbounded)");
+            assert_eq!(refused(Ray::new([0.0; 3], [0.0; 3])), "value_check: the ray's direction is zero");
+            assert_eq!(refused(Ray::from_values(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])), "value_check: a ray is 6 numbers, got 7");
+            let scaled = ray.transform(&Transform::scale_xyz(&xy(), 1.0, 1.0, 3.0).unwrap()).unwrap();
+            assert_eq!(scaled, Ray::new([1.0, 2.0, 9.0], [0.0, 0.0, 6.0]).unwrap());
+        }
+
+        #[test]
+        fn rectangles_triangles_and_rays_match_rhino() {
+            if !kernel_present() {
+                return;
+            }
+            let r = vectors();
+            let ranges = nums(&r, "rectangle", "ranges");
+            let frame = Frame::of(nums(&r, "rectangle", "frame").try_into().unwrap()).unwrap();
+            let rect = Rectangle::new(&frame, (ranges[0], ranges[1]), (ranges[2], ranges[3])).unwrap();
+            let corners = nums(&r, "rectangle", "corners");
+            for (k, c) in rect.corners().unwrap().iter().enumerate() {
+                close(c, &corners[3 * k..3 * k + 3], EXACT, &format!("corner {k}"));
+            }
+            let want = [nums(&r, "rectangle", "area"), nums(&r, "rectangle", "circumference")].concat();
+            close(&[rect.area().unwrap(), rect.length().unwrap()], &want, EXACT, "area and circumference");
+            for k in 0..9 {
+                let n = nums(&r, &format!("rectangle_at_{k}"), "point");
+                close(&rect.point_at(n[0]).unwrap(), &n[1..4], EXACT, &format!("rectangle_at_{k}"));
+            }
+            let words = HashMap::from([("Inside", "inside"), ("Outside", "outside"), ("Coincident", "on")]);
+            for (case, q) in queries(&r, "rectangle").into_iter().chain(queries(&r, "rectangle_in")) {
+                close(&rect.closest_point(q).unwrap().point, &nums(&r, &case, "boundary"), EXACT, &case);
+                close(&rect.closest_point_in(q, true).unwrap(), &nums(&r, &case, "filled"), EXACT, &case);
+                let said = &r[&(case.clone(), "contains".to_string())][0];
+                assert_eq!(rect.contains(q, Some(0.0)).unwrap(), words[said.as_str()], "{case}");
+            }
+            let p = nums(&r, "triangle", "points");
+            let tri = Triangle::new(p3(&p[0..3]), p3(&p[3..6]), p3(&p[6..9])).unwrap();
+            let want = [nums(&r, "triangle", "area"), nums(&r, "triangle", "perimeter")].concat();
+            close(&[tri.area().unwrap(), tri.perimeter().unwrap()], &want, EXACT, "area and perimeter");
+            close(&tri.centroid().unwrap(), &nums(&r, "triangle", "centroid"), EXACT, "centroid");
+            close(&tri.circumcircle().unwrap().values(), &nums(&r, "triangle", "circumcircle"), EXACT, "circumcircle");
+            for (case, q) in queries(&r, "triangle").into_iter().chain(queries(&r, "triangle_in")) {
+                let w = tri.barycentric(q).unwrap();
+                close(&w[1..], &nums(&r, &case, "barycentric")[..2], EXACT, &case);
+                close(&tri.point_at(w[0], w[1], w[2]).unwrap(), &nums(&r, &case, "projected"), EXACT, &case);
+                if w.iter().cloned().fold(f64::INFINITY, f64::min) < 0.0 {
+                    close(&tri.closest_point(q).unwrap(), &nums(&r, &case, "boundary"), EXACT, &case);
+                }
+            }
+            let rn = nums(&r, "ray", "ray");
+            let ray = Ray::new(p3(&rn[0..3]), p3(&rn[3..6])).unwrap();
+            for k in 0..4 {
+                let n = nums(&r, &format!("ray_at_{k}"), "point");
+                close(&ray.point_at(n[0]).unwrap(), &n[1..4], EXACT, &format!("ray_at_{k}"));
             }
         }
     }

@@ -93,7 +93,7 @@ final class KernelTests: XCTestCase {
         let sheet = try Solid.extrudeOpen(try Profile.rect(4, 4), try Frame.xy(), 2)
         XCTAssertFalse(try sheet.isWatertight())
         XCTAssertEqual(try sheet.manifold.boundaryEdges, 8)
-        XCTAssertEqual(refusal { _ = try cube.leakedEdges(tolerance: 0) },
+        XCTAssertEqual(refusal { _ = try cube.leakedEdges(tolerance: -1) },
                        "leaked_edges: tolerance must be positive and finite")
     }
 
@@ -245,7 +245,7 @@ final class KernelTests: XCTestCase {
         XCTAssertTrue(touched[0].touch && !touched[0].run)
         let runs = try Profile.rect(10, 10).hits(try Profile.rect(10, 10).translate(5, 0)).filter { $0.run }
         XCTAssertEqual(runs.count, 2)
-        XCTAssertTrue(refusal { _ = try Profile.circle(1).hits(try Profile.circle(2), tolerance: 0) }?
+        XCTAssertTrue(refusal { _ = try Profile.circle(1).hits(try Profile.circle(2), tolerance: -1) }?
             .contains("profile_hits: tolerance must be positive and finite") ?? false)
         XCTAssertTrue(try Profile.circle(1).hits(try Profile.circle(2).translate(10, 0)).isEmpty)
     }
@@ -280,7 +280,7 @@ final class KernelTests: XCTestCase {
         let across = try sheet.hits(try Profile.path([0, -20]).lineTo(0, 20).endOpen(), try Frame.xz())
         XCTAssertFalse(across.hits.isEmpty)
         XCTAssertTrue(across.pieces.isEmpty)
-        XCTAssertEqual(refusal { _ = try box.hits(line, try Frame.xy(), tolerance: 0) },
+        XCTAssertEqual(refusal { _ = try box.hits(line, try Frame.xy(), tolerance: -1) },
                        "solid_profile_hits: tolerance must be positive and finite")
     }
 
@@ -292,7 +292,7 @@ final class KernelTests: XCTestCase {
         // Four arcs (each circle's own seam stays a join) between two caps.
         XCTAssertEqual(try Solid.extrude(lenses[0], try Frame.xy(), 1).faces, 6)
         XCTAssertTrue(try a.common(try b.translate(100, 0)).isEmpty)
-        XCTAssertTrue(refusal { _ = try a.common(b, tolerance: 0) }?
+        XCTAssertTrue(refusal { _ = try a.common(b, tolerance: -1) }?
             .contains("profile_common: tolerance must be positive and finite") ?? false)
     }
 
@@ -381,7 +381,7 @@ final class KernelTests: XCTestCase {
         // Apart: nothing, and not an error. A bad tolerance is refused in the kernel's words.
         let apart = try a.intersect(try b.translate(10, 0, 0))
         XCTAssertTrue(apart.chains.isEmpty && apart.overlaps.isEmpty, apart.description)
-        XCTAssertTrue(refusal { _ = try a.intersect(b, tolerance: 0) }?.hasPrefix("intersect: tolerance must be positive and finite") ?? false)
+        XCTAssertTrue(refusal { _ = try a.intersect(b, tolerance: -1) }?.hasPrefix("intersect: tolerance must be positive and finite") ?? false)
         // Two coaxial pipes overlapping in height share a wall band: rings on that wall.
         let lower = try Solid.cylinder(1, 4)
         let upper = try Solid.cylinder(1, 4).translate(0, 0, 2)
@@ -613,7 +613,7 @@ final class KernelTests: XCTestCase {
         let loop = try SweepPath.along(try Profile.rect(40, 20).round(5), xy, open: false)
         XCTAssertTrue(try Solid.sweep(try Profile.circle(1), try Frame(.init(-15, -10, 0), [0, 1, 0], [0, 0, 1], [1, 0, 0]), loop)
             .isWatertight())
-        XCTAssertEqual(refusal { _ = try SweepPath.along(wave, xy, tolerance: 0) },
+        XCTAssertEqual(refusal { _ = try SweepPath.along(wave, xy, tolerance: -1) },
                        "along: the tolerance must be positive and finite")
         path.close()
         path.close()
@@ -664,7 +664,7 @@ final class KernelTests: XCTestCase {
         XCTAssertGreaterThan(try a.join(b).faces, 6)
         assertClose(try a.common(b).bounds.min, .zero)
         XCTAssertGreaterThan(try a.cut(b).faces, 6)
-        XCTAssertTrue(refusal { _ = try a.join(b, tolerance: 0) }?.hasPrefix("join: ") ?? false)
+        XCTAssertTrue(refusal { _ = try a.join(b, tolerance: -1) }?.hasPrefix("join: ") ?? false)
         _ = try a.rotate((.zero, [0, 0, 1]), .pi / 2)
         _ = try a.mirror(try Frame.xy())
         XCTAssertEqual(try Solid.cylinder(1, 3).place(try Frame.xy([0, 0, 5])).bounds.min.z, 5, accuracy: 1e-6)

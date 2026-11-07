@@ -191,8 +191,8 @@ static Result<void> containment_errors() {
     refused(box.contains(bad), "contains: ", "not finite", "contains(NaN)");
     CADACLYSM_TRY(classifier, box.classifier());
     refused(classifier.contains(bad), "classifier_contains: ", "not finite", "classifier.contains(NaN)");
-    refused(box.contains(Vec3{0, 0, 0}, 0.0), "contains: ", "positive and finite", "contains with tolerance 0");
-    refused(box.classifier(0.0), "classifier_new: ", "positive and finite", "classifier with tolerance 0");
+    refused(box.contains(Vec3{0, 0, 0}, -1.0), "contains: ", "positive and finite", "contains with tolerance -1");
+    refused(box.classifier(-1.0), "classifier_new: ", "positive and finite", "classifier with tolerance -1");
     classifier.close();
     check(classifier.closed(), "the classifier is closed");
     refused(classifier.contains(Vec3{0, 0, 0}), "classifier: closed", "", "contains after close");
@@ -246,7 +246,7 @@ static Result<void> closest_errors_and_progress() {
     CADACLYSM_TRY(a, bs::Solid::sphere(1));
     CADACLYSM_TRY(b0, bs::Solid::sphere(1));
     CADACLYSM_TRY(b, b0.translate(5, 0, 0));
-    refused(a.closest(b, 0.0), "closest: ", "", "closest with tolerance 0");
+    refused(a.closest(b, -1.0), "closest: ", "", "closest with tolerance -1");
     std::vector<std::string> phases;
     bs::Progress hear = [&phases](std::string_view phase, std::size_t, std::size_t) { phases.emplace_back(phase); };
     CADACLYSM_TRY(c, a.closest(b, 1e-3, hear));

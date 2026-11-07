@@ -16,6 +16,8 @@ export declare const Convention: {
   parse(text: string): number;
 };
 export type ValueKind = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+/** What a file declares about its own precision: `absolute`, in the file's own unit, and `angular`, radians -- null where it said nothing. */
+export interface Tolerances { readonly absolute: number | null; readonly angular: number | null }
 export declare const ValueKind: { readonly NONE: 0; readonly TEXT: 1; readonly INTEGER: 2; readonly REAL: 3; readonly BOOLEAN: 4; readonly LIST: 5; readonly REFERENCE: 6 };
 
 /** front back left right top bottom iso, `[azimuth, elevation]` degrees each. */
@@ -400,6 +402,8 @@ export class Task {
   private constructor();
   schedule: WorkSchedule; index: number;
   equals(other: Task): boolean;
+  /** The index of the work schedule this task belongs to (`scene.schedules()[i]`). */
+  readonly scheduleIndex: number;
   readonly name: string;
   /** `''` where none. */
   readonly identification: string;
@@ -527,7 +531,7 @@ export class Scene {
   [Symbol.dispose](): void;
   readonly version: string; readonly schema: string; readonly schemaRead: string; readonly substituted: boolean;
   readonly sourceName: string | null;
-  readonly metresPerUnit: number; readonly bounds: Bounds; readonly bounds64: Bounds64; readonly surfaceMatrix: Float32Array;
+  readonly metresPerUnit: number; readonly tolerances: Tolerances; readonly bounds: Bounds; readonly bounds64: Bounds64; readonly surfaceMatrix: Float32Array;
   diagnostics(): string[]; geometryDiagnostics(): string[];
   readonly nodeCount: number;
   node(index: number): Node; nodes(): Node[]; roots(): Node[];

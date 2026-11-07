@@ -10,7 +10,7 @@
     "./blacksmith": { "types": "./cadaclysm_blacksmith.d.ts", "default": "./cadaclysm_blacksmith.js" },
     "./view": { "types": "./cadaclysm_view.d.ts", "default": "./cadaclysm_view.js" }
   },
-  "files": ["cadaclysm.js", "cadaclysm_blacksmith.js", "cadaclysm_view.js", "worker.js", "cadaclysm.d.ts", "cadaclysm_blacksmith.d.ts", "cadaclysm_view.d.ts", "README.md", "smoke.js"],
+  "files": ["cadaclysm.js", "cadaclysm_blacksmith.js", "cadaclysm_view.js", "cadaclysm_blacksmith_remote.js", "worker.js", "cadaclysm.d.ts", "cadaclysm_blacksmith.d.ts", "cadaclysm_view.d.ts", "cadaclysm_blacksmith_remote.d.ts", "README.md", "smoke.js"],
   "engines": { "node": ">=18" },
   "scripts": { "test": "node --test" },
   "dependencies": { "koffi": "^2.16.0" },

@@ -1331,6 +1331,8 @@ return function(t)
     t.eq(slab.kind_name, "")
     t.eq(topping.milestone, true)
     t.eq(slab.milestone, false)
+    for _, task in ipairs(tasks) do t.eq(task.schedule_index, 0) end
+    t.eq(fit.schedule_index, s.index)
     t.eq(slab.identification, "T1")
     t.eq(slab.status, "COMPLETED")
     local time = slab.time
