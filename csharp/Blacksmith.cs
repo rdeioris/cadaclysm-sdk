@@ -1186,6 +1186,31 @@ internal unsafe struct RawBlacksmithSubdReport
 // consume (`path_end`), after which the handle is marked invalid so no free follows.
 
 /// <summary>`CadaclysmBlacksmithProfile *`.</summary>
+/// <summary>A read-only map that enumerates in insertion order (a key set again keeps its first
+/// place): .NET 8 has no generic OrderedDictionary, so the attribute maps use this.</summary>
+internal sealed class OrderedAttributes : IReadOnlyDictionary<string, string>
+{
+    private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
+    private readonly List<string> _keys = new();
+
+    internal void Set(string key, string value)
+    {
+        if (!_values.ContainsKey(key)) _keys.Add(key);
+        _values[key] = value;
+    }
+
+    public string this[string key] => _values[key];
+    public IEnumerable<string> Keys => _keys;
+    public IEnumerable<string> Values => _keys.Select(k => _values[k]);
+    public int Count => _keys.Count;
+    public bool ContainsKey(string key) => _values.ContainsKey(key);
+    public bool TryGetValue(string key, [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out string value) =>
+        _values.TryGetValue(key, out value);
+    public IEnumerator<KeyValuePair<string, string>> GetEnumerator() =>
+        _keys.Select(k => new KeyValuePair<string, string>(k, _values[k])).GetEnumerator();
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+}
+
 internal sealed class ProfileHandle : CadaclysmHandle
 {
     public ProfileHandle()
@@ -6421,15 +6446,15 @@ public sealed class Solid : IDisposable
     /// borrowed strings into a read-only map that enumerates in that order.</summary>
     private IReadOnlyDictionary<string, string> AttributeMap(uint count, Func<uint, IntPtr> keyAt, Func<uint, IntPtr> valueAt)
     {
-        var map = new OrderedDictionary<string, string>(StringComparer.Ordinal);
+        var map = new OrderedAttributes();
         for (uint i = 0; i < count; i++)
         {
             IntPtr k = keyAt(i), v = valueAt(i);
             if (k == IntPtr.Zero || v == IntPtr.Zero) throw Blacksmith.Failure("attributes");
-            map[Marshal.PtrToStringUTF8(k) ?? ""] = Marshal.PtrToStringUTF8(v) ?? "";
+            map.Set(Marshal.PtrToStringUTF8(k) ?? "", Marshal.PtrToStringUTF8(v) ?? "");
         }
         GC.KeepAlive(this);
-        return new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(map);
+        return map;
     }
 
     /// <summary>A borrowed attribute: null where there is none, unless the library left a

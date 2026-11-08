@@ -10,6 +10,12 @@ minor release may change the API).
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-07
+
+### Fixed
+
+- The NuGet package also targets .NET 8 (it was .NET 9 only), so `dotnet add package Cadaclysm` works in a net8.0 project.
+
 ## [0.13.0] - 2026-11-07
 
 ### Highlights

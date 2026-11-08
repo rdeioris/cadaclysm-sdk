@@ -1,6 +1,6 @@
 # Cadaclysm blacksmith: a modelling guide for language models
 
-**For cadaclysm 0.13.0.** The API below is this release's: use it with the wrappers and libraries of 0.13.0.
+**For cadaclysm 0.13.1.** The API below is this release's: use it with the wrappers and libraries of 0.13.1.
 
 > This file teaches a language model (ChatGPT, Gemini, Claude or any other) to write Python
 > that builds exact solid CAD parts with the cadaclysm modelling kernel, the *blacksmith*,

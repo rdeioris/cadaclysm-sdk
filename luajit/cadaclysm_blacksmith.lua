@@ -88,7 +88,7 @@ if not pcall(ffi.typeof, "struct CadaclysmBlacksmithMesh") then
 end
 
 --- This file's own version (the workspace's); `version()` is the loaded library's.
-M.__version__ = "0.13.0"
+M.__version__ = "0.13.1"
 
 --- What the ABI returns for "no such face" and uses for "the whole solid".
 M.NONE = 0xFFFFFFFF
