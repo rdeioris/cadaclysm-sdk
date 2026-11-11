@@ -13,11 +13,14 @@ copying or using the Software you accept this Agreement. If you do not
 accept it, do not download, install, copy or use the Software.
 
 1. Definitions.
-   "Software" means the cadaclysm libraries -- cadaclysm_capi and
-   cadaclysm_blacksmith -- in every file form in which the Licensor
-   distributes them (shared and static native libraries and WebAssembly
-   modules), with their updates and the documentation distributed with
-   them. It does not include the Open Components (section 14).
+   "Software" means the cadaclysm library in each of its flavours --
+   cadaclysm, cadaclysm_kernel_reader, cadaclysm_kernel and
+   cadaclysm_reader -- and, as distributed in earlier releases,
+   cadaclysm_capi and cadaclysm_blacksmith, in every file form in which
+   the Licensor distributes them (shared and static native libraries and
+   WebAssembly modules), with their updates and the documentation
+   distributed with them. It does not include the Open Components
+   (section 14).
    "License" means a license to the Software issued by the Licensor and
    recorded in a license file the Licensor signs, which states its holder,
    its scope (product, server, web or education), its plan where it has
