@@ -145,6 +145,35 @@ final class BlacksmithCAMTests: XCTestCase {
         XCTAssertTrue(ops.contains { $0.kind == "pocket" && $0.tool == 2 }, "\(ops)")
     }
 
+    func testCornerReliefReplacesTheCornersWithReliefItems() throws {
+        let block = try pocketedBlock()
+        let t1 = try Tool.flat(1, diameter: 6, fluteLength: 20, feed: 800, plunge: 200, rpm: 12000)
+        let t2 = try Tool.flat(2, diameter: 2, fluteLength: 20, feed: 800, plunge: 200, rpm: 12000)
+        let job = try Job(try Stock.around(block, margin: 2), safeZ: 30)
+        let report = try job.machine(block, endMills: [t1, t2], skin: 0.3, cornerRelief: true)
+        XCTAssertEqual(report.items.count, 4)
+        for item in report.items {
+            XCTAssertEqual(item.kind, "relief")
+            XCTAssertTrue(item.reason.hasPrefix("corner relieved by T2 (2 mm): a notch 0.293 mm into the walls"),
+                          item.reason)
+        }
+        XCTAssertEqual(report.items[0].size, 1 - 0.5.squareRoot(), accuracy: 1e-6)
+    }
+
+    func testCornerReliefOffOrLeftOutKeepsTheCornerItems() throws {
+        let block = try pocketedBlock()
+        let t1 = try Tool.flat(1, diameter: 6, fluteLength: 20, feed: 800, plunge: 200, rpm: 12000)
+        let t2 = try Tool.flat(2, diameter: 2, fluteLength: 20, feed: 800, plunge: 200, rpm: 12000)
+        let off = try Job(try Stock.around(block, margin: 2), safeZ: 30)
+        let offReport = try off.machine(block, endMills: [t1, t2], skin: 0.3, cornerRelief: false)
+        XCTAssertEqual(offReport.items.count, 4)
+        XCTAssertTrue(offReport.items.allSatisfy { $0.kind == "corner" })
+        let left = try Job(try Stock.around(block, margin: 2), safeZ: 30)
+        let leftReport = try left.machine(block, endMills: [t1, t2], skin: 0.3)
+        XCTAssertEqual(leftReport.items.count, 4)
+        XCTAssertTrue(leftReport.items.allSatisfy { $0.kind == "corner" })
+    }
+
     func testAnEmptyEndMillListIsRefusedAndLeavesTheJobAsItWas() throws {
         let block = try pocketedBlock()
         let job = try Job(try Stock.around(block, margin: 2), safeZ: 30)

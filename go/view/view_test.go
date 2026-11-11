@@ -118,6 +118,34 @@ func TestTheLodStructIsTwelveBytes(t *testing.T) {
 	}
 }
 
+func TestOccludedStyleRoundTrips(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	v, err := view.Offscreen(160, 120, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer v.Close()
+	grey := [3]float32{0.5, 0.5, 0.5}
+	if err := v.SetOccludedStyle(view.OccludedStyle{Dash: 10, Gap: 5, Dim: 0.25, Colour: &grey}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := v.OccludedStyle()
+	if err != nil || s.Dash != 10 || s.Colour == nil || *s.Colour != grey {
+		t.Fatalf("got %+v, %v", s, err)
+	}
+	if err := v.SetOccludedStyle(view.OccludedStyle{Dim: 1.5}); err == nil {
+		t.Fatal("dim 1.5 accepted")
+	}
+	if err := v.SetOccludedStyle(view.OccludedStyle{}); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := v.OccludedStyle(); s != view.DefaultOccludedStyle() {
+		t.Fatalf("zero value is the default, got %+v", s)
+	}
+}
+
 func TestABrokenVariableNamesItself(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nothing-here")
 	t.Setenv("CADACLYSM_TERMINAL_LIBRARY", missing)
@@ -133,6 +161,36 @@ func TestABrokenVariableNamesItself(t *testing.T) {
 type heldSolid struct {
 	*blacksmith.Solid
 	_ *int
+}
+
+// A solid in a material and an opacity, and two of its faces alone (1.21); a material or a
+// face the solid does not have is refused, named.
+func TestOffscreenSolidMaterialOpacityAndFaces(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	v, err := view.Offscreen(64, 48, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer v.Close()
+	cube, err := blacksmith.Cuboid(1, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	half := float32(0.5)
+	if _, err := v.ShowSolid(cube, blacksmith.DefaultTolerance, nil, view.SolidOptions{Material: "glass", Opacity: &half, Faces: []uint32{0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.ShowSolid(cube, blacksmith.DefaultTolerance, nil, view.SolidOptions{Material: "metal"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.ShowSolid(cube, blacksmith.DefaultTolerance, nil, view.SolidOptions{Material: "chrome"}); !strings.HasPrefix(message(err), "material: \"chrome\" is not") {
+		t.Fatalf("material chrome: %v", err)
+	}
+	if _, err := v.ShowSolid(cube, blacksmith.DefaultTolerance, nil, view.SolidOptions{Faces: []uint32{99}}); !strings.Contains(message(err), "face 99 is not one of the solid's 6 faces") {
+		t.Fatalf("face 99: %v", err)
+	}
 }
 
 func TestOffscreenSolidByHandle(t *testing.T) {
@@ -819,18 +877,18 @@ func TestPumpWithNoWindowWaits(t *testing.T) {
 	}
 }
 
-// The loader binds 86 calls of cadaclysm_view.h 1.18 (all but 1.14's analysis calls and 1.12's
-// texture targets): a 1.17 library (no set_finish) is refused before any call is bound, in
-// Python's words; 1.18 and later 1.x are taken.
-func TestTheLoaderNeedsViewABI118(t *testing.T) {
-	for _, ok := range []uint32{0x10012, 0x10013} {
+// The loader binds 95 calls of cadaclysm_view.h 1.22 (all but 1.14's analysis calls, 1.16's
+// layers, 1.19's KMS pair and 1.12's texture targets): a 1.21 library (no snapping) is
+// refused before any call is bound, in Python's words; 1.22 and later 1.x are taken.
+func TestTheLoaderNeedsViewABI122(t *testing.T) {
+	for _, ok := range []uint32{0x10016, 0x10017} {
 		if err := view.CheckABIForTest(ok, "lib"); err != nil {
 			t.Fatalf("%#x refused: %v", ok, err)
 		}
 	}
 	for version, want := range map[uint32]string{
-		0x10011: "lib: view ABI 1.17, this SDK needs 1.18 or a later 1.x",
-		0x20012: "lib: view ABI 2.18, this SDK needs 1.18 or a later 1.x",
+		0x10015: "lib: view ABI 1.21, this SDK needs 1.22 or a later 1.x",
+		0x20016: "lib: view ABI 2.22, this SDK needs 1.22 or a later 1.x",
 	} {
 		if got := message(view.CheckABIForTest(version, "lib")); got != want {
 			t.Fatalf("%#x: %s, want %s", version, got, want)
@@ -1324,6 +1382,194 @@ func TestAPickCarriesClicksAndThePointOnlyWhereSet(t *testing.T) {
 	cam, err := v.Run()
 	if err != nil || cam.Pick == nil || *cam.Pick != (view.Pick{Item: 7, Clicks: 2}) {
 		t.Fatalf("run's pick: %+v %v", cam.Pick, err)
+	}
+}
+
+func TestTheSnapStructIsTheHeaders(t *testing.T) {
+	want := [12]uintptr{88, 4, 8, 32, 36, 40, 44, 48, 60, 72, 80, 84}
+	if got := view.SnapLayoutForTest(); got != want {
+		t.Fatalf("CadaclysmViewSnap: size and offsets %v, want %v", got, want)
+	}
+	if view.SnapVertex != 1 || view.SnapFace != 32 || view.SnapPlane != 128 || view.SnapAll != 0xFF {
+		t.Fatal("the snap kinds' bits moved")
+	}
+	if got := (view.SnapVertex | view.SnapEdge).String(); got != "vertex|edge" {
+		t.Fatalf("kinds' names: %q", got)
+	}
+	if got := view.SnapKind(0).String(); got != "" {
+		t.Fatalf("no kind: %q", got)
+	}
+}
+
+// SetSnap hands the library the kinds' bits, the aperture and the marker; Snap and LastSnap
+// read the answer whole (no edge for a face snap, Kind 0 for nothing); ClearSnap,
+// SetWorkPlane and ClearWorkPlane reach the library with their arguments.
+func TestSnapSettingsAndAnswersReachTheLibrary(t *testing.T) {
+	rig(t, "last_error", "create", "destroy", "draw", "set_snap", "request_snap_in", "snap_result", "clear_snap",
+		"set_work_plane", "clear_work_plane")
+	v, err := view.Offscreen(8, 8, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	for _, c := range []struct {
+		kinds      view.SnapKind
+		aperture   float32
+		marker     bool
+		wantMarker uint32
+	}{
+		{view.SnapAll, 0, true, 1},
+		{view.SnapVertex | view.SnapEdge, 6, false, 0},
+		{0, 0, true, 1},
+	} {
+		if err := v.SetSnap(c.kinds, c.aperture, c.marker); err != nil {
+			t.Fatal(err)
+		}
+		size, kinds, aperture, marker, _ := viewrig.SnapSettings()
+		if size != 16 || kinds != uint32(c.kinds) || aperture != c.aperture || marker != c.wantMarker {
+			t.Fatalf("SetSnap(%#x, %v, %v) handed size %d, kinds %#x, aperture %v, marker %d",
+				uint32(c.kinds), c.aperture, c.marker, size, kinds, aperture, marker)
+		}
+	}
+
+	viewrig.SetSnapAnswer(viewrig.Answer{Kind: 1, Point: [3]float64{-1, 1, 0}, Item: 3, Node: 4, Face: 5, Edge: 2,
+		Tangent: [3]float32{1, 0, 0}, DistancePx: 2.5})
+	s, err := v.Snap(10, 20, 1)
+	want := view.Snap{Kind: view.SnapVertex, Point: [3]float64{-1, 1, 0}, Item: 3, Node: 4, Face: 5, Edge: 2, HasEdge: true,
+		Tangent: [3]float32{1, 0, 0}, DistancePx: 2.5}
+	if err != nil || s != want {
+		t.Fatalf("the vertex snap: %+v %v, want %+v", s, err, want)
+	}
+	if got := viewrig.Log(); got != "snap 1 10 20" {
+		t.Fatalf("snap asked %q", got)
+	}
+	viewrig.SetSnapAnswer(viewrig.Answer{Kind: 4, Item: 3, Axis: [3]float32{0, 0, 1}, Radius: 2.5})
+	if s, err := v.Snap(1, 1, 0); err != nil || s.Kind != view.SnapCentre || s.Axis != [3]float32{0, 0, 1} || s.Radius != 2.5 {
+		t.Fatalf("the centre snap: %+v %v", s, err)
+	}
+	viewrig.SetSnapAnswer(viewrig.Answer{Kind: 32, Item: 3, Face: 5, Edge: 0xFFFFFFFF})
+	if s, err := v.Snap(1, 1, 0); err != nil || s.Kind != view.SnapFace || s.HasEdge || s.Edge != 0 {
+		t.Fatalf("a face snap has no edge: %+v %v", s, err)
+	}
+	viewrig.SetSnapAnswer(viewrig.Answer{Edge: 0xFFFFFFFF})
+	if s, err := v.Snap(1, 1, 0); err != nil || s.Kind != 0 {
+		t.Fatalf("kind 0 is nothing snapped: %+v %v", s, err)
+	}
+
+	viewrig.SetSnapAnswer(viewrig.Answer{Kind: 16, Item: 3, Edge: 1, Clicks: 1})
+	if s, landed, err := v.LastSnap(); err != nil || !landed || s.Kind != view.SnapEdge || s.Clicks != 1 {
+		t.Fatalf("the landed answer: %+v %v %v", s, landed, err)
+	}
+	viewrig.SnapLanded(false)
+	viewrig.Say("cadaclysm_view_snap_result: no snap result")
+	if _, landed, err := v.LastSnap(); err != nil || landed {
+		t.Fatalf("nothing landed yet: %v %v", landed, err)
+	}
+	viewrig.Say("boom from snap_result")
+	if _, _, err := v.LastSnap(); message(err) != "boom from snap_result" {
+		t.Fatalf("the library's refusal: %s", message(err))
+	}
+	viewrig.Say("")
+	viewrig.SnapLanded(true)
+
+	if err := v.ClearSnap(); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.SetWorkPlane([3]float64{1, 2, 3}, [3]float64{1, 0, 0}, [3]float64{0, 0, 1}, 0.5); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.ClearWorkPlane(); err != nil {
+		t.Fatal(err)
+	}
+	if got, tail := viewrig.Log(), "clear snap; work plane 1 2 3, 1 0 0, 0 0 1, 0.5; ground plane"; !strings.HasSuffix(got, tail) {
+		t.Fatalf("the library saw %q", got)
+	}
+}
+
+// Python's test_a_snap_on_the_real_library_finds_the_squares_corner and
+// test_snapping_is_off_until_set_snap: the red square with its four sides, from the top, on a
+// 64 x 48 view. Snapping is off until SetSnap; then a snap 3 pixels inside the topmost (then
+// leftmost) pixel that is not the background answers that corner, (-1, 1, 0), as a vertex of
+// the square's item; a face snap lands on the face; off again, nothing.
+func TestASnapFindsTheSquaresCorner(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	v, err := view.Offscreen(64, 48, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer v.Close()
+	if err := v.Layer(view.LayerGrid, false); err != nil {
+		t.Fatal(err)
+	}
+	square := []float32{-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0}
+	var outline []float32
+	for i := 0; i < 4; i++ {
+		for _, k := range []int{i, (i + 1) % 4} {
+			outline = append(outline, square[3*k:3*k+3]...)
+		}
+	}
+	item, err := v.ShowMesh(view.Mesh{Positions: square, Indices: []uint32{0, 1, 2, 0, 2, 3}, Edges: outline,
+		RGB: &[3]float32{1, 0, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Standard("top"); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Frame(); err != nil {
+		t.Fatal(err)
+	}
+	img, err := v.Image()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, err := v.Snap(32, 24, 0); err != nil || s.Kind != 0 {
+		t.Fatalf("a view starts with snapping off: %+v %v", s, err)
+	}
+	if err := v.SetSnap(view.SnapAll, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	bg := img.RGBAAt(0, 0)
+	cx, cy := -1, -1
+	for y := 0; y < img.Bounds().Dy() && cy < 0; y++ {
+		for x := 0; x < img.Bounds().Dx(); x++ {
+			if p := img.RGBAAt(x, y); p.R != bg.R || p.G != bg.G || p.B != bg.B {
+				cx, cy = x, y
+				break
+			}
+		}
+	}
+	if cy < 0 {
+		t.Fatal("the square drew nothing")
+	}
+	s, err := v.Snap(uint32(cx+3), uint32(cy+3), 0)
+	if err != nil || s.Kind != view.SnapVertex || s.Item != item.ID() {
+		t.Fatalf("the corner's snap: %+v %v (item %d)", s, err, item.ID())
+	}
+	for i, want := range [3]float64{-1, 1, 0} {
+		if math.Abs(s.Point[i]-want) > 1e-6 {
+			t.Fatalf("the corner is (-1, 1, 0), not %v", s.Point)
+		}
+	}
+	if !s.HasEdge || s.Clicks != 0 {
+		t.Fatalf("a vertex snap lies on an edge, asked by the host: %+v", s)
+	}
+	if err := v.ClearSnap(); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.SetSnap(view.SnapFace, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := v.Snap(32, 24, 0); err != nil || f.Kind != view.SnapFace || f.Item != item.ID() || f.HasEdge {
+		t.Fatalf("the face snap: %+v %v", f, err)
+	}
+	if err := v.SetSnap(0, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := v.Snap(32, 24, 0); err != nil || n.Kind != 0 {
+		t.Fatalf("snapping off answers nothing: %+v %v", n, err)
 	}
 }
 

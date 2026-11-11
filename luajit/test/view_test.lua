@@ -867,6 +867,20 @@ return function(t)
     v:close()
   end)
 
+  t.test("show_solid takes a material, an opacity and faces on the real library; a bad one is refused, named", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    local cube = bs.Solid.cuboid(1, 1, 1)
+    local ghost = v:show_solid(cube, 0.05, nil, { material = "glass", opacity = 0.5, faces = { 0, 1 } })
+    t.ok(ghost.id > 0, "a ghost of two faces was not shown")
+    ghost:remove()
+    t.ok(v:show_solid(cube, nil, nil, { material = "metal" }).id > 0, "a metal cube was not shown")
+    t.raises(function() v:show_solid(cube, nil, nil, { material = "chrome" }) end, "material: 'chrome' is not 'default'")
+    t.raises(function() v:show_solid(cube, nil, nil, { material = "_list" }) end, "material: '_list' is not")
+    t.raises(function() v:show_solid(cube, nil, nil, { faces = { 99 } }) end, "face 99 is not one of the solid's 6 faces")
+    v:close()
+  end)
+
   t.test("pick uses request_pick for viewport 0 and request_pick_in for another, and a refusal raises", function()
     local state = {}
     view.use(fake(state))
@@ -994,19 +1008,35 @@ return function(t)
     view._reset()
   end)
 
-  t.test("a library answering view ABI 1.8 (1.17 or 2.18) is refused with its version", function()
+  t.test("a library answering view ABI 1.8 (1.21 or 2.22) is refused with its version", function()
     local function answering(version)
       return { cadaclysm_view_abi_version = function() return version end }
     end
     local e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 8)) end, "view ABI 1.8")
-    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.18 or a later 1.x")
-    e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 18)) end, "view ABI 2.18")
-    t.eq(tostring(e), "stand-in: view ABI 2.18, this wrapper needs 1.18 or a later 1.x")
-    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 17)) end, "view ABI 1.17")
-    t.eq(tostring(e), "stand-in: view ABI 1.17, this wrapper needs 1.18 or a later 1.x")
-    -- 1.18 passes the gate (this stand-in then fails a later check, never the version's).
-    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 18))
-    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.18 passes the version gate: " .. tostring(why))
+    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.22 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 22)) end, "view ABI 2.22")
+    t.eq(tostring(e), "stand-in: view ABI 2.22, this wrapper needs 1.22 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 21)) end, "view ABI 1.21")
+    t.eq(tostring(e), "stand-in: view ABI 1.21, this wrapper needs 1.22 or a later 1.x")
+    -- 1.22 passes the gate (this stand-in then fails a later check, never the version's).
+    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 22))
+    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.22 passes the version gate: " .. tostring(why))
+  end)
+
+  t.test("occluded style: set, read back, a bad dim refused by the library, false restores the default", function()
+    local v = offscreen(64, 64)
+    if not v then return end
+    v:occluded_style{ dash = 10, gap = 5, dim = 0.25, colour = { 0.5, 0.5, 0.5 } }
+    local s = v:occluded_style()
+    t.ok(s.dash == 10 and s.gap == 5 and math.abs(s.dim - 0.25) < 1e-6 and s.colour[3] == 0.5, "occluded style round trip")
+    t.ok(not pcall(function() v:occluded_style{ dim = 1.5 } end), "dim 1.5 refused")
+    t.eq(v:occluded_style().dash, 10, "a refused style leaves the last one")
+    v:occluded_style{ colour = "#ff0000" }
+    t.eq(v:occluded_style().colour[1], 1, "colour text")
+    v:occluded_style(false)
+    local d = v:occluded_style()
+    t.ok(d.colour == nil and d.dash == 6 and d.gap == 4 and math.abs(d.dim - 0.5) < 1e-6, "default")
+    v:close()
   end)
 
   -- ---- view ABI 1.9: the lighting ----
@@ -1190,6 +1220,142 @@ return function(t)
     v:focus({ 0, 0, 0 })
     t.eq(changed(before, v:image()), 0, "focus back restores it")
     t.raises(function() v:focus({ 0 / 0, 0, 0 }) end, "cadaclysm_view_focus")
+    v:close()
+  end)
+
+  -- ---- view ABI 1.22: snapping ---------------------------------------------------------------
+
+  t.test("set_snap hands the library the kinds' bits and refuses an unknown name before it; snap, last_snap, clear_snap and set_work_plane reach it", function()
+    local state = {}
+    local f = fake(state)
+    local seen, answers = {}, {}
+    local function draws()
+      local n = 0
+      for _, c in ipairs(state.calls) do if c == "draw" then n = n + 1 end end
+      return n
+    end
+    f.C.cadaclysm_view_set_snap = function(_, s)
+      seen[#seen + 1] = ("settings %d %d %g %d"):format(s.size, s.kinds, s.aperture_px, s.marker)
+      return true
+    end
+    -- A call that succeeds clears the last error, as the real library's do.
+    f.C.cadaclysm_view_request_snap_in = function(_, vp, x, y) state.error = "" seen[#seen + 1] = ("request %d %d %d"):format(vp, x, y) end
+    f.C.cadaclysm_view_snap_result = function(_, out)
+      local a = table.remove(answers, 1)
+      if a == nil or a == "none" then state.error = "cadaclysm_view_snap_result: no snap result" return false end
+      state.error = ""
+      out.kind, out.item, out.node, out.face, out.edge, out.clicks = a[1], a[2] or 0, 0, 4, a[3], a[4] or 0
+      out.point[0], out.point[1], out.point[2] = 1, 2, 3
+      out.radius, out.distance_px = 0.5, 2.5
+      return true
+    end
+    f.C.cadaclysm_view_clear_snap = function() state.error = "" seen[#seen + 1] = "clear" end
+    f.C.cadaclysm_view_set_work_plane = function(_, o, x, n, step)
+      seen[#seen + 1] = ("plane %g %g %g / %g %g %g / %g %g %g / %g"):format(o[0], o[1], o[2], x[0], x[1], x[2], n[0], n[1], n[2], step)
+      return true
+    end
+    f.C.cadaclysm_view_clear_work_plane = function() seen[#seen + 1] = "no plane" return true end
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+
+    v:set_snap()
+    v:set_snap({ "vertex", "edge" }, { aperture_px = 6, marker = false })
+    v:set_snap("face")
+    v:set_snap(false)
+    t.eq(table.concat(seen, "; "), "settings 16 255 0 1; settings 16 17 6 0; settings 16 32 0 1; settings 16 0 0 1")
+    local before = #seen
+    local e = t.raises(function() v:set_snap({ "vertex", "corner" }) end, "snap kind")
+    t.ok(is_view_error(e))
+    t.eq(tostring(e), 'snap kind "corner": one of vertex, midpoint, centre, quadrant, edge, face, grid, plane')
+    t.eq(#seen, before, "refused before the library")
+
+    answers = { "none", "none", { 1, 3, 7 } }
+    local s = v:snap(10, 20)
+    t.ok(s and s.kind == "vertex" and s.item == 3 and s.face == 4 and s.edge == 7 and s.clicks == 0, "the answer was not read")
+    t.ok(s.point[1] == 1 and s.point[2] == 2 and s.point[3] == 3 and s.radius == 0.5 and s.distance_px == 2.5, "its point, radius, distance")
+    t.eq(seen[#seen], "request 0 10 20")
+    t.eq(draws(), 4, "drawn first (never drawn), then once a wait")
+    answers = { { 32, 3, 0xFFFFFFFF } }
+    t.eq(v:snap(1, 1, 2).edge, nil, "a face snap has no edge")
+    t.eq(seen[#seen], "request 2 1 1")
+    answers = { { 0, 0, 0xFFFFFFFF } }
+    t.eq(v:snap(0, 0), nil, "kind 0: nothing snapped")
+
+    local calls, asked = draws(), #seen
+    answers = { "none", { 2, 5, 1, 1 }, { 0, 0, 0xFFFFFFFF } }
+    t.eq(v:last_snap(), nil, "nothing landed yet")
+    local m = v:last_snap()
+    t.ok(m and m.kind == "midpoint" and m.item == 5 and m.edge == 1 and m.clicks == 1, "a landed click's snap")
+    t.eq(v:last_snap(), false, "a snap that found nothing")
+    t.eq(v:last_snap(), nil, "each answer is read once")
+    t.eq(draws(), calls, "last_snap never draws")
+    t.eq(#seen, asked, "last_snap never asks")
+
+    f.C.cadaclysm_view_snap_result = function() state.error = "cadaclysm_view_snap_result: the device was lost" return false end
+    e = t.raises(function() v:snap(1, 1) end, "device was lost")
+    t.eq(tostring(e), "cadaclysm_view_snap_result: the device was lost", "the library's own reason, bare, at once")
+    t.raises(function() v:last_snap() end, "device was lost")
+    state.error = ""
+
+    v:clear_snap()
+    v:set_work_plane({ 1, 2, 3 }, { 1, 0, 0 }, { 0, 0, 1 }, 0.5)
+    v:set_work_plane({ 0, 0, 0 })
+    v:set_work_plane(nil)
+    t.eq(table.concat(seen, "; ", #seen - 3), "clear; plane 1 2 3 / 1 0 0 / 0 0 1 / 0.5; plane 0 0 0 / 1 0 0 / 0 0 1 / 0; no plane")
+    t.raises(function() v:set_work_plane({ 1, 2 }) end, "set_work_plane origin: 3 numbers, not 2")
+    v:close()
+    view._reset()
+  end)
+
+  -- The square with its four edges, framed from the top. Not zoomed out: the test aims a few
+  -- pixels inside a corner.
+  local SQUARE_EDGES = { -1, -1, 0, 1, -1, 0, 1, -1, 0, 1, 1, 0, 1, 1, 0, -1, 1, 0, -1, 1, 0, -1, -1, 0 }
+  local function edged_square()
+    local v = offscreen(64, 48)
+    if not v then return nil end
+    v:layer("grid", false)
+    local item = v:show_mesh({ positions = SQUARE.positions, indices = SQUARE.indices, rgb = { 1, 0, 0 }, edges = SQUARE_EDGES })
+    v:standard("top")
+    v:frame()
+    return v, item
+  end
+
+  t.test("a snap on the real library finds the square's corner", function()
+    local v, item = edged_square()
+    if not v then return end
+    v:set_snap()
+    local img = v:image()
+    -- The topmost pixel that is not the background, the leftmost of its row: the top left corner.
+    local r0, g0, b0 = pixel(img, 0, 0)
+    local cx, cy
+    for y = 0, img.height - 1 do
+      for x = 0, img.width - 1 do
+        local r, g, b = pixel(img, x, y)
+        if r ~= r0 or g ~= g0 or b ~= b0 then cx, cy = x, y break end
+      end
+      if cx then break end
+    end
+    t.ok(cx, "the square drew nothing")
+    local s = v:snap(cx + 3, cy + 3)
+    t.ok(s and s.kind == "vertex" and s.item == item.id, "a snap inside the corner: " .. tostring(s and s.kind))
+    t.ok(math.abs(s.point[1] + 1) < 1e-6 and math.abs(s.point[2] - 1) < 1e-6 and math.abs(s.point[3]) < 1e-6,
+      ("the corner (-1, 1, 0), in the shown coordinates: %g %g %g"):format(s.point[1], s.point[2], s.point[3]))
+    t.ok(s.edge ~= nil and s.clicks == 0, "a vertex lies on an edge; snap's own answer is clicks 0")
+    v:clear_snap()
+    v:close()
+  end)
+
+  t.test("snapping is off until set_snap on the real library; false switches it off; an unknown kind is refused", function()
+    local v = edged_square()
+    if not v then return end
+    t.eq(v:snap(32, 24), nil, "a view starts with snapping off")
+    v:set_snap("face")
+    local s = v:snap(32, 24)
+    t.ok(s and s.kind == "face", "a face snap at the centre")
+    v:set_snap(false)
+    t.eq(v:snap(32, 24), nil, "false switches snapping off")
+    local e = t.raises(function() v:set_snap({ "vertex", "corner" }) end, "snap kind")
+    t.ok(tostring(e):find('snap kind "corner": one of vertex, midpoint', 1, true), tostring(e))
     v:close()
   end)
 

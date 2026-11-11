@@ -1128,15 +1128,25 @@ func test_fem_a_node_with_no_brep_meshes_from_its_own_triangles():
 	if not ok(mesh != null, "fem: " + Cadaclysm.last_error()):
 		return
 	var counts := fem_arrays(mesh, "fem")
-	# A mesh-only body: one face, every node on it, no topology at all -- and its census
-	# does run over the welded triangles, so an empty one here means "nothing found"
-	# rather than "not asked".
-	eq(mesh.from_mesh, true, "fem: a node with no brep did not report from_mesh")
-	eq(mesh.face_count, 1)
-	eq(mesh.edges.size(), 0)
-	eq(mesh.vertices.size(), 0)
-	for k in mesh.node_kind:
-		eq(k, 2, "fem: a from_mesh body has a node off a face")
+	# cube.scad is a mesh with no brep in the Reader flavour and an exact box where the
+	# reader library carries the kernel's builder (`cadaclysm-capi`'s `openscad-brep`, every
+	# shipped desktop library): the figures that differ are pinned both ways.
+	if scene.node(0).brep != null:
+		# The exact box: six faces, twelve edges, eight corners, the mesh the brep's.
+		eq(mesh.from_mesh, false, "fem: the exact cube has a brep, so the mesh is the brep's")
+		eq(mesh.face_count, 6)
+		eq(mesh.edges.size(), 12)
+		eq(mesh.vertices.size(), 8)
+	else:
+		# A mesh-only body: one face, every node on it, no topology at all -- and its census
+		# does run over the welded triangles, so an empty one here means "nothing found"
+		# rather than "not asked".
+		eq(mesh.from_mesh, true, "fem: a node with no brep did not report from_mesh")
+		eq(mesh.face_count, 1)
+		eq(mesh.edges.size(), 0)
+		eq(mesh.vertices.size(), 0)
+		for k in mesh.node_kind:
+			eq(k, 2, "fem: a from_mesh body has a node off a face")
 	eq(mesh.open_edges.size(), 0)
 	eq(mesh.folded_edges.size(), 0)
 	eq(mesh.crossings.size(), 0, "fem: the cube does not cross itself")
@@ -1195,11 +1205,18 @@ func test_fem_neither_tolerance_nor_max_size_is_pre_validated():
 	# `fem_mesh_of_mesh` takes no options at all, so a tolerance or a size the B-rep path
 	# refuses still comes back as a mesh here. Catches a wrapper that validated either
 	# field itself -- which passes every Python-shaped test and is wrong.
-	var scene := cube_scene()
+	# The open sheet, not the cube: a polyhedron is mesh-only in every flavour, where the
+	# cube is an exact box (which reads both fields) wherever the kernel's builder is linked.
+	var path := fixture(OPEN_SHEET)
+	if path == "":
+		return
+	var scene := CadaclysmScene.open_with(path, {"convention": "native"})
+	if not ok(scene != null, "fem: " + Cadaclysm.last_error()):
+		return
 	var node := scene.node(0)
 	for pair in [[0.0, 0.0], [-1.0, 0.0], [NAN, 0.0], [0.01, -1.0], [0.01, NAN], [0.01, INF]]:
 		var mesh: CadaclysmFemMesh = node.fem_mesh(pair[0], pair[1])
-		ok(mesh != null and mesh.nodes.size() == 24,
+		ok(mesh != null and mesh.from_mesh and mesh.nodes.size() == 15,
 			"fem: tolerance %s max_size %s did not mesh on the mesh-only path: %s" % [pair[0], pair[1], Cadaclysm.last_error()])
 	scene.close()
 

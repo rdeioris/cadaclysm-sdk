@@ -10,7 +10,7 @@
 // table rigged (windows forced offscreen, run faked) the void calls' refusals, show()/view()'s
 // titles, up axes and camera, and run()'s camera Y up; an item removed; a scene posed and back at rest, an empty pose refused, a nested node with its
 // siblings hidden, Scene::close releasing what shows it (and refused while another thread's
-// view shows it); and a closed view's refusals. The terminal half skips without
+// view shows it); and a closed view's refusals; 1.22's snapping (rigged: the kinds' bits, the answer whole, the work plane; on the GPU: the square's corner). The terminal half skips without
 // cadaclysm_terminal unless CADACLYSM_REQUIRE_TERMINAL=1; the GPU half without cadaclysm_view
 // or an adapter unless CADACLYSM_REQUIRE_WGPU is set.
 //
@@ -231,6 +231,44 @@ std::uint32_t show_points(CadaclysmView*, const float* p, std::uint32_t n, const
     return 17;
 }
 }  // namespace points
+
+// ---- view ABI 1.22's snapping, on the wgpu table rigged: what set_snap and the work plane get --
+
+namespace snapspy {
+CadaclysmViewSnapSettings settings{};
+int sets = 0;
+std::string calls;  // request_snap_in, clear_snap and the work plane calls, in order
+CadaclysmViewSnap answer{};
+bool landed = true;  // snap_result answers `answer`; else false, spy::said saying why
+bool set_snap(CadaclysmView*, const CadaclysmViewSnapSettings* s) {
+    settings = *s;
+    ++sets;
+    return true;
+}
+void request_snap_in(CadaclysmView*, std::uint32_t viewport, std::uint32_t x, std::uint32_t y) {
+    calls += "snap " + std::to_string(viewport) + " " + std::to_string(x) + " " + std::to_string(y) + ";";
+}
+// `answer`, up to the caller's size as the library writes it.
+bool snap_result(CadaclysmView*, CadaclysmViewSnap* out) {
+    if (!landed) return false;
+    CadaclysmViewSnap a = answer;
+    a.size = out->size;
+    std::memcpy(out, &a, out->size < sizeof a ? out->size : sizeof a);
+    return true;
+}
+void clear_snap(CadaclysmView*) { calls += "clear;"; }
+bool set_work_plane(CadaclysmView*, const double* o, const double* x, const double* n, double step) {
+    char text[192];
+    std::snprintf(text, sizeof text, "plane %g %g %g, %g %g %g, %g %g %g, %g;", o[0], o[1], o[2], x[0], x[1], x[2], n[0],
+                  n[1], n[2], step);
+    calls += text;
+    return true;
+}
+bool clear_work_plane(CadaclysmView*) {
+    calls += "ground;";
+    return true;
+}
+}  // namespace snapspy
 
 // A colour is three or four numbers or text: two numbers do not compile.
 static_assert(!std::is_constructible<cadaclysm::Colour, float, float>::value, "Colour(r, g) compiles");
@@ -765,6 +803,102 @@ static void rigged_half(View& view, const cadaclysm::ViewLibrary& wgpu, const st
     t.set_double_click_frames = saved.set_double_click_frames;
     t.focus = saved.focus;
     t.navigation = saved.navigation;
+    t.last_error = saved.last_error;
+    // 1.22's snapping, rigged: set_snap's bits, aperture and marker (an unknown kind refused
+    // before the library); snap's request and its answer whole (no edge for a face snap, kind ""
+    // for nothing); last_snap; clear_snap and the work plane's arrays, and the ground plane back.
+    t.last_error = &spy::last_error;
+    t.set_snap = &snapspy::set_snap;
+    t.request_snap_in = &snapspy::request_snap_in;
+    t.snap_result = &snapspy::snap_result;
+    t.clear_snap = &snapspy::clear_snap;
+    t.set_work_plane = &snapspy::set_work_plane;
+    t.clear_work_plane = &snapspy::clear_work_plane;
+    {
+        spy::said = nullptr;
+        cadaclysm::Result<void> all = view.set_snap();
+        CHECK(all && snapspy::settings.size == 16 && snapspy::settings.kinds == 0xFFu &&
+                  snapspy::settings.aperture_px == 0.0f && snapspy::settings.marker == 1u,
+              "set_snap(): %s, kinds 0x%x marker %u", refused(all).c_str(), snapspy::settings.kinds,
+              snapspy::settings.marker);
+        cadaclysm::Result<void> two = view.set_snap(std::vector<std::string>{"vertex", "edge"}, 6.0f, false);
+        CHECK(two && snapspy::settings.kinds == 0x11u && snapspy::settings.aperture_px == 6.0f &&
+                  snapspy::settings.marker == 0u,
+              "set_snap(vertex, edge): %s, kinds 0x%x", refused(two).c_str(), snapspy::settings.kinds);
+        CHECK(view.set_snap(std::vector<std::string>{"face"}) && snapspy::settings.kinds == 32u, "one kind alone");
+        CHECK(view.set_snap(std::nullopt) && snapspy::settings.kinds == 0u, "nullopt switches snapping off");
+        const int before = snapspy::sets;
+        const std::string corner = refused(view.set_snap(std::vector<std::string>{"vertex", "corner"}));
+        CHECK(corner == "snap kind 'corner': one of vertex, midpoint, centre, quadrant, edge, face, grid, plane" &&
+                  snapspy::sets == before,
+              "an unknown kind: %s", corner.c_str());
+
+        snapspy::calls.clear();
+        snapspy::answer = CadaclysmViewSnap{};
+        snapspy::answer.kind = CADACLYSM_VIEW_SNAP_VERTEX;
+        snapspy::answer.point[0] = -1.0;
+        snapspy::answer.point[1] = 1.0;
+        snapspy::answer.item = 3;
+        snapspy::answer.node = 4;
+        snapspy::answer.face = 5;
+        snapspy::answer.edge = 2;
+        snapspy::answer.tangent[0] = 1.0f;
+        snapspy::answer.distance_px = 2.5f;
+        cadaclysm::Result<cadaclysm::ViewSnap> vertex = view.snap(10, 20, 1);
+        const bool whole = vertex && vertex->kind == "vertex" && vertex->point[0] == -1.0 && vertex->point[1] == 1.0 &&
+                           vertex->point[2] == 0.0 && vertex->item == 3 && vertex->node == 4 && vertex->face == 5 &&
+                           vertex->edge && *vertex->edge == 2 && vertex->tangent[0] == 1.0f &&
+                           vertex->distance_px == 2.5f && vertex->clicks == 0;
+        CHECK(whole, "the vertex snap: %s", vertex ? vertex->kind.c_str() : refused(vertex).c_str());
+        CHECK(snapspy::calls == "snap 1 10 20;", "snap asked %s", snapspy::calls.c_str());
+        snapspy::answer = CadaclysmViewSnap{};
+        snapspy::answer.kind = CADACLYSM_VIEW_SNAP_CENTRE;
+        snapspy::answer.axis[2] = 1.0f;
+        snapspy::answer.radius = 2.5;
+        cadaclysm::Result<cadaclysm::ViewSnap> centre = view.snap(1, 1);
+        CHECK(centre && centre->kind == "centre" && centre->axis[2] == 1.0f && centre->radius == 2.5,
+              "the centre snap: %s", centre ? centre->kind.c_str() : refused(centre).c_str());
+        snapspy::answer = CadaclysmViewSnap{};
+        snapspy::answer.kind = CADACLYSM_VIEW_SNAP_FACE;
+        snapspy::answer.item = 3;
+        snapspy::answer.edge = 0xFFFFFFFFu;
+        cadaclysm::Result<cadaclysm::ViewSnap> face = view.snap(1, 1);
+        CHECK(face && face->kind == "face" && !face->edge, "a face snap has no edge: %s",
+              face ? face->kind.c_str() : refused(face).c_str());
+        snapspy::answer = CadaclysmViewSnap{};
+        cadaclysm::Result<cadaclysm::ViewSnap> nothing = view.snap(1, 1);
+        CHECK(nothing && nothing->kind.empty(), "kind 0 is nothing snapped: %s",
+              nothing ? nothing->kind.c_str() : refused(nothing).c_str());
+
+        snapspy::answer.kind = CADACLYSM_VIEW_SNAP_EDGE;
+        snapspy::answer.clicks = 1;
+        cadaclysm::Result<std::optional<cadaclysm::ViewSnap>> landed = view.last_snap();
+        CHECK(landed && *landed && (*landed)->kind == "edge" && (*landed)->clicks == 1, "last_snap, landed: %s",
+              refused(landed).c_str());
+        snapspy::landed = false;
+        spy::said = "cadaclysm_view_snap_result: no snap result";
+        cadaclysm::Result<std::optional<cadaclysm::ViewSnap>> waiting = view.last_snap();
+        CHECK(waiting && !*waiting, "last_snap, nothing landed yet: %s", refused(waiting).c_str());
+        spy::said = "boom from snap_result";
+        cadaclysm::Result<std::optional<cadaclysm::ViewSnap>> broke = view.last_snap();
+        CHECK(refused(broke) == "boom from snap_result", "last_snap, a refusal: %s", refused(broke).c_str());
+        spy::said = nullptr;
+        snapspy::landed = true;
+
+        CHECK(view.clear_snap(), "clear_snap");
+        CHECK(view.set_work_plane(std::array<double, 3>{1, 2, 3}, {1, 0, 0}, {0, 0, 1}, 0.5), "set_work_plane");
+        CHECK(view.set_work_plane(std::nullopt), "the ground plane back");
+        const std::string tail = "clear;plane 1 2 3, 1 0 0, 0 0 1, 0.5;ground;";
+        CHECK(snapspy::calls.size() >= tail.size() &&
+                  snapspy::calls.compare(snapspy::calls.size() - tail.size(), tail.size(), tail) == 0,
+              "the library saw %s", snapspy::calls.c_str());
+    }
+    t.set_snap = saved.set_snap;
+    t.request_snap_in = saved.request_snap_in;
+    t.snap_result = saved.snap_result;
+    t.clear_snap = saved.clear_snap;
+    t.set_work_plane = saved.set_work_plane;
+    t.clear_work_plane = saved.clear_work_plane;
     t.last_error = saved.last_error;
 
     // show() on the wgpu library runs its window, a solid titled "Solid", Z up; view() answers
@@ -1325,6 +1459,67 @@ static void double_click_case() {
     }
 }
 
+// ---- view ABI 1.22 on the real library: a snap finds the square's corner -------------------
+
+// Python's test_a_snap_on_the_real_library_finds_the_squares_corner and
+// test_snapping_is_off_until_set_snap: the red square with its four sides, from the top, on a
+// 64 x 48 view. Snapping is off until set_snap; then a snap 3 pixels inside the topmost (then
+// leftmost) pixel that is not the background answers that corner, (-1, 1, 0), as a vertex of
+// the square's item, on an edge, asked by the host; a face snap lands on the face; off again,
+// nothing.
+static void snap_case() {
+    auto made = View::offscreen(64, 48);
+    CHECK(made, "offscreen: %s", refused(made).c_str());
+    if (!made) return;
+    View v = std::move(*made);
+    CHECK(v.layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
+    const std::vector<float> square{-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0};
+    std::vector<float> outline;
+    for (int i = 0; i < 4; ++i)
+        for (int k : {i, (i + 1) % 4})
+            for (int c = 0; c < 3; ++c) outline.push_back(square[static_cast<std::size_t>(3 * k + c)]);
+    auto item = v.show_mesh(square, {0, 1, 2, 0, 2, 3}, {}, outline, std::array<float, 3>{1, 0, 0});
+    CHECK(item, "show_mesh: %s", refused(item).c_str());
+    if (!item) return;
+    CHECK(v.standard("top") && v.frame(), "the square from the top");
+    ViewImage img = frame_of(v);
+    cadaclysm::Result<cadaclysm::ViewSnap> off = v.snap(32, 24);
+    CHECK(off && off->kind.empty(), "a view starts with snapping off: %s",
+          off ? off->kind.c_str() : refused(off).c_str());
+    CHECK(v.set_snap(), "set_snap");
+    if (img.rgba.empty()) return;
+    const std::array<std::uint8_t, 4> background = at(img, 0, 0);
+    std::uint32_t cx = 0, cy = 0;
+    bool found = false;
+    for (std::uint32_t y = 0; y < img.height && !found; ++y)
+        for (std::uint32_t x = 0; x < img.width && !found; ++x) {
+            const std::array<std::uint8_t, 4> p = at(img, x, y);
+            if (p[0] != background[0] || p[1] != background[1] || p[2] != background[2]) {
+                cx = x;
+                cy = y;
+                found = true;
+            }
+        }
+    CHECK(found, "the square drew nothing");
+    if (!found) return;
+    cadaclysm::Result<cadaclysm::ViewSnap> s = v.snap(cx + 3, cy + 3);
+    CHECK(s && s->kind == "vertex" && s->item == item->id(), "the corner's snap: %s (item %u)",
+          s ? s->kind.c_str() : refused(s).c_str(), s ? s->item : 0u);
+    if (s)
+        CHECK(std::abs(s->point[0] + 1.0) < 1e-6 && std::abs(s->point[1] - 1.0) < 1e-6 && std::abs(s->point[2]) < 1e-6,
+              "the corner is (-1, 1, 0), not (%g, %g, %g)", s->point[0], s->point[1], s->point[2]);
+    CHECK(s && s->edge && s->clicks == 0, "a vertex snap lies on an edge, asked by the host");
+    CHECK(v.clear_snap(), "clear_snap");
+    CHECK(v.set_snap(std::vector<std::string>{"face"}), "set_snap face");
+    cadaclysm::Result<cadaclysm::ViewSnap> face = v.snap(32, 24);
+    CHECK(face && face->kind == "face" && face->item == item->id() && !face->edge, "the face snap: %s",
+          face ? face->kind.c_str() : refused(face).c_str());
+    CHECK(v.set_snap(std::nullopt), "snapping off");
+    cadaclysm::Result<cadaclysm::ViewSnap> none = v.snap(32, 24);
+    CHECK(none && none->kind.empty(), "snapping off answers nothing: %s",
+          none ? none->kind.c_str() : refused(none).c_str());
+}
+
 // ---- the plate of web/test/fixtures/machining-plate, offscreen on the real library (F7) ------
 
 static std::string read_file(const std::string& path) {
@@ -1572,6 +1767,7 @@ int main(int argc, char** argv) {
     colour_text(mechanism);
     text_case(font_path);
     double_click_case();
+    snap_case();
     plate_case(mechanism, ".");
 
     // A solid by handle: its item keeps it alive after the Solid is gone.
@@ -1634,6 +1830,31 @@ int main(int argc, char** argv) {
     CHECK(view.lighting("headlight"), "lighting headlight");
     lit = view.lighting();
     CHECK(lit && *lit == "headlight", "lighting after headlight: %s", lit ? lit->c_str() : refused(lit).c_str());
+    // 1.20's occluded style: the defaults first, a set one (with a colour) read back, a refused
+    // one (a negative dash) leaving it as it was, and the defaults again.
+    {
+        cadaclysm::Result<cadaclysm::OccludedStyle> before = view.occluded_style();
+        CHECK(before && before->dash == 6.0f && before->gap == 4.0f && before->dim == 0.5f && !before->colour.has_value(),
+              "occluded style at first: %s", before ? "not the defaults" : refused(before).c_str());
+        cadaclysm::OccludedStyle style;
+        style.dash = 10.0f;
+        style.gap = 5.0f;
+        style.dim = 0.25f;
+        style.colour = std::array<float, 3>{0.5f, 0.25f, 0.75f};
+        CHECK(view.occluded_style(style), "occluded style set");
+        cadaclysm::Result<cadaclysm::OccludedStyle> back = view.occluded_style();
+        CHECK(back && back->dash == 10.0f && back->gap == 5.0f && back->dim == 0.25f && back->colour.has_value() &&
+                  (*back->colour)[0] == 0.5f && (*back->colour)[1] == 0.25f && (*back->colour)[2] == 0.75f,
+              "occluded style read back: %s", back ? "other values" : refused(back).c_str());
+        cadaclysm::OccludedStyle bad = style;
+        bad.dash = -1.0f;
+        CHECK(!view.occluded_style(bad), "a negative dash accepted");
+        back = view.occluded_style();
+        CHECK(back && back->dash == 10.0f, "a refused style changed it");
+        CHECK(view.occluded_style(cadaclysm::OccludedStyle()), "occluded style defaults");
+        back = view.occluded_style();
+        CHECK(back && back->dash == 6.0f && !back->colour.has_value(), "the defaults were not restored");
+    }
     if (item) {
         auto posed = item->node_transforms(std::vector<std::array<double, 16>>{});
         CHECK(!posed && !posed.error().message.empty(), "node transforms on a solid were accepted");

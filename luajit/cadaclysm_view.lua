@@ -44,7 +44,10 @@ local M = {}
 -- 1.11: cadaclysm_view_show_points.
 -- 1.13: cadaclysm_view_set_occluded.
 -- 1.18: cadaclysm_view_set_finish.
-local ABI_MAJOR, ABI_MINOR = 1, 18
+-- 1.20: cadaclysm_view_set_occluded_style and _occluded_style (View:occluded_style).
+-- 1.21: cadaclysm_view_show_solid_faces (a solid in a material and an opacity, all or some faces).
+-- 1.22: snapping -- cadaclysm_view_set_snap, _request_snap_in, _snap_result, _clear_snap, _set_work_plane, _clear_work_plane.
+local ABI_MAJOR, ABI_MINOR = 1, 22
 local NAVIGATION_FLY = 1   -- CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0)
 local OPEN, CLOSED = 1, 2
 local INPUT_CLOSE, NONE_COMING = 1, 0xFFFFFFFF
@@ -68,6 +71,7 @@ ALIGN._list = { "top-left", "top", "top-right", "left", "centre", "center", "rig
 local TEXT_MODES = names({ "label", "world" })
 local OCCLUDED = names({ "off", "solid", "dashed" })
 local FINISH = names({ "gloss", "satin", "matte" })
+local MATERIAL = names({ "default", "plastic", "metal", "matte", "paint", "brushed", "glass" })
 local POINTERS = names({ "mouse", "touch", "pen" })
 local CAMERA_KINDS = names({ "orbit", "fly", "ortho", "fixed" })
 local EVENTS = { pointer_down = 1, pointer_move = 2, pointer_up = 3, pointer_cancel = 4, wheel = 5, key = 6,
@@ -303,7 +307,8 @@ local ENTRY_POINTS = {
   "cadaclysm_view_request_pick_in", "cadaclysm_view_pick_result", "cadaclysm_view_frame_node", "cadaclysm_view_look",
   "cadaclysm_view_dolly", "cadaclysm_view_input", "cadaclysm_view_show_mesh", "cadaclysm_view_show_lines",
   "cadaclysm_view_show_points", "cadaclysm_view_show_curves", "cadaclysm_view_show_image", "cadaclysm_view_set_colour", "cadaclysm_view_set_xray", "cadaclysm_view_set_occluded", "cadaclysm_view_set_finish",
-  "cadaclysm_view_set_face_colours", "cadaclysm_view_set_placement", "cadaclysm_view_show_solid", "cadaclysm_view_image",
+  "cadaclysm_view_set_face_colours", "cadaclysm_view_set_placement", "cadaclysm_view_show_solid",
+  "cadaclysm_view_show_solid_faces", "cadaclysm_view_image",
   "cadaclysm_view_size", "cadaclysm_view_set_lod", "cadaclysm_view_wake_ms", "cadaclysm_view_set_node_transforms",
   "cadaclysm_view_show_machining", "cadaclysm_view_machining_seek", "cadaclysm_view_machining_colour_by",
   "cadaclysm_view_machining_overlays", "cadaclysm_view_machining_info", "cadaclysm_view_machining_heights",
@@ -313,10 +318,13 @@ local ENTRY_POINTS = {
   "cadaclysm_view_parse_colour", "cadaclysm_view_load_font", "cadaclysm_view_show_text", "cadaclysm_view_set_text",
   "cadaclysm_view_set_double_click_frames", "cadaclysm_view_focus", "cadaclysm_view_navigation",
   "cadaclysm_view_set_lighting", "cadaclysm_view_lighting",
+  "cadaclysm_view_set_occluded_style", "cadaclysm_view_occluded_style",
   "cadaclysm_view_viewport_camera", "cadaclysm_view_set_viewport_camera", "cadaclysm_view_set_viewport_rects",
   "cadaclysm_view_aim", "cadaclysm_view_set_pivot", "cadaclysm_view_set_tap", "cadaclysm_view_orbit_in",
   "cadaclysm_view_pan_in", "cadaclysm_view_zoom_in", "cadaclysm_view_look_in", "cadaclysm_view_dolly_in",
   "cadaclysm_view_frame_in", "cadaclysm_view_standard_in",
+  "cadaclysm_view_set_snap", "cadaclysm_view_request_snap_in", "cadaclysm_view_snap_result",
+  "cadaclysm_view_clear_snap", "cadaclysm_view_set_work_plane", "cadaclysm_view_clear_work_plane",
 }
 
 local open_views = {}   -- windows of a view's own on the wgpu library, in the order made
@@ -562,11 +570,27 @@ function View:show(obj, rgb, tolerance)
   fail("show: a Solid, Scene or Node, not " .. describe(obj), 2)
 end
 
-function View:show_solid(solid, tolerance, rgb)
+-- `opts` (view ABI 1.21, each optional): `material` "default", "plastic", "metal", "matte",
+-- "paint", "brushed" or "glass"; `opacity` 0..1 (1 opaque); `faces` the solid's face numbers to
+-- show alone, with no edges -- a trim's ghost (nil: every face). None of them: the 1.4 call. The
+-- item's faces are numbered as the solid numbers them.
+function View:show_solid(solid, tolerance, rgb, opts)
   if kind_of(solid) ~= "solid" then fail("show_solid: a Solid, not " .. describe(solid), 2) end
   tolerance = tolerance == nil and 0.05 or number(tolerance, "show_solid tolerance")
   local colour = floats3(rgb, "show_solid rgb", self._lib)
-  return self:_item(self._lib.C.cadaclysm_view_show_solid(self:_live("cadaclysm_view_show_solid"), solid:_h(), tolerance, colour), solid)
+  if opts ~= nil and type(opts) ~= "table" then fail("show_solid opts: a table, not " .. describe(opts), 2) end
+  if opts == nil or (opts.material == nil and opts.opacity == nil and opts.faces == nil) then
+    return self:_item(self._lib.C.cadaclysm_view_show_solid(self:_live("cadaclysm_view_show_solid"), solid:_h(), tolerance, colour), solid)
+  end
+  local m = opts.material == nil and 0 or MATERIAL[opts.material]
+  if type(m) ~= "number" then
+    fail(("material: '%s' is not 'default', 'plastic', 'metal', 'matte', 'paint', 'brushed' or 'glass'"):format(tostring(opts.material)), 2)
+  end
+  local opacity = opts.opacity == nil and 1 or number(opts.opacity, "show_solid opacity")
+  local faces, n = nil, 0
+  if opts.faces ~= nil then faces, n = carray("uint32_t", opts.faces, "show_solid faces") end
+  return self:_item(self._lib.C.cadaclysm_view_show_solid_faces(self:_live("cadaclysm_view_show_solid_faces"), solid:_h(), tolerance,
+    colour, m, opacity, faces, n), solid)
 end
 
 function View:show_scene(scene, shown)
@@ -958,6 +982,31 @@ function View:lighting(name)
   end
   ok(self, self._lib.C.cadaclysm_view_set_lighting(self:_live("cadaclysm_view_set_lighting"), name_of(LIGHTING, name, "lighting")))
 end
+--- How every "dashed" item's hidden lines and points look, view-wide: `t.dash` and `t.gap`
+--- in points (6, 4), `t.dim` the coverage kept (0.5), `t.colour` one colour for all of them
+--- (text or three numbers; nil: each line's own). Every key is optional. `false` sets the
+--- default back; no argument reads the style back: { dash, gap, dim, colour = nil | {r, g, b} }.
+function View:occluded_style(t)
+  local C = self._lib.C
+  if t == nil then
+    local out = ffi.new("CadaclysmViewOccludedStyle", { size = ffi.sizeof("CadaclysmViewOccludedStyle") })
+    ok(self, C.cadaclysm_view_occluded_style(self:_live("cadaclysm_view_occluded_style"), out))
+    local colour = out.has_colour ~= 0 and { out.colour[0], out.colour[1], out.colour[2] } or nil
+    return { dash = out.dash, gap = out.gap, dim = out.dim, colour = colour }
+  end
+  if t == false then
+    ok(self, C.cadaclysm_view_set_occluded_style(self:_live("cadaclysm_view_set_occluded_style"), nil))
+    return
+  end
+  if type(t) ~= "table" then fail("occluded_style: a table, false, or nothing", 2) end
+  local s = ffi.new("CadaclysmViewOccludedStyle", { size = ffi.sizeof("CadaclysmViewOccludedStyle"),
+    dash = t.dash or 6, gap = t.gap or 4, dim = t.dim or 0.5, has_colour = t.colour ~= nil and 1 or 0 })
+  if t.colour ~= nil then
+    local rgb = floats3(t.colour, "occluded_style colour", self._lib)
+    s.colour[0], s.colour[1], s.colour[2] = rgb[0], rgb[1], rgb[2]
+  end
+  ok(self, C.cadaclysm_view_set_occluded_style(self:_live("cadaclysm_view_set_occluded_style"), s))
+end
 function View:needs_draw() return self._lib.C.cadaclysm_view_needs_draw(self:_live("cadaclysm_view_needs_draw")) end
 
 -- A hit as every pick answer carries it (Python's `_pick_dict`): the item, node and face,
@@ -1009,6 +1058,109 @@ function View:last_pick()
   local waiting = last_error(self._lib)
   if waiting ~= "" and waiting:sub(-14) ~= "no pick result" then fail(waiting, 2) end
   return nil
+end
+
+-- ---- snapping (view ABI 1.22) ----------------------------------------------------------------
+-- A block of its own: it adds no local to the main chunk (LuaJIT allows 200).
+do
+  -- The CADACLYSM_VIEW_SNAP_* bits by the names set_snap takes and a snap's `kind` reports:
+  -- bit n is the nth name.
+  local SNAP_KINDS = names({ "vertex", "midpoint", "centre", "quadrant", "edge", "face", "grid", "plane" })
+  local SNAP_NONE = 0xFFFFFFFF   -- CadaclysmViewSnap.edge where the snap is on no edge
+
+  -- A snap answer as Python's `_snap_dict`; nil for kind 0 (nothing snapped).
+  local function snap_of(raw)
+    if raw.kind == 0 then return nil end
+    local kind = tostring(raw.kind)
+    for i, n in ipairs(SNAP_KINDS._list) do
+      if raw.kind == bit.lshift(1, i - 1) then kind = n break end
+    end
+    return { kind = kind, point = { raw.point[0], raw.point[1], raw.point[2] }, item = raw.item, node = raw.node,
+      face = raw.face, edge = raw.edge ~= SNAP_NONE and raw.edge or nil,
+      tangent = { raw.tangent[0], raw.tangent[1], raw.tangent[2] }, axis = { raw.axis[0], raw.axis[1], raw.axis[2] },
+      radius = raw.radius, distance_px = raw.distance_px, clicks = raw.clicks }
+  end
+
+  --- What a snap may land on (Python's `set_snap`): "all" (or no argument), one kind's name, a
+  --- list of names, or false to switch snapping off -- "vertex", "midpoint", "centre" (a circular
+  --- edge's), "quadrant", "edge", "face", "grid" and "plane". `opts.aperture_px`: how far from the
+  --- cursor a point kind may lie (0, the default: the library's 10 points); `opts.marker` (default
+  --- true): whether the view draws its marker at the snap. A view starts with snapping off. Once
+  --- on, a mouse over a view in its own window snaps, and so does a click (`last_snap` reads
+  --- them); `snap` asks one at any pixel. Where kinds compete, a corner beats the face it is on.
+  function View:set_snap(kinds, opts)
+    local bits = 0
+    if kinds == nil or kinds == "all" then
+      bits = 0xFF
+    elseif kinds ~= false then
+      for _, n in ipairs(type(kinds) == "table" and kinds or { kinds }) do
+        bits = bit.bor(bits, bit.lshift(1, name_of(SNAP_KINDS, n, "snap kind")))
+      end
+    end
+    if opts ~= nil and type(opts) ~= "table" then fail("set_snap options: a table, not " .. describe(opts), 2) end
+    opts = opts or {}
+    local aperture = opts.aperture_px == nil and 0 or number(opts.aperture_px, "set_snap aperture_px")
+    local s = ffi.new("CadaclysmViewSnapSettings", { size = ffi.sizeof("CadaclysmViewSnapSettings"),
+      kinds = bits, aperture_px = aperture, marker = opts.marker == false and 0 or 1 })
+    ok(self, self._lib.C.cadaclysm_view_set_snap(self:_live("cadaclysm_view_set_snap"), s))
+  end
+
+  --- The snap under pixel (x, y) of `viewport` (default 0): { kind, point, item, node, face, edge,
+  --- tangent, axis, radius, distance_px, clicks }, or nil where nothing in the kinds set_snap chose
+  --- lies there -- always nil while snapping is off. Draws until the answer lands, as `pick` does
+  --- (a never-drawn view first). A failure other than "no answer yet" raises the library's message.
+  function View:snap(x, y, viewport)
+    uint(x, "snap x"); uint(y, "snap y")
+    viewport = viewport == nil and 0 or uint(viewport, "snap viewport")
+    if not self._drawn then self:draw() end
+    local p = self:_live("cadaclysm_view_request_snap_in")
+    self._lib.C.cadaclysm_view_request_snap_in(p, viewport, x, y)
+    void_ok(self)
+    local out = ffi.new("CadaclysmViewSnap", { size = ffi.sizeof("CadaclysmViewSnap") })
+    local waiting = ""
+    for _ = 1, 200 do
+      self:draw()
+      if self._lib.C.cadaclysm_view_snap_result(p, out) then return snap_of(out) end
+      waiting = last_error(self._lib)
+      if waiting ~= "" and waiting:sub(-14) ~= "no snap result" then fail(waiting, 2) end
+      sleep_ms(10)
+    end
+    fail("snap: the answer never landed (" .. (waiting ~= "" and waiting or "no error reported") .. ")", 2)
+  end
+
+  --- The newest snap answer that has landed, without asking or waiting (Python's `last_snap`): a
+  --- hover or click in the view's own window (`pump` lands them as it draws), or one `snap` asked.
+  --- nil while none has; false for a snap that found nothing; else a snap table. Each answer is
+  --- read once; a hover's never replaces a click's not read yet.
+  function View:last_snap()
+    local out = ffi.new("CadaclysmViewSnap", { size = ffi.sizeof("CadaclysmViewSnap") })
+    if self._lib.C.cadaclysm_view_snap_result(self:_live("cadaclysm_view_snap_result"), out) then return snap_of(out) or false end
+    local waiting = last_error(self._lib)
+    if waiting ~= "" and waiting:sub(-14) ~= "no snap result" then fail(waiting, 2) end
+    return nil
+  end
+
+  --- Hides the snap marker and drops any snap asked or answered and not yet read.
+  function View:clear_snap()
+    self._lib.C.cadaclysm_view_clear_snap(self:_live("cadaclysm_view_clear_snap"))
+    void_ok(self)
+  end
+
+  --- The plane "grid" and "plane" snaps land on, in place of the ground grid: through `origin`,
+  --- its grid lines along `x_axis` ({1, 0, 0}) and across it, `step` apart (0: the ground grid's
+  --- spacing), facing `normal` ({0, 0, 1}). nil or false as `origin` puts the ground grid back.
+  function View:set_work_plane(origin, x_axis, normal, step)
+    local C = self._lib.C
+    if origin == nil or origin == false then
+      ok(self, C.cadaclysm_view_clear_work_plane(self:_live("cadaclysm_view_clear_work_plane")))
+      return
+    end
+    local o = exactly("double", origin, 3, "set_work_plane origin")
+    local x = exactly("double", x_axis or { 1, 0, 0 }, 3, "set_work_plane x_axis")
+    local n = exactly("double", normal or { 0, 0, 1 }, 3, "set_work_plane normal")
+    step = step == nil and 0 or number(step, "set_work_plane step")
+    ok(self, C.cadaclysm_view_set_work_plane(self:_live("cadaclysm_view_set_work_plane"), o, x, n, step))
+  end
 end
 
 function View:draw() ok(self, self._lib.C.cadaclysm_view_draw(self:_live("cadaclysm_view_draw"))); self._drawn = true end

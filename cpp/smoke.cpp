@@ -295,7 +295,7 @@ static Result<void> fem_census_wiring(const std::string& sheet) {
 // `from_mesh` is true, there are no edges and no vertices, and -- the trap the plan names
 // -- `fem_mesh_of_mesh` reads no options at all, so a tolerance or a size the B-rep path
 // refuses still comes back as a mesh.
-static Result<void> fem_reader(const cadaclysm::Scene& scene, bool is_cube) {
+static Result<void> fem_reader(const cadaclysm::Scene& scene, bool is_cube, const std::string& path) {
     std::vector<cadaclysm::Node> bodies = scene.walk();
     auto body = std::find_if(bodies.begin(), bodies.end(), [](const cadaclysm::Node& n) { return n.can_mesh(); });
     EXPECT(body != bodies.end(), "fem: no meshable node");
@@ -304,13 +304,23 @@ static Result<void> fem_reader(const cadaclysm::Scene& scene, bool is_cube) {
     CADACLYSM_TRY(vertices, mesh.vertices());
     CADACLYSM_TRY_VOID(fem_arrays(mesh, edges.size(), vertices.size(), "fem reader"));
 
-    // A mesh-only body: one face, every node on it, no topology at all -- and its census
-    // does run over the welded triangles, so an empty one here means "nothing found".
-    EXPECT(mesh.from_mesh(), "fem: a node with no brep did not report from_mesh");
-    cadaclysm::Span<const std::uint32_t> kinds = mesh.node_kind();
-    EXPECT(mesh.face_count() == 1 && edges.empty() && vertices.empty() &&
-               std::all_of(kinds.begin(), kinds.end(), [](std::uint32_t k) { return k == 2; }),
-           "fem: a from_mesh body has edges, vertices or a node off face 0");
+    // The exact cube (a reader library with the kernel's `openscad-brep`, every shipped desktop
+    // one) is a B-rep body: six faces, twelve edges, eight corners. The mesh cube (the Reader
+    // flavour's) is the mesh-only body the rest of this function is about.
+    const bool exact = is_cube && body->brep().has_value();
+    if (exact) {
+        EXPECT(!mesh.from_mesh() && mesh.face_count() == 6 && edges.size() == 12 && vertices.size() == 8,
+               "fem: the exact cube has " + std::to_string(mesh.face_count()) + " faces, " + std::to_string(edges.size()) +
+                   " edges, " + std::to_string(vertices.size()) + " vertices");
+    } else {
+        // A mesh-only body: one face, every node on it, no topology at all -- and its census
+        // does run over the welded triangles, so an empty one here means "nothing found".
+        EXPECT(mesh.from_mesh(), "fem: a node with no brep did not report from_mesh");
+        cadaclysm::Span<const std::uint32_t> kinds = mesh.node_kind();
+        EXPECT(mesh.face_count() == 1 && edges.empty() && vertices.empty() &&
+                   std::all_of(kinds.begin(), kinds.end(), [](std::uint32_t k) { return k == 2; }),
+               "fem: a from_mesh body has edges, vertices or a node off face 0");
+    }
     CADACLYSM_TRY(open, mesh.open_edges());
     CADACLYSM_TRY(folded, mesh.folded_edges());
     CADACLYSM_TRY(crossings, mesh.crossings());
@@ -367,12 +377,21 @@ static Result<void> fem_reader(const cadaclysm::Scene& scene, bool is_cube) {
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const double inf = std::numeric_limits<double>::infinity();
     const std::pair<double, double> waved[] = {{0.0, 0.0}, {-1.0, 0.0}, {nan, 0.0}, {0.01, -1.0}, {0.01, nan}, {0.01, inf}};
+    // The body is open-sheet.scad, beside the sample: mesh-only in every flavour, where the cube
+    // is an exact box (which reads both fields, as `fem_brep` checks) wherever the kernel's
+    // builder is linked.
+    std::filesystem::path sheet_path = std::filesystem::path(path).parent_path() / "open-sheet.scad";
+    CADACLYSM_TRY(sheet_scene, cadaclysm::open(utf8(sheet_path)));
+    std::vector<cadaclysm::Node> sheet_bodies = sheet_scene.walk();
+    auto sheet = std::find_if(sheet_bodies.begin(), sheet_bodies.end(), [](const cadaclysm::Node& n) { return n.can_mesh(); });
+    EXPECT(sheet != sheet_bodies.end(), "fem: open-sheet.scad has no meshable node");
     for (const std::pair<double, double>& pair : waved) {
-        auto anyway = body->fem_mesh(pair.first, pair.second);
+        auto anyway = sheet->fem_mesh(pair.first, pair.second);
         EXPECT(anyway.ok(), "fem: tolerance " + std::to_string(pair.first) + " max_size " + std::to_string(pair.second) +
                            " was refused on the mesh-only path: " + (anyway ? std::string() : anyway.error().message));
-        EXPECT(!anyway->nodes().empty(), "fem: tolerance " + std::to_string(pair.first) + " max_size " +
-                                             std::to_string(pair.second) + " came back as an empty mesh");
+        EXPECT(anyway->from_mesh() && anyway->nodes().size() == 5 * 3,
+               "fem: tolerance " + std::to_string(pair.first) + " max_size " + std::to_string(pair.second) +
+                   " meshed the open sheet to " + std::to_string(anyway->nodes().size() / 3) + " nodes, not 5 mesh-only ones");
     }
     std::puts("fem reader: tolerance 0/-1/NaN and max_size -1/NaN/+Inf all mesh on the mesh-only path");
     return {};
@@ -400,7 +419,9 @@ static Result<void> fem_outlives_its_scene(const std::string& path) {
         kept.assign(nodes.begin(), nodes.end());
         triangles = mesh.triangles().size() / 3;
         CADACLYSM_TRY(edges, mesh.edges());
-        EXPECT(edges.empty(), "fem: the mesh-only body grew edges after the scene closed");
+        // A mesh-only body has no edges; a B-rep body -- the exact cube, where the reader library
+        // carries the kernel's `openscad-brep` -- keeps its own.
+        EXPECT(mesh.from_mesh() ? edges.empty() : !edges.empty(), "fem: the body's edges changed after the scene closed");
         CADACLYSM_TRY(text, mesh.msh_text());
         EXPECT(!text.empty(), "fem: the .msh text is empty after the scene closed");
         EXPECT(!mesh.freed(), "fem: closing the scene freed the FEM mesh");
@@ -848,6 +869,14 @@ static Result<void> reader(const std::string& path) {
     }
 
     bool is_cube = cadaclysm::detail::file_name(path) == "cube.scad";
+    // cube.scad is a mesh with no brep in the Reader flavour and an exact box where the kernel's
+    // builder is linked (`openscad-brep`, as every shipped desktop library is): the figures below
+    // that only a mesh has are pinned for the first, and the other has its own.
+    bool cube_is_mesh = false;
+    if (is_cube) {
+        std::vector<cadaclysm::Node> nodes = scene.walk();
+        cube_is_mesh = std::none_of(nodes.begin(), nodes.end(), [](const cadaclysm::Node& n) { return n.brep().has_value(); });
+    }
     if (is_cube) {
         // All six values: a bug that only flips Y still passes the X and Z checks.
         EXPECT(bounds.min == (std::array<float, 3>{0, 0, 0}) && bounds.max == (std::array<float, 3>{20, 20, 20}),
@@ -909,7 +938,7 @@ static Result<void> reader(const std::string& path) {
         EXPECT(first != bodies.end(), "no meshable node");
         EXPECT(first->mesh_lod(0).triangle_count() == first->mesh().triangle_count(), "LOD 0 is not the mesh");
         EXPECT(first->lod_error(0) == 0.0f && first->mesh_lod(4).triangle_count() == 0, "LOD errors or levels are off");
-        if (is_cube) {
+        if (cube_is_mesh) {
             cadaclysm::Beziers beziers = first->edge_beziers();
             EXPECT(first->mesh_lod(1).triangle_count() == 3 && beziers.count() == 12 && beziers.points().size() == 12 * 12,
                    "the cube's LOD 1 or Béziers are off");
@@ -921,9 +950,11 @@ static Result<void> reader(const std::string& path) {
         auto first = std::find_if(bodies.begin(), bodies.end(), [](const cadaclysm::Node& n) { return n.can_mesh(); });
         EXPECT(first != bodies.end(), "no meshable node");
         std::optional<cadaclysm::Collision> fit = first->collision();
-        EXPECT(fit && fit->error == 0.0 && fit->hull_vertex_count == 8 && !fit->shape_name().empty(), "the collision fit is off");
+        // The mesh cube is fitted as a hull of 8 vertices; the exact cube is the box it is, with no hull.
+        std::uint32_t want_hull = is_cube && !cube_is_mesh ? 0 : 8;
+        EXPECT(fit && fit->error == 0.0 && fit->hull_vertex_count == want_hull && !fit->shape_name().empty(), "the collision fit is off");
         cadaclysm::CollisionHull hull = first->collision_hull();
-        EXPECT(hull.vertex_count() == 8 && hull.index_count() == 36, "the collision hull is off");
+        EXPECT(want_hull == 0 || (hull.vertex_count() == 8 && hull.index_count() == 36), "the collision hull is off");
         if (is_cube) EXPECT(fit->shape_name() == "hull" || fit->shape_name() == "box", "the cube's collision shape is off");
     }
     {
@@ -935,7 +966,7 @@ static Result<void> reader(const std::string& path) {
         EXPECT(meshlets.count() >= 1, "no meshlets");
         cadaclysm::Meshlet one = meshlets.meshlet(0);
         EXPECT(one.positions.size() == one.vertex_count() * 3 && one.indices.size() == one.triangle_count() * 3 && one.level == 0, "meshlet 0 is off");
-        if (is_cube) EXPECT(meshlets.count() == 1 && one.triangle_count() == 12 && one.vertex_count() == 36, "the cube's meshlets are off");
+        if (is_cube) EXPECT(meshlets.count() == 1 && one.triangle_count() == 12 && one.vertex_count() == (cube_is_mesh ? 36u : 24u), "the cube's meshlets are off");
         meshlets.free();
         EXPECT(meshlets.freed(), "free() did not free");
         meshlets.free();
@@ -950,7 +981,7 @@ static Result<void> reader(const std::string& path) {
         std::array<double, 16> identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         EXPECT(first->bounds_placed(identity) == first->bounds_placed(), "the identity placement moved the surface bounds");
         EXPECT(first->bounds_placed64(identity) == first->bounds_placed64(), "the identity placement moved the f64 surface bounds");
-        if (is_cube) {
+        if (cube_is_mesh) {
             EXPECT(estimate == 12, "the cube's estimate is not 12");
             EXPECT(first->surface_edges().empty() && first->surface_isocurves().empty(), "the cube has surface curves");
             EXPECT(first->surface_proxy_mesh(4).empty(), "the cube has a surface proxy");
@@ -1082,7 +1113,7 @@ static Result<void> reader(const std::string& path) {
     EXPECT(yup.realized() == yup.realize_total(), "realize_all stopped short");
 
     CADACLYSM_TRY_VOID(save_checks(scene));
-    CADACLYSM_TRY_VOID(fem_reader(scene, is_cube));
+    CADACLYSM_TRY_VOID(fem_reader(scene, is_cube, path));
     if (is_cube) {
         std::string sheet = path.substr(0, path.size() - std::string("cube.scad").size()) + "open-sheet.scad";
         CADACLYSM_TRY_VOID(fem_census_wiring(sheet));

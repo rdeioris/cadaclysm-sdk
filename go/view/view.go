@@ -133,6 +133,8 @@ static bool cv_set_layer(const CvlTable *t, CadaclysmView *v, uint32_t l, bool o
 static void cv_set_background(const CvlTable *t, CadaclysmView *v, const float *rgb) { t->set_background(v, rgb); }
 static bool cv_set_lighting(const CvlTable *t, CadaclysmView *v, uint32_t l) { return t->set_lighting(v, l); }
 static uint32_t cv_lighting(const CvlTable *t, CadaclysmView *v) { return t->lighting(v); }
+static bool cv_set_occluded_style(const CvlTable *t, CadaclysmView *v, const CadaclysmViewOccludedStyle *s) { return t->set_occluded_style(v, s); }
+static bool cv_occluded_style(const CvlTable *t, CadaclysmView *v, CadaclysmViewOccludedStyle *s) { return t->occluded_style(v, s); }
 static bool cv_set_lod(const CvlTable *t, CadaclysmView *v, const CadaclysmViewLod *l) { return t->set_lod(v, l); }
 static uint32_t cv_wake_ms(const CvlTable *t, CadaclysmView *v) { return t->wake_ms(v); }
 static bool cv_set_node_visible(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t n, bool on) { return t->set_node_visible(v, i, n, on); }
@@ -174,9 +176,15 @@ static bool cv_set_face_colours(const CvlTable *t, CadaclysmView *v, uint32_t i,
 static bool cv_set_placement(const CvlTable *t, CadaclysmView *v, uint32_t i, const double *m) { return t->set_placement(v, i, m); }
 static bool cv_set_node_transforms(const CvlTable *t, CadaclysmView *v, uint32_t i, const double *m, uint32_t n) { return t->set_node_transforms(v, i, m, n); }
 static uint32_t cv_show_solid(const CvlTable *t, CadaclysmView *v, void *solid, double tol, const float *rgb) { return t->show_solid(v, (const CadaclysmBlacksmithSolid *)solid, tol, rgb); }
+static uint32_t cv_show_solid_faces(const CvlTable *t, CadaclysmView *v, void *solid, double tol, const float *rgb, uint32_t material, float opacity, const uint32_t *faces, uint32_t count) { return t->show_solid_faces(v, (const CadaclysmBlacksmithSolid *)solid, tol, rgb, material, opacity, faces, count); }
 static uint32_t cv_load_font(const CvlTable *t, const uint8_t *bytes, size_t n) { return t->load_font(bytes, n); }
 static uint32_t cv_show_text(const CvlTable *t, CadaclysmView *v, const CadaclysmViewText *text) { return t->show_text(v, text); }
 static bool cv_set_text(const CvlTable *t, CadaclysmView *v, uint32_t i, const char *text) { return t->set_text(v, i, text); }
+static bool cv_set_snap(const CvlTable *t, CadaclysmView *v, const CadaclysmViewSnapSettings *s) { return t->set_snap(v, s); }
+static bool cv_snap_result(const CvlTable *t, CadaclysmView *v, CadaclysmViewSnap *s) { return t->snap_result(v, s); }
+static void cv_clear_snap(const CvlTable *t, CadaclysmView *v) { t->clear_snap(v); }
+static bool cv_set_work_plane(const CvlTable *t, CadaclysmView *v, const double *o, const double *x, const double *n, double step) { return t->set_work_plane(v, o, x, n, step); }
+static bool cv_clear_work_plane(const CvlTable *t, CadaclysmView *v) { return t->clear_work_plane(v); }
 static int cv_draw_object(const CvlTable *t, int interactive, const char *default_view, void *solid, double tol,
                           void *scene, const double *transforms, uint32_t transform_count, const uint32_t *hide,
                           uint32_t hide_count, uint32_t node, const CvlShow *o, CadaclysmViewCamera *c,
@@ -249,6 +257,22 @@ var _ [12 - unsafe.Sizeof(C.CadaclysmViewLod{})]struct{}
 func lodLayout() (size, minTriangles, motion uintptr) {
 	var l C.CadaclysmViewLod
 	return unsafe.Sizeof(l), unsafe.Offsetof(l.min_triangles), unsafe.Offsetof(l.motion)
+}
+
+// CadaclysmViewSnapSettings is 16 bytes and CadaclysmViewSnap 88 (1.22): the package fails to
+// compile if the header's structs ever differ.
+var _ [unsafe.Sizeof(C.CadaclysmViewSnapSettings{}) - 16]struct{}
+var _ [16 - unsafe.Sizeof(C.CadaclysmViewSnapSettings{})]struct{}
+var _ [unsafe.Sizeof(C.CadaclysmViewSnap{}) - 88]struct{}
+var _ [88 - unsafe.Sizeof(C.CadaclysmViewSnap{})]struct{}
+
+// snapLayout is the snap answer's size and its fields' offsets, in the header's order, for
+// the layout test.
+func snapLayout() [12]uintptr {
+	var s C.CadaclysmViewSnap
+	return [12]uintptr{unsafe.Sizeof(s), unsafe.Offsetof(s.kind), unsafe.Offsetof(s.point), unsafe.Offsetof(s.item),
+		unsafe.Offsetof(s.node), unsafe.Offsetof(s.face), unsafe.Offsetof(s.edge), unsafe.Offsetof(s.tangent),
+		unsafe.Offsetof(s.axis), unsafe.Offsetof(s.radius), unsafe.Offsetof(s.distance_px), unsafe.Offsetof(s.clicks)}
 }
 
 // noDisplay is appended to a create failure that says "no display" (cvl_create_failed).
@@ -410,7 +434,7 @@ func find(stem, variable, what string, dirs []string) (string, error) {
 }
 
 // checkABI is cvl_check_abi, which every open runs on the library's answer first: nil for
-// 1.18 or a later 1.x, else the refusal naming `path`.
+// 1.22 or a later 1.x, else the refusal naming `path`.
 func checkABI(version uint32, path string) error {
 	cp := C.CString(path)
 	defer C.free(unsafe.Pointer(cp))
@@ -533,6 +557,73 @@ func pickOf(p *C.CadaclysmViewPick) Pick {
 	if p.has_point != 0 {
 		out.HasPoint = true
 		out.Point = [3]float32{float32(p.point[0]), float32(p.point[1]), float32(p.point[2])}
+	}
+	return out
+}
+
+// SnapKind is a set of CADACLYSM_VIEW_SNAP_* bits: what SetSnap lets a snap land on, and,
+// one bit alone, what a Snap landed on (0: nothing).
+type SnapKind uint32
+
+const (
+	SnapVertex   SnapKind = C.CADACLYSM_VIEW_SNAP_VERTEX
+	SnapMidpoint SnapKind = C.CADACLYSM_VIEW_SNAP_MIDPOINT
+	SnapCentre   SnapKind = C.CADACLYSM_VIEW_SNAP_CENTRE // a circular edge's centre
+	SnapQuadrant SnapKind = C.CADACLYSM_VIEW_SNAP_QUADRANT
+	SnapEdge     SnapKind = C.CADACLYSM_VIEW_SNAP_EDGE
+	SnapFace     SnapKind = C.CADACLYSM_VIEW_SNAP_FACE
+	SnapGrid     SnapKind = C.CADACLYSM_VIEW_SNAP_GRID
+	SnapPlane    SnapKind = C.CADACLYSM_VIEW_SNAP_PLANE
+	SnapAll      SnapKind = C.CADACLYSM_VIEW_SNAP_ALL
+)
+
+var snapNames = [...]struct {
+	kind SnapKind
+	name string
+}{{SnapVertex, "vertex"}, {SnapMidpoint, "midpoint"}, {SnapCentre, "centre"}, {SnapQuadrant, "quadrant"},
+	{SnapEdge, "edge"}, {SnapFace, "face"}, {SnapGrid, "grid"}, {SnapPlane, "plane"}}
+
+// String is the kinds' names, as Python's ("vertex", "midpoint", "centre", "quadrant",
+// "edge", "face", "grid", "plane"), joined by "|"; "" for none.
+func (k SnapKind) String() string {
+	var names []string
+	for _, n := range snapNames {
+		if k&n.kind != 0 {
+			names = append(names, n.name)
+		}
+	}
+	return strings.Join(names, "|")
+}
+
+// Snap is what a snap found, as Python's Snap: Kind (0 where nothing in the kinds SetSnap
+// chose lay within the aperture, or snapping is off), Point in world coordinates, the Item,
+// Node and Face it lies on, its Edge when HasEdge (false for a face, grid or plane snap), the
+// edge's unit Tangent there, a circular edge's Axis and Radius (zeros otherwise), DistancePx
+// from the cursor, and Clicks: 0 for View.Snap and a hover, 1 for a click's snap, 2 for a
+// double click's. Every field is a value, so two snaps compare with ==.
+type Snap struct {
+	Kind             SnapKind
+	Point            [3]float64
+	Item, Node, Face uint32
+	Edge             uint32
+	HasEdge          bool
+	Tangent, Axis    [3]float32
+	Radius           float64
+	DistancePx       float32
+	Clicks           uint32
+}
+
+// snapOf is a library's snap answer as a Snap.
+func snapOf(s *C.CadaclysmViewSnap) Snap {
+	out := Snap{Kind: SnapKind(s.kind), Item: uint32(s.item), Node: uint32(s.node), Face: uint32(s.face),
+		Radius: float64(s.radius), DistancePx: float32(s.distance_px), Clicks: uint32(s.clicks)}
+	if uint32(s.edge) != 0xFFFFFFFF {
+		out.Edge, out.HasEdge = uint32(s.edge), true
+	}
+	for i := 0; i < 3; i++ {
+		out.Point[i] = float64(s.point[i])
+		out.Tangent[i] = float32(s.tangent[i])
+		out.Axis[i] = float32(s.axis[i])
 	}
 	return out
 }
@@ -877,21 +968,67 @@ func uint32s(s []uint32) *C.uint32_t {
 	return (*C.uint32_t)(unsafe.Pointer(&s[0]))
 }
 
+// SolidOptions is how ShowSolid draws a solid (view ABI 1.21). Material: "default",
+// "plastic", "metal", "matte", "paint", "brushed" or "glass" ("" the default). Opacity: 0..1
+// (nil: 1, opaque). Faces: the solid's face numbers to show alone, with no edges -- a trim's
+// ghost (nil: every face). The item's faces are numbered as the solid numbers them.
+type SolidOptions struct {
+	Material string
+	Opacity  *float32
+	Faces    []uint32
+}
+
 // ShowSolid shows a kernel solid by handle, exact where its surfaces draw, triangles at
 // tolerance otherwise; rgb (a Colour) nil keeps its paint. The item keeps the solid
-// reachable.
-func (v *View) ShowSolid(s Solid, tolerance float64, rgb Colour) (*Item, error) {
+// reachable. An options value (1.21) gives a material, an opacity and the faces to show
+// alone; without one, or with a zero one, the 1.4 call.
+func (v *View) ShowSolid(s Solid, tolerance float64, rgb Colour, options ...SolidOptions) (*Item, error) {
 	h := s.SolidHandle()
 	if h == nil {
 		return nil, refused("solid: closed")
 	}
 	defer runtime.KeepAlive(s)
-	c, err := v.paintFor("cadaclysm_view_show_solid", rgb, false)
+	if len(options) > 1 {
+		return nil, refused("ShowSolid: one SolidOptions at most")
+	}
+	var o SolidOptions
+	if len(options) == 1 {
+		o = options[0]
+	}
+	material := C.uint32_t(C.CADACLYSM_VIEW_MATERIAL_DEFAULT)
+	if o.Material != "" {
+		m, ok := map[string]C.uint32_t{"default": C.CADACLYSM_VIEW_MATERIAL_DEFAULT, "plastic": C.CADACLYSM_VIEW_MATERIAL_PLASTIC,
+			"metal": C.CADACLYSM_VIEW_MATERIAL_METAL, "matte": C.CADACLYSM_VIEW_MATERIAL_MATTE, "paint": C.CADACLYSM_VIEW_MATERIAL_PAINT,
+			"brushed": C.CADACLYSM_VIEW_MATERIAL_BRUSHED, "glass": C.CADACLYSM_VIEW_MATERIAL_GLASS}[o.Material]
+		if !ok {
+			return nil, fmt.Errorf("material: %q is not \"default\", \"plastic\", \"metal\", \"matte\", \"paint\", \"brushed\" or \"glass\"", o.Material)
+		}
+		material = m
+	}
+	if o.Material == "" && o.Opacity == nil && o.Faces == nil {
+		c, err := v.paintFor("cadaclysm_view_show_solid", rgb, false)
+		if err != nil {
+			return nil, err
+		}
+		return v.add("cadaclysm_view_show_solid", func() C.uint32_t {
+			return C.cv_show_solid(v.lib.t, v.handle, h, C.double(tolerance), c)
+		}, s)
+	}
+	c, err := v.paintFor("cadaclysm_view_show_solid_faces", rgb, false)
 	if err != nil {
 		return nil, err
 	}
-	return v.add("cadaclysm_view_show_solid", func() C.uint32_t {
-		return C.cv_show_solid(v.lib.t, v.handle, h, C.double(tolerance), c)
+	opacity := C.float(1)
+	if o.Opacity != nil {
+		opacity = C.float(*o.Opacity)
+	}
+	var faces *C.uint32_t
+	if o.Faces != nil {
+		faces = uint32s(o.Faces)
+	}
+	defer runtime.KeepAlive(o.Faces)
+	return v.add("cadaclysm_view_show_solid_faces", func() C.uint32_t {
+		return C.cv_show_solid_faces(v.lib.t, v.handle, h, C.double(tolerance), c, material, opacity, faces, C.uint32_t(len(o.Faces)))
 	}, s)
 }
 
@@ -1818,6 +1955,47 @@ func (v *View) Lighting() (string, error) {
 	return "headlight", nil
 }
 
+// OccludedStyle is how every "dashed" item's hidden lines and points look, as Python's
+// OccludedStyle: a dash and a gap in points, the share of coverage kept (above 0, at most
+// 1), and optionally one colour (0..1 RGB). Its zero value is the default: the library reads
+// a zero dash, gap or dim as 6, 4 and 0.5.
+type OccludedStyle struct {
+	Dash, Gap, Dim float32
+	Colour         *[3]float32
+}
+
+// DefaultOccludedStyle is the style a view starts with, as the library reports it.
+func DefaultOccludedStyle() OccludedStyle { return OccludedStyle{Dash: 6, Gap: 4, Dim: 0.5} }
+
+// SetOccludedStyle sets the view-wide occluded style; "solid" and "off" items never use it.
+func (v *View) SetOccludedStyle(s OccludedStyle) error {
+	raw := C.CadaclysmViewOccludedStyle{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	raw.dash, raw.gap, raw.dim = C.float(s.Dash), C.float(s.Gap), C.float(s.Dim)
+	if s.Colour != nil {
+		raw.has_colour = 1
+		for i, c := range s.Colour {
+			raw.colour[i] = C.float(c)
+		}
+	}
+	return v.ok("cadaclysm_view_set_occluded_style", func() C.bool { return C.cv_set_occluded_style(v.lib.t, v.handle, &raw) })
+}
+
+// OccludedStyle reports the view's occluded style, the defaults as their values.
+func (v *View) OccludedStyle() (OccludedStyle, error) {
+	raw := C.CadaclysmViewOccludedStyle{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	if err := v.ok("cadaclysm_view_occluded_style", func() C.bool { return C.cv_occluded_style(v.lib.t, v.handle, &raw) }); err != nil {
+		return OccludedStyle{}, err
+	}
+	s := OccludedStyle{Dash: float32(raw.dash), Gap: float32(raw.gap), Dim: float32(raw.dim)}
+	if raw.has_colour != 0 {
+		c := [3]float32{float32(raw.colour[0]), float32(raw.colour[1]), float32(raw.colour[2])}
+		s.Colour = &c
+	}
+	return s, nil
+}
+
 // Play plays the view's timeline at `speed` times real time: each Draw moves it on by the
 // wall-clock time since the last. It stops at its end unless Loop is on; Play at the end
 // starts again from 0.
@@ -1985,6 +2163,84 @@ func (v *View) LastPick() (pick Pick, landed bool, err error) {
 		return Pick{}, false, refused(said)
 	}
 	return Pick{}, false, nil
+}
+
+// SetSnap is what a snap may land on -- SnapAll, kinds or'ed together, or 0 to switch
+// snapping off, as a view starts -- how far from the cursor a point kind may lie (aperturePx
+// points; 0: the library's default, 10), and whether the view draws the marker at the snap.
+// Once on, a mouse hovering over a view in its own window snaps, and so does a click
+// (LastSnap reads them); Snap asks one at any pixel. Where kinds compete, a corner beats the
+// face it sits on.
+func (v *View) SetSnap(kinds SnapKind, aperturePx float32, marker bool) error {
+	raw := C.CadaclysmViewSnapSettings{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	raw.kinds = C.uint32_t(kinds)
+	raw.aperture_px = C.float(aperturePx)
+	if marker {
+		raw.marker = 1
+	}
+	return v.ok("cadaclysm_view_set_snap", func() C.bool { return C.cv_set_snap(v.lib.t, v.handle, &raw) })
+}
+
+// Snap is the snap under (x, y) of a viewport; Kind 0 where nothing in the kinds SetSnap
+// chose lies there -- always, while snapping is off. As Pick: a view never drawn is drawn
+// first, then frames until the answer lands; a failure is the library's own message, or
+// "snap: the answer never landed (...)".
+func (v *View) Snap(x, y, viewport uint32) (Snap, error) {
+	call := "cadaclysm_view_draw"
+	if v != nil && v.drawn != 0 {
+		call = "cadaclysm_view_request_snap_in"
+	}
+	if err := v.refusal(call); err != nil {
+		return Snap{}, err
+	}
+	var raw C.CadaclysmViewSnap
+	var msg [C.CVL_ERROR]C.char
+	if C.cvl_snap(v.lib.t, v.handle, &v.drawn, C.uint32_t(viewport), C.uint32_t(x), C.uint32_t(y), &raw, &msg[0], C.CVL_ERROR) == 0 {
+		return Snap{}, refused(C.GoString(&msg[0]))
+	}
+	return snapOf(&raw), nil
+}
+
+// LastSnap is the newest snap answer that has landed, without asking or waiting -- Python's
+// last_snap: a hover or click in the view's own window (Pump lands them as it draws), or one
+// an Input asked for. landed is false while none has; a snap that found nothing is landed
+// with Kind 0. Each answer is read once; a hover's never replaces a click's not read yet. A
+// failure other than "no answer yet" is the library's own message.
+func (v *View) LastSnap() (snap Snap, landed bool, err error) {
+	if err := v.refusal("cadaclysm_view_snap_result"); err != nil {
+		return Snap{}, false, err
+	}
+	raw := C.CadaclysmViewSnap{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	if C.cv_snap_result(v.lib.t, v.handle, &raw) {
+		return snapOf(&raw), true, nil
+	}
+	said := C.GoString(C.cv_last_error(v.lib.t))
+	if said != "" && !strings.HasSuffix(said, "no snap result") {
+		return Snap{}, false, refused(said)
+	}
+	return Snap{}, false, nil
+}
+
+// ClearSnap hides the snap marker and drops any snap asked or answered and not yet read.
+func (v *View) ClearSnap() error {
+	return v.act("cadaclysm_view_clear_snap", func() { C.cv_clear_snap(v.lib.t, v.handle) })
+}
+
+// SetWorkPlane is the plane SnapGrid and SnapPlane snaps land on, in place of the ground
+// grid: through origin, its grid lines along xAxis and across it, step apart (0: the ground
+// grid's spacing). The axes need not be unit length, but must not be parallel.
+func (v *View) SetWorkPlane(origin, xAxis, normal [3]float64, step float64) error {
+	return v.ok("cadaclysm_view_set_work_plane", func() C.bool {
+		return C.cv_set_work_plane(v.lib.t, v.handle, (*C.double)(unsafe.Pointer(&origin[0])),
+			(*C.double)(unsafe.Pointer(&xAxis[0])), (*C.double)(unsafe.Pointer(&normal[0])), C.double(step))
+	})
+}
+
+// ClearWorkPlane puts the ground grid back for SnapGrid and SnapPlane snaps.
+func (v *View) ClearWorkPlane() error {
+	return v.ok("cadaclysm_view_clear_work_plane", func() C.bool { return C.cv_clear_work_plane(v.lib.t, v.handle) })
 }
 
 // SetDoubleClickFrames is whether a double click frames what it hit (off by default: it is

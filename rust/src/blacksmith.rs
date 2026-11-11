@@ -73,7 +73,7 @@
 //!
 //! # Solids from files
 //!
-//! [`Solid::open`] reads a STEP, ACIS, Rhino, OCCT `.brep`, IGES or IFC file's body
+//! [`Solid::open`] reads a STEP, ACIS, Rhino, OCCT `.brep`, IGES, IFC or OpenSCAD file's body
 //! through the reader library, and [`Solid::from_node`] takes one node of a
 //! [`crate::Scene`] already open: the reader's B-rep is handed to the kernel by
 //! pointer and shared, never copied, so the two libraries must come from the same
@@ -95,7 +95,7 @@
 //! `tolerance.angular` (default one degree) stands in where nothing declares an angle.
 
 use std::collections::BTreeMap;
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Mul;
@@ -2767,6 +2767,103 @@ impl Profile {
         Profile::wrap(api, raw, "profile_chain")
     }
 
+    /// The straight segments through `points`, in order: open, or `closed` with a side back
+    /// to the first point. At least two points.
+    pub fn polyline(points: &[[f64; 2]], closed: bool) -> Result<Profile> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_profile_polyline)(points.as_ptr().cast(), points.len(), closed) };
+        Profile::wrap(api, raw, "profile_polyline")
+    }
+
+    /// The arc of the circle about `centre` of radius `r` from angle `a0` to `a1` radians,
+    /// counter-clockwise; equal angles are the full circle.
+    pub fn arc(centre: [f64; 2], r: f64, a0: f64, a1: f64) -> Result<Profile> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_profile_arc)(centre[0], centre[1], r, a0, a1) };
+        Profile::wrap(api, raw, "profile_arc")
+    }
+
+    /// The arc from `start` to `end` that passes `through`, whichever side that is on. The
+    /// three points must not be in a line.
+    pub fn arc_through(start: [f64; 2], through: [f64; 2], end: [f64; 2]) -> Result<Profile> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_profile_arc_through)(start[0], start[1], through[0], through[1], end[0], end[1]) };
+        Profile::wrap(api, raw, "profile_arc_through")
+    }
+
+    /// The ellipse about `centre` of semi-axes `rx` along x and `ry` along y.
+    pub fn ellipse(centre: [f64; 2], rx: f64, ry: f64) -> Result<Profile> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_profile_ellipse)(centre[0], centre[1], rx, ry) };
+        Profile::wrap(api, raw, "profile_ellipse")
+    }
+
+    /// A profile from cubic Beziers, 16 numbers each (four control points of x, y, z, w).
+    /// With `recognise`, the lines, arcs and circles they draw become the exact curves;
+    /// without, they are kept as given. A trailing partial Bezier is ignored.
+    pub fn from_beziers(beziers: &[f64], recognise: bool) -> Result<Profile> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_profile_from_beziers)(beziers.as_ptr(), beziers.len() / 16, recognise) };
+        Profile::wrap(api, raw, "profile_from_beziers")
+    }
+
+    /// This profile drawn as cubic Beziers, 16 numbers each (four control points of x, y,
+    /// z, w). With a `frame` the sketch is carried onto that plane; `None` leaves it in the
+    /// sketch's own xy.
+    pub fn beziers(&self, frame: Option<&Frame>) -> Result<Vec<f64>> {
+        let count = unsafe { (self.api.cadaclysm_blacksmith_profile_bezier_count)(self.raw()) } as usize;
+        if count == 0 && failed(self.api) {
+            return Err(fail(self.api, "profile_beziers"));
+        }
+        let mut out = vec![0.0; 16 * count];
+        let frame_ptr = frame.map_or(ptr::null(), |f| f.v.as_ptr());
+        let ok = unsafe { (self.api.cadaclysm_blacksmith_profile_beziers)(self.raw(), frame_ptr, out.as_mut_ptr()) };
+        if !ok {
+            return Err(fail(self.api, "profile_beziers"));
+        }
+        Ok(out)
+    }
+
+    /// The closed loops the open `pieces` make end to end, as indices into `pieces` in the
+    /// order each loop runs; a piece closed on its own is a loop of one. Pieces that join
+    /// no loop are left out, and a corner where three ends meet is ambiguous: no loop
+    /// runs through it.
+    pub fn loops(pieces: &[&Profile], tolerance: f64) -> Result<Vec<Vec<u32>>> {
+        let api = api()?;
+        let handles: Vec<_> = pieces.iter().map(|p| p.raw()).collect();
+        let room = 2 * pieces.len();
+        let mut out = vec![0u32; room.max(1)];
+        let ok = unsafe { (api.cadaclysm_blacksmith_profile_loops)(handles.as_ptr(), handles.len(), tolerance, out.as_mut_ptr()) };
+        if !ok {
+            return Err(fail(api, "profile_loops"));
+        }
+        // Records `len, i, i, ...` one after another; a length of 0 ends the list.
+        let mut loops = Vec::new();
+        let mut at = 0;
+        while at < room && out[at] != 0 {
+            let end = at + 1 + out[at] as usize;
+            if end > room {
+                return Err(Error::new("profile_loops: malformed loop records".to_string()));
+            }
+            loops.push(out[at + 1..end].to_vec());
+            at = end;
+        }
+        Ok(loops)
+    }
+
+    /// The order [`Profile::chain`] would join `pieces` in: each piece's index and whether
+    /// it is turned round. The error names a piece that meets none of the others.
+    pub fn chain_order(pieces: &[&Profile], tolerance: f64) -> Result<Vec<(u32, bool)>> {
+        let api = api()?;
+        let handles: Vec<_> = pieces.iter().map(|p| p.raw()).collect();
+        let mut out = vec![0u32; (2 * pieces.len()).max(1)];
+        let ok = unsafe { (api.cadaclysm_blacksmith_profile_chain_order)(handles.as_ptr(), handles.len(), tolerance, out.as_mut_ptr()) };
+        if !ok {
+            return Err(fail(api, "chain_order"));
+        }
+        Ok((0..pieces.len()).map(|i| (out[2 * i], out[2 * i + 1] != 0)).collect())
+    }
+
     /// Closed loops, in any order, as one profile: the loop enclosing the most area is
     /// the boundary and every other a hole in it -- a sketch's rectangle and the circles
     /// drawn inside it.
@@ -2994,7 +3091,10 @@ impl Profile {
 
     /// Draw the outline and holes with the view library in use ([`crate::view::current`]),
     /// from the top by default, as lines. `options.edges` is ignored: the lines are the
-    /// picture. On the terminal one still; elsewhere a window this call waits on.
+    /// picture. On the terminal one still; elsewhere a window this call waits on. In the
+    /// browser it draws into the latest `View::on_canvas` view still open and returns,
+    /// re-aiming that shared view's camera, where natively each `show()` has a window of
+    /// its own.
     pub fn show<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
@@ -3905,6 +4005,15 @@ fn tol_arg(tolerance: Option<f64>) -> f64 {
     tolerance.unwrap_or(f64::NAN)
 }
 
+/// A `no_inflection` hold as the library takes it: the flag and the span's two ends, NaN for an
+/// open one (`None`: no hold; `Some((None, None))`: the whole curve).
+fn no_inflection_arg(span: Option<(Option<f64>, Option<f64>)>) -> (bool, f64, f64) {
+    match span {
+        None => (false, 0.0, 0.0),
+        Some((lo, hi)) => (true, lo.unwrap_or(f64::NAN), hi.unwrap_or(f64::NAN)),
+    }
+}
+
 /// A curve in space -- always a NURBS, so a line, an arc or a conic is an exact rational one --
 /// to model with: built through points, read off an edge or a face, projected onto a plane or a
 /// face, trimmed, extended and blended; asked for its points, derivatives, curvature, length and
@@ -3912,8 +4021,9 @@ fn tol_arg(tolerance: Option<f64>) -> f64 {
 /// library's `nurbs_curve_clone`.
 ///
 /// A face here is its whole surface: projecting onto, pulling to and crossing a face ignore its
-/// trims. The `fit_error` is set only on curves from [`fit`](Self::fit),
-/// [`projected_to_face`](Self::projected_to_face) and [`pulled_to_face`](Self::pulled_to_face).
+/// trims. The `fit_error` is set only on curves from [`fit`](Self::fit), [`fair`](Self::fair),
+/// [`faired`](Self::faired), [`projected_to_face`](Self::projected_to_face) and
+/// [`pulled_to_face`](Self::pulled_to_face).
 pub struct NurbsCurve {
     handle: NonNull<sys::CadaclysmBlacksmithNurbsCurve>,
     api: &'static Api,
@@ -4012,6 +4122,24 @@ impl NurbsCurve {
         NurbsCurve::fitted(api, raw, error, "nurbs_curve_fit")
     }
 
+    /// The smoothest curve of `degree` (3 to 7; 5 usually) within `tolerance` of every point,
+    /// through the first and the last: least squares plus the curvature's derivative squared,
+    /// weighed as heavily as the tolerance allows. Where [`fit`](Self::fit) follows the points'
+    /// noise, this spends the tolerance on a calm curvature comb -- a design line traced off a
+    /// drawing comes back fair. `no_inflection` `Some((None, None))` keeps the curvature from
+    /// turning over anywhere; `Some((Some(i), Some(j)))` only between points `i` and `j`
+    /// (fractions between points; `None` an open end); `None` holds nothing. Refused where no
+    /// such curve is within the tolerance. Its [`fit_error`](Self::fit_error) is the largest
+    /// distance from a point to it; `tolerance` `None` asks for the inputs' effective tolerance.
+    pub fn fair(points: &[[f64; 3]], degree: u32, tolerance: Option<f64>, no_inflection: Option<(Option<f64>, Option<f64>)>) -> Result<NurbsCurve> {
+        let api = api()?;
+        let xyz = flat_points(points);
+        let (held, lo, hi) = no_inflection_arg(no_inflection);
+        let mut error = 0.0;
+        let raw = unsafe { (api.cadaclysm_blacksmith_nurbs_curve_fair)(xyz.as_ptr(), points.len(), degree, tol_arg(tolerance), held, lo, hi, &mut error) };
+        NurbsCurve::fitted(api, raw, error, "nurbs_curve_fair")
+    }
+
     /// Edge `edge` (an [`Edge::index`]) of `solid` as an exact NURBS over the edge's own span of
     /// its curve, running the way the edge runs.
     pub fn from_edge(solid: &Solid, edge: u32) -> Result<NurbsCurve> {
@@ -4103,6 +4231,17 @@ impl NurbsCurve {
         NurbsCurve::fitted(self.api, raw, error, "nurbs_curve_pulled_to_face")
     }
 
+    /// This curve, lying on the sheet `solid` (any of its faces, within ten times `tolerance`),
+    /// offset `distance` along it: each point walked that far across the sheet, square to the curve
+    /// -- left of its run seen from the outward side for a positive distance -- over the seams of a
+    /// joined sheet, and fitted within `tolerance`. `fit_error` is the larger of the fit's error
+    /// and its distance off the sheet. Refused where the curve does not lie on the sheet.
+    pub fn offset_on_sheet(&self, solid: &Solid, distance: f64, tolerance: Option<f64>) -> Result<NurbsCurve> {
+        let mut error = 0.0;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_offset_on_sheet)(self.raw(), solid.raw(), distance, tol_arg(tolerance), &mut error) };
+        NurbsCurve::fitted(self.api, raw, error, "nurbs_curve_offset_on_sheet")
+    }
+
     /// The same curve run the other way over the same domain.
     pub fn reversed(&self) -> Result<NurbsCurve> {
         let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_reversed)(self.raw()) };
@@ -4138,9 +4277,9 @@ impl NurbsCurve {
 
     // ---- reading ----------------------------------------------------------------------
 
-    /// The largest distance from a fitted-to point or surface to this curve: set only on curves
-    /// from [`fit`](Self::fit), [`projected_to_face`](Self::projected_to_face) and
-    /// [`pulled_to_face`](Self::pulled_to_face).
+    /// The largest distance from a fitted-to point, curve or surface to this curve: set only on
+    /// curves from [`fit`](Self::fit), [`fair`](Self::fair), [`faired`](Self::faired),
+    /// [`projected_to_face`](Self::projected_to_face) and [`pulled_to_face`](Self::pulled_to_face).
     pub fn fit_error(&self) -> Option<f64> {
         self.fit_error
     }
@@ -4224,6 +4363,100 @@ impl NurbsCurve {
         Ok(raw.into())
     }
 
+    /// The [`CurveFoot`] nearest `p` over the curve's whole domain: `unique` is false where another
+    /// point of the curve is as near (a point on a circle's axis) and `point` is a pick among them.
+    /// Exact.
+    pub fn closest_point(&self, p: [f64; 3]) -> Result<CurveFoot> {
+        let mut out = [0.0f64; 5];
+        if unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_closest_point)(self.raw(), p.as_ptr(), out.as_mut_ptr()) } < 0 {
+            return Err(fail(self.api, "nurbs_curve_closest_point"));
+        }
+        Ok(CurveFoot { t: out[0], point: [out[1], out[2], out[3]], unique: out[4] != 0.0 })
+    }
+
+    /// [`NurbsCurve::closest_point`] within `max_distance`: `None` where the nearest point lies
+    /// beyond it (`None`, NaN or +inf: no limit, the same answer as `closest_point`). A negative
+    /// limit is refused.
+    pub fn closest_point_within(&self, p: [f64; 3], max_distance: Option<f64>) -> Result<Option<CurveFoot>> {
+        let mut out = [0.0f64; 5];
+        let found = unsafe {
+            (self.api.cadaclysm_blacksmith_nurbs_curve_closest_point_within)(self.raw(), p.as_ptr(), tol_arg(max_distance), out.as_mut_ptr())
+        };
+        if found < 0 {
+            return Err(fail(self.api, "nurbs_curve_closest_point_within"));
+        }
+        Ok((found != 0).then(|| CurveFoot { t: out[0], point: [out[1], out[2], out[3]], unique: out[4] != 0.0 }))
+    }
+
+    /// The nearest points of this curve and `other`, as a [`CurvePair`] (side `a` this curve,
+    /// distance 0 where they cross; among equal distances the smallest `t_a`, then `t_b`), or
+    /// `None` where they lie farther apart than `max_distance` (`None`, NaN or +inf: no limit).
+    /// Exact.
+    pub fn closest_points(&self, other: &NurbsCurve, max_distance: Option<f64>) -> Result<Option<CurvePair>> {
+        let mut raw = sys::CadaclysmBlacksmithCurvePair::default();
+        let found =
+            unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_closest_points)(self.raw(), other.raw(), tol_arg(max_distance), &mut raw) };
+        if found < 0 {
+            return Err(fail(self.api, "nurbs_curve_closest_points"));
+        }
+        Ok((found != 0).then(|| CurvePair::of(&raw)))
+    }
+
+    /// The item of `items` nearest to this curve, as a [`NearestObject`] -- `which` its index --
+    /// or `None` where none lies within `max_distance` (`None`, NaN or +inf: no limit) or `items`
+    /// is empty. Items are asked in order, each with the best distance so far as its limit; equal
+    /// distances go to the earlier item. `tolerance` (`None`, 0 or NaN: each solid's effective
+    /// tolerance) sizes each solid's search; a projector keeps its own, and its lock is held for
+    /// the whole curve query.
+    pub fn closest_object(&self, items: &[NearItem<'_>], max_distance: Option<f64>, tolerance: Option<f64>) -> Result<Option<NearestObject>> {
+        let mut kinds = Vec::with_capacity(items.len());
+        let (mut solids, mut curves, mut points, mut projectors) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for item in items {
+            match item {
+                NearItem::Solid(solid) => {
+                    kinds.push(0u8);
+                    solids.push(solid.raw());
+                }
+                NearItem::Curve(curve) => {
+                    kinds.push(1);
+                    curves.push(curve.raw());
+                }
+                NearItem::Point(p) => {
+                    kinds.push(2);
+                    points.extend_from_slice(p);
+                }
+                NearItem::Projector(projector) => {
+                    kinds.push(3);
+                    projectors.push(projector.handle.as_ptr() as *const sys::CadaclysmBlacksmithProjector);
+                }
+            }
+        }
+        let mut raw = std::mem::MaybeUninit::<sys::CadaclysmBlacksmithNearestObject>::zeroed();
+        let found = unsafe {
+            (self.api.cadaclysm_blacksmith_nurbs_curve_closest_object)(
+                self.raw(),
+                kinds.as_ptr(),
+                kinds.len() as u32,
+                solids.as_ptr(),
+                solids.len() as u32,
+                curves.as_ptr(),
+                curves.len() as u32,
+                points.as_ptr(),
+                (points.len() / 3) as u32,
+                projectors.as_ptr(),
+                projectors.len() as u32,
+                tol_arg(max_distance),
+                tol_arg(tolerance),
+                raw.as_mut_ptr(),
+            )
+        };
+        if found < 0 {
+            return Err(fail(self.api, "nurbs_curve_closest_object"));
+        }
+        // SAFETY: zeroed is a valid bit pattern for every field (a null `kind` is never read).
+        Ok((found != 0).then(|| NearestObject::of(unsafe { &raw.assume_init() })))
+    }
+
     /// The point at arc length `s` from the curve's start.
     pub fn point_at_length(&self, s: f64, accuracy: f64) -> Result<At> {
         let mut raw = sys::CadaclysmBlacksmithAt::default();
@@ -4258,6 +4491,35 @@ impl NurbsCurve {
     pub fn face_hits(&self, solid: &Solid, face: u32, tolerance: Option<f64>) -> Result<Vec<At>> {
         let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_face_hits)(self.raw(), solid.raw(), face, tol_arg(tolerance)) };
         samples_of(self.api, raw, "nurbs_curve_face_hits")
+    }
+
+    /// This curve faired: the smoothest curve of `degree` (3 to 7; 5 usually) within
+    /// `tolerance` of it, from its start to its end, as [`fair`](Self::fair) makes one from
+    /// points; `no_inflection`'s ends are this curve's own parameters here. Its
+    /// [`fit_error`](Self::fit_error) is the largest distance found between the two.
+    pub fn faired(&self, degree: u32, tolerance: Option<f64>, no_inflection: Option<(Option<f64>, Option<f64>)>) -> Result<NurbsCurve> {
+        let (held, lo, hi) = no_inflection_arg(no_inflection);
+        let mut error = 0.0;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_faired)(self.raw(), degree, tol_arg(tolerance), held, lo, hi, &mut error) };
+        NurbsCurve::fitted(self.api, raw, error, "nurbs_curve_faired")
+    }
+
+    /// Where the curvature turns from one side to the other, in parameter order (`error` zero):
+    /// the comb flipping sides. Empty for a curve that bends one way only -- what a test of a
+    /// design line asks for.
+    pub fn inflections(&self) -> Result<Vec<At>> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_inflections)(self.raw()) };
+        samples_of(self.api, raw, "nurbs_curve_inflections")
+    }
+
+    /// The largest turn of the tangent and jump of the curvature at the curve's own knots.
+    pub fn knot_continuity(&self) -> Result<KnotContinuity> {
+        let mut out = sys::CadaclysmBlacksmithKnotContinuity::default();
+        if unsafe { (self.api.cadaclysm_blacksmith_nurbs_curve_knot_continuity)(self.raw(), &mut out) } {
+            Ok(out.into())
+        } else {
+            Err(fail(self.api, "nurbs_curve_knot_continuity"))
+        }
     }
 
     /// A curvature comb to draw: at `n + 1` even parameters (`max(n, 1)` steps), the curve point
@@ -4413,6 +4675,70 @@ impl From<sys::CadaclysmBlacksmithContinuity> for Continuity {
     }
 }
 
+/// How smoothly a curve runs through its own knots ([`NurbsCurve::knot_continuity`]; a closed
+/// curve's seam among them): the largest turn of its tangent in radians (`angle`) and the
+/// largest jump of its curvature vector `kappa * normal` (`curvature`), each with the parameter
+/// and the point it was found at. A curve with no inner knot reads zero at its start.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct KnotContinuity {
+    pub angle: f64,
+    pub angle_parameter: f64,
+    pub angle_at: [f64; 3],
+    pub curvature: f64,
+    pub curvature_parameter: f64,
+    pub curvature_at: [f64; 3],
+}
+
+impl From<sys::CadaclysmBlacksmithKnotContinuity> for KnotContinuity {
+    fn from(r: sys::CadaclysmBlacksmithKnotContinuity) -> KnotContinuity {
+        KnotContinuity {
+            angle: r.angle,
+            angle_parameter: r.angle_parameter,
+            angle_at: r.angle_at,
+            curvature: r.curvature,
+            curvature_parameter: r.curvature_parameter,
+            curvature_at: r.curvature_at,
+        }
+    }
+}
+
+/// Where a face's curvatures change sign ([`Solid::curvature_turns`]): how many separate areas
+/// the sample grid finds where the Gaussian curvature is positive and negative
+/// (`gaussian_positive`, `gaussian_negative`) and the mean curvature (`mean_positive`,
+/// `mean_negative`, about the face's outward normal), the points between opposite signs
+/// (`gaussian_turns`, `mean_turns`: [`At`]s, `tangent` the face's unit normal there, `parameter`
+/// its `u`), and the grid's `samples` steps each way. A sample within a millionth of the face's
+/// size of flat is neither sign: a cylinder's patch reads no Gaussian area at all.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CurvatureTurns {
+    pub gaussian_positive: u32,
+    pub gaussian_negative: u32,
+    pub gaussian_turns: Vec<At>,
+    pub mean_positive: u32,
+    pub mean_negative: u32,
+    pub mean_turns: Vec<At>,
+    pub samples: u32,
+}
+
+/// The worst kink of the highlight lines crossing an edge ([`Solid::highlight_kink`]): the
+/// `angle` in radians (0 to pi/2) between a line on one face and the same line on the other,
+/// the point `at` along the edge, and the light that shows it -- a straight tube through
+/// `light_point` along `light_direction` (unit) -- from `samples` points along the edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HighlightKink {
+    pub angle: f64,
+    pub at: [f64; 3],
+    pub light_point: [f64; 3],
+    pub light_direction: [f64; 3],
+    pub samples: u32,
+}
+
+impl From<sys::CadaclysmBlacksmithHighlightKink> for HighlightKink {
+    fn from(r: sys::CadaclysmBlacksmithHighlightKink) -> HighlightKink {
+        HighlightKink { angle: r.angle, at: r.at, light_point: r.light_point, light_direction: r.light_direction, samples: r.samples }
+    }
+}
+
 /// How well an N-sided patch ([`Solid::n_sided_patch`]) meets: `faces` sub-patches, the worst
 /// `boundary` against the neighbours (the gap over every side, the angle over those met at G1
 /// or G2, the curvature jump over those at G2), the worst `internal` across the patch's own
@@ -4459,6 +4785,28 @@ impl From<sys::CadaclysmBlacksmithJoinReport> for JoinReport {
             turned: r.turned,
             closed: r.closed != 0,
         }
+    }
+}
+
+/// What [`Solid::mirror_join`] did: the `seams` (edges on the plane, one face of the half and one
+/// of its mirror), the faces `squared` to the plane and the furthest a control point `moved`
+/// doing it; the seam's worst `gap`, `angle` between the two sides' normals (radians) and
+/// `curvature` (the largest difference of their normal curvatures in any one direction); and the
+/// `naked` edges left on the body.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SymmetryReport {
+    pub seams: u32,
+    pub squared: u32,
+    pub moved: f64,
+    pub gap: f64,
+    pub angle: f64,
+    pub curvature: f64,
+    pub naked: u32,
+}
+
+impl From<[f64; 7]> for SymmetryReport {
+    fn from(r: [f64; 7]) -> SymmetryReport {
+        SymmetryReport { seams: r[0] as u32, squared: r[1] as u32, moved: r[2], gap: r[3], angle: r[4], curvature: r[5], naked: r[6] as u32 }
     }
 }
 
@@ -4551,7 +4899,7 @@ impl Solid {
 
     /// On a sheet from [`sweep_rail`](Self::sweep_rail), [`sweep_two_rails`](Self::sweep_two_rails),
     /// [`edge_surface`](Self::edge_surface), [`network_surface`](Self::network_surface),
-    /// [`fillet_surfaces`](Self::fillet_surfaces), [`flange`](Self::flange) or
+    /// [`fillet_surfaces`](Self::fillet_surfaces), [`faired`](Self::faired), [`flange`](Self::flange) or
     /// [`extrude_to`](Self::extrude_to), how close the fitted sheet is to what it was
     /// asked to be (the largest distance to the curves given, or the fit error); `None` on every
     /// other solid.
@@ -4638,6 +4986,93 @@ impl Solid {
             Ok(out.into())
         } else {
             Err(fail(self.api, "continuity"))
+        }
+    }
+
+    /// How well the two faces of edge `edge` (an [`Edge::index`]) meet along it: `samples`
+    /// points along the edge (64 usually; 16 at fewest), each projected onto both faces, and the
+    /// largest gap between the two, angle between the faces' normals (each the way its face
+    /// faces: a square crease reads pi/2) and difference of their normal curvatures across the
+    /// edge -- [`continuity`](Self::continuity)'s figures for any two faces of one body, of any
+    /// kind of surface. Refused for an edge that does not bound exactly two faces.
+    pub fn edge_continuity(&self, edge: u32, samples: u32) -> Result<Continuity> {
+        let mut out = sys::CadaclysmBlacksmithContinuity::default();
+        if unsafe { (self.api.cadaclysm_blacksmith_edge_continuity)(self.raw(), edge, samples, &mut out) } {
+            Ok(out.into())
+        } else {
+            Err(fail(self.api, "edge_continuity"))
+        }
+    }
+
+    /// Face `face` faired, as a sheet of its own: the smoothest surface within `tolerance`
+    /// (1e-3 usually; `None` the effective one) of its NURBS surface -- least squares plus its
+    /// third derivatives squared (what a zebra's ripple costs), weighed as heavily as the
+    /// tolerance allows. A sheet lofted through traced sections wobbles between them; this
+    /// spends the tolerance on smoothness.
+    ///
+    /// `controls` `None` fairs on the face's own net, its degree raised to `degree` (3 to 7; 3
+    /// usually) and its spans split to a dozen each way at least, so a kept side is kept
+    /// exactly; `Some((n_u, n_v))` fairs on a uniform net that size, its kept sides within the
+    /// tolerance. `keep` says what each side keeps, in side order `u0`, `u1`, `v0`, `v1`:
+    /// `None` free to move, `Some(0)` its position, `Some(1)` the tangent plane across it,
+    /// `Some(2)` the curvature too (what [`matched`](Self::matched) gave it; `[Some(2); 4]`
+    /// usually). `no_inflection` `(along_u, along_v)` holds the isocurves along those
+    /// directions from turning their curvature over -- each bends to the side it bends to most
+    /// -- which turns a roof lofted through wobbly sections into a dome. Refused where no such
+    /// fair is within the tolerance. Its [`sheet_error`](Self::sheet_error) is the largest
+    /// distance found between the two surfaces.
+    pub fn faired(&self, tolerance: Option<f64>, degree: u32, controls: Option<(u32, u32)>, keep: [Option<u32>; 4], no_inflection: (bool, bool), face: u32) -> Result<Solid> {
+        let (cu, cv) = controls.unwrap_or((0, 0));
+        let levels = keep.map(|k| k.map_or(-1, |l| i32::try_from(l).unwrap_or(i32::MAX)));
+        let bits = u32::from(no_inflection.0) | (u32::from(no_inflection.1) << 1);
+        let mut error = 0.0;
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_surface_faired)(self.raw(), face, tol_arg(tolerance), degree, cu, cv, levels.as_ptr(), bits, &mut error)
+        };
+        Solid::fitted(self.next(raw, "surface_faired"), error)
+    }
+
+    /// Where face `face`'s Gaussian and mean curvature change sign, on a grid of `samples`
+    /// steps each way over its surface (32 usually; 8 at fewest): how many separate areas of
+    /// each sign, and the points between opposite signs ([`CurvatureTurns`]). A dome or a
+    /// saddle reads one area of one sign and no turn; a sheet whose sections wobble reads
+    /// several -- the surface's form of [`NurbsCurve::inflections`].
+    pub fn curvature_turns(&self, face: u32, samples: u32) -> Result<CurvatureTurns> {
+        let mut out = sys::CadaclysmBlacksmithCurvatureTurns::default();
+        if !unsafe { (self.api.cadaclysm_blacksmith_curvature_turns)(self.raw(), face, samples, &mut out) } {
+            return Err(fail(self.api, "curvature_turns"));
+        }
+        let points = |mean: bool, count: u32| -> Result<Vec<At>> {
+            if count == 0 {
+                return Ok(Vec::new());
+            }
+            let raw = unsafe { (self.api.cadaclysm_blacksmith_curvature_turn_points)(self.raw(), face, samples, mean) };
+            samples_of(self.api, raw, "curvature_turn_points")
+        };
+        Ok(CurvatureTurns {
+            gaussian_positive: out.gaussian_positive,
+            gaussian_negative: out.gaussian_negative,
+            gaussian_turns: points(false, out.gaussian_turns)?,
+            mean_positive: out.mean_positive,
+            mean_negative: out.mean_negative,
+            mean_turns: points(true, out.mean_turns)?,
+            samples: out.samples,
+        })
+    }
+
+    /// The worst kink of the highlight lines crossing edge `edge` (an [`Edge::index`]), at
+    /// `samples` points along it (64 usually; 16 at fewest): the lines of straight light tubes
+    /// parallel to the surface a body's size away, every tube direction tried. They run on
+    /// through an edge where the two faces' curvatures agree (G2) and kink where it jumps -- a
+    /// fillet's seam with a flat face among them. Beside [`edge_continuity`](Self::edge_continuity)'s
+    /// curvature jump, this is the number a zebra shows. Refused for an edge that does not
+    /// bound exactly two faces.
+    pub fn highlight_kink(&self, edge: u32, samples: u32) -> Result<HighlightKink> {
+        let mut out = sys::CadaclysmBlacksmithHighlightKink::default();
+        if unsafe { (self.api.cadaclysm_blacksmith_highlight_kink)(self.raw(), edge, samples, &mut out) } {
+            Ok(out.into())
+        } else {
+            Err(fail(self.api, "highlight_kink"))
         }
     }
 
@@ -4742,6 +5177,22 @@ impl Solid {
         }
     }
 
+    /// A chain of spline edges rounded with the radius following a law along it: `law` is the
+    /// radius at stations along the chain, each `(share, radius)` -- the share of the chain's arc
+    /// length from its start, 0 to 1 -- run through smoothly by a monotone cubic, so the radius
+    /// never swings past its stations, and held flat before the first station and after the last.
+    /// `edges` must run end to end into one open chain, each running on tangent into the next;
+    /// the chain runs the way the first edge's curve does. One edge is a chain of one.
+    /// `tolerance` is the fillet surfaces' fit.
+    pub fn fillet_law(&self, edges: &[u32], law: &[(f64, f64)], tolerance: f64) -> Result<Solid> {
+        let shares: Vec<f64> = law.iter().map(|&(f, _)| f).collect();
+        let radii: Vec<f64> = law.iter().map(|&(_, r)| r).collect();
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_fillet_law)(self.raw(), edges.as_ptr(), edges.len(), shares.as_ptr(), radii.as_ptr(), law.len(), tolerance)
+        };
+        self.next(raw, "fillet_law")
+    }
+
     /// This sheet cut along `curve` -- one lying on it, say projected or pulled onto it -- and
     /// nothing removed: every face comes back in its pieces outside the cutter, then its pieces
     /// inside, each a face. The cutter is `curve` run along `direction` (`None`: the mean of the
@@ -4828,6 +5279,35 @@ impl Solid {
         Ok((Solid::wrap(api, raw, "join_sheets")?, report.into()))
     }
 
+    /// This sheet cut along `curve`, a curve lying on it (within ten times `tolerance`), with no
+    /// direction: the cut is made in each face's own parameters, so it follows the curve however
+    /// far the sheet rolls, and runs across the seams of a joined sheet. An open curve is carried
+    /// on along the sheet past both ends to its boundary; a closed one cuts out the island it
+    /// bounds. Nothing is removed. Where the cut lies on the curve the rim is one edge carrying the
+    /// curve's own span exactly. Refused where the curve leaves the sheet. Python's tolerance is 0.01.
+    pub fn split_along_curve(&self, curve: &NurbsCurve, tolerance: Option<f64>) -> Result<Solid> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_split_along_curve)(self.raw(), curve.raw(), tol_arg(tolerance)) };
+        self.next(raw, "split_along_curve")
+    }
+
+    /// This sheet parted along `curve` (lying on it, as for split_along_curve) into two panels with
+    /// a shut line between them: each trimmed back `gap / 2` from the curve along the sheet, with a
+    /// flange `flange` along the faces' outward normals on its cut edge only (negative turns it
+    /// under; 0 for none), ending square where the curve runs off the sheet. The panel left of the
+    /// curve's run (seen from the outward side) first, then the right one; a loop run
+    /// counter-clockwise from that side has the island on its left. Refused where the curve leaves
+    /// the sheet or the gap leaves nothing of a panel. Python's defaults: gap 4, flange -10, tolerance 0.01.
+    pub fn panel_gap(&self, curve: &NurbsCurve, gap: f64, flange: f64, tolerance: Option<f64>) -> Result<(Solid, Solid)> {
+        let mut out: [*mut sys::CadaclysmBlacksmithSolid; 2] = [ptr::null_mut(); 2];
+        let ok = unsafe { (self.api.cadaclysm_blacksmith_panel_gap)(self.raw(), curve.raw(), gap, flange, tol_arg(tolerance), out.as_mut_ptr()) };
+        if !ok {
+            return Err(fail(self.api, "panel_gap"));
+        }
+        // Both wrapped first, so each is freed whatever the other does.
+        let (left, right) = (self.next(out[0], "panel_gap"), self.next(out[1], "panel_gap"));
+        Ok((left?, right?))
+    }
+
     /// This sheet with an opening recessed into it along `outline` -- a window, a lamp, a grille
     /// or an air intake set into a panel -- and how many of the result's faces are each part's:
     /// `(sheet, fillet, walls, pane)`, the faces in that order.
@@ -4850,6 +5330,25 @@ impl Solid {
             (self.api.cadaclysm_blacksmith_recess)(self.raw(), outline.raw(), depth, draft, fillet, pane, tol_arg(tolerance), faces.as_mut_ptr())
         };
         Ok((self.next(raw, "recess")?, (faces[0], faces[1], faces[2], faces[3])))
+    }
+
+    /// This half and its reflection across `plane` (its z the plane's normal) joined into one
+    /// symmetric body -- half a car, a hull or a bottle modelled once -- the half's faces first,
+    /// and a [`SymmetryReport`] of how well the seam on the plane meets.
+    ///
+    /// With `snap` above 0, every NURBS face that is its whole surface and has a side whose
+    /// control points all lie within `snap` of the plane is squared to it first: that side pulled
+    /// onto the plane, the next row of control points stood straight off it along the normal
+    /// (keeping its distance from the plane). The surface then crosses the plane at 90 degrees,
+    /// so it meets its mirror tangent and curvature continuous; nothing past that row moves.
+    /// `snap` 0 mirrors the half as it is, a crease wherever it leans. The halves are sewn within
+    /// `tolerance` (`None` or 0: a rounding of the body's size). Refused for a half on both sides
+    /// of the plane, no edge of it on the plane, or a face that cannot be squared (its next row
+    /// on the plane or past it). Python's defaults: snap 0, tolerance 0.
+    pub fn mirror_join(&self, plane: &Frame, snap: f64, tolerance: Option<f64>) -> Result<(Solid, SymmetryReport)> {
+        let mut report = [0.0f64; 7];
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_mirror_join)(self.raw(), plane.v.as_ptr(), snap, tol_arg(tolerance), report.as_mut_ptr()) };
+        Ok((self.next(raw, "mirror_join")?, report.into()))
     }
 }
 
@@ -4875,6 +5374,173 @@ pub struct Closest {
     pub index_b: u32,
     pub edge_b: Option<u32>,
     pub refined: bool,
+}
+
+/// The nearest point of a solid (or of one face) to a query point ([`Solid::closest_point`],
+/// [`Projector::closest_point`], [`Solid::face_closest_point`]). `point` lies on the body's
+/// boundary and `distance` is from the query point to it. What it lies on is named as
+/// [`Closest`] names each side: `kind` (`"face"`, `"edge"` or `"vertex"`), `index` (the kernel's
+/// id) and `edge`, the public edge number ([`Solid::edge_length`], [`Solid::fillet`] and
+/// [`Solid::edge_closest_point`] take it) for an edge foot, `None` for a face, a vertex and an
+/// edge the fillet table does not hold -- read `edge`, not `index`. `uv` is the face parameter of
+/// a foot inside a face, `None` otherwise. `normal` is unit: a face foot's outward normal, an
+/// edge or vertex foot's direction from the foot to the query point, on the body the mean of the
+/// adjacent faces' outward normals. `refined` false is the mesh's answer, within
+/// `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PointFoot {
+    pub point: [f64; 3],
+    pub distance: f64,
+    pub kind: String,
+    pub index: u32,
+    pub edge: Option<u32>,
+    pub uv: Option<[f64; 2]>,
+    pub normal: [f64; 3],
+    pub refined: bool,
+}
+
+impl PointFoot {
+    fn unfilled() -> sys::CadaclysmBlacksmithPointFoot {
+        sys::CadaclysmBlacksmithPointFoot {
+            distance: 0.0,
+            point: [0.0; 3],
+            kind: ptr::null(),
+            index: 0,
+            edge: u32::MAX,
+            uv: [f64::NAN; 2],
+            normal: [0.0; 3],
+            refined: 0,
+        }
+    }
+
+    fn of(raw: &sys::CadaclysmBlacksmithPointFoot) -> PointFoot {
+        // The kind is a static string the library owns: copied, never freed.
+        PointFoot {
+            point: raw.point,
+            distance: raw.distance,
+            kind: if raw.kind.is_null() { String::new() } else { unsafe { text(raw.kind) } },
+            index: raw.index,
+            edge: (raw.edge != u32::MAX).then_some(raw.edge),
+            uv: (!raw.uv[0].is_nan() && !raw.uv[1].is_nan()).then_some(raw.uv),
+            normal: raw.normal,
+            refined: raw.refined != 0,
+        }
+    }
+}
+
+/// The nearest points of two curves ([`NurbsCurve::closest_points`], and a [`NearestObject`]'s
+/// answer for a curve): side `a` on the curve asked, at its parameter `t_a`, side `b` on the
+/// other, at `t_b`, `distance` apart (0 where they cross). Exact.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CurvePair {
+    pub distance: f64,
+    pub t_a: f64,
+    pub point_a: [f64; 3],
+    pub t_b: f64,
+    pub point_b: [f64; 3],
+}
+
+impl CurvePair {
+    fn of(raw: &sys::CadaclysmBlacksmithCurvePair) -> CurvePair {
+        CurvePair { distance: raw.distance, t_a: raw.t_a, point_a: raw.point_a, t_b: raw.t_b, point_b: raw.point_b }
+    }
+}
+
+/// The nearest points of a curve and a solid's boundary ([`Solid::curve_closest_points`],
+/// [`Projector::curve_closest_points`], and a [`NearestObject`]'s answer for a solid or a
+/// projector): `point_on_curve` at the curve's parameter `t`, and `point_on_body`, `distance`
+/// apart. The body's side is named as [`PointFoot`] names its point: `kind`, `index` (the
+/// kernel's id), `edge` the public edge number for an edge foot (`None` otherwise -- read
+/// `edge`, not `index`), `uv` `None` off a face, `normal` unit. `refined` false is the mesh's
+/// answer, within `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`. `crossing` is
+/// true where the curve passes through the boundary: `distance` is then exactly 0 and the
+/// earliest crossing in `t` answers.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CurveBodyFoot {
+    pub distance: f64,
+    pub t: f64,
+    pub point_on_curve: [f64; 3],
+    pub point_on_body: [f64; 3],
+    pub kind: String,
+    pub index: u32,
+    pub edge: Option<u32>,
+    pub uv: Option<[f64; 2]>,
+    pub normal: [f64; 3],
+    pub refined: bool,
+    pub crossing: bool,
+}
+
+impl CurveBodyFoot {
+    fn unfilled() -> sys::CadaclysmBlacksmithCurveBodyFoot {
+        sys::CadaclysmBlacksmithCurveBodyFoot { distance: 0.0, t: 0.0, point_on_curve: [0.0; 3], body: PointFoot::unfilled(), crossing: 0 }
+    }
+
+    fn of(raw: &sys::CadaclysmBlacksmithCurveBodyFoot) -> CurveBodyFoot {
+        let body = PointFoot::of(&raw.body);
+        CurveBodyFoot {
+            distance: raw.distance,
+            t: raw.t,
+            point_on_curve: raw.point_on_curve,
+            point_on_body: body.point,
+            kind: body.kind,
+            index: body.index,
+            edge: body.edge,
+            uv: body.uv,
+            normal: body.normal,
+            refined: body.refined,
+            crossing: raw.crossing != 0,
+        }
+    }
+}
+
+/// An item of [`NurbsCurve::closest_object`]'s list.
+#[derive(Clone, Copy, Debug)]
+pub enum NearItem<'a> {
+    Solid(&'a Solid),
+    Curve(&'a NurbsCurve),
+    Point([f64; 3]),
+    Projector(&'a Projector),
+}
+
+/// A [`NearestObject`]'s item's own answer: a solid's or a projector's, a curve's (side `a` the
+/// curve asked), or nothing more for a point.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NearestAnswer {
+    Body(CurveBodyFoot),
+    Curve(CurvePair),
+    Point,
+}
+
+/// The nearest of a list of things to a curve ([`NurbsCurve::closest_object`]): `which` the
+/// item's index in the list, `distance` from `point_on_curve` (at the curve's parameter `t`) to
+/// `point_on_item`, and the item's own `answer`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NearestObject {
+    pub which: usize,
+    pub distance: f64,
+    pub t: f64,
+    pub point_on_curve: [f64; 3],
+    pub point_on_item: [f64; 3],
+    pub answer: NearestAnswer,
+}
+
+impl NearestObject {
+    fn of(raw: &sys::CadaclysmBlacksmithNearestObject) -> NearestObject {
+        // Only the member answer_kind names is read: the other is zero bytes (a null kind).
+        let answer = match raw.answer_kind {
+            0 => NearestAnswer::Body(CurveBodyFoot::of(&raw.body)),
+            1 => NearestAnswer::Curve(CurvePair::of(&raw.pair)),
+            _ => NearestAnswer::Point,
+        };
+        NearestObject {
+            which: raw.which as usize,
+            distance: raw.distance,
+            t: raw.t,
+            point_on_curve: raw.point_on_curve,
+            point_on_item: raw.point_on_item,
+            answer,
+        }
+    }
 }
 
 /// `"outside"`, `"inside"` or `"on"` from the library's 0, 1 or 2.
@@ -4920,6 +5586,62 @@ impl Classifier {
             return Err(fail(self.api, "classifier_contains"));
         }
         containment("classifier_contains", code)
+    }
+}
+
+/// One solid's reusable nearest-point search ([`Solid::projector`]), keeping the mesh, its search
+/// tree and each face's trim judge between queries. It keeps its own reference to the body, so it
+/// goes on answering after its [`Solid`] is dropped. Calls on one projector take turns (a lock
+/// inside the library). Dropping it frees the handle.
+pub struct Projector {
+    handle: NonNull<sys::CadaclysmBlacksmithProjector>,
+    api: &'static Api,
+}
+
+// SAFETY: the library wraps its projector in a mutex (calls from several threads serialise),
+// and the handle holds its own reference to the body, so it may move and be shared.
+unsafe impl Send for Projector {}
+unsafe impl Sync for Projector {}
+
+impl Drop for Projector {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_projector_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for Projector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Projector({:p})", self.handle)
+    }
+}
+
+impl Projector {
+    /// The nearest point of the body's boundary to `p`, or `None` beyond `max_distance` (`None`,
+    /// NaN or +inf: no limit) -- [`Solid::closest_point`]'s answer, at the projector's tolerance.
+    pub fn closest_point(&self, p: [f64; 3], max_distance: Option<f64>) -> Result<Option<PointFoot>> {
+        let mut raw = PointFoot::unfilled();
+        let found = unsafe {
+            (self.api.cadaclysm_blacksmith_projector_closest_point)(self.handle.as_ptr(), p.as_ptr(), tol_arg(max_distance), &mut raw)
+        };
+        if found < 0 {
+            return Err(fail(self.api, "projector_closest_point"));
+        }
+        Ok((found != 0).then(|| PointFoot::of(&raw)))
+    }
+
+    /// The nearest points of `curve` and the body's boundary, or `None` beyond `max_distance`
+    /// (`None`, NaN or +inf: no limit) -- [`Solid::curve_closest_points`]'s answer, at the
+    /// projector's tolerance. The projector's lock is held for the whole curve query: other
+    /// threads asking it wait.
+    pub fn curve_closest_points(&self, curve: &NurbsCurve, max_distance: Option<f64>) -> Result<Option<CurveBodyFoot>> {
+        let mut raw = CurveBodyFoot::unfilled();
+        let found = unsafe {
+            (self.api.cadaclysm_blacksmith_projector_curve_closest_points)(self.handle.as_ptr(), curve.raw(), tol_arg(max_distance), &mut raw)
+        };
+        if found < 0 {
+            return Err(fail(self.api, "projector_curve_closest_points"));
+        }
+        Ok((found != 0).then(|| CurveBodyFoot::of(&raw)))
     }
 }
 
@@ -5389,7 +6111,7 @@ impl Solid {
     }
 
     /// The body a CAD file holds, as a solid, read where it draws in the file's own
-    /// units and axes: STEP, ACIS, Rhino, OCCT `.brep`, IGES or IFC. A file of several
+    /// units and axes: STEP, ACIS, Rhino, OCCT `.brep`, IGES, IFC or OpenSCAD. A file of several
     /// bodies needs `body` (0-based, in drawing order) -- or [`Solid::open_all`].
     ///
     /// What such a solid can do is what its geometry allows: fillet and chamfer want
@@ -5427,8 +6149,8 @@ impl Solid {
         if solids.is_empty() {
             let extension = path.extension().unwrap_or_default().to_string_lossy();
             return Err(Error::new(format!(
-                "open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, OCCT .brep, IGES or IFC \
-                 body can be a solid, not a mesh, a curve or a CSG body"
+                "open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, OCCT .brep, IGES, IFC or \
+                 OpenSCAD body can be a solid, not a mesh, a curve or a CSG body"
             )));
         }
         Ok(solids)
@@ -6394,6 +7116,64 @@ impl Solid {
         Ok(Manifold::from_row(out))
     }
 
+    /// The radius of the round face `face` belongs to -- a fillet's face that `unfillet` can
+    /// take back -- 0 where it is none. Refused for a face the solid does not have.
+    pub fn face_round_radius(&self, face: u32) -> Result<f64> {
+        let r = unsafe { (self.api.cadaclysm_blacksmith_face_round_radius)(self.raw(), face) };
+        if r.is_nan() {
+            return Err(fail(self.api, "face_round_radius"));
+        }
+        Ok(r)
+    }
+
+    /// The distance of the chamfer face `face` belongs to -- a bevel `unchamfer` can take
+    /// back -- 0 where it is none. Refused for a face the solid does not have.
+    pub fn face_chamfer_distance(&self, face: u32) -> Result<f64> {
+        let d = unsafe { (self.api.cadaclysm_blacksmith_face_chamfer_distance)(self.raw(), face) };
+        if d.is_nan() {
+            return Err(fail(self.api, "face_chamfer_distance"));
+        }
+        Ok(d)
+    }
+
+    /// The edges as rational cubic Beziers, sixteen numbers each (`x y z w` per control
+    /// point, the point Cartesian and its weight beside it) -- what a viewer draws the edges
+    /// by: exact where an edge's curve has a Bezier form, flattened within `tolerance` where
+    /// it has none (`None`: the solid's effective tolerance).
+    pub fn edge_beziers(&self, tolerance: Option<f64>) -> Result<Vec<f64>> {
+        let t = tol_arg(tolerance);
+        let count = unsafe { (self.api.cadaclysm_blacksmith_edge_bezier_count)(self.raw(), t) } as usize;
+        if count == 0 && failed(self.api) {
+            return Err(fail(self.api, "edge_beziers"));
+        }
+        let mut out = vec![0.0; 16 * count.max(1)];
+        if !unsafe { (self.api.cadaclysm_blacksmith_edge_beziers)(self.raw(), t, out.as_mut_ptr()) } {
+            return Err(fail(self.api, "edge_beziers"));
+        }
+        out.truncate(16 * count);
+        Ok(out)
+    }
+
+    /// The faces' isoparametric curves as rational cubic Beziers, sixteen numbers each as
+    /// [`Solid::edge_beziers`] gives them: `density` interior lines each way on every curved
+    /// face, clipped to the face, plus the lines at the ends of its parameter span; a flat
+    /// face draws none. Exact where the surface has a closed form for the line, flattened
+    /// within `tolerance` elsewhere (`None`: the solid's effective tolerance). Python's
+    /// default density is 4.
+    pub fn isocurve_beziers(&self, density: u32, tolerance: Option<f64>) -> Result<Vec<f64>> {
+        let t = tol_arg(tolerance);
+        let count = unsafe { (self.api.cadaclysm_blacksmith_isocurve_bezier_count)(self.raw(), density, t) } as usize;
+        if count == 0 && failed(self.api) {
+            return Err(fail(self.api, "isocurve_beziers"));
+        }
+        let mut out = vec![0.0; 16 * count.max(1)];
+        if !unsafe { (self.api.cadaclysm_blacksmith_isocurve_beziers)(self.raw(), density, t, out.as_mut_ptr()) } {
+            return Err(fail(self.api, "isocurve_beziers"));
+        }
+        out.truncate(16 * count);
+        Ok(out)
+    }
+
     /// What is wrong with this solid's body, as a [`HealthReport`] (the reader's type, shared):
     /// the free edges (the sides one face bounds) and the wires they chain into, each with its
     /// nearest partner and the gap to it; the features below `tolerance`; the loose edges; and
@@ -6631,6 +7411,71 @@ impl Solid {
         })
     }
 
+    /// The nearest point of this solid's boundary to `p`, or `None` where it lies beyond
+    /// `max_distance` (`None`, NaN or +inf: no limit; 0 finds a point on the body). `tolerance`
+    /// -- absolute, in model units; `None` (or 0, or NaN) is unset, which the tolerance policy
+    /// resolves to the solid's effective tolerance -- sizes the mesh search only: a `refined`
+    /// false answer is within `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`.
+    /// Meshes the body every call: for more than a few points build a [`Projector`] once.
+    pub fn closest_point(&self, p: [f64; 3], max_distance: Option<f64>, tolerance: Option<f64>) -> Result<Option<PointFoot>> {
+        let mut raw = PointFoot::unfilled();
+        let found = unsafe {
+            (self.api.cadaclysm_blacksmith_closest_point)(self.raw(), p.as_ptr(), tol_arg(max_distance), tol_arg(tolerance), &mut raw)
+        };
+        if found < 0 {
+            return Err(fail(self.api, "closest_point"));
+        }
+        Ok((found != 0).then(|| PointFoot::of(&raw)))
+    }
+
+    /// A [`Projector`] for this solid at `tolerance` (`None`, 0 or NaN: unset, the solid's
+    /// effective tolerance): the body meshed once, then asked [`Projector::closest_point`] point
+    /// after point. It keeps its own reference to the body. Open bodies and sheets are accepted.
+    pub fn projector(&self, tolerance: Option<f64>) -> Result<Projector> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_projector_new)(self.raw(), tol_arg(tolerance)) };
+        NonNull::new(raw).map(|handle| Projector { handle, api: self.api }).ok_or_else(|| fail(self.api, "projector_new"))
+    }
+
+    /// The nearest points of `curve` and this solid's boundary, as a [`CurveBodyFoot`] --
+    /// `crossing` true, distance 0, where the curve passes through the boundary (the earliest
+    /// crossing in `t`) -- or `None` where the body lies beyond `max_distance` (`None`, NaN or
+    /// +inf: no limit). `tolerance` -- absolute, in model units; `None` (or 0, or NaN) is unset,
+    /// which the tolerance policy resolves to the solid's effective tolerance -- sizes the march
+    /// along the curve and the mesh search: a `refined` false answer is within
+    /// `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`. Meshes the body every call:
+    /// for more than a few curves build a [`Projector`] once.
+    pub fn curve_closest_points(&self, curve: &NurbsCurve, max_distance: Option<f64>, tolerance: Option<f64>) -> Result<Option<CurveBodyFoot>> {
+        let mut raw = CurveBodyFoot::unfilled();
+        let found = unsafe {
+            (self.api.cadaclysm_blacksmith_curve_closest_points)(self.raw(), curve.raw(), tol_arg(max_distance), tol_arg(tolerance), &mut raw)
+        };
+        if found < 0 {
+            return Err(fail(self.api, "curve_closest_points"));
+        }
+        Ok((found != 0).then(|| CurveBodyFoot::of(&raw)))
+    }
+
+    /// The nearest point to `p` of face `face` alone, inside its trims or on its boundary: exact,
+    /// no mesh, always refined.
+    pub fn face_closest_point(&self, face: u32, p: [f64; 3]) -> Result<PointFoot> {
+        let mut raw = PointFoot::unfilled();
+        if unsafe { (self.api.cadaclysm_blacksmith_face_closest_point)(self.raw(), face, p.as_ptr(), &mut raw) } < 0 {
+            return Err(fail(self.api, "face_closest_point"));
+        }
+        Ok(PointFoot::of(&raw))
+    }
+
+    /// The nearest point to `p` of edge `edge` (an index into [`Solid::edges`], a [`PointFoot`]'s
+    /// `edge`) on its own curve over its range: `(t, point, distance)`, `t` the curve's parameter
+    /// as [`Solid::edge_point_at_length`] gives it. Exact.
+    pub fn edge_closest_point(&self, edge: u32, p: [f64; 3]) -> Result<(f64, [f64; 3], f64)> {
+        let mut out = [0.0f64; 5];
+        if unsafe { (self.api.cadaclysm_blacksmith_edge_closest_point)(self.raw(), edge, p.as_ptr(), out.as_mut_ptr()) } < 0 {
+            return Err(fail(self.api, "edge_closest_point"));
+        }
+        Ok((out[0], [out[1], out[2], out[3]], out[4]))
+    }
+
     /// The edges a fillet indexes, copied out.
     pub fn edges(&self) -> Result<Vec<Edge>> {
         let count = unsafe { (self.api.cadaclysm_blacksmith_edge_count)(self.raw()) };
@@ -6834,7 +7679,11 @@ impl Solid {
     /// Draw the solid with the view library in use ([`crate::view::current`]), by handle:
     /// exact surfaces where they draw, its paint, its edges (`options.edges`). On the
     /// terminal one still in the scrollback; on the wgpu library ([`crate::view::use_wgpu`])
-    /// a window this call waits on until it is closed. `None` for `options` is the defaults.
+    /// a window this call waits on until it is closed. In the browser it draws into the
+    /// latest `View::on_canvas` view still open, replacing what an earlier `show()` drew
+    /// there, and returns. That view is shared: `show()` re-aims its camera and switches its
+    /// whole Edges layer, your own items on it included, where natively each `show()` has a
+    /// window of its own. `None` for `options` is the defaults.
     pub fn show<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
@@ -7120,7 +7969,8 @@ pub struct Operation {
 /// One thing [`Job::machine`] left uncut, one of [`Report`]'s items. Copied out; immutable.
 #[derive(Debug)]
 pub struct ReportItem {
-    /// `"corner"` (material the end mill doesn't reach), `"hole"` (a round hole no drill
+    /// `"corner"` (material the end mill doesn't reach), `"relief"` (a corner notched into the
+    /// walls by [`Job::machine_relieved`]), `"hole"` (a round hole no drill
     /// matches or a matched drill can't make), `"slope"` (a face that is neither horizontal
     /// nor vertical, cut as steps), `"undercut"` (material under an overhang) or `"too_deep"`
     /// (a level below the end mill's flute length, cut only that far).
@@ -7128,8 +7978,8 @@ pub struct ReportItem {
     /// The item's XYZ location -- a centroid for an area, the axis point at the top for a
     /// hole.
     pub at: [f64; 3],
-    /// An area in mm^2 for `corner`/`undercut`, a diameter in mm for `hole`, and a height in
-    /// mm (its Z range) for `slope` and `too_deep`.
+    /// An area in mm^2 for `corner`/`undercut`, a diameter in mm for `hole`, a notch depth in
+    /// mm for `relief`, and a height in mm (its Z range) for `slope` and `too_deep`.
     pub size: f64,
     /// The highest Z the item stands up to: the level a corner or undercut starts from, a
     /// hole's top, a slope's head, or for `too_deep` the flutes' reach.
@@ -7413,7 +8263,8 @@ impl Job {
     /// holes no drill matches. Everything else is as in `machine`. Fails for what the kernel
     /// refuses (no end mill, one not smaller than the one before, two sharing a number, a
     /// drill among them, a null drill, ...); the job changes only on success -- a refusal
-    /// leaves it exactly as it was.
+    /// leaves it exactly as it was. See [`machine_relieved`](Self::machine_relieved) to relieve the corners the
+    /// smallest end mill leaves.
     #[allow(clippy::too_many_arguments)]
     pub fn machine_with(
         &mut self,
@@ -7425,26 +8276,67 @@ impl Job {
         skin: f64,
         peck: Option<f64>,
     ) -> Result<Report> {
+        self.machine_relieved(part, end_mills, drills, stepover, stepdown, skin, peck, false)
+    }
+
+    /// [`machine_with`](Self::machine_with) with `corner_relief` choosing what happens to the
+    /// inside corners the smallest end mill still leaves: `false` reports them as `corner`
+    /// items, as `machine_with` does; `true` notches each into the walls with that end mill
+    /// and reports it as a `relief` item instead (`size` is the notch's depth in mm, `reason`
+    /// says by which tool and how deep). Everything else is as in `machine_with`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn machine_relieved(
+        &mut self,
+        part: &Solid,
+        end_mills: &[&Tool],
+        drills: &[Option<&Tool>],
+        stepover: Option<f64>,
+        stepdown: Option<f64>,
+        skin: f64,
+        peck: Option<f64>,
+        corner_relief: bool,
+    ) -> Result<Report> {
         let ends: Vec<*const sys::CadaclysmBlacksmithTool> = end_mills.iter().map(|t| t.raw()).collect::<Vec<_>>();
         let ends_ptr = if ends.is_empty() { ptr::null() } else { ends.as_ptr() };
         let handles: Vec<*const sys::CadaclysmBlacksmithTool> = drills.iter().map(|t| t.map_or(ptr::null(), Tool::raw)).collect();
         let drills_ptr = if handles.is_empty() { ptr::null() } else { handles.as_ptr() };
-        let raw = unsafe {
-            (self.api.cadaclysm_blacksmith_job_machine_with)(
-                self.raw(),
-                part.raw(),
-                ends_ptr,
-                ends.len(),
-                drills_ptr,
-                handles.len(),
-                stepover.unwrap_or(f64::NAN),
-                stepdown.unwrap_or(f64::NAN),
-                skin,
-                peck.unwrap_or(f64::NAN),
-            )
+        // Without the flag the old entry point is called, exactly as before.
+        let (raw, context) = if corner_relief {
+            let raw = unsafe {
+                (self.api.cadaclysm_blacksmith_job_machine_relieved)(
+                    self.raw(),
+                    part.raw(),
+                    ends_ptr,
+                    ends.len(),
+                    drills_ptr,
+                    handles.len(),
+                    stepover.unwrap_or(f64::NAN),
+                    stepdown.unwrap_or(f64::NAN),
+                    skin,
+                    peck.unwrap_or(f64::NAN),
+                    true,
+                )
+            };
+            (raw, "job_machine_relieved")
+        } else {
+            let raw = unsafe {
+                (self.api.cadaclysm_blacksmith_job_machine_with)(
+                    self.raw(),
+                    part.raw(),
+                    ends_ptr,
+                    ends.len(),
+                    drills_ptr,
+                    handles.len(),
+                    stepover.unwrap_or(f64::NAN),
+                    stepdown.unwrap_or(f64::NAN),
+                    skin,
+                    peck.unwrap_or(f64::NAN),
+                )
+            };
+            (raw, "job_machine_with")
         };
         if raw.is_null() {
-            return Err(fail(self.api, "job_machine_with"));
+            return Err(fail(self.api, context));
         }
         read_report(self.api, raw)
     }
@@ -10882,7 +11774,7 @@ fn place_result(api: &'static Api, raw: *mut c_char, what: &str) -> Result<Strin
 
 fn no_brep(what: &str) -> String {
     format!(
-        "{what} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, IGES, IFC), not a mesh, a \
+        "{what} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, IGES, IFC, OpenSCAD), not a mesh, a \
          curve or a CSG body"
     )
 }
@@ -11285,6 +12177,23 @@ impl Document {
     /// of every node as JSON, `[{"id", "state": "ok"|"error"|"blocked"|"pending", ...}]`.
     pub fn evaluate(&mut self, cheap_only: bool) -> Result<String> {
         owned_text(self.api, unsafe { (self.api.cadaclysm_blacksmith_document_evaluate)(self.raw(), cheap_only) }, "document_evaluate")
+    }
+
+    /// [`Document::evaluate`], every kernel call's progress heard by `report` as `(node,
+    /// phase, done, total)`: `node` the id of the node being built. The same statuses; a
+    /// cheap-only pass reports nothing. `report` runs on this thread, often, and must not
+    /// touch the document.
+    pub fn evaluate_with(&mut self, cheap_only: bool, mut report: impl FnMut(&str, &str, usize, usize)) -> Result<String> {
+        unsafe extern "C" fn heard(node: *const c_char, phase: *const c_char, done: usize, total: usize, user: *mut c_void) {
+            // SAFETY: `user` is the `&mut dyn FnMut` below, alive for the call; the strings the library's.
+            let report = unsafe { &mut *(user as *mut &mut dyn FnMut(&str, &str, usize, usize)) };
+            let text = |p: *const c_char| if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() };
+            report(&text(node), &text(phase), done, total);
+        }
+        let mut sink: &mut dyn FnMut(&str, &str, usize, usize) = &mut report;
+        let user = &mut sink as *mut &mut dyn FnMut(&str, &str, usize, usize) as *mut c_void;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_document_evaluate_with)(self.raw(), cheap_only, Some(heard), user) };
+        owned_text(self.api, raw, "document_evaluate_with")
     }
 
     fn up_to_date(&mut self) -> Result<()> {
@@ -12011,6 +12920,57 @@ fn taken_3dm(api: &Api, raw: *mut u8, len: usize, what: &str) -> Result<Vec<u8>>
     unsafe { (api.cadaclysm_blacksmith_bytes_free)(raw, len) };
     Ok(bytes)
 }
+
+/// Several solids meshed at `tolerance` (`None`: each one's effective tolerance) -- each the
+/// mesh [`Solid::mesh`] hands out -- as one file's bytes in `format`: `"stl"` (binary, every
+/// solid in one body), `"stl-ascii"` (one body named as the first solid), `"obj"` (one named
+/// object a solid, no material library), `"glb"` or `"gltf"` (one named node a solid in a
+/// material of its own; the `.gltf` with its buffer embedded). `names` one a solid (`None`:
+/// each solid's own name, else `Solid 1`, `Solid 2`, ...). `looks` one a solid -- linear
+/// `[r, g, b, a, metallic, roughness]` in 0..1 -- the glTF's materials (`None`: each solid's
+/// own colour); STL and OBJ ignore them.
+pub fn mesh_file(solids: &[&Solid], format: &str, names: Option<&[&str]>, looks: Option<&[[f64; 6]]>, tolerance: Option<f64>) -> Result<Vec<u8>> {
+    let api = api()?;
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let format = CString::new(format).map_err(|_| Error::new("mesh_file: the format has a NUL byte"))?;
+    let c_names = match names {
+        None => None,
+        Some(names) => {
+            if names.len() != solids.len() {
+                return Err(Error::new(format!("mesh_file: {} names for {} solids", names.len(), solids.len())));
+            }
+            let owned = names
+                .iter()
+                .map(|n| CString::new(*n).map_err(|_| Error::new(format!("mesh_file: the name {n:?} has a NUL byte"))))
+                .collect::<Result<Vec<_>>>()?;
+            Some(owned)
+        }
+    };
+    let name_ptrs: Option<Vec<*const c_char>> = c_names.as_ref().map(|v| v.iter().map(|c| c.as_ptr()).collect());
+    if let Some(looks) = looks {
+        if looks.len() != solids.len() {
+            return Err(Error::new(format!("mesh_file: {} look values for {} solids -- 6 a solid", 6 * looks.len(), solids.len())));
+        }
+    }
+    let mut len = 0usize;
+    let raw = unsafe {
+        (api.cadaclysm_blacksmith_mesh_file)(
+            handles.as_ptr(),
+            handles.len(),
+            format.as_ptr(),
+            name_ptrs.as_ref().map_or(ptr::null(), |v| v.as_ptr()),
+            looks.map_or(ptr::null(), |l| l.as_ptr().cast()),
+            tol_arg(tolerance),
+            &mut len,
+        )
+    };
+    if raw.is_null() {
+        return Err(fail(api, "mesh_file"));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(raw, len) }.to_vec();
+    unsafe { (api.cadaclysm_blacksmith_bytes_free)(raw, len) };
+    Ok(bytes)
+}
 /// One OCCT `.brep` file's text, each solid its own solid under one compound (one
 /// solid is the file's root): the exact surfaces and curves, with a curve in each
 /// face's own parameters for every edge, so OCCT's `BRepTools::Read` gives a shape
@@ -12186,6 +13146,150 @@ mod tests {
 
     fn refused<T: fmt::Debug>(result: Result<T>) -> String {
         result.expect_err("the kernel should have refused this").message().to_string()
+    }
+
+    // ---- what a page that draws a solid reads off it -----------------------------------
+
+    #[test]
+    fn a_face_tells_its_round_radius_and_chamfer_distance() {
+        if !kernel_present() {
+            return;
+        }
+        let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let vertical: Vec<u32> =
+            cube.edges().unwrap().iter().filter(|e| e.is_line() && e.direction().is_some_and(|d| d[2].abs() > 0.99)).map(|e| e.index).collect();
+        let rounded = cube.fillet(&vertical, 1.5, 1e-6).unwrap();
+        let radii: Vec<f64> = (0..rounded.faces().unwrap()).map(|f| rounded.face_round_radius(f).unwrap()).collect();
+        assert_eq!(radii.iter().filter(|r| **r != 0.0).count(), 4, "one round a vertical edge: {radii:?}");
+        assert!(radii.iter().all(|r| *r == 0.0 || (r - 1.5).abs() < 1e-9), "{radii:?}");
+        assert!((0..rounded.faces().unwrap()).all(|f| rounded.face_chamfer_distance(f).unwrap() == 0.0));
+        let bevelled = cube.chamfer(&vertical, 2.0, 1e-6).unwrap();
+        let distances: Vec<f64> = (0..bevelled.faces().unwrap()).map(|f| bevelled.face_chamfer_distance(f).unwrap()).collect();
+        assert_eq!(distances.iter().filter(|d| (**d - 2.0).abs() < 1e-9).count(), 4, "{distances:?}");
+        assert!((0..bevelled.faces().unwrap()).all(|f| bevelled.face_round_radius(f).unwrap() == 0.0));
+        assert!(refused(cube.face_round_radius(6)).contains("face_round_radius: face 6 of 6"));
+        assert!(refused(cube.face_chamfer_distance(6)).contains("face_chamfer_distance: face 6 of 6"));
+    }
+
+    #[test]
+    fn edges_and_isocurves_come_as_beziers() {
+        if !kernel_present() {
+            return;
+        }
+        let cube = Solid::cuboid(2.0, 2.0, 2.0).unwrap();
+        let edges = cube.edge_beziers(None).unwrap();
+        assert_eq!(edges.len(), 12 * 16, "one straight Bezier an edge");
+        assert!(edges.iter().skip(3).step_by(4).all(|w| *w == 1.0), "a line's weights are one");
+        assert!(cube.isocurve_beziers(4, None).unwrap().is_empty(), "a flat face draws no isocurve");
+        let cylinder = Solid::cylinder(1.0, 3.0).unwrap();
+        let rings = cylinder.isocurve_beziers(3, None).unwrap();
+        assert!(!rings.is_empty() && rings.len() % 16 == 0);
+        assert!(cylinder.isocurve_beziers(6, None).unwrap().len() > rings.len(), "a denser grid draws more lines");
+        assert!(cylinder.edge_beziers(None).unwrap().iter().skip(3).step_by(4).any(|w| *w < 0.99), "a circle's Beziers are exact conics");
+        assert!(refused(cube.edge_beziers(Some(-1.0))).contains("tolerance must be positive and finite"));
+    }
+
+    #[test]
+    fn mesh_file_writes_several_solids_in_each_format() {
+        if !kernel_present() {
+            return;
+        }
+        let a = Solid::cuboid(2.0, 2.0, 2.0).unwrap();
+        let b = Solid::cuboid(1.0, 1.0, 1.0).unwrap().translate(5.0, 0.0, 0.0).unwrap();
+        let both = [&a, &b];
+        let stl = mesh_file(&both, "stl", None, None, None).unwrap();
+        assert_eq!(u32::from_le_bytes(stl[80..84].try_into().unwrap()), 24, "two boxes, twelve triangles each");
+        assert_eq!(stl.len(), 84 + 50 * 24);
+        let names: &[&str] = &["plate", "pin"];
+        let text = String::from_utf8(mesh_file(&both, "stl-ascii", Some(names), None, None).unwrap()).unwrap();
+        assert!(text.starts_with("solid plate") && text.matches("facet normal").count() == 24);
+        let obj = String::from_utf8(mesh_file(&both, "obj", Some(names), None, None).unwrap()).unwrap();
+        assert!(obj.contains("o plate") && obj.contains("o pin"));
+        let looks = [[1.0, 0.0, 0.0, 1.0, 0.0, 0.5], [0.0, 0.0, 1.0, 0.5, 1.0, 0.2]];
+        assert_eq!(&mesh_file(&both, "glb", None, Some(&looks), None).unwrap()[..4], b"glTF");
+        let gltf = String::from_utf8(mesh_file(&both, "gltf", None, None, None).unwrap()).unwrap();
+        assert!(gltf.contains("\"Solid 1\"") && gltf.contains("\"Solid 2\""), "the nodes are named Solid 1 and Solid 2");
+        assert!(refused(mesh_file(&[&a], "step", None, None, None)).contains("mesh_file: format \"step\" is not one of"));
+        assert!(refused(mesh_file(&[], "stl", None, None, None)).contains("mesh_file: no solids"));
+        assert!(refused(mesh_file(&[&a], "obj", Some(&["a", "b"]), None, None)).contains("2 names for 1 solids"));
+    }
+
+    // ---- sketch curves as profiles ---------------------------------------------------
+
+    fn curve_close(a: &[f64], b: &[f64], tol: f64) {
+        assert_eq!(a.len(), b.len(), "{a:?} vs {b:?}");
+        for (x, y) in a.iter().zip(b) {
+            assert!((x - y).abs() <= tol, "{a:?} vs {b:?}");
+        }
+    }
+
+    fn curve_volume(p: &Profile) -> f64 {
+        Solid::extrude(p, &Frame::XY, 1.0).unwrap().mass(0.0).unwrap().volume
+    }
+
+    #[test]
+    fn sketch_curves_are_profiles_that_draw_as_beziers() {
+        if !kernel_present() {
+            return;
+        }
+        let line = Profile::polyline(&[[1.0, 2.0], [4.0, 6.0]], false).unwrap();
+        curve_close(&line.beziers(None).unwrap(), &[1.0, 2.0, 0.0, 1.0, 2.0, 10.0 / 3.0, 0.0, 1.0, 3.0, 14.0 / 3.0, 0.0, 1.0, 4.0, 6.0, 0.0, 1.0], 1e-12);
+        let tri = Profile::polyline(&[[0.0, 0.0], [4.0, 0.0], [4.0, 3.0]], true).unwrap();
+        assert_eq!(tri.beziers(None).unwrap().len(), 3 * 16);
+        let circle = Profile::arc([1.0, 2.0], 3.0, 0.0, 0.0).unwrap();
+        let flat = circle.beziers(None).unwrap();
+        assert_eq!(flat.len(), 4 * 16);
+        for k in (0..flat.len()).step_by(16) {
+            assert!(((flat[k] - 1.0).hypot(flat[k + 1] - 2.0) - 3.0).abs() < 1e-9);
+            assert!((flat[k + 3] - 1.0).abs() < 1e-12);
+            assert!((flat[k + 7] - (0.5f64.sqrt() * 2.0 / 3.0 + 1.0 / 3.0)).abs() < 1e-9);
+        }
+        let (a, b) = (curve_volume(&circle), curve_volume(&Profile::circle(3.0).unwrap()));
+        assert!((a - b).abs() <= 1e-6 * b);
+        let quarter = Profile::arc([0.0, 0.0], 2.0, 0.0, std::f64::consts::FRAC_PI_2).unwrap().beziers(None).unwrap();
+        curve_close(&quarter[12..14], &[0.0, 2.0], 1e-12);
+        let ell = Profile::ellipse([0.0, 0.0], 3.0, 1.0).unwrap();
+        assert_eq!(ell.beziers(None).unwrap().len(), 4 * 16);
+        let expect = std::f64::consts::PI * 3.0;
+        assert!((curve_volume(&ell) - expect).abs() <= 1e-2 * expect);
+        let up = Profile::arc_through([0.0, 0.0], [2.0, 2.0], [4.0, 0.0]).unwrap().beziers(None).unwrap();
+        let down = Profile::arc_through([0.0, 0.0], [2.0, -2.0], [4.0, 0.0]).unwrap().beziers(None).unwrap();
+        let top = up.iter().skip(1).step_by(4).cloned().fold(f64::MIN, f64::max);
+        let bottom = down.iter().skip(1).step_by(4).cloned().fold(f64::MAX, f64::min);
+        assert!((top - 2.0).abs() < 1e-9 && (bottom + 2.0).abs() < 1e-9);
+        let front = Frame::new([0.0, -5.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]).unwrap();
+        let on_front = line.beziers(Some(&front)).unwrap();
+        curve_close(&on_front[0..3], &[1.0, -5.0, 2.0], 1e-9);
+        curve_close(&on_front[12..15], &[4.0, -5.0, 6.0], 1e-9);
+        curve_close(&Profile::from_beziers(&flat, false).unwrap().beziers(None).unwrap(), &flat, 1e-9);
+        let again = Solid::extrude(&Profile::from_beziers(&flat, true).unwrap(), &Frame::XY, 1.0).unwrap();
+        for i in 0..again.faces().unwrap() {
+            let kind = again.face_kind(i).unwrap();
+            assert!(kind == "cylinder" || kind == "plane", "face {i} is a {kind}");
+        }
+        assert_eq!(refused(Profile::arc_through([0.0, 0.0], [1.0, 1.0], [2.0, 2.0])), "profile_arc_through: the arc's three points are in a line");
+        assert!(refused(Profile::polyline(&[[0.0, 0.0]], false)).starts_with("profile_polyline: a polyline needs at least two points"));
+        assert!(refused(Profile::from_beziers(&[], true)).starts_with("profile_from_beziers: "));
+    }
+
+    #[test]
+    fn open_sketch_curves_close_into_loops() {
+        if !kernel_present() {
+            return;
+        }
+        let d_line = Profile::polyline(&[[0.0, 0.0], [4.0, 0.0]], false).unwrap();
+        let d_arc = Profile::arc_through([4.0, 0.0], [2.0, 2.0], [0.0, 0.0]).unwrap();
+        let stray = Profile::polyline(&[[9.0, 9.0], [10.0, 9.0]], false).unwrap();
+        let ring = Profile::arc([20.0, 0.0], 1.0, 0.0, 0.0).unwrap();
+        assert_eq!(Profile::loops(&[&stray, &d_line, &ring, &d_arc], 1e-6).unwrap(), vec![vec![1, 3], vec![2]]);
+        let spur = Profile::polyline(&[[0.0, 0.0], [-3.0, 0.0]], false).unwrap();
+        assert!(Profile::loops(&[&d_line, &d_arc, &spur], 1e-6).unwrap().is_empty());
+        assert_eq!(Profile::chain_order(&[&d_arc, &d_line], 1e-6).unwrap(), vec![(0, false), (1, false)]);
+        let back = Profile::polyline(&[[7.0, 0.0], [4.0, 0.0]], false).unwrap();
+        assert_eq!(Profile::chain_order(&[&d_line, &back], 1e-6).unwrap(), vec![(0, false), (1, true)]);
+        assert_eq!(refused(Profile::chain_order(&[&d_line, &stray], 1e-6)), "chain: piece 1 does not meet the others");
+        let holed = Profile::rect(9.0, 9.0).unwrap().with_hole(&Profile::circle(1.0).unwrap()).unwrap();
+        assert_eq!(refused(Profile::loops(&[&holed], 1e-6)), "profile_loops: piece 0 has holes");
     }
 
     fn cube() -> Subd {
@@ -13782,6 +14886,33 @@ mod tests {
     }
 
     #[test]
+    fn corner_relief_turns_the_corner_items_into_relief_items() {
+        let block = pocketed_block();
+        let t1 = Tool::flat(1, 6.0, 20.0, 800.0, 200.0, 12000.0, TOOL_DEFAULT_RAMP_ANGLE).unwrap();
+        let t2 = Tool::flat(2, 2.0, 20.0, 800.0, 200.0, 12000.0, TOOL_DEFAULT_RAMP_ANGLE).unwrap();
+        let report = machine_job(&block).machine_relieved(&block, &[&t1, &t2], &[], None, None, 0.3, None, true).unwrap();
+        assert_eq!(report.items().len(), 4);
+        for item in report.items() {
+            assert_eq!(item.kind, "relief");
+            assert!(item.reason.starts_with("corner relieved by T2 (2 mm): a notch 0.293 mm into the walls"), "{}", item.reason);
+        }
+        assert!((report.items()[0].size - (1.0 - 0.5f64.sqrt())).abs() < 1e-6, "{}", report.items()[0].size);
+    }
+
+    #[test]
+    fn corner_relief_off_leaves_the_corner_items_as_they_were() {
+        let block = pocketed_block();
+        let t1 = Tool::flat(1, 6.0, 20.0, 800.0, 200.0, 12000.0, TOOL_DEFAULT_RAMP_ANGLE).unwrap();
+        let t2 = Tool::flat(2, 2.0, 20.0, 800.0, 200.0, 12000.0, TOOL_DEFAULT_RAMP_ANGLE).unwrap();
+        let off = machine_job(&block).machine_relieved(&block, &[&t1, &t2], &[], None, None, 0.3, None, false).unwrap();
+        let plain = machine_job(&block).machine_with(&block, &[&t1, &t2], &[], None, None, 0.3, None).unwrap();
+        for report in [&off, &plain] {
+            assert_eq!(report.items().len(), 4);
+            assert!(report.items().iter().all(|i| i.kind == "corner"));
+        }
+    }
+
+    #[test]
     fn an_empty_end_mill_list_is_refused_and_leaves_the_job() {
         let block = pocketed_block();
         let mut job = machine_job(&block);
@@ -14789,6 +15920,54 @@ mod tests {
     }
 
     #[test]
+    fn mirror_join_squares_a_half_roof_to_its_mirror() {
+        if !kernel_present() {
+            return;
+        }
+        // Half a roof domed both ways, lofted out from the centre plane y = 0, leaning as it
+        // leaves the plane: mirrored as it is, the seam is a crease; squared first, it is smooth.
+        let section = |y: f64| {
+            let points: Vec<[f64; 3]> = (0..=8)
+                .map(|i| {
+                    let x = 10.0 * i as f64;
+                    [x, y, 20.0 * (std::f64::consts::PI * x / 80.0).sin() - 0.01 * y * y + 0.05 * y + 0.002 * x * y]
+                })
+                .collect();
+            NurbsCurve::through(&points, 3, false, None, None).unwrap()
+        };
+        let sections: Vec<NurbsCurve> = [0.0, 10.0, 20.0, 30.0].into_iter().map(section).collect();
+        let half = Solid::loft_curves(&sections.iter().collect::<Vec<_>>(), 3, false, false).unwrap();
+        let plane = Frame::new([0.0; 3], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]).unwrap();
+        let (creased, r) = half.mirror_join(&plane, 0.0, Some(0.01)).unwrap();
+        assert_eq!((creased.faces().unwrap(), r.seams, r.squared, r.moved), (2, 1, 0, 0.0), "{r:?}");
+        assert!(r.gap < 1e-9 && r.angle > 5f64.to_radians() && r.curvature > 1e-4, "{r:?}");
+        let (smooth, r) = half.mirror_join(&plane, 0.5, Some(0.01)).unwrap();
+        assert_eq!((smooth.faces().unwrap(), r.seams, r.squared, r.naked), (2, 1, 1, 6), "{r:?}");
+        assert!(r.moved > 0.0 && r.gap < 1e-9 && r.angle < 1e-9 && r.curvature < 1e-9, "{r:?}");
+        // Only the first two rows moved: the body is near twice the half.
+        let (body, one) = (smooth.mass(0.0).unwrap().area, half.mass(0.0).unwrap().area);
+        assert!((body - 2.0 * one).abs() < 0.01 * one, "{body} against {one}");
+        let refused = message(smooth.mirror_join(&plane, 0.0, None));
+        assert!(refused.starts_with("mirror_join: the half lies on both sides of the plane"), "{refused}");
+    }
+
+    #[test]
+    fn a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap() {
+        if !kernel_present() {
+            return;
+        }
+        let sq = rect_sheet([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 40.0, 40.0);
+        let pts: Vec<[f64; 3]> = (0..48).map(|i| { let a = std::f64::consts::TAU * i as f64 / 48.0; [8.0 * a.cos(), 8.0 * a.sin(), 0.0] }).collect();
+        let ring = NurbsCurve::through(&pts, 3, true, None, None).unwrap();
+        let inner = ring.offset_on_sheet(&sq, 2.0, Some(1e-3)).unwrap();
+        let p0 = inner.point(inner.domain().unwrap().0).unwrap();
+        assert!(inner.fit_error().unwrap() <= 1e-3 && (p0[0].hypot(p0[1]) - 6.0).abs() < 1e-3, "{p0:?}");
+        assert_eq!(sq.split_along_curve(&ring, Some(1e-3)).unwrap().faces().unwrap(), 2);
+        let (island, rest) = sq.panel_gap(&ring, 4.0, -10.0, Some(1e-3)).unwrap();
+        assert_eq!((island.faces().unwrap(), rest.faces().unwrap()), (3, 3));
+    }
+
+    #[test]
     fn trim_by_curve_and_join_refuse_by_name() {
         if !kernel_present() {
             return;
@@ -14935,6 +16114,154 @@ mod tests {
         assert!(message(a.matched(SheetSide::U1, &b, SheetSide::U0, 3, 0, 0)).starts_with("match_side: "));
     }
 
+    /// A roof line traced off a drawing: rising to a header at point 4, then a long gentle arch.
+    const ROOF: [[f64; 2]; 15] = [
+        [1717.0, 1110.0],
+        [1848.0, 1191.0],
+        [1979.0, 1262.0],
+        [2110.0, 1330.0],
+        [2242.0, 1356.0],
+        [2504.0, 1367.0],
+        [2767.0, 1369.0],
+        [3029.0, 1364.0],
+        [3160.0, 1354.0],
+        [3423.0, 1304.0],
+        [3554.0, 1251.0],
+        [3686.0, 1207.0],
+        [3817.0, 1165.0],
+        [3948.0, 1123.0],
+        [4079.0, 1078.0],
+    ];
+
+    /// The parameter of `curve` nearest `p`, among 400 even arc-length steps.
+    fn parameter_near(curve: &NurbsCurve, p: [f64; 3]) -> f64 {
+        let d = |a: &At| (0..3).map(|i| (a.point[i] - p[i]).powi(2)).sum::<f64>();
+        curve.divide_by_count(400, 1e-9).unwrap().iter().min_by(|a, b| d(a).total_cmp(&d(b))).unwrap().parameter
+    }
+
+    #[test]
+    fn a_traced_roof_faired_has_no_inflection_past_the_header() {
+        if !kernel_present() {
+            return;
+        }
+        let pts: Vec<[f64; 3]> = ROOF.iter().map(|&[x, z]| [x, 0.0, z]).collect();
+        let through = NurbsCurve::through(&pts, 3, false, None, None).unwrap();
+        let t_header = parameter_near(&through, pts[4]);
+        let wobbles: Vec<At> = through.inflections().unwrap().into_iter().filter(|a| a.parameter > t_header).collect();
+        assert!(wobbles.len() >= 3, "{wobbles:?}");
+        for a in &wobbles {
+            let p = through.point(a.parameter).unwrap();
+            let d = (0..3).map(|i| (p[i] - a.point[i]).powi(2)).sum::<f64>().sqrt();
+            assert!(d < 1e-9 && a.error == 0.0, "{a:?}");
+        }
+        let tolerance = 5.25; // two pixels of the drawing
+        let roof = NurbsCurve::fair(&pts, 5, Some(tolerance), Some((Some(4.0), None))).unwrap();
+        let fit_error = roof.fit_error().unwrap();
+        assert!(roof.degree() == 5 && (0.0..=tolerance).contains(&fit_error), "{fit_error}");
+        let t_header = parameter_near(&roof, pts[4]);
+        let past: Vec<At> = roof.inflections().unwrap().into_iter().filter(|a| a.parameter > t_header + 1e-6).collect();
+        assert!(past.is_empty(), "{past:?}");
+        let k = roof.knot_continuity().unwrap();
+        assert!(k.angle < 1e-6 && k.curvature < 1e-9, "{k:?}");
+        // Too tight to hold: refused in the library's words, not a curve that turns over.
+        let tight = message(NurbsCurve::fair(&pts, 5, Some(0.05), Some((None, None))));
+        assert!(tight.starts_with("nurbs_curve_fair: ") && tight.contains("no curve free of inflections"), "{tight}");
+        let low = message(NurbsCurve::fair(&pts, 2, Some(tolerance), None));
+        assert!(low.starts_with("nurbs_curve_fair: ") && low.contains("degree 2"), "{low}");
+        // Faired from the wobbly curve itself, its own parameters naming the span.
+        let (lo, hi) = through.domain().unwrap();
+        let faired = through.faired(5, Some(1.5 * tolerance), Some((Some(lo), Some(hi)))).unwrap();
+        assert!(faired.inflections().unwrap().is_empty(), "{:?}", faired.inflections());
+        assert!(faired.fit_error().unwrap() <= 1.6 * tolerance, "{:?}", faired.fit_error());
+    }
+
+    #[test]
+    fn edge_continuity_reads_a_crease_and_a_fillet_seam() {
+        if !kernel_present() {
+            return;
+        }
+        let block = Solid::cuboid(40.0, 30.0, 20.0).unwrap();
+        let r = block.edge_continuity(0, 16).unwrap();
+        assert!((r.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-9 && r.gap < 1e-9 && r.curvature < 1e-9 && r.samples == 17, "{r:?}");
+        let rounded = block.fillet(&[0], 4.0, FILLET_TOLERANCE).unwrap();
+        // The fillet's two tangent seams, its curvature a quarter where the flat faces' is zero
+        // (an edge of one face is refused and skipped).
+        let seams: Vec<Continuity> = rounded
+            .edges()
+            .unwrap()
+            .iter()
+            .filter_map(|e| rounded.edge_continuity(e.index, 64).ok())
+            .filter(|k| k.angle < 1e-6)
+            .collect();
+        assert!(seams.len() == 2 && seams.iter().all(|k| (k.curvature - 0.25).abs() < 1e-4), "{seams:?}");
+        let none = message(block.edge_continuity(999, 64));
+        assert!(none.starts_with("edge_continuity: "), "{none}");
+    }
+
+    #[test]
+    fn a_wobbly_loft_faired_turns_no_curvature_over() {
+        if !kernel_present() {
+            return;
+        }
+        // Eleven lines across a shallow arch, each lifted or dropped by 0.4 in turn: a loft
+        // through them ripples between every pair.
+        let lines: Vec<NurbsCurve> = (0..11)
+            .map(|k| {
+                let x = 10.0 * k as f64;
+                let z = -0.01 * (x - 50.0).powi(2) + if k % 2 == 0 { 0.4 } else { -0.4 };
+                NurbsCurve::new(&[[x, 0.0, z], [x, 40.0, z]], 1, None, None).unwrap()
+            })
+            .collect();
+        let loft = Solid::loft_curves(&lines.iter().collect::<Vec<_>>(), 3, false, false).unwrap();
+        let t = loft.curvature_turns(0, 32).unwrap();
+        assert!(t.samples == 32 && !t.mean_turns.is_empty() && t.mean_positive + t.mean_negative > 1, "{t:?}");
+        for a in &t.mean_turns {
+            let n = (0..3).map(|i| a.tangent[i].powi(2)).sum::<f64>().sqrt();
+            assert!((n - 1.0).abs() < 1e-9 && (0.0..=100.0).contains(&a.point[0]) && a.point[2] > -26.0 && a.point[2] < 1.0, "{a:?}");
+        }
+        // The lines run along u, the loft's v across them: the end lines kept, held along v.
+        let keep = [None, None, Some(0), Some(0)];
+        let faired = loft.faired(Some(1.0), 3, None, keep, (false, true), 0).unwrap();
+        let e = faired.sheet_error().unwrap();
+        assert!((0.0..=1.05).contains(&e), "{e}");
+        let f = faired.curvature_turns(0, 32).unwrap();
+        assert!(f.mean_turns.is_empty() && f.mean_positive + f.mean_negative == 1, "{f:?}");
+        let coarse = loft.faired(Some(1.0), 3, Some((6, 8)), keep, (false, true), 0).unwrap();
+        assert!(coarse.sheet_error().unwrap() <= 1.05 && coarse.curvature_turns(0, 32).unwrap().mean_turns.is_empty());
+        let low = message(loft.faired(Some(1.0), 2, None, [Some(2); 4], (false, false), 0));
+        assert!(low.starts_with("surface_faired: ") && low.contains("degree 2"), "{low}");
+        let tight = message(loft.faired(Some(0.01), 3, None, keep, (false, true), 0));
+        assert!(tight.starts_with("surface_faired: ") && tight.contains("no fair free of inflections"), "{tight}");
+        let none = message(loft.curvature_turns(7, 32));
+        assert!(none.starts_with("curvature_turns: "), "{none}");
+    }
+
+    #[test]
+    fn highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam() {
+        if !kernel_present() {
+            return;
+        }
+        let block = Solid::cuboid(2.0, 2.0, 2.0).unwrap();
+        let k = block.highlight_kink(0, 16).unwrap();
+        assert!(k.angle < 1e-9 && k.samples == 17, "{k:?}");
+        let rounded = block.fillet(&[0], 0.5, FILLET_TOLERANCE).unwrap();
+        // Where the fillet's curvature meets a flat face's, the highlight lines break (an edge
+        // of one face is refused and skipped).
+        let worst = rounded
+            .edges()
+            .unwrap()
+            .iter()
+            .filter_map(|e| rounded.highlight_kink(e.index, 64).ok())
+            .max_by(|a, b| a.angle.total_cmp(&b.angle))
+            .unwrap();
+        assert!(worst.angle > 45f64.to_radians(), "{worst:?}");
+        // The light that shows it: a unit direction.
+        let d = (0..3).map(|i| worst.light_direction[i].powi(2)).sum::<f64>().sqrt();
+        assert!((d - 1.0).abs() < 1e-9, "{worst:?}");
+        let none = message(block.highlight_kink(999, 64));
+        assert!(none.starts_with("highlight_kink: "), "{none}");
+    }
+
     #[test]
     fn n_sided_patch_fills_a_pentagon_of_strips() {
         if !kernel_present() {
@@ -15067,6 +16394,27 @@ mod tests {
         let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
         let refused = message(cube.fillet_varying(&[0], 1.0, Some(2.0), FILLET_TOLERANCE));
         assert!(refused.contains("a varying radius rounds only spline edges"), "{refused}");
+    }
+
+    #[test]
+    fn fillet_law_with_stations_at_the_ends_is_the_varying_fillet() {
+        if !kernel_present() {
+            return;
+        }
+        let shell = fender_and_door();
+        let crease: Vec<u32> = shell.edges().unwrap().into_iter().filter(|e| e.faces.len() == 2).map(|e| e.index).collect();
+        let varying = shell.fillet_varying(&crease, 8.0, Some(20.0), 1e-3).unwrap();
+        let lawed = shell.fillet_law(&crease, &[(0.0, 8.0), (1.0, 20.0)], 1e-3).unwrap();
+        assert_eq!(lawed.faces().unwrap(), 3);
+        assert!((area_of(&lawed) - area_of(&varying)).abs() < 1e-3, "{} against {}", area_of(&lawed), area_of(&varying));
+        // A swell in the middle takes more than 8 all along and less than 20 all along.
+        let swell = area_of(&shell.fillet_law(&crease, &[(0.0, 8.0), (0.5, 20.0), (1.0, 8.0)], 1e-3).unwrap());
+        assert!(swell < area_of(&shell.fillet(&crease, 8.0, 1e-3).unwrap()) && swell > area_of(&shell.fillet(&crease, 20.0, 1e-3).unwrap()));
+        let none = message(shell.fillet_law(&crease, &[], 1e-3));
+        assert!(none.contains("at least one station"), "{none}");
+        let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let refused = message(cube.fillet_law(&[0], &[(0.0, 1.0), (1.0, 2.0)], FILLET_TOLERANCE));
+        assert!(refused.contains("a radius law rounds only spline edges"), "{refused}");
     }
 
     // ---- the R-tree (rtree plan 3): Python's test_rtree_*, trimmed to the marshalling ----
@@ -15967,6 +17315,310 @@ mod tests {
         assert_eq!(c.edge_b, None);
         let rounded = cuboid.fillet(&[edge], 0.2, 1e-3).unwrap();
         assert_eq!(rounded.faces().unwrap(), cuboid.faces().unwrap() + 1);
+    }
+
+    // ---- closest point from a point (closest-point P3): Python's figures, each a closed form ----
+
+    const SQRT_HALF: f64 = 0.7071067811865476;
+    const INV_SQRT3: f64 = 0.5773502691896258;
+
+    #[test]
+    fn closest_point_of_a_cube_names_face_edge_and_vertex() {
+        if !kernel_present() {
+            return;
+        }
+        let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let face = cube.closest_point([20.0, 0.0, 0.0], None, None).unwrap().expect("a foot");
+        near(face.distance, 15.0, 1e-9, "face distance");
+        near3(face.point, [5.0, 0.0, 0.0], 1e-9, "face point");
+        assert!(face.kind == "face" && face.edge.is_none() && face.refined && face.uv.is_some(), "{face:?}");
+        near3(face.normal, [1.0, 0.0, 0.0], 1e-9, "face normal");
+        let edge = cube.closest_point([8.0, 8.0, 0.0], None, None).unwrap().unwrap();
+        near(edge.distance, 4.242640687119285, 1e-9, "edge distance");
+        near3(edge.point, [5.0, 5.0, 0.0], 1e-9, "edge point");
+        assert!(edge.kind == "edge" && edge.edge.is_some() && edge.uv.is_none(), "{edge:?}");
+        near3(edge.normal, [SQRT_HALF, SQRT_HALF, 0.0], 1e-9, "edge normal");
+        let corner = cube.closest_point([8.0, 8.0, 8.0], None, None).unwrap().unwrap();
+        near(corner.distance, 5.196152422706632, 1e-9, "corner distance");
+        near3(corner.point, [5.0, 5.0, 5.0], 1e-9, "corner point");
+        assert!(corner.kind == "vertex" && corner.edge.is_none() && corner.uv.is_none(), "{corner:?}");
+        near3(corner.normal, [INV_SQRT3; 3], 1e-9, "corner normal");
+        let inside = cube.closest_point([1.0, 0.0, 0.0], None, None).unwrap().unwrap();
+        near(inside.distance, 4.0, 1e-9, "inside distance");
+        near3(inside.point, [5.0, 0.0, 0.0], 1e-9, "inside point");
+        let on = cube.closest_point([5.0, 1.0, 2.0], None, None).unwrap().unwrap();
+        near(on.distance, 0.0, 1e-9, "on distance");
+        near3(on.normal, [1.0, 0.0, 0.0], 1e-9, "on normal");
+    }
+
+    #[test]
+    fn closest_point_edge_is_the_public_edge_number() {
+        if !kernel_present() {
+            return;
+        }
+        let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let p = [8.0, 8.0, 1.0];
+        let edge = cube.closest_point(p, None, None).unwrap().unwrap().edge.expect("an edge foot");
+        let (t, point, distance) = cube.edge_closest_point(edge, p).unwrap();
+        near3(point, [5.0, 5.0, 1.0], 1e-9, "edge_closest_point point");
+        near(distance, 4.242640687119285, 1e-9, "edge_closest_point distance");
+        let start = cube.edge_point_at_length(edge, 0.0, 0.0).unwrap().point; // a straight edge: arc length is the chord
+        let s = start.iter().zip(point).map(|(a, b)| (a - b) * (a - b)).sum::<f64>().sqrt();
+        let at = cube.edge_point_at_length(edge, s, 0.0).unwrap();
+        near3(at.point, point, 1e-9, "the point at that arc length");
+        near(at.parameter, t, 1e-9, "the edge's own parameter");
+        assert_eq!(message(cube.edge_closest_point(99, p)), "edge_closest_point: edge 99 of 12");
+    }
+
+    #[test]
+    fn closest_point_of_a_sphere_in_closed_form() {
+        if !kernel_present() {
+            return;
+        }
+        let sphere = Solid::sphere(2.0).unwrap();
+        let foot = sphere.closest_point([0.0, 3.0, 4.0], None, None).unwrap().unwrap();
+        near(foot.distance, 3.0, 1e-9, "sphere distance");
+        near3(foot.point, [0.0, 1.2, 1.6], 1e-9, "sphere point");
+        near3(foot.normal, [0.0, 0.6, 0.8], 1e-9, "sphere normal");
+        assert_eq!(foot.kind, "face");
+        let inside = sphere.closest_point([0.0, 0.0, 0.5], None, None).unwrap().unwrap();
+        near(inside.distance, 1.5, 1e-9, "inside the sphere");
+        near3(inside.point, [0.0, 0.0, 2.0], 1e-9, "inside the sphere's point");
+    }
+
+    #[test]
+    fn closest_point_max_distance_on_both_sides() {
+        if !kernel_present() {
+            return;
+        }
+        let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let far = [20.0, 0.0, 0.0];
+        assert_eq!(cube.closest_point(far, Some(14.9), None).unwrap(), None);
+        near(cube.closest_point(far, Some(15.1), None).unwrap().expect("within 15.1").distance, 15.0, 1e-9, "at 15.1");
+        assert!(cube.closest_point(far, Some(f64::INFINITY), None).unwrap().is_some());
+        assert!(cube.closest_point(far, Some(f64::NAN), None).unwrap().is_some());
+        assert!(cube.closest_point([5.0, 1.0, 2.0], Some(0.0), None).unwrap().is_some(), "0 keeps a point on the body");
+        assert_eq!(cube.closest_point([5.5, 1.0, 2.0], Some(0.0), None).unwrap(), None);
+        assert_eq!(message(cube.closest_point([0.0; 3], Some(-1.0), None)), "closest_point: the max distance must not be negative");
+        for tol in [-1.0, f64::INFINITY] {
+            assert!(message(cube.closest_point([0.0; 3], None, Some(tol))).starts_with("closest_point: "), "{tol}");
+        }
+        assert!(message(cube.closest_point([f64::NAN, 0.0, 0.0], None, None)).starts_with("closest_point: "));
+    }
+
+    #[test]
+    fn a_projector_answers_as_the_one_shot_and_outlives_its_solid() {
+        if !kernel_present() {
+            return;
+        }
+        let points = [[20.0, 0.0, 0.0], [8.0, 8.0, 0.0], [8.0, 8.0, 8.0], [1.0, 0.0, 0.0], [0.0, -7.0, 2.0]];
+        let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let expected: Vec<Option<PointFoot>> = points.iter().map(|&p| cube.closest_point(p, None, None).unwrap()).collect();
+        let projector = cube.projector(None).unwrap();
+        drop(cube);
+        let got: Vec<Option<PointFoot>> = points.iter().map(|&p| projector.closest_point(p, None).unwrap()).collect();
+        assert_eq!(got, expected);
+        assert_eq!(projector.closest_point(points[0], Some(14.9)).unwrap(), None);
+        assert_eq!(projector.closest_point(points[0], Some(15.1)).unwrap(), expected[0]);
+        assert_eq!(message(projector.closest_point([0.0; 3], Some(-1.0))), "projector_closest_point: the max distance must not be negative");
+        assert!(message(Solid::sphere(1.0).unwrap().projector(Some(-1.0))).starts_with("projector_new: "));
+    }
+
+    #[test]
+    fn face_closest_point_stays_on_its_face() {
+        if !kernel_present() {
+            return;
+        }
+        let cube = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let top = (0..cube.faces().unwrap()).find(|&f| cube.face_ref(f).unwrap()[6] > 0.5).expect("a top face");
+        let foot = cube.face_closest_point(top, [20.0, 0.0, 0.0]).unwrap();
+        near3(foot.point, [5.0, 0.0, 5.0], 1e-9, "past the face's edge");
+        near(foot.distance, 15.811388300841896, 1e-9, "past the face's edge, distance");
+        assert!(foot.kind == "edge" && foot.refined, "{foot:?}");
+        let inner = cube.face_closest_point(top, [1.0, 2.0, 9.0]).unwrap();
+        near3(inner.point, [1.0, 2.0, 5.0], 1e-9, "above the face");
+        assert!(inner.kind == "face" && inner.index == top && inner.edge.is_none() && inner.uv.is_some(), "{inner:?}");
+        near3(inner.normal, [0.0, 0.0, 1.0], 1e-9, "above the face, normal");
+        assert_eq!(message(cube.face_closest_point(99, [0.0; 3])), "face_closest_point: face 99 of 6");
+    }
+
+    #[test]
+    fn a_nurbs_curve_closest_point_and_its_axis() {
+        if !kernel_present() {
+            return;
+        }
+        let circle = Circle::new(&Frame::xy([0.0; 3]), 2.0).unwrap().to_nurbs().unwrap();
+        let foot = circle.closest_point([0.0, 5.0, 0.0]).unwrap();
+        near3(foot.point, [0.0, 2.0, 0.0], 1e-9, "the circle's foot");
+        assert!(foot.unique);
+        near3(circle.point(foot.t).unwrap(), foot.point, 1e-12, "the foot's parameter");
+        let axis = circle.closest_point([0.0, 0.0, 3.0]).unwrap();
+        assert!(!axis.unique, "{axis:?}");
+        near(axis.point.iter().map(|x| x * x).sum::<f64>().sqrt(), 2.0, 1e-9, "the axis foot on the circle");
+        assert!(message(circle.closest_point([f64::INFINITY, 0.0, 0.0])).starts_with("nurbs_curve_closest_point: "));
+    }
+
+    // ---- closest points from a curve (curve closest points P3): Python's figures, each a ----
+    // ---- closed form, at the origin and shifted far out                                  ----
+
+    const CURVE_SHIFTS: [[f64; 3]; 3] = [[0.0, 0.0, 0.0], [1e4, -1e4, 5e3], [1e6, -1e6, 5e5]];
+
+    fn shifted(p: [f64; 3], s: [f64; 3]) -> [f64; 3] {
+        [p[0] + s[0], p[1] + s[1], p[2] + s[2]]
+    }
+
+    fn shift_tol(s: [f64; 3], unit: f64) -> f64 {
+        unit * (1.0 + s.iter().fold(0.0f64, |m, v| m.max(v.abs())))
+    }
+
+    /// The straight curve from `a` to `b`, `t` running 0 to 1.
+    fn segment(a: [f64; 3], b: [f64; 3]) -> NurbsCurve {
+        NurbsCurve::new(&[a, b], 1, None, None).unwrap()
+    }
+
+    #[test]
+    fn a_nurbs_curve_closest_point_within_reach() {
+        if !kernel_present() {
+            return;
+        }
+        for s in CURVE_SHIFTS {
+            let line = segment(shifted([0.0; 3], s), shifted([10.0, 0.0, 0.0], s));
+            let p = shifted([3.0, 4.0, 0.0], s);
+            let foot = line.closest_point_within(p, Some(4.1)).unwrap().expect("within 4.1");
+            near(foot.t, 0.3, 1e-12, "t");
+            near3(foot.point, shifted([3.0, 0.0, 0.0], s), shift_tol(s, 1e-12), "point");
+            assert!(foot.unique);
+            assert_eq!(line.closest_point_within(p, Some(3.9)).unwrap(), None);
+            let unlimited = line.closest_point(p).unwrap();
+            for limit in [None, Some(f64::NAN), Some(f64::INFINITY)] {
+                assert_eq!(line.closest_point_within(p, limit).unwrap(), Some(unlimited), "{limit:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn two_skew_lines_meet_at_their_closed_form() {
+        if !kernel_present() {
+            return;
+        }
+        for s in CURVE_SHIFTS {
+            let tol = shift_tol(s, 1e-12);
+            let a = segment(shifted([0.0; 3], s), shifted([10.0, 0.0, 0.0], s));
+            let b = segment(shifted([3.0, -5.0, 2.0], s), shifted([3.0, 5.0, 2.0], s));
+            for limit in [Some(2.1), None, Some(f64::NAN), Some(f64::INFINITY)] {
+                let pair = a.closest_points(&b, limit).unwrap().expect("a pair");
+                near(pair.distance, 2.0, 1e-9, "distance");
+                near(pair.t_a, 0.3, 1e-12, "t_a");
+                near3(pair.point_a, shifted([3.0, 0.0, 0.0], s), tol, "point_a");
+                near(pair.t_b, 0.5, 1e-12, "t_b");
+                near3(pair.point_b, shifted([3.0, 0.0, 2.0], s), tol, "point_b");
+            }
+            let swapped = b.closest_points(&a, None).unwrap().unwrap();
+            near(swapped.t_a, 0.5, 1e-12, "swapped t_a");
+            near(swapped.t_b, 0.3, 1e-12, "swapped t_b");
+            near3(swapped.point_a, shifted([3.0, 0.0, 2.0], s), tol, "swapped point_a");
+            assert_eq!(a.closest_points(&b, Some(1.9)).unwrap(), None);
+            assert_eq!(message(a.closest_points(&b, Some(-1.0))), "nurbs_curve_closest_points: the max distance must not be negative");
+        }
+    }
+
+    #[test]
+    fn a_line_past_an_edge_names_its_public_edge() {
+        if !kernel_present() {
+            return;
+        }
+        for s in CURVE_SHIFTS {
+            let tol = shift_tol(s, 1e-9);
+            let cube = Solid::cuboid(2.0, 2.0, 2.0).unwrap().translate(s[0], s[1], s[2]).unwrap();
+            let line = segment(shifted([2.0, -0.5, 2.0], s), shifted([2.5, 0.5, 2.5], s));
+            let projector = cube.projector(None).unwrap();
+            let foot = cube.curve_closest_points(&line, Some(1.5), None).unwrap().expect("within 1.5");
+            assert!(!foot.crossing && foot.kind == "edge" && foot.uv.is_none(), "{foot:?}");
+            near(foot.distance, 2f64.sqrt(), tol, "distance");
+            near(foot.t, 0.0, 1e-9, "t");
+            near3(foot.point_on_curve, shifted([2.0, -0.5, 2.0], s), tol, "point on the curve");
+            near3(foot.point_on_body, shifted([1.0, -0.5, 1.0], s), tol, "point on the body");
+            let (_, at, distance) = cube.edge_closest_point(foot.edge.expect("an edge foot"), foot.point_on_curve).unwrap();
+            near3(at, foot.point_on_body, tol, "the public edge's point");
+            near(distance, foot.distance, tol, "the public edge's distance");
+            assert_eq!(cube.curve_closest_points(&line, Some(1.4), None).unwrap(), None);
+            assert_eq!(projector.curve_closest_points(&line, Some(1.4)).unwrap(), None);
+            assert_eq!(projector.curve_closest_points(&line, Some(1.5)).unwrap(), Some(foot.clone()), "the projector against the one-shot");
+            assert_eq!(projector.curve_closest_points(&line, None).unwrap(), cube.curve_closest_points(&line, None, None).unwrap());
+            assert_eq!(
+                cube.curve_closest_points(&line, Some(f64::NAN), None).unwrap(),
+                cube.curve_closest_points(&line, Some(f64::INFINITY), None).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_through_a_box_crosses_at_its_first_face() {
+        if !kernel_present() {
+            return;
+        }
+        let cube = Solid::cuboid(2.0, 2.0, 2.0).unwrap();
+        let through = segment([-3.0, 0.1, 0.2], [3.0, 0.1, 0.2]);
+        let projector = cube.projector(None).unwrap();
+        let foot = cube.curve_closest_points(&through, None, None).unwrap().expect("a crossing");
+        assert!(foot.crossing && foot.distance == 0.0 && foot.kind == "face" && foot.edge.is_none() && foot.uv.is_some(), "{foot:?}");
+        near(foot.t, 1.0 / 3.0, 1e-9, "t");
+        near3(foot.point_on_curve, [-1.0, 0.1, 0.2], 1e-9, "point on the curve");
+        near3(foot.point_on_body, [-1.0, 0.1, 0.2], 1e-9, "point on the body");
+        near3(foot.normal, [-1.0, 0.0, 0.0], 1e-9, "normal");
+        assert_eq!(projector.curve_closest_points(&through, None).unwrap(), Some(foot));
+        for bad in [-1.0, f64::INFINITY] {
+            assert_eq!(message(cube.curve_closest_points(&through, None, Some(bad))), "curve_closest_points: tolerance must be positive and finite");
+        }
+        assert!(cube.curve_closest_points(&through, None, Some(0.0)).unwrap().is_some(), "0 is an unset tolerance");
+        assert_eq!(message(cube.curve_closest_points(&through, Some(-1.0), None)), "curve_closest_points: the max distance must not be negative");
+        assert_eq!(message(projector.curve_closest_points(&through, Some(-1.0))), "projector_curve_closest_points: the max distance must not be negative");
+    }
+
+    #[test]
+    fn the_nearest_object_to_a_curve_names_its_item() {
+        if !kernel_present() {
+            return;
+        }
+        let cube = Solid::cuboid(2.0, 2.0, 2.0).unwrap();
+        let line = segment([2.0, -0.5, 2.0], [2.5, 0.5, 2.5]);
+        let other = segment([2.0, -0.5, 2.3], [2.0, 5.0, 2.3]); // sqrt(0.045) off `line`, at t 0.3
+        let projector = cube.projector(None).unwrap();
+        // a curve wins: answer kind 1
+        let items = [
+            NearItem::Point([0.0, 0.0, 10.0]),
+            NearItem::Solid(&cube),
+            NearItem::Curve(&other),
+            NearItem::Projector(&projector),
+            NearItem::Point([9.0, 9.0, 9.0]),
+        ];
+        let near_ = line.closest_object(&items, None, None).unwrap().expect("a nearest item");
+        let pair = line.closest_points(&other, None).unwrap().unwrap();
+        assert_eq!(near_.which, 2, "{near_:?}");
+        assert_eq!(near_.answer, NearestAnswer::Curve(pair.clone()));
+        near(near_.distance, 0.045f64.sqrt(), 1e-9, "the curve's win");
+        near(near_.t, 0.3, 1e-9, "the curve's win, t");
+        assert_eq!((near_.distance, near_.t, near_.point_on_curve, near_.point_on_item), (pair.distance, pair.t_a, pair.point_a, pair.point_b));
+        // a point wins: answer kind 2
+        let point = line.closest_object(&[NearItem::Solid(&cube), NearItem::Point([2.5, 0.6, 2.5])], None, None).unwrap().unwrap();
+        assert_eq!((point.which, &point.answer, point.point_on_item), (1, &NearestAnswer::Point, [2.5, 0.6, 2.5]));
+        near(point.distance, 0.1, 1e-9, "the point's win");
+        near(point.t, 1.0, 1e-9, "the point's win, t");
+        near3(point.point_on_curve, [2.5, 0.5, 2.5], 1e-9, "the point's win on the curve");
+        // a solid or a projector alone: answer kind 0
+        let solid = line.closest_object(&[NearItem::Solid(&cube)], None, None).unwrap().unwrap();
+        let body = cube.curve_closest_points(&line, None, None).unwrap().unwrap();
+        assert!(body.edge.is_some() && solid.point_on_item == body.point_on_body, "{body:?}");
+        assert_eq!((solid.which, solid.answer), (0, NearestAnswer::Body(body)));
+        let prepared = line.closest_object(&[NearItem::Projector(&projector)], None, None).unwrap().unwrap();
+        assert_eq!((prepared.which, prepared.answer), (0, NearestAnswer::Body(projector.curve_closest_points(&line, None).unwrap().unwrap())));
+        // the limit, an empty list and the refusals
+        let two = [NearItem::Solid(&cube), NearItem::Curve(&other)];
+        assert_eq!(line.closest_object(&two, Some(0.2), None).unwrap(), None);
+        assert_eq!(line.closest_object(&two, Some(0.25), None).unwrap().map(|n| n.which), Some(1));
+        assert_eq!(line.closest_object(&[], None, None).unwrap(), None);
+        assert_eq!(message(line.closest_object(&two, Some(-1.0), None)), "nurbs_curve_closest_object: the max distance must not be negative");
+        assert!(message(line.closest_object(&[NearItem::Point([f64::NAN, 0.0, 0.0])], None, None)).starts_with("nurbs_curve_closest_object: "));
     }
 
     #[test]

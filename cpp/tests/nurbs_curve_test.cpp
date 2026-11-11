@@ -369,6 +369,89 @@ static Result<void> lifetime() {
     return {};
 }
 
+// The fastback's roof on its centreline, (x, z) in mm, traced off the side view of the reference
+// drawing (2.625 mm a pixel): the windshield's foot, the header (the fifth point), the crown, the
+// backlight, the deck.
+static const double ROOF[15][2] = {{1717, 1110}, {1848, 1191}, {1979, 1262}, {2110, 1330}, {2242, 1356},
+                                   {2504, 1367}, {2767, 1369}, {3029, 1364}, {3160, 1354}, {3423, 1304},
+                                   {3554, 1251}, {3686, 1207}, {3817, 1165}, {3948, 1123}, {4079, 1078}};
+
+// The parameter of `curve` nearest `p`, read off 400 even arc-length pieces.
+static double nearest(const NurbsCurve& curve, const Vec3& p) {
+    std::vector<At> samples = must(curve.divide_by_count(400), "divide_by_count(400)");
+    double best = samples.front().parameter;
+    double best_distance = distance(samples.front().point, p);
+    for (const At& a : samples) {
+        double d = distance(a.point, p);
+        if (d < best_distance) {
+            best_distance = d;
+            best = a.parameter;
+        }
+    }
+    return best;
+}
+
+static std::size_t inflections_past(const NurbsCurve& curve, double t) {
+    std::size_t n = 0;
+    for (const At& a : must(curve.inflections(), "inflections")) {
+        if (a.parameter > t) ++n;
+    }
+    return n;
+}
+
+static Result<void> traced_roof_faired() {
+    std::vector<Vec3> pts;
+    for (const double (&xz)[2] : ROOF) pts.push_back(Vec3{xz[0], 0.0, xz[1]});
+    NurbsCurve through = must(NurbsCurve::through(pts), "through");
+    double t_header = nearest(through, pts[4]);
+    std::vector<At> wobbles;
+    for (const At& a : must(through.inflections(), "through inflections")) {
+        if (a.parameter > t_header) wobbles.push_back(a);
+    }
+    check(wobbles.size() >= 3, "the traced roof turns over at least 3 times past the header");
+    for (const At& a : wobbles) {
+        check(distance(must(through.point(a.parameter), "inflection point"), a.point) < 1e-9 && a.error == 0.0,
+              "an inflection's point is the curve's point at its parameter, error 0");
+    }
+    const double tolerance = 5.25;   // two pixels of the drawing
+    NurbsCurve roof = must(NurbsCurve::fair(pts, 5, tolerance, bs::NoInflection::between(4.0, std::nullopt)), "fair");
+    check(roof.degree() == 5, "fair is a quintic");
+    check(roof.fit_error().has_value() && *roof.fit_error() >= 0.0 && *roof.fit_error() <= tolerance, "fair lands within its tolerance");
+    check(inflections_past(roof, nearest(roof, pts[4]) + 1e-6) == 0, "the faired roof has no inflection past the header");
+    bs::KnotContinuity k = must(roof.knot_continuity(), "knot_continuity");
+    check(k.angle < 1e-6 && k.curvature < 1e-9, "the faired roof is C2 through its knots");
+    // Too tight to hold: refused in the library's words, not a curve that turns over.
+    refused(NurbsCurve::fair(pts, 5, 0.05, bs::NoInflection::whole()), "nurbs_curve_fair: ", "no curve free of inflections",
+            "fair too tight");
+    refused(NurbsCurve::fair(pts, 2, tolerance), "nurbs_curve_fair: ", "degree 2", "fair at degree 2");
+    // Faired from the wobbly curve itself, its own parameters naming the span.
+    std::pair<double, double> dom = must(through.domain(), "domain");
+    NurbsCurve faired = must(through.faired(5, 1.5 * tolerance, bs::NoInflection::between(dom.first, dom.second)), "faired");
+    check(must(faired.inflections(), "faired inflections").empty(), "the faired curve has no inflection");
+    check(faired.fit_error().has_value() && *faired.fit_error() <= 1.6 * tolerance, "faired lands within its tolerance");
+    return {};
+}
+
+static Result<void> edge_continuity() {
+    bs::Solid block = must(bs::Solid::cuboid(40, 30, 20), "cuboid");
+    bs::Continuity r = must(block.edge_continuity(0, 16), "edge_continuity");
+    check(within(r.angle, PI / 2, 1e-9) && r.gap < 1e-9 && r.curvature < 1e-9 && r.samples == 17,
+          "a box's edge is a square crease, no gap, no curvature, 17 samples");
+    bs::Solid rounded = must(block.fillet({0}, 4.0), "fillet");
+    std::size_t edges = must(rounded.edges(), "edges").size();
+    std::vector<bs::Continuity> seams;
+    for (std::uint32_t e = 0; e < edges; ++e) {
+        Result<bs::Continuity> k = rounded.edge_continuity(e);
+        if (!k) continue;   // an edge of one face
+        if (k->angle < 1e-6) seams.push_back(*k);
+    }
+    // The fillet's two tangent seams, its curvature a quarter where the flat faces' is zero.
+    check(seams.size() == 2, "the fillet has two tangent seams");
+    for (const bs::Continuity& k : seams) check(within(k.curvature, 0.25, 1e-4), "a seam's curvature jump is 1 / radius");
+    refused(block.edge_continuity(999), "edge_continuity: ", "", "edge_continuity of edge 999");
+    return {};
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) {
         Result<void> loaded = bs::license(argv[1]);
@@ -390,6 +473,8 @@ int main(int argc, char** argv) {
         {"refusals", refusals},
         {"maps_and_values", maps_and_values},
         {"lifetime", lifetime},
+        {"traced_roof_faired", traced_roof_faired},
+        {"edge_continuity", edge_continuity},
     };
     for (const Test& t : tests) {
         int before = failures;

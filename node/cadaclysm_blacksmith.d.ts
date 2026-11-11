@@ -73,6 +73,8 @@ export type AxisLine = ArrayLike<number> | [ArrayLike<number>, ArrayLike<number>
 export type Point2 = [number, number] | ArrayLike<number>;
 export type Point3 = [number, number, number] | ArrayLike<number>;
 export type Progress = (phase: string, done: number, total: number) => void;
+/** A document evaluation's progress: the id of the node being built, then as `Progress`. */
+export type DocumentProgress = (node: string, phase: string, done: number, total: number) => void;
 
 export function libraryPath(): string;
 /**
@@ -125,6 +127,22 @@ export class Profile {
   static path(start: Point2): Path;
   static parabola(vertex: Point2, axis: Point2, focal: number, from: number, to: number): Path;
   static chain(pieces: Iterable<Profile>, tolerance?: number | null): Profile;
+  /** A polyline through `points` (at least two), open, or `closed` with a side back to the first. */
+  static polyline(points: Point2[], closed?: boolean): Profile;
+  /** The arc of radius `r` about `centre` from angle `a0` counter-clockwise to `a1` (radians); equal angles are the whole circle. */
+  static arc(centre: Point2, r: number, a0: number, a1: number): Profile;
+  /** The arc from `start` through `through` to `end`; throws when the three are in a line. */
+  static arcThrough(start: Point2, through: Point2, end: Point2): Profile;
+  /** The ellipse about `centre` with semi-axes `rx` along x and `ry` along y, closed. */
+  static ellipse(centre: Point2, rx: number, ry: number): Profile;
+  /** Rational cubic Béziers end to end (sixteen numbers each, `x y z w` per control point) as one open profile; `recognise` turns straight ones into lines and circular ones into arcs. */
+  static fromBeziers(beziers: ArrayLike<number>, recognise?: boolean): Profile;
+  /** This profile as rational cubic Béziers, sixteen numbers each, on the sketch plane or carried onto `frame` (twelve numbers). */
+  beziers(frame?: ArrayLike<number> | null): Float64Array;
+  /** The closed loops among `pieces`: each the pieces' indices in the order it runs. */
+  static loops(pieces: Iterable<Profile>, tolerance?: number | null): number[][];
+  /** The order `chain` takes `pieces` in: per piece its index and whether it was turned round. */
+  static chainOrder(pieces: Iterable<Profile>, tolerance?: number | null): Array<[number, boolean]>;
   static fromLoops(loops: Iterable<Profile>): Profile;
   closeLoop(): Profile;
   /** This curve cut where the cutters cross it -- the sketch trim's pieces, in order along the curve. */
@@ -818,6 +836,88 @@ export interface Closest {
   /** The answer was refined on the exact surfaces; false is the mesh's answer, within the tolerance. */
   readonly refined: boolean;
 }
+/**
+ * The nearest point of a solid (or of one face) to a query point (`Solid.closestPoint`,
+ * `Projector.closestPoint`, `Solid.faceClosestPoint`). What the point lies on is named as
+ * `Closest` names each side.
+ */
+export class PointFoot {
+  private constructor();
+  /** The nearest point, on the body's boundary (a query inside a closed body is answered by its nearest boundary point). */
+  readonly point: number[];
+  /** From the query point to `point`. */
+  readonly distance: number;
+  /** What the point lies on. */
+  readonly kind: 'face' | 'edge' | 'vertex';
+  /** The kernel's id for the face, edge or vertex. */
+  readonly index: number;
+  /** The index `Solid.edges` uses (what `edgeLength`, `fillet` and `edgeClosestPoint` take) for an edge foot; null for a face, a vertex, and an edge the fillet table does not hold. Read this, not `index`. */
+  readonly edge: number | null;
+  /** The face parameter of a foot inside a face; null for an edge or a vertex foot. */
+  readonly uv: [number, number] | null;
+  /** Unit: a face foot's outward normal; an edge or vertex foot's direction from the foot to the query point; on the body the mean of the adjacent faces' outward normals. */
+  readonly normal: number[];
+  /** Refined onto the exact geometry; false is the mesh's answer, within `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`. */
+  readonly refined: boolean;
+}
+/** The nearest point of one edge to a query point (`Solid.edgeClosestPoint`): `t` the edge curve's own parameter. */
+export interface EdgeFoot {
+  readonly t: number;
+  readonly point: number[];
+  readonly distance: number;
+}
+/** The nearest points of two curves (`NurbsCurve.closestPoints`, a `NearestObject`'s answer for a curve): side `a` on the curve asked, side `b` on the other. Exact. */
+export class CurvePair {
+  private constructor();
+  /** From `pointA` to `pointB`; 0 where the curves cross. */
+  readonly distance: number;
+  /** The parameter of `pointA` on the curve asked. */
+  readonly tA: number;
+  readonly pointA: number[];
+  /** The parameter of `pointB` on the other curve. */
+  readonly tB: number;
+  readonly pointB: number[];
+}
+/** The nearest points of a curve and a solid's boundary (`Solid.curveClosestPoints`, `Projector.curveClosestPoints`, a `NearestObject`'s answer for a solid or a projector). The body's side is named as `PointFoot` names its point. */
+export class CurveBodyFoot {
+  private constructor();
+  /** From `pointOnCurve` to `pointOnBody`. */
+  readonly distance: number;
+  /** The curve's parameter at `pointOnCurve`. */
+  readonly t: number;
+  readonly pointOnCurve: number[];
+  readonly pointOnBody: number[];
+  /** What the body's point lies on. */
+  readonly kind: 'face' | 'edge' | 'vertex';
+  /** The kernel's id for the face, edge or vertex. */
+  readonly index: number;
+  /** The public edge number (what `edgeLength` and `edgeClosestPoint` take) for an edge foot; null otherwise. Read this, not `index`. */
+  readonly edge: number | null;
+  /** The face parameter of a foot inside a face; null for an edge or a vertex foot. */
+  readonly uv: [number, number] | null;
+  /** Unit, as `PointFoot.normal`. */
+  readonly normal: number[];
+  /** Refined onto the exact geometry; false is the mesh's answer, within `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`. */
+  readonly refined: boolean;
+  /** The curve passes through the boundary: `distance` is exactly 0 and the earliest crossing in `t` answers. */
+  readonly crossing: boolean;
+}
+/** The nearest of a list of things to a curve (`NurbsCurve.closestObject`). */
+export class NearestObject {
+  private constructor();
+  /** The item's index in the list asked. */
+  readonly which: number;
+  /** From `pointOnCurve` to `pointOnItem`. */
+  readonly distance: number;
+  /** The curve's parameter at `pointOnCurve`. */
+  readonly t: number;
+  readonly pointOnCurve: number[];
+  readonly pointOnItem: number[];
+  /** A solid's or a projector's answer; null for a curve or a point. */
+  readonly body: CurveBodyFoot | null;
+  /** A curve's answer, side `a` the curve asked; null for a solid, a projector or a point. */
+  readonly pair: CurvePair | null;
+}
 export interface SolidMesh { positions: Float32Array; normals: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number }
 /** `SolidMesh` in `double`: the same tessellation's own unnarrowed positions/normals. */
 export interface SolidMesh64 { positions: Float64Array; normals: Float64Array; indices: Uint32Array; vertexCount: number; indexCount: number }
@@ -907,12 +1007,20 @@ export class Solid {
   convertToNurbs(level?: NurbsLevel): Solid;
   /** The trims the `transform` / `convertToNurbs` call that made this solid lost; 0 otherwise. */
   readonly inexactTrims: number;
-  /** On a fitted sheet (`sweepRail`, `sweepTwoRails`, `edgeSurface`, `networkSurface`, `filletSurfaces`, `flange`, `extrudeTo`) how far its fit is from what was asked; null elsewhere. */
+  /** On a fitted sheet (`sweepRail`, `sweepTwoRails`, `edgeSurface`, `networkSurface`, `filletSurfaces`, `flange`, `extrudeTo`, `faired`) how far its fit is from what was asked; null elsewhere. */
   readonly sheetError: number | null;
   /** On the sheet from `nSidedPatch`, its report; null elsewhere. */
   readonly patchReport: PatchReport | null;
   /** How well this face's side meets `other`'s along `otherSide`. */
   continuity(side: SheetSide, other: Solid, otherSide: SheetSide, face?: number, otherFace?: number, samples?: number): Continuity;
+  /** How well the two faces of edge `edge` meet along it (a square crease reads an angle of pi/2). */
+  edgeContinuity(edge: Edge | number, samples?: number): Continuity;
+  /** Face `face` faired within `tolerance` as a sheet of its own (its `sheetError` set): `controls` null on its own net raised to `degree`, `[nU, nV]` a uniform net; `keep` one level for every side or per side (null free, 0 position, 1 tangent, 2 curvature); `noInflection` holds those isocurves from turning over. */
+  faired(tolerance?: number | null, degree?: number, controls?: [number, number] | null, keep?: SheetKeep, noInflection?: 'u' | 'v' | 'uv' | null, face?: number): Solid;
+  /** Where face `face`'s Gaussian and mean curvature change sign, on a `samples`-step grid each way. */
+  curvatureTurns(face?: number, samples?: number): CurvatureTurns;
+  /** The worst kink of the highlight lines crossing edge `edge`, at `samples` points along it. */
+  highlightKink(edge: Edge | number, samples?: number): HighlightKink;
   /** The face as a sheet of its own, its side bent to meet `other`'s at G`level` (0, 1 or 2). */
   matched(side: SheetSide, other: Solid, otherSide: SheetSide, level?: number, face?: number, otherFace?: number): Solid;
   /** This sheet cut along `curve`, nothing removed. */
@@ -923,8 +1031,14 @@ export class Solid {
   flange(edges: Iterable<Edge | number>, section: NurbsCurve, tolerance?: number | null, join?: boolean): Solid;
   /** Naked `edges` slid along `direction` to their first hits on `target`: one wall per edge, sewn on with `join`. */
   extrudeTo(edges: Iterable<Edge | number>, direction: Point3, target: Solid, tolerance?: number | null, join?: boolean): Solid;
+  /** This sheet cut along `curve`, a curve lying on it, with no direction: in each face's own parameters. */
+  splitAlongCurve(curve: NurbsCurve, tolerance?: number | null): Solid;
+  /** This sheet parted along `curve` into two flanged panels `gap` apart: `[left, right]`. */
+  panelGap(curve: NurbsCurve, gap?: number, flange?: number, tolerance?: number | null): [Solid, Solid];
   /** This sheet with an opening recessed into it along the closed `outline`, and its face counts `[sheet, fillet, walls, pane]`. */
   recess(outline: NurbsCurve, depth: number, draft?: number, fillet?: number, pane?: boolean, tolerance?: number | null): [Solid, [number, number, number, number]];
+  /** This half and its reflection across `plane` joined into one symmetric body, the half's faces first, and how well the seam meets. */
+  mirrorJoin(plane: FrameLike, snap?: number, tolerance?: number | null): [Solid, SymmetryReport];
   join(other: Solid, tolerance?: number | null, progress?: Progress | null, merge?: boolean): Solid;
   cut(other: Solid, tolerance?: number | null, progress?: Progress | null, merge?: boolean): Solid;
   common(other: Solid, tolerance?: number | null, progress?: Progress | null, merge?: boolean): Solid;
@@ -988,6 +1102,14 @@ export class Solid {
   unpairedEdges(tolerance?: number | null): number;
   isWatertight(tolerance?: number | null): boolean;
   readonly manifold: Manifold;
+  /** The radius of the round face `face` belongs to (a fillet's face `unfillet` can take back), 0 where it is none; throws for a face the solid does not have. */
+  faceRoundRadius(face: number): number;
+  /** The distance of the chamfer face `face` belongs to (a bevel `unchamfer` can take back), 0 where it is none; throws for a face the solid does not have. */
+  faceChamferDistance(face: number): number;
+  /** The edges as rational cubic Béziers, sixteen numbers each (`x y z w` per control point): exact where the curve has a Bézier form, flattened within `tolerance` elsewhere (null: the effective tolerance). */
+  edgeBeziers(tolerance?: number | null): Float64Array;
+  /** The curved faces' isoparametric curves as rational cubic Béziers, sixteen numbers each, `density` interior lines each way; a flat face draws none. */
+  isocurveBeziers(density?: number, tolerance?: number | null): Float64Array;
   /**
    * What this solid measures, per unit density, each figure beside a bound on its own error.
    * `accuracy` is relative and 0 asks for the library's default.
@@ -1009,6 +1131,16 @@ export class Solid {
   classifier(tolerance?: number | null): Classifier;
   /** The closest points between this solid's boundary and `other`'s, to `tolerance` (0.05 by default); this solid is side `a`. `progress` hears 'meshing', 'pruning' and 'refining'; over the wasm it is never called. */
   closest(other: Solid, tolerance?: number | null, progress?: Progress | null): Closest;
+  /** The nearest point of this solid's boundary to `p`, or null beyond `maxDistance` (undefined, null, NaN or Infinity: no limit). `tolerance` undefined, null, 0 or NaN is unset (the solid's effective tolerance); it sizes the mesh search only: a `refined` false answer is within `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`. Meshes every call. */
+  closestPoint(p: Point3, maxDistance?: number | null, tolerance?: number | null): PointFoot | null;
+  /** A `Projector` for this solid at `tolerance` (undefined, null, 0 or NaN: unset): meshed once, asked point after point. */
+  projector(tolerance?: number | null): Projector;
+  /** The nearest point to `p` of face `face` alone, inside its trims or on its boundary: exact, always `refined`. */
+  faceClosestPoint(face: number, p: Point3): PointFoot;
+  /** The nearest point to `p` of edge `edge` (an index into `edges()`, or the `Edge`) on its own curve over its range. Exact. */
+  edgeClosestPoint(edge: number | Edge, p: Point3): EdgeFoot;
+  /** The nearest points of `curve` and this solid's boundary (`crossing` true, distance 0, where the curve passes through it: the earliest crossing in `t`), or null beyond `maxDistance` (undefined, null, NaN or Infinity: no limit). `tolerance` undefined, null, 0 or NaN is unset (the solid's effective tolerance); a `refined` false answer is within `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`. Meshes every call. */
+  curveClosestPoints(curve: NurbsCurve, maxDistance?: number | null, tolerance?: number | null): CurveBodyFoot | null;
   /** This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the
    *  broad phase's own bound (`Collider` builds one per part at construction). */
   boundsBox(tolerance?: number | null): Box;
@@ -1161,6 +1293,8 @@ export class Solid {
   edges(): Edge[];
   /** A `radiusEnd` other than `radius` runs the radius along a spline edge (the varying fillet). */
   fillet(edges: Iterable<Edge | number>, radius: number, tolerance?: number | null, progress?: Progress | null, radiusEnd?: number | null): Solid;
+  /** A chain of spline edges rounded with the radius following a law of `[share, radius]` stations along it (share: 0 to 1 of the chain's arc length). */
+  filletLaw(edges: Iterable<Edge | number>, law: Iterable<[number, number]>, tolerance?: number | null): Solid;
   chamfer(edges: Iterable<Edge | number>, distance: number, tolerance?: number | null): Solid;
   pushPull(face: number | Iterable<number>, distance: number, tolerance?: number | null, progress?: Progress | null): Solid;
   mergeFlush(): Solid;
@@ -1559,6 +1693,21 @@ export class Classifier {
   contains(point: Point3): Containment;
 }
 /**
+ * A solid meshed once and asked for its nearest point to point after point (`Solid.projector`).
+ * It keeps its own reference to the body, so it answers on after that solid is closed. `close()`
+ * frees this handle; so does leaving a `using` block or the garbage collector.
+ */
+export class Projector {
+  constructor(solid: Solid, tolerance?: number | null);
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** `Solid.closestPoint`'s answer at the projector's tolerance; null beyond `maxDistance` (undefined, null, NaN or Infinity: no limit). */
+  closestPoint(p: Point3, maxDistance?: number | null): PointFoot | null;
+  /** `Solid.curveClosestPoints`' answer at the projector's tolerance; null beyond `maxDistance` (undefined, null, NaN or Infinity: no limit). The projector's lock is held for the whole curve query. */
+  curveClosestPoints(curve: NurbsCurve, maxDistance?: number | null): CurveBodyFoot | null;
+}
+/**
  * Parts meshed once, asked pose after pose which of them interfere. `close()` frees this handle;
  * so does leaving a `using` block or the garbage collector.
  */
@@ -1836,6 +1985,42 @@ export class Continuity {
   readonly curvatureAt: number[];
   readonly samples: number;
 }
+/** How smoothly a curve runs through its own knots (`NurbsCurve.knotContinuity`). Frozen. */
+export class KnotContinuity {
+  private constructor();
+  readonly angle: number;
+  readonly angleParameter: number;
+  readonly angleAt: number[];
+  readonly curvature: number;
+  readonly curvatureParameter: number;
+  readonly curvatureAt: number[];
+}
+/** A fair's span free of inflections: off (null/false), the whole curve (true), or `[from, to]` with null an open end. */
+export type NoInflection = boolean | null | [number | null, number | null];
+/** What `Solid.faired` keeps of each side: one level for all four, per side by name, or a 4-array `[u0, u1, v0, v1]`; null free to move, 0 position, 1 tangent plane, 2 curvature. */
+export type SheetKeep = number | null | Partial<Record<SheetSide, number | null>> | [number | null, number | null, number | null, number | null];
+/** Where a face's curvatures change sign (`Solid.curvatureTurns`). Frozen. */
+export class CurvatureTurns {
+  private constructor();
+  readonly gaussianPositive: number;
+  readonly gaussianNegative: number;
+  /** The points between opposite Gaussian signs: `tangent` the face's unit normal, `parameter` its `u`. */
+  readonly gaussianTurns: At[];
+  readonly meanPositive: number;
+  readonly meanNegative: number;
+  /** The points between opposite mean-curvature signs. */
+  readonly meanTurns: At[];
+  readonly samples: number;
+}
+/** The worst kink of the highlight lines crossing an edge (`Solid.highlightKink`): `angle` in radians, where, and the light tube that shows it. Frozen. */
+export class HighlightKink {
+  private constructor();
+  readonly angle: number;
+  readonly at: number[];
+  readonly lightPoint: number[];
+  readonly lightDirection: number[];
+  readonly samples: number;
+}
 /** How well an N-sided patch meets (`Solid.patchReport`). Frozen. */
 export class PatchReport {
   private constructor();
@@ -1855,6 +2040,17 @@ export class JoinReport {
   readonly turned: number;
   readonly closed: boolean;
 }
+/** What `Solid.mirrorJoin` did. Frozen. */
+export class SymmetryReport {
+  private constructor();
+  readonly seams: number;
+  readonly squared: number;
+  readonly moved: number;
+  readonly gap: number;
+  readonly angle: number;
+  readonly curvature: number;
+  readonly naked: number;
+}
 /** How `NurbsCurve.tween` blends: control point by control point, after making the curves compatible, or through arc-length samples. */
 export type TweenMethod = 'plain' | 'matching' | 'sampling';
 /**
@@ -1868,10 +2064,12 @@ export class NurbsCurve {
   close(): void;
   readonly closed: boolean;
   [Symbol.dispose](): void;
-  /** The largest distance from the fitted points; null unless made by `fit`, `projectedToFace` or `pulledToFace`. */
+  /** The largest distance from the fitted points; null unless made by `fit`, `fair`, `faired`, `projectedToFace` or `pulledToFace`. */
   readonly fitError: number | null;
   static through(points: Iterable<Point3>, degree?: number, closed?: boolean, startTangent?: Point3 | null, endTangent?: Point3 | null): NurbsCurve;
   static fit(points: Iterable<Point3>, degree?: number, tolerance?: number | null): NurbsCurve;
+  /** The smoothest curve of `degree` (3 to 7) within `tolerance` of the points; `noInflection` true holds the whole curve, `[i, j]` (point indices, null an open end) a span, free of inflections. */
+  static fair(points: Iterable<Point3>, degree?: number, tolerance?: number | null, noInflection?: NoInflection): NurbsCurve;
   static fromEdge(solid: Solid, edge: Edge | number): NurbsCurve;
   static isocurve(solid: Solid, face: number, alongU: boolean, at: number): NurbsCurve;
   static blend(a: NurbsCurve, aEnd: boolean, b: NurbsCurve, bEnd: boolean, continuity?: number, bulge?: number): NurbsCurve;
@@ -1881,6 +2079,8 @@ export class NurbsCurve {
   projectedToPlane(origin: Point3, normal: Point3, direction?: Point3 | null): NurbsCurve;
   projectedToFace(solid: Solid, face: number, direction: Point3, tolerance?: number | null): NurbsCurve;
   pulledToFace(solid: Solid, face: number, tolerance?: number | null): NurbsCurve;
+  /** This curve, lying on the sheet `solid`, offset `distance` along it (positive: left of its run seen from the outward side). */
+  offsetOnSheet(solid: Solid, distance: number, tolerance?: number | null): NurbsCurve;
   reversed(): NurbsCurve;
   trimmed(t0: number, t1: number): NurbsCurve;
   extended(length: number, atStart?: boolean): NurbsCurve;
@@ -1895,6 +2095,14 @@ export class NurbsCurve {
   readonly isRational: boolean;
   readonly isClosed: boolean;
   point(t: number): number[];
+  /** The nearest point of the curve to `p` over its whole domain; `unique` false where another point is as near (a circle's axis). Exact. */
+  closestPoint(p: Point3): CurveFoot;
+  /** The same, or null where that point lies beyond `maxDistance` (undefined, null, NaN or Infinity: no limit, the same answer as with none). */
+  closestPoint(p: Point3, maxDistance: number | null | undefined): CurveFoot | null;
+  /** The nearest points of this curve and `other` (side `a` this curve; distance 0 where they cross), or null where they lie farther apart than `maxDistance` (undefined, null, NaN or Infinity: no limit). Exact. */
+  closestPoints(other: NurbsCurve, maxDistance?: number | null): CurvePair | null;
+  /** The item of `items` nearest to this curve -- each a `Solid`, a `NurbsCurve`, a `Projector` or a point -- or null where none lies within `maxDistance` (undefined, null, NaN or Infinity: no limit) or the list is empty. Equal distances go to the earlier item. `tolerance` (undefined, null, 0 or NaN: each solid's effective tolerance) sizes each solid's search; a projector keeps its own. */
+  closestObject(items: Iterable<Solid | NurbsCurve | Projector | Point3>, maxDistance?: number | null, tolerance?: number | null): NearestObject | null;
   /** The point and its derivatives up to `order` (at most 8): `order + 1` points. */
   derivatives(t: number, order?: number): number[][];
   curvature(t: number): Curvature;
@@ -1904,6 +2112,12 @@ export class NurbsCurve {
   divideByLength(step: number, accuracy?: number): At[];
   planeHits(origin: Point3, normal: Point3): At[];
   faceHits(solid: Solid, face: number, tolerance?: number | null): At[];
+  /** This curve faired, as `fair` makes one from points; `noInflection`'s pair is this curve's own parameters. */
+  faired(degree?: number, tolerance?: number | null, noInflection?: NoInflection): NurbsCurve;
+  /** Where the curvature turns from one side to the other, in parameter order (`error` zero). */
+  inflections(): At[];
+  /** The largest turn of the tangent and jump of the curvature at the curve's knots. */
+  knotContinuity(): KnotContinuity;
   /** `n + 1` pairs `[point, point - scale * kappa * normal]` along the domain. */
   comb(n?: number, scale?: number): [number[], number[]][];
 }
@@ -2262,6 +2476,8 @@ export class Document {
   log(branch?: string | null): Commit[];
   readonly head: Commit;
   evaluate(options?: { cheapOnly?: boolean }): NodeStatus[];
+  /** `evaluate`, every kernel call's progress heard as `(node, phase, done, total)`: `node` the id of the node being built. */
+  evaluateWith(progress: DocumentProgress | null, options?: { cheapOnly?: boolean }): NodeStatus[];
   errors(): NodeError[];
   /** Node `id`'s value, parsed; throws `BuildError` for a node with none. */
   value(id: string): any;
@@ -2331,8 +2547,8 @@ export class Operation {
 }
 
 /** One thing `Job.machine()` left uncut: `kind` (`"corner"`, `"hole"`, `"slope"`,
- * `"undercut"` or `"too_deep"`), `at` (`[x, y, z]`), `size` (its meaning per `kind`),
- * `reason` (one sentence naming the tool involved), `region` (its XY area, as a list
+ * `"undercut"`, `"too_deep"` or `"relief"`), `at` (`[x, y, z]`), `size` (its meaning per
+ * `kind`; for a relief, how far the notch reaches into each wall, in mm), `reason` (one sentence naming the tool involved), `region` (its XY area, as a list
  * of `Profile`), and `top` and `bottom` (the highest and lowest Z it stands at, from the
  * band's top down to its floor). Read-only. */
 export class ReportItem {
@@ -2390,9 +2606,11 @@ export class Job {
    * array: each later one cleans what the earlier ones left, and the report lists only
    * what none of them reached -- its holes drilled with whichever of `drills` fits each --
    * a tool per required diameter. `drills` may be one `Tool` as well as an array of them.
+   * With `cornerRelief` true, each inside corner the smallest end mill leaves is relieved with a
+   * dog-bone and reported as a `relief` item in place of the corner item.
    * Returns the machining's `Report` of what could not be cut.
    */
-  machine(part: Solid, endMill: Tool | (Tool | null)[], drills?: Tool | Iterable<Tool>, stepover?: number | null, stepdown?: number | null, skin?: number, peck?: number | null): Report;
+  machine(part: Solid, endMill: Tool | (Tool | null)[], drills?: Tool | Iterable<Tool>, stepover?: number | null, stepdown?: number | null, skin?: number, peck?: number | null, cornerRelief?: boolean): Report;
   /** Every operation added to this job so far, in order -- whether added by
    * `face`/`contour`/`pocket`/`drill` or by `machine`. */
   operations(): Operation[];
@@ -2427,6 +2645,8 @@ export function writeSat(path: string, solids: Iterable<Solid>, unit?: Unit): vo
  * so. Named, coloured and with the solid's attributes as user text.
  */
 export function rhino3dmBytes(solids: Iterable<Solid>, unit?: Unit): Buffer;
+/** Several solids meshed as one file's bytes: `'stl'`, `'stl-ascii'`, `'obj'`, `'glb'` or `'gltf'`; `names` one a solid, `looks` six linear numbers a solid (`r g b a metallic roughness`, glTF only). */
+export function meshFile(solids: Iterable<Solid>, format?: 'stl' | 'stl-ascii' | 'obj' | 'glb' | 'gltf', names?: Iterable<string> | null, looks?: Iterable<ArrayLike<number>> | null, tolerance?: number | null): Buffer;
 export function write3dm(path: string, solids: Iterable<Solid>, unit?: Unit): void;
 /** Several solids as one `.brep`, each its own solid under one compound. */
 export function writeBrepText(solids: Iterable<Solid>): string;

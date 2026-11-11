@@ -81,7 +81,29 @@ private func temporaryFile(_ name: String) -> URL {
 
 private struct Cancelled: Error, Equatable { let why: String }
 
+/// The plate with a 4 x 4 bar `x2` cut through it (`c1`): a node that reports its progress.
+private func cutPlateDocument() throws -> Document {
+    let doc = try plateDocument()
+    try doc.apply(addOp(#"{"id": "r2", "kind": "profile.rect", "w": 4, "h": 4}"#))
+    try doc.apply(addOp(#"{"id": "x2", "kind": "solid.extrude", "profile": "r2", "frame": "xy", "distance": 20}"#))
+    try doc.apply(addOp(#"{"id": "c1", "kind": "solid.cut", "target": "x1", "tool": "x2", "tolerance": 0.01}"#))
+    return doc
+}
+
 final class DocumentTests: XCTestCase {
+
+    func testEvaluateWithProgressNamesTheNodeBeingBuilt() throws {
+        let plain = try cutPlateDocument().evaluate()
+        XCTAssertEqual(states(plain), Array(repeating: "ok", count: 5))
+        let doc = try cutPlateDocument()
+        var ticks: [(String, String)] = []
+        try doc.evaluateWith(cheapOnly: true) { node, phase, _, _ in ticks.append((node, phase)) }
+        XCTAssertTrue(ticks.isEmpty, "a cheap-only pass reported \(ticks)")
+        let status = try doc.evaluateWith { node, phase, _, _ in ticks.append((node, phase)) }
+        XCTAssertEqual(status, plain)
+        XCTAssertTrue(ticks.contains { $0.0 == "c1" && $0.1 != "start" }, "\(ticks)")
+        XCTAssertTrue(ticks.allSatisfy { ["r1", "x1", "r2", "x2", "c1"].contains($0.0) }, "\(ticks)")
+    }
     // 1. evaluate and results
     func testEvaluateAndResults() throws {
         let doc = try plateDocument()

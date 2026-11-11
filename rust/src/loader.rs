@@ -7,13 +7,31 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use libloading::Library;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use libloading::Library;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use self::no_library::Library;
 
 /// Declares a function table: one field per entry point, bound by name when the
 /// library loads, plus the list of names it binds. Every entry point is bound up
 /// front, so a library older than this crate is refused at load with the name it
 /// lacks, rather than at some later call.
+///
+/// The kernel's table is declared `web; Api, ENTRY_POINTS; ...`: on wasm32 it is also
+/// filled from the web package (`Api::from_shim`, the generated adapters in
+/// [`crate::web`]'s shim), which have exactly the signatures declared here.
 macro_rules! entry_points {
+    (web; $api:ident, $names:ident; $(fn $name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)*) => {
+        $crate::loader::entry_points! { $api, $names; $(fn $name($($arg: $ty),*) $(-> $ret)?;)* }
+
+        #[cfg(target_arch = "wasm32")]
+        impl $api {
+            /// The table over the web package: each entry the shim's adapter of that name.
+            pub(crate) fn from_shim() -> $api {
+                $api { $($name: $crate::web::shim::$name,)* }
+            }
+        }
+    };
     ($api:ident, $names:ident; $(fn $name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)*) => {
         /// Every entry point of the header this crate calls, as function pointers
         /// into the loaded library.
@@ -30,7 +48,8 @@ macro_rules! entry_points {
             /// `library` must be the cadaclysm library this table describes: each
             /// symbol is read as the signature declared here, and nothing can check
             /// that it is one.
-            pub(crate) unsafe fn bind(library: &::libloading::Library, path: &::std::path::Path) -> Result<$api, String> {
+            #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+            pub(crate) unsafe fn bind(library: &$crate::loader::Library, path: &::std::path::Path) -> Result<$api, String> {
                 Ok($api {
                     $($name: *library
                         .get::<unsafe extern "C" fn($($ty),*) $(-> $ret)?>(
@@ -203,11 +222,15 @@ impl<A: 'static> Loader<A> {
     /// Bind the copy of the library the process already holds, found by its file name as
     /// a viewer finds it. An error where the process holds none, or where this crate
     /// already bound another copy.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn use_loaded(&'static self) -> Result<&'static A, String> {
         self.load_with(None, true)
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code, unused_variables))]
     fn load_with(&'static self, path: Option<&Path>, loaded_only: bool) -> Result<&'static A, String> {
+        #[cfg(target_arch = "wasm32")]
+        return Err(no_library::refusal(&self.file_name()));
         if let Some(loaded) = self.loaded.get() {
             return self.check_bound(loaded, path, loaded_only);
         }
@@ -325,6 +348,56 @@ fn held(name: &str, probe: &str) -> Option<(Library, Option<PathBuf>)> {
 #[cfg(not(any(windows, unix)))]
 fn held(_name: &str, _probe: &str) -> Option<(Library, Option<PathBuf>)> {
     None
+}
+
+/// What stands in for `libloading` on wasm32, where nothing is loaded from a file: the
+/// kernel comes from the web package ([`crate::web`]), and the reader and the native view
+/// libraries are not available in the browser yet. Every load refuses, saying so.
+#[cfg(target_arch = "wasm32")]
+mod no_library {
+    use std::fmt;
+    use std::path::Path;
+
+    /// The refusal for the library file `name`.
+    pub(crate) fn refusal(name: &str) -> String {
+        format!(
+            "{name} cannot be loaded in the browser: the kernel comes from the web package              (cadaclysm_sdk::web::load), and the reader and the native viewers aren't available              in the browser yet"
+        )
+    }
+
+    /// Why a load refused.
+    #[derive(Debug)]
+    pub(crate) struct NoLibrary(String);
+
+    impl fmt::Display for NoLibrary {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    /// A library that is never loaded.
+    pub(crate) struct Library(());
+
+    impl Library {
+        pub(crate) unsafe fn new(path: impl AsRef<Path>) -> Result<Library, NoLibrary> {
+            let name = path.as_ref().file_name().map_or_else(|| "the library".into(), |n| n.to_string_lossy().into_owned());
+            Err(NoLibrary(refusal(&name)))
+        }
+
+        pub(crate) unsafe fn get<T: 'static>(&self, _symbol: &[u8]) -> Result<Symbol<T>, NoLibrary> {
+            Err(NoLibrary(refusal("the library")))
+        }
+    }
+
+    /// A symbol of a library that is never loaded: never made.
+    pub(crate) struct Symbol<T: 'static>(&'static T);
+
+    impl<T: 'static> std::ops::Deref for Symbol<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            self.0
+        }
+    }
 }
 
 fn check_same<A>(loaded: &'static Loaded<A>, path: Option<&Path>) -> Result<&'static A, String> {

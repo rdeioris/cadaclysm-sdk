@@ -4455,7 +4455,7 @@ public final class Cad {
         }
 
         /** Its exact B-rep, for {@code Blacksmith.Solid.fromNode} to operate on, or null
-         *  where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). Shared
+         *  where it has none (a mesh, a curve, a CSG body, an open OpenSCAD polyhedron, or an OpenSCAD file read without the kernel). Shared
          *  with the scene, not copied; see {@link Brep}. */
         public Brep brep() {
             MemorySegment raw;

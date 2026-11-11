@@ -1930,7 +1930,7 @@ class Node {
     return new FemMesh(pointer);
   }
   surfaces() { return _surfacesOf(_lib().node_surfaces(this.scene._handle, this.index)); }
-  /** Its exact B-rep, for `Solid.fromNode`, or null where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). */
+  /** Its exact B-rep, for `Solid.fromNode`, or null where it has none (a mesh, a curve, a CSG body, an open OpenSCAD polyhedron, or an OpenSCAD file read without the kernel). */
   get brep() {
     const p = _lib().node_brep(this.scene._handle, this.index);
     return p ? new Brep(p) : null;

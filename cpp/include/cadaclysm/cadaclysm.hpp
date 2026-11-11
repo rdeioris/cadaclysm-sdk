@@ -2306,7 +2306,7 @@ public:
         return Surfaces(scene_, std::move(faces));
     }
 
-    // Its exact B-rep, or nothing (a mesh, a curve, a CSG body, a JT or OpenSCAD part).
+    // Its exact B-rep, or nothing (a mesh, a curve, a CSG body, an open OpenSCAD polyhedron, or an OpenSCAD file read without the kernel).
     std::optional<Brep> brep() const {
         const CadaclysmBrep* pointer = ::cadaclysm_node_brep(h(), index_);
         if (!pointer) return std::nullopt;

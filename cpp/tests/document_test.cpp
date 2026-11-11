@@ -386,6 +386,45 @@ static const Json& first_op(const Json& commit) { return commit["ops"][0]; }
 
 static bool same_floats(const std::optional<Vec3>& got, const Vec3& want) { return got && *got == want; }
 
+// ---- 1b. evaluate_with: progress naming the node being built --------------------------------
+// The plate with a 4 x 4 bar x2 cut through it (c1): a node that reports its progress.
+static Result<Document> cut_plate_document() {
+    CADACLYSM_TRY(doc, plate_document());
+    CADACLYSM_TRY(a, doc.apply(add_op(R"J({"id": "r2", "kind": "profile.rect", "w": 4, "h": 4})J")));
+    CADACLYSM_TRY(b, doc.apply(add_op(R"J({"id": "x2", "kind": "solid.extrude", "profile": "r2", "frame": "xy", "distance": 20})J")));
+    CADACLYSM_TRY(c, doc.apply(add_op(R"J({"id": "c1", "kind": "solid.cut", "target": "x1", "tool": "x2", "tolerance": 0.01})J")));
+    (void)a; (void)b; (void)c;
+    return doc;
+}
+
+static Result<void> evaluate_with_progress() {
+    CADACLYSM_TRY(quiet, cut_plate_document());
+    CADACLYSM_TRY(plain, quiet.evaluate());
+    check(states(plain) == std::vector<std::string>(5, "ok"), "the cut plate evaluates to " + plain);
+    CADACLYSM_TRY(doc, cut_plate_document());
+    std::vector<std::pair<std::string, std::string>> ticks;
+    bs::DocumentProgress heard = [&](std::string_view node, std::string_view phase, std::size_t, std::size_t) {
+        ticks.emplace_back(std::string(node), std::string(phase));
+    };
+    CADACLYSM_TRY(cheap, doc.evaluate_with(heard, true));
+    (void)cheap;
+    check(ticks.empty(), "a cheap-only pass reported " + std::to_string(ticks.size()) + " ticks");
+    CADACLYSM_TRY(status, doc.evaluate_with(heard));
+    check(status == plain, "evaluate_with's statuses " + status + " are not the plain " + plain);
+    bool cut = false, named = true;
+    const std::set<std::string> nodes = {"r1", "x1", "r2", "x2", "c1"};
+    for (const auto& t : ticks) {
+        cut = cut || (t.first == "c1" && t.second != "start");
+        named = named && nodes.count(t.first) == 1;
+    }
+    check(cut, "no progress from the cut c1");
+    check(named, "a tick names no node");
+    CADACLYSM_TRY(silent, cut_plate_document());
+    CADACLYSM_TRY(none, silent.evaluate_with({}));
+    check(none == plain, "a silent evaluate_with's statuses " + none);
+    return {};
+}
+
 // ---- 1. evaluate and results ----------------------------------------------------------------
 static Result<void> evaluate_and_results() {
     CADACLYSM_TRY(doc, plate_document());
@@ -1081,6 +1120,7 @@ int main(int argc, char** argv) {
     };
     const Test tests[] = {
         {"evaluate_and_results", evaluate_and_results},
+        {"evaluate_with_progress", evaluate_with_progress},
         {"save_load_open_and_refusals", save_load_open_and_refusals},
         {"undo_and_redo", undo_and_redo},
         {"a_refusal_leaves_the_document_unchanged", a_refusal_leaves_the_document_unchanged},

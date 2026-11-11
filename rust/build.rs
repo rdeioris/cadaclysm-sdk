@@ -37,6 +37,11 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CADACLYSM_NO_DOWNLOAD");
     println!("cargo:rerun-if-env-changed=CADACLYSM_SDK_RELEASE");
+    // In the browser the kernel is the web package, served beside the app (src/web): there
+    // is no library to download or build, for any feature.
+    if env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "wasm32") {
+        return;
+    }
     if env::var_os("CARGO_FEATURE_DOWNLOAD").is_none() || env::var_os("DOCS_RS").is_some() {
         return;
     }

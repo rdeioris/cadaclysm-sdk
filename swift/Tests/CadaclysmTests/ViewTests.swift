@@ -3,11 +3,11 @@
 // by its item), image() inside its silhouette, pick, save, a real pose and the rest pose, a
 // nested node and a root drawing less than their scene, Scene.close() releasing its items,
 // another thread's calls refused, colour text drawing its numbers' pixels and refused text
-// refused in the library's words, the loader's ABI 1.18, text (labels shown, changed, picked
+// refused in the library's words, the loader's ABI 1.22, text (labels shown, changed, picked
 // by line, coloured on their box; fonts loaded; refusals) -- and the wgpu library's table
 // rigged: show()/view()'s title and up axis, run()'s camera, pump's waits and count, input,
 // void-call refusals; ABI 1.8's pick (clicks, point), set_double_click_frames, focus and
-// navigation, rigged and on the GPU (a double click through input). The
+// navigation, rigged and on the GPU (a double click through input); 1.22's snapping (rigged, and the square's corner on the GPU). The
 // GPU half skips without cadaclysm_view or an adapter unless CADACLYSM_REQUIRE_WGPU is set.
 @testable import CadaclysmView
 @testable import Blacksmith
@@ -154,6 +154,40 @@ private func rig17(_ t: UnsafeMutablePointer<CvlTable>) {
     t.pointee.navigation = { _ in
         spyCalls.append("navigation")
         return spyNavigation
+    }
+}
+
+// ---- view ABI 1.22, rigged: what set_snap, request_snap_in and the work plane calls are handed
+
+private var spySnapSettings = CadaclysmViewSnapSettings()
+private var spySnap = CadaclysmViewSnap()
+// snap_result answers spySnap while spySnapLanded, else false (spySaid says why).
+private var spySnapLanded = true
+private var spySnapCalls: [String] = []
+
+private func rigSnap(_ t: UnsafeMutablePointer<CvlTable>) {
+    t.pointee.last_error = { spySaid }
+    t.pointee.set_snap = { _, s in
+        spySnapSettings = s!.pointee
+        return true
+    }
+    t.pointee.request_snap_in = { _, viewport, x, y in spySnapCalls.append("snap \(viewport) \(x) \(y)") }
+    // spySnap, up to the caller's size as the library writes it.
+    t.pointee.snap_result = { _, out in
+        if !spySnapLanded { return false }
+        var answer = spySnap
+        answer.size = out!.pointee.size
+        out!.pointee = answer
+        return true
+    }
+    t.pointee.clear_snap = { _ in spySnapCalls.append("clear snap") }
+    t.pointee.set_work_plane = { _, o, x, n, step in
+        spySnapCalls.append("work plane \(o![0]) \(o![1]) \(o![2]), \(x![0]) \(x![1]) \(x![2]), \(n![0]) \(n![1]) \(n![2]), \(step)")
+        return true
+    }
+    t.pointee.clear_work_plane = { _ in
+        spySnapCalls.append("ground plane")
+        return true
     }
 }
 
@@ -404,6 +438,23 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(CADACLYSM_VIEW_LOD_SMOOTH, 1)
     }
 
+    func testTheSnapStructsAreTheHeaders() {
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnapSettings>.size, 16)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnapSettings>.offset(of: \CadaclysmViewSnapSettings.aperture_px), 8)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.size, 88)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.point), 8)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.item), 32)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.edge), 44)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.tangent), 48)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.axis), 60)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.radius), 72)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.clicks), 84)
+        XCTAssertEqual(SnapKind.allCases.map(\.rawValue),
+                       [CADACLYSM_VIEW_SNAP_VERTEX, CADACLYSM_VIEW_SNAP_MIDPOINT, CADACLYSM_VIEW_SNAP_CENTRE,
+                        CADACLYSM_VIEW_SNAP_QUADRANT, CADACLYSM_VIEW_SNAP_EDGE, CADACLYSM_VIEW_SNAP_FACE,
+                        CADACLYSM_VIEW_SNAP_GRID, CADACLYSM_VIEW_SNAP_PLANE].map { UInt32($0) })
+    }
+
     func testTheTerminalLoadsAndRefusesAnOffscreenView() throws {
         let terminal: ViewLibrary
         do { terminal = try ViewLibrary.useTerminal() } catch {
@@ -504,6 +555,12 @@ final class ViewTests: XCTestCase {
         let gone = try Solid.cuboid(1, 1, 1)
         gone.close()
         XCTAssertEqual(message { try view.showSolid(gone) }, "solid: closed")
+        // 1.21: a material, an opacity and two faces alone (a trim's ghost); a face the cube does
+        // not have is refused, named.
+        let cube = try Solid.cuboid(1, 1, 1)
+        let ghost = try view.showSolid(cube, material: .glass, opacity: 0.5, faces: [0, 1])
+        try ghost.remove()
+        XCTAssertTrue(message { try view.showSolid(cube, faces: [99]) }.contains("face 99 is not one of the solid's 6 faces"))
         try view.frame()
         let drawn = try view.image()
         XCTAssertNotEqual(pixel(drawn, 160, 120), pixel(empty, 160, 120), "nothing drawn at the centre")
@@ -949,16 +1006,29 @@ final class ViewTests: XCTestCase {
         XCTAssertTrue(try ViewLibrary.current() === first, "a later CADACLYSM_VIEW changed the remembered library")
     }
 
-    /// The loader binds 86 calls of cadaclysm_view.h 1.18 (all but 1.14's analysis calls and
-    /// 1.12's texture targets): a 1.17 library (no set_finish) is refused before any call is
-    /// bound, in Python's words; 1.18 and later 1.x are taken.
-    func testTheLoaderNeedsViewABI118() throws {
-        try checkABIForTest(version: 0x10012, path: "lib")
-        try checkABIForTest(version: 0x10013, path: "lib")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x10011, path: "lib") },
-                       "lib: view ABI 1.17, this SDK needs 1.18 or a later 1.x")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x20012, path: "lib") },
-                       "lib: view ABI 2.18, this SDK needs 1.18 or a later 1.x")
+    /// 1.20's occluded style: set and read back with a colour, nil restores the defaults.
+    func testOccludedStyleRoundTrips() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        XCTAssertEqual(try view.occludedStyle(), OccludedStyle())
+        try view.setOccludedStyle(OccludedStyle(dash: 10, gap: 5, dim: 0.25, colour: SIMD3(0.5, 0.5, 0.5)))
+        XCTAssertEqual(try view.occludedStyle(), OccludedStyle(dash: 10, gap: 5, dim: 0.25, colour: SIMD3(0.5, 0.5, 0.5)))
+        XCTAssertFalse(message { try view.setOccludedStyle(OccludedStyle(dash: -1)) }.isEmpty)
+        XCTAssertEqual(try view.occludedStyle().dash, 10, "a refused style changed the view")
+        try view.setOccludedStyle(nil)
+        XCTAssertEqual(try view.occludedStyle(), OccludedStyle())
+    }
+
+    /// The loader binds 95 calls of cadaclysm_view.h 1.22 (all but 1.14's analysis calls, 1.16's
+    /// layers, 1.19's KMS pair and 1.12's texture targets): a 1.21 library (no snapping) is
+    /// refused before any call is bound, in Python's words; 1.22 and later 1.x are taken.
+    func testTheLoaderNeedsViewABI122() throws {
+        try checkABIForTest(version: 0x10016, path: "lib")
+        try checkABIForTest(version: 0x10017, path: "lib")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x10015, path: "lib") },
+                       "lib: view ABI 1.21, this SDK needs 1.22 or a later 1.x")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x20016, path: "lib") },
+                       "lib: view ABI 2.22, this SDK needs 1.22 or a later 1.x")
     }
 
     /// show_points (view ABI 1.11), through the table rigged: the points, their count, the colour
@@ -1255,6 +1325,124 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(message { _ = try view.navigation }, "cadaclysm_view_navigation: the view is closed")
         XCTAssertEqual(message { try view.setDoubleClickFrames(true) },
                        "cadaclysm_view_set_double_click_frames: the view is closed")
+    }
+
+    // ---- view ABI 1.22: snapping
+
+    /// Through the table rigged: setSnap hands over the kinds' bits, the aperture and the
+    /// marker; snap and lastSnap read the answer whole (no edge for a face snap, nil for
+    /// nothing); clearSnap and the work plane reach the library as given.
+    func testSnapSettingsAndAnswersRigged() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        let t = view.library.table
+        let saved = t.pointee
+        defer { t.pointee = saved; spySaid = nil; spySnap = CadaclysmViewSnap(); spySnapLanded = true; spySnapCalls = [] }
+        rigSnap(t)
+
+        try view.setSnap()
+        XCTAssertEqual([spySnapSettings.size, spySnapSettings.kinds, spySnapSettings.marker], [16, 0xFF, 1], "every kind")
+        XCTAssertEqual(spySnapSettings.aperture_px, 0)
+        try view.setSnap([.vertex, .edge], aperturePx: 6, marker: false)
+        XCTAssertEqual([spySnapSettings.kinds, spySnapSettings.marker], [0b1_0001, 0])
+        XCTAssertEqual(spySnapSettings.aperture_px, 6)
+        try view.setSnap([.face])
+        XCTAssertEqual(spySnapSettings.kinds, 32, "one kind alone")
+        try view.setSnap(nil)
+        XCTAssertEqual(spySnapSettings.kinds, 0, "nil switches snapping off")
+
+        spySnap = CadaclysmViewSnap()
+        spySnap.kind = UInt32(CADACLYSM_VIEW_SNAP_VERTEX)
+        spySnap.point = (-1, 1, 0)
+        spySnap.item = 3
+        spySnap.node = 4
+        spySnap.face = 5
+        spySnap.edge = 2
+        spySnap.tangent = (1, 0, 0)
+        spySnap.distance_px = 2.5
+        let vertex = try view.snap(x: 10, y: 20, viewport: 1)
+        XCTAssertEqual(vertex, ViewSnap(kind: .vertex, point: SIMD3(-1, 1, 0), item: 3, node: 4, face: 5, edge: 2,
+                                        tangent: SIMD3(1, 0, 0), axis: SIMD3(0, 0, 0), radius: 0, distancePx: 2.5, clicks: 0))
+        XCTAssertEqual(spySnapCalls, ["snap 1 10 20"])
+        spySnap = CadaclysmViewSnap()
+        spySnap.kind = UInt32(CADACLYSM_VIEW_SNAP_CENTRE)
+        spySnap.axis = (0, 0, 1)
+        spySnap.radius = 2.5
+        let centre = try XCTUnwrap(try view.snap(x: 1, y: 1))
+        XCTAssertEqual(centre.kind, .centre)
+        XCTAssertEqual(centre.axis, SIMD3(0, 0, 1))
+        XCTAssertEqual(centre.radius, 2.5)
+        spySnap = CadaclysmViewSnap()
+        spySnap.kind = UInt32(CADACLYSM_VIEW_SNAP_FACE)
+        spySnap.edge = UInt32.max
+        XCTAssertNil(try XCTUnwrap(try view.snap(x: 1, y: 1)).edge, "a face snap has no edge")
+        spySnap = CadaclysmViewSnap()
+        XCTAssertNil(try view.snap(x: 1, y: 1), "kind 0 is nothing snapped")
+
+        spySnap.kind = UInt32(CADACLYSM_VIEW_SNAP_EDGE)
+        spySnap.clicks = 1
+        let landed = try view.lastSnap()
+        XCTAssertTrue(landed.landed)
+        XCTAssertEqual(landed.snap?.kind, .edge)
+        XCTAssertEqual(landed.snap?.clicks, 1)
+        spySnapLanded = false
+        spySaid = cstr("cadaclysm_view_snap_result: no snap result")
+        XCTAssertFalse(try view.lastSnap().landed, "nothing landed yet")
+        spySaid = cstr("boom from snap_result")
+        XCTAssertEqual(message { _ = try view.lastSnap() }, "boom from snap_result", "the library's refusal")
+        spySaid = nil
+        spySnapLanded = true
+
+        try view.clearSnap()
+        try view.setWorkPlane(origin: SIMD3(1, 2, 3), step: 0.5)
+        try view.setWorkPlane(origin: nil)
+        XCTAssertEqual(Array(spySnapCalls.suffix(3)),
+                       ["clear snap", "work plane 1.0 2.0 3.0, 1.0 0.0 0.0, 0.0 0.0 1.0, 0.5", "ground plane"])
+    }
+
+    /// Python's test_a_snap_on_the_real_library_finds_the_squares_corner and
+    /// test_snapping_is_off_until_set_snap: the red square with its four sides, from the top, on
+    /// a 64 x 48 view. Snapping is off until setSnap; then a snap 3 pixels inside the topmost
+    /// (then leftmost) pixel that is not the background answers that corner, (-1, 1, 0), as a
+    /// vertex of the square's item; a face snap lands on the face; nil switches it off again.
+    func testASnapFindsTheSquaresCorner() throws {
+        let view = try offscreen(64, 48)
+        defer { try? view.close() }
+        try view.layer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
+        let square: [Float] = [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]
+        // The square's four sides as segments, written out: Swift 6.1 gives up type-checking
+        // the nested flatMap this was ("unable to type-check this expression in reasonable time").
+        var outline: [Float] = []
+        for i in 0..<4 {
+            let a = 3 * i
+            let b = 3 * ((i + 1) % 4)
+            outline.append(contentsOf: square[a..<a + 3])
+            outline.append(contentsOf: square[b..<b + 3])
+        }
+        let item = try view.showMesh(positions: square, indices: [0, 1, 2, 0, 2, 3], edges: outline, rgb: SIMD3<Float>(1, 0, 0))
+        try view.standard("top")
+        try view.frame()
+        let image = try view.image()
+        XCTAssertNil(try view.snap(x: 32, y: 24), "a view starts with snapping off")
+        try view.setSnap()
+        let width = Int(image.width)
+        let background = Array(image.rgba[0..<3])
+        let first = try XCTUnwrap((0..<Int(image.height) * width).first { Array(image.rgba[4 * $0 ..< 4 * $0 + 3]) != background },
+                                  "the square drew nothing")
+        let s = try XCTUnwrap(try view.snap(x: UInt32(first % width) + 3, y: UInt32(first / width) + 3), "nothing snapped near the corner")
+        XCTAssertEqual(s.kind, .vertex)
+        XCTAssertEqual(s.item, item.id)
+        XCTAssertLessThan(max(abs(s.point.x + 1), abs(s.point.y - 1), abs(s.point.z)), 1e-6, "the corner is (-1, 1, 0), not \(s.point)")
+        XCTAssertNotNil(s.edge, "a vertex snap lies on an edge")
+        XCTAssertEqual(s.clicks, 0, "asked by the host")
+        try view.clearSnap()
+        try view.setSnap([.face])
+        let face = try XCTUnwrap(try view.snap(x: 32, y: 24), "the face snap")
+        XCTAssertEqual(face.kind, .face)
+        XCTAssertEqual(face.item, item.id)
+        XCTAssertNil(face.edge)
+        try view.setSnap(nil)
+        XCTAssertNil(try view.snap(x: 32, y: 24), "snapping off answers nothing")
     }
 
     /// A red square seen from the top, zoomed out so a framing visibly changes the picture.

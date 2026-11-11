@@ -44,6 +44,13 @@ return function(t)
     t.raises(function() scene:forget_meshes() end, "closed")
   end)
 
+  -- cube.scad is a mesh with no brep in the Reader flavour and an exact box where the reader
+  -- library carries the kernel's builder (`cadaclysm-capi`'s `openscad-brep`, every shipped
+  -- desktop library): the cube's figures that differ are pinned both ways, by this.
+  local function cube_is_exact(scene)
+    return scene.nodes[1].brep ~= nil
+  end
+
   t.test("LOD levels and Béziers", function()
     t.eq(cadaclysm.lod_levels(), 3)
     local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
@@ -58,7 +65,8 @@ return function(t)
     t.eq(b.count, 12)
     t.ok(b.points ~= nil and b.weights ~= nil)
     t.eq(node.curve_beziers.count, 0)
-    t.eq(node.isocurve_beziers.count, 12)
+    -- 12 axis sections of the mesh; the exact cube's isocurves are the surfaces' to draw.
+    t.eq(node.isocurve_beziers.count, cube_is_exact(scene) and 0 or 12)
     local kept = b:copy()
     t.eq(#kept.points, 12 * 12)
     t.eq(#kept.weights, 12 * 4)
@@ -689,12 +697,18 @@ return function(t)
     t.eq(fit.error, 0)
     t.eq(#fit.frame, 16)
     t.eq(#fit.half_extent, 3)
-    t.eq(fit.hull_vertex_count, 8)
     t.ok(fit.shape_name == "box" or fit.shape_name == "hull", fit.shape_name)
-    local hull = scene.nodes[1]:collision_hull()
-    t.eq(hull.vertex_count, 8)
-    t.eq(hull.index_count, 36)
-    t.ok(hull.positions ~= nil)
+    if cube_is_exact(scene) then
+      -- The exact cube is fitted as the box it is: no hull to hand over.
+      t.eq(fit.shape_name, "box")
+      t.eq(fit.hull_vertex_count, 0)
+    else
+      t.eq(fit.hull_vertex_count, 8)
+      local hull = scene.nodes[1]:collision_hull()
+      t.eq(hull.vertex_count, 8)
+      t.eq(hull.index_count, 36)
+      t.ok(hull.positions ~= nil)
+    end
     scene:close()
   end)
 
@@ -702,13 +716,15 @@ return function(t)
     local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
     local mesh = scene.nodes[1].mesh
     local m = cadaclysm.Meshlets.build(mesh.positions, mesh.normals, mesh.indices, mesh.vertex_count, mesh.index_count, 124, 64)
+    -- The mesh cube is 36 vertices; the exact cube's mesh shares its corners per face (24).
+    local vertices = cube_is_exact(scene) and 24 or 36
     t.eq(m.count, 1)
     t.eq(m:triangle_count(0), 12)
-    t.eq(m:vertex_count(0), 36)
+    t.eq(m:vertex_count(0), vertices)
     t.eq(m:level(0), 0)
     local one = m:meshlet(0)
     t.eq(one.triangle_count, 12)
-    t.eq(#one.positions, 36 * 3)
+    t.eq(#one.positions, vertices * 3)
     t.eq(#one.indices, 36)
     t.eq(#one.children, 0)
     m:free()
@@ -844,15 +860,24 @@ return function(t)
 
   t.test("a node's FEM mesh: the mesh-only cube's arrays, census, quality and .msh text", function()
     local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    local exact = cube_is_exact(scene)
     local mesh = scene.nodes[1]:fem_mesh()
     t.eq(getmetatable(mesh), cadaclysm.FemMesh)
     t.eq(mesh.node_count, 8)
     t.eq(mesh.triangle_count, 12)
-    t.eq(mesh.face_count, 1)
-    t.eq(mesh.from_mesh, true, "cube.scad is a CSG body with no brep, so the mesh is the scene's own")
     t.eq(mesh.watertight, true)
-    t.eq(#mesh.edges, 0, "a from_mesh body has no brep edges at all")
-    t.eq(#mesh.vertices, 0)
+    if exact then
+      -- The exact box: six faces, twelve edges, eight corners, in the file's own space.
+      t.eq(mesh.face_count, 6)
+      t.eq(mesh.from_mesh, false, "the exact cube has a brep, so the mesh is the brep's")
+      t.eq(#mesh.edges, 12)
+      t.eq(#mesh.vertices, 8)
+    else
+      t.eq(mesh.face_count, 1)
+      t.eq(mesh.from_mesh, true, "cube.scad is a CSG body with no brep, so the mesh is the scene's own")
+      t.eq(#mesh.edges, 0, "a from_mesh body has no brep edges at all")
+      t.eq(#mesh.vertices, 0)
+    end
     t.eq(#mesh.open_edges, 0)
     t.eq(#mesh.folded_edges, 0)
     t.eq(#mesh.crossings, 0)
@@ -873,9 +898,9 @@ return function(t)
     for i = 0, mesh.triangle_count - 1 do
       t.ok(mesh.triangle_face[i] < mesh.face_count, "a triangle_face past the faces")
     end
-    for i = 0, mesh.node_count - 1 do
+    for i = 0, exact and -1 or mesh.node_count - 1 do
       -- One face and every node on it: this is what tells node_kind from node_entity
-      -- if the two were ever lent from one pointer.
+      -- if the two were ever lent from one pointer. (The exact cube's corners lie on vertices.)
       t.eq(mesh.node_kind[i], 2, "every node of a from_mesh body lies on a face")
       t.eq(mesh.node_entity[i], 0, "and on face 0, the only one")
     end
@@ -921,15 +946,22 @@ return function(t)
   end)
 
   t.test("fem_mesh validates neither tolerance nor max_size on the mesh-only path", function()
-    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
-    local node = scene.nodes[1]
+    -- The open sheet, not the cube: it is mesh-only in every flavour, where the cube is an
+    -- exact box (which reads both fields) wherever the kernel's builder is linked.
+    local scene = cadaclysm.open(t.fixture("samples/open-sheet.scad"))
+    local node
+    for _, n in ipairs(scene.nodes) do
+      if n.can_mesh then node = n break end
+    end
+    t.ok(node ~= nil, "open-sheet.scad has no meshable node")
     local nan, inf = 0 / 0, math.huge
     -- `fem_mesh_of_mesh` takes no FemOptions at all, so a body with no brep comes back
     -- whatever these say, where the brep path refuses each. A wrapper that checked
     -- either field itself would pass every other test here and be wrong.
     for _, pair in ipairs({ { 0, 0 }, { -1, 0 }, { nan, 0 }, { 0.01, -1 }, { 0.01, nan }, { 0.01, inf } }) do
       local mesh = node:fem_mesh(pair[1], pair[2])
-      t.eq(mesh.node_count, 8, ("tolerance %s, max_size %s"):format(tostring(pair[1]), tostring(pair[2])))
+      t.eq(mesh.from_mesh, true, "the open sheet is a mesh-only body")
+      t.eq(mesh.node_count, 5, ("tolerance %s, max_size %s"):format(tostring(pair[1]), tostring(pair[2])))
       mesh:free()
     end
     scene:close()

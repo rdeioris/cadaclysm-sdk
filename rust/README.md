@@ -9,7 +9,8 @@ same prebuilt libraries.
 
 It carries **no cadaclysm source**. The crate opens the libraries (`.dll`, `.so`,
 `.dylib`) when your program runs, the way Python's ctypes does, so building needs
-no C toolchain and no import library. Its only dependency is `libloading`.
+no C toolchain and no import library. Its only dependency is `libloading` (in the
+browser, wasm-bindgen and its companions instead: see [In the browser](#in-the-browser)).
 
 ```
 cargo add cadaclysm-sdk
@@ -149,7 +150,8 @@ view.frame()?;
 view.save("view.png")?;                        // or view.image()? for the pixels; view.run()? for a window
 ```
 
-- **Showing.** `show_solid(&solid, tolerance, rgb)`, `show_scene(&scene)`,
+- **Showing.** `show_solid(&solid, tolerance, rgb)` (or `show_solid_with(.., &SolidOptions { material,
+  opacity, faces })`: a `Material`, an opacity, and only some faces -- a trim's ghost), `show_scene(&scene)`,
   `show_node(node)` by handle; `show_mesh`, `show_lines`, `show_points` (`&[[f32; 3]]`, a
   disc of `size_px` pixels a point), `show_curves` (rational cubic
   Béziers, `[[x, y, z, w]; 4]` each), `show_image` by value -- these need no reader or
@@ -179,6 +181,12 @@ view.save("view.png")?;                        // or view.image()? for the pixel
   `input(&Event)`, `resize`, `layer`, `set_surfaces`, `set_lighting`, `background`, `lod(Some(Lod { .. }))`
   (levels of detail) and `wake_ms` (when a resting frame is owed). Dropping the view
   destroys it.
+- **Snapping.** `set_snap(kinds, aperture_px, marker)` -- `SnapKind::ALL`, some kinds, or `&[]`
+  for off, as a view starts -- then `snap(x, y, viewport)`: the vertex, midpoint, arc centre,
+  quadrant, edge, face, grid or plane point under a pixel as a `Snap` (`None` for nothing),
+  drawing until it lands like `pick`. `last_snap` reads a hover's or a click's in the view's own
+  window without waiting; `clear_snap` hides the marker; `set_work_plane(Some(WorkPlane { .. }))`
+  moves grid and plane snaps off the ground grid (`None` puts it back). Since view ABI 1.22.
 - **A host's window.** `unsafe { View::in_window(window, &options) }` with a `RawWindow`
   (a kind, a handle and a display); with the `raw-window-handle` feature,
   `RawWindow::of(&winit_window, width, height)`. The host forwards input (`input`), calls
@@ -199,6 +207,96 @@ view.save("view.png")?;                        // or view.image()? for the pixel
 or set `CADACLYSM_VIEW` to `terminal`, `wgpu` or a path. `CADACLYSM_TERMINAL_LIBRARY` and
 `CADACLYSM_VIEW_LIBRARY` point at the two libraries when they are not beside the program.
 `cargo run --example view` shows the API in a window; `-- offscreen` writes `view.png`.
+
+## In the browser
+
+Built for `wasm32-unknown-unknown`, the crate runs the kernel in a web page: the same
+`blacksmith` API -- `Profile`, `Solid`, `Workplane`, STEP text -- answered by the cadaclysm
+web package instead of a native library, and the same `view::View`, drawing through the
+package's `View`. Download `cadaclysm-<version>-web-pro.zip` from the
+[SDK's releases](https://github.com/rdeioris/cadaclysm-sdk/releases) and serve its `pkg/`
+beside your app; nothing is downloaded when the crate builds for the web. Then:
+
+- `web::load` imports the package and binds the kernel to it;
+- `View::on_canvas` makes a `View` on a page's canvas or a worker's, with the pointer
+  controls wired; the drawing code after it is the desktop's;
+- `web::page::spawn` and `web::worker::start` run the kernel and the view in a Web
+  Worker, so the page stays responsive while a boolean runs: the page hands its canvas
+  over and forwards drag, wheel and pinch to it.
+
+The drawing is shared; only how the `View` is made and how the program waits on it differ:
+
+```rust
+use cadaclysm_sdk::blacksmith::{Frame, Profile, Solid};
+use cadaclysm_sdk::view::{Rgb, View, ViewOptions};
+use cadaclysm_sdk::web::page::{self, App};
+use cadaclysm_sdk::web::{worker, LoadOptions};
+use wasm_bindgen::prelude::*;
+
+/// Shared with the desktop program.
+pub fn present<'a>(view: &View<'a>, hex: &'a Solid) -> cadaclysm_sdk::Result<()> {
+    view.show_solid(hex, 0.05, Rgb::from("#c8ccd4"))?;
+    view.frame()
+}
+
+/// On the page (called from index.html after the glue's init()).
+#[wasm_bindgen]
+pub fn page_main() -> Result<(), JsValue> {
+    let canvas = web_sys::window().unwrap().document().unwrap()
+        .get_element_by_id("view").unwrap().dyn_into::<web_sys::HtmlCanvasElement>()?;
+    page::spawn(&canvas, App { glue: "./app/my_app.js", entry: "worker_main", package: "./pkg/index.js" })?;
+    Ok(())
+}
+
+/// In the worker: load the package, take the canvas, draw, and keep drawing.
+#[wasm_bindgen]
+pub async fn worker_main() -> Result<(), JsValue> {
+    let worker = worker::start(LoadOptions::new("./pkg/index.js")).await?;
+    let hex = Solid::extrude(&Profile::regular_polygon([0.0, 0.0], 60.0, 6, 0.0)?, &Frame::xy([0.0; 3]), 46.0)?;
+    let view = View::on_canvas(worker.canvas(), &ViewOptions::default()).await?;
+    present(&view, &hex)?;
+    view.run().await?; // resolves when view.close() is called
+    Ok(())
+}
+```
+
+On the desktop the same `present` follows `View::new(&ViewOptions::default())?` and
+`view.run()?` blocks until the window closes. In the browser `view.run().await` resolves
+when `view.close()` stops the view; awaiting it keeps the view and what it shows alive.
+Messages the page posts to the worker (`PageWorker::post`, the forwarded controls) are held
+until the entry returns or awaits `run`. `nut.show(None)` draws into the latest canvas view
+still open, replacing what an earlier `show()` drew there, and returns; with none open it
+says to make one with `View::on_canvas`. That view is shared: `show()` re-aims its camera
+and switches its whole Edges layer, your own items on it included, where on the desktop
+each `show()` has a window of its own.
+
+What a browser can't do refuses, naming the call: `View::new`, `offscreen`,
+`offscreen_with`, `in_window`, `pump`, `image`, `save`, `png`, `pixel`, `input`, `pick`,
+`last_pick`, `viewports`, `lod`, the viewport cameras, `show_image`, `show_scene`/`show_node`
+and the node calls, `finish`, machining, the timeline and `use_library`.
+`snap` is `async` in the browser (await it); `set_snap`, `last_snap`, `clear_snap` and
+`set_work_plane` are as on the desktop, and `last_snap` reads only the answers to your own `snap`s.
+
+Call `page_main` from the page yourself rather than marking it
+`#[wasm_bindgen(start)]`: the worker runs the same wasm, and a start function would run
+there too. For a demo where a short freeze doesn't matter, skip the worker: `web::load`,
+then `View::on_canvas` on the page's canvas. Build and serve:
+
+```
+cargo build --release --target wasm32-unknown-unknown
+wasm-bindgen --target web --out-dir app target/wasm32-unknown-unknown/release/my_app.wasm
+```
+
+Serve the folder holding `index.html`, `app/` and the package's `pkg/` over HTTP (a
+`file:` page can't start a module worker). The `wasm-bindgen` command-line tool must be the
+version of the `wasm-bindgen` crate in your `Cargo.lock`. Your app's wasm is small beside
+the package's: an app that builds and draws one part is about 0.4 MB, the package 15.7 MB.
+
+Not in the browser yet: reading files (the reader), `heal`, `health`, a solid's history,
+`n_sided_patch` and the FEM mesh, which fail saying so; calls that write a file, such as
+`Solid::sat`, fail too -- use their text or bytes form (`sat_text`) and save the result
+from the page. Checked with plain `wasm-bindgen --target web` in Chrome; Trunk and bundlers
+such as Vite are untested.
 
 ## The license
 

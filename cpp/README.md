@@ -90,7 +90,7 @@ other with `cadaclysm::view::use(path)` or `CADACLYSM_VIEW`. Link `cadaclysm::vi
 **and** `cadaclysm::blacksmith` (the view library is not linked: `view_loader` compiles in
 where to look). `cadaclysm::view` is the linked C library itself, for a host that calls
 `cadaclysm_view.h` directly. A missing library is refused with "no view library: ...", naming
-where it looked, and the view library must speak ABI 1.18.
+where it looked, and the view library must speak ABI 1.22.
 
 ```cpp
 #include <cadaclysm/view.hpp>

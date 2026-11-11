@@ -3412,8 +3412,7 @@ func (n *Node) LodError(level uint32) float32 {
 }
 
 // Brep is this node's exact B-rep, for the blacksmith package's FromNode to operate on --
-// nil, with a nil error, where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD
-// part). Shared with the scene, not copied; see [Brep]. The error is non-nil only for a
+// nil, with a nil error, where it has none (a mesh, a curve, a CSG body, an open OpenSCAD polyhedron, or an OpenSCAD file read without the kernel). Shared with the scene, not copied; see [Brep]. The error is non-nil only for a
 // closed scene, as Mesh's.
 func (n *Node) Brep() (*Brep, error) {
 	if err := n.scene.closedError(); err != nil {

@@ -1,7 +1,8 @@
 //! The kernel: `CadaclysmBlacksmith` (the library's own functions), `CadaclysmFrame`, `CadaclysmProfile`,
 //! `CadaclysmPath`, `CadaclysmSweepPath`, `CadaclysmSolid`, `CadaclysmAssembly`, `CadaclysmEdge`, `CadaclysmHit`,
 //! the curves in space (`CadaclysmNurbsCurve`, `CadaclysmCurvature`) and the records of the sheets
-//! made from them (`CadaclysmContinuity`, `CadaclysmPatchReport`, `CadaclysmJoinReport`),
+//! made from them (`CadaclysmContinuity`, `CadaclysmKnotContinuity`, `CadaclysmPatchReport`, `CadaclysmJoinReport`,
+//! `CadaclysmSymmetryReport`, `CadaclysmCurvatureTurns`, `CadaclysmHighlightKink`),
 //! `CadaclysmSpot`, `CadaclysmWorkplane`, `CadaclysmSolidFemMesh`, the 2D sketcher (`CadaclysmSketch`,
 //! `CadaclysmSolveReport`, `CadaclysmDof`, `CadaclysmPartDof`), the R-tree (`CadaclysmRTree`,
 //! `CadaclysmRTreeHit`, `CadaclysmRTreePair`), `CadaclysmInterpolator`, the regions of a merge
@@ -799,6 +800,42 @@ impl CadaclysmBlacksmith {
             Some(text) => write_text(&path, text),
             None => false,
         }
+    }
+
+    /// Several solids meshed at `tolerance` (`NAN`, the default: each one's effective
+    /// tolerance) as one file's bytes in `format`: `"stl"` (binary, every solid in one body),
+    /// `"stl-ascii"`, `"obj"` (one named object a solid), `"glb"` or `"gltf"` (one named node
+    /// a solid in a material of its own). `names` one a solid (empty: each solid's own name,
+    /// else `Solid 1`, `Solid 2`, ...); `looks` six numbers a solid -- linear `r g b a
+    /// metallic roughness` -- the glTF's materials (empty: each solid's own colour). Empty,
+    /// with the reason logged, on a refusal.
+    #[func]
+    fn mesh_file(
+        solids: AnyArray,
+        #[opt(default = "stl")] format: GString,
+        #[opt(default = &PackedStringArray::new())] names: PackedStringArray,
+        #[opt(default = &PackedFloat64Array::new())] looks: PackedFloat64Array,
+        #[opt(default = f64::NAN)] tolerance: f64,
+    ) -> PackedByteArray {
+        let Some(list) = object_list::<CadaclysmSolid>(&solids, "mesh_file: solids") else { return PackedByteArray::new() };
+        let guards: Vec<GdRef<CadaclysmSolid>> = list.iter().map(|s| s.bind()).collect();
+        let Some(held) = guards.iter().map(|g| g.held()).collect::<Option<Vec<&bs::Solid>>>() else { return PackedByteArray::new() };
+        let names: Vec<String> = names.as_slice().iter().map(|n| n.to_string()).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let looks = looks.as_slice();
+        if looks.len() % 6 != 0 {
+            return fail(format!("mesh_file: {} look values -- 6 a solid", looks.len())).unwrap_or_default();
+        }
+        let rows: Vec<[f64; 6]> = looks.chunks_exact(6).map(|c| [c[0], c[1], c[2], c[3], c[4], c[5]]).collect();
+        let t = (!tolerance.is_nan()).then_some(tolerance);
+        let bytes = bs::mesh_file(
+            &held,
+            &format.to_string(),
+            (!name_refs.is_empty()).then_some(name_refs.as_slice()),
+            (!rows.is_empty()).then_some(rows.as_slice()),
+            t,
+        );
+        ok(bytes).map(|b| PackedByteArray::from(b.as_slice())).unwrap_or_default()
     }
 
     /// Several solids' wireframe as one SVG's text, each its own `<g>`. `""` on a
@@ -4197,6 +4234,87 @@ impl CadaclysmProfile {
         Self::joined(&loops, "from_loops", bs::Profile::from_loops)
     }
 
+    /// A polyline through `points` in order, a straight segment per side: open, or with
+    /// `closed` a side from the last point back to the first. Sides of no length are kept.
+    #[func]
+    fn polyline(points: Variant, #[opt(default = false)] closed: bool) -> Option<Gd<CadaclysmProfile>> {
+        Self::made(bs::Profile::polyline(&points2(&points, "polyline")?, closed))
+    }
+
+    /// The arc of radius `r` about `centre` from `a0` counter-clockwise to `a1` radians,
+    /// open; equal angles the whole circle, closed.
+    #[func]
+    fn arc(centre: Variant, r: f64, a0: f64, a1: f64) -> Option<Gd<CadaclysmProfile>> {
+        Self::made(bs::Profile::arc(v2(&centre, "arc: centre")?, r, a0, a1))
+    }
+
+    /// The arc from `start` through `through` to `end`, open.
+    #[func]
+    fn arc_through(start: Variant, through: Variant, end: Variant) -> Option<Gd<CadaclysmProfile>> {
+        let (a, m, b) = (v2(&start, "arc_through: start")?, v2(&through, "arc_through: through")?, v2(&end, "arc_through: end")?);
+        Self::made(bs::Profile::arc_through(a, m, b))
+    }
+
+    /// The ellipse about `centre` with semi-axes `rx` along x and `ry` along y, closed:
+    /// four exact quarter conics.
+    #[func]
+    fn ellipse(centre: Variant, rx: f64, ry: f64) -> Option<Gd<CadaclysmProfile>> {
+        Self::made(bs::Profile::ellipse(v2(&centre, "ellipse: centre")?, rx, ry))
+    }
+
+    /// Rational cubic Béziers end to end (sixteen numbers each, `x y z w` per control
+    /// point) as one open profile; `recognise` makes straight ones lines and circular
+    /// ones arcs.
+    #[func]
+    fn from_beziers(beziers: PackedFloat64Array, #[opt(default = true)] recognise: bool) -> Option<Gd<CadaclysmProfile>> {
+        Self::made(bs::Profile::from_beziers(beziers.as_slice(), recognise))
+    }
+
+    /// This profile as rational cubic Béziers, sixteen numbers each (`x y z w` per control
+    /// point): on the sketch plane, or carried onto `frame` -- a frame's 12 numbers (a
+    /// `CadaclysmFrame`'s `raw`); empty for the sketch plane. Empty, with the reason logged,
+    /// on a refusal.
+    #[func]
+    fn beziers(&self, #[opt(default = &PackedFloat64Array::new())] frame: PackedFloat64Array) -> PackedFloat64Array {
+        let at = if frame.is_empty() {
+            None
+        } else {
+            match self::frame(&frame.to_variant(), "beziers: frame") {
+                Some(f) => Some(f),
+                None => return PackedFloat64Array::new(),
+            }
+        };
+        ok(self.profile.beziers(at.as_ref())).map(|v| doubles(&v)).unwrap_or_default()
+    }
+
+    /// The closed loops among `pieces`, each read by its two ends: an `Array` of loops,
+    /// each its pieces' indices in the order it runs. Empty, with the reason logged, on
+    /// a refusal.
+    #[func]
+    fn loops(pieces: AnyArray, #[opt(default = 1e-6)] tolerance: f64) -> VarArray {
+        let Some(list) = object_list::<CadaclysmProfile>(&pieces, "loops") else { return VarArray::new() };
+        let guards: Vec<GdRef<CadaclysmProfile>> = list.iter().map(|p| p.bind()).collect();
+        let refs: Vec<&bs::Profile> = guards.iter().map(|g| &g.profile).collect();
+        ok(bs::Profile::loops(&refs, tolerance))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|l| l.into_iter().map(i64::from).collect::<PackedInt64Array>().to_variant())
+            .collect()
+    }
+
+    /// The order `chain` takes `pieces` in: an `Array` of `[index, turned]` pairs.
+    #[func]
+    fn chain_order(pieces: AnyArray, #[opt(default = 1e-6)] tolerance: f64) -> VarArray {
+        let Some(list) = object_list::<CadaclysmProfile>(&pieces, "chain_order") else { return VarArray::new() };
+        let guards: Vec<GdRef<CadaclysmProfile>> = list.iter().map(|p| p.bind()).collect();
+        let refs: Vec<&bs::Profile> = guards.iter().map(|g| &g.profile).collect();
+        ok(bs::Profile::chain_order(&refs, tolerance))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(i, turned)| varray![i64::from(i), turned].to_variant())
+            .collect()
+    }
+
     /// This profile closed: a straight segment back to the start where it stops short.
     #[func]
     fn close_loop(&self) -> Option<Gd<CadaclysmProfile>> {
@@ -5488,6 +5606,13 @@ impl CadaclysmAt {
         vector3(self.value.point)
     }
 
+    /// The point on the curve in full precision: three doubles (`point`'s `Vector3` holds
+    /// floats).
+    #[func]
+    fn raw_point(&self) -> PackedFloat64Array {
+        doubles(&self.value.point)
+    }
+
     /// The unit tangent at `point`, along the direction of travel.
     #[func]
     fn get_tangent(&self) -> Vector3 {
@@ -5726,6 +5851,634 @@ impl CadaclysmClassifier {
     #[func]
     fn get_closed(&self) -> bool {
         self.classifier.is_none()
+    }
+}
+
+/// The nearest point of a solid (or of one face) to a query point
+/// (`CadaclysmSolid.closest_point`, `CadaclysmProjector.closest_point`,
+/// `CadaclysmSolid.face_closest_point`). `point` lies on the body's boundary and `distance` is
+/// from the query point to it. What it lies on is named as `CadaclysmClosest` names each side:
+/// `kind` (`"face"`, `"edge"` or `"vertex"`), `index` (the kernel's id) and `edge`, the index
+/// `CadaclysmSolid.edges` uses (`edge_length`, `fillet` and `edge_closest_point` take it) for an
+/// edge foot, -1 for a face, a vertex and an edge the fillet table does not hold -- read `edge`,
+/// not `index`. `uv` is the face parameter of a foot inside a face, two doubles, empty
+/// otherwise. `normal` is unit: a face foot's outward normal, an edge or vertex foot's direction
+/// from the foot to the query point, on the body the mean of the adjacent faces' outward
+/// normals. `refined` false is the mesh's answer, within `[d - 2/3 tolerance, d + tolerance]` of
+/// the true distance `d`. `point` and `normal` are `Vector3`s, so floats; `raw_point` and
+/// `raw_normal` give the doubles.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmPointFoot {
+    foot: bs::PointFoot,
+    /// The nearest point, on the boundary.
+    #[var(get = get_point, no_set)]
+    point: PhantomVar<Vector3>,
+    /// From the query point to `point`.
+    #[var(get = get_distance, no_set)]
+    distance: PhantomVar<f64>,
+    /// What `point` lies on: `"face"`, `"edge"` or `"vertex"`.
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    /// The kernel's id of the face, edge or vertex `point` lies on.
+    #[var(get = get_index, no_set)]
+    index: PhantomVar<i64>,
+    /// The `edges` index of the edge `point` lies on, -1 for none.
+    #[var(get = get_edge, no_set)]
+    edge: PhantomVar<i64>,
+    /// The face parameter of a foot inside a face, two doubles; empty for an edge or a vertex.
+    #[var(get = get_uv, no_set)]
+    uv: PhantomVar<PackedFloat64Array>,
+    /// The unit normal at the foot.
+    #[var(get = get_normal, no_set)]
+    normal: PhantomVar<Vector3>,
+    /// Whether the foot was refined onto the exact geometry, not the mesh's answer.
+    #[var(get = get_refined, no_set)]
+    refined: PhantomVar<bool>,
+    /// `point` as three doubles.
+    #[var(get = get_raw_point, no_set)]
+    raw_point: PhantomVar<PackedFloat64Array>,
+    /// `normal` as three doubles.
+    #[var(get = get_raw_normal, no_set)]
+    raw_normal: PhantomVar<PackedFloat64Array>,
+}
+
+impl CadaclysmPointFoot {
+    fn wrap(foot: bs::PointFoot) -> Gd<CadaclysmPointFoot> {
+        Gd::from_object(CadaclysmPointFoot {
+            foot,
+            point: PhantomVar::default(),
+            distance: PhantomVar::default(),
+            kind: PhantomVar::default(),
+            index: PhantomVar::default(),
+            edge: PhantomVar::default(),
+            uv: PhantomVar::default(),
+            normal: PhantomVar::default(),
+            refined: PhantomVar::default(),
+            raw_point: PhantomVar::default(),
+            raw_normal: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmPointFoot {
+    fn to_string(&self) -> GString {
+        let f = &self.foot;
+        gs(format!(
+            "PointFoot(point={:?}, distance={}, kind={}, index={}, edge={:?}, uv={:?}, normal={:?}, refined={})",
+            f.point, f.distance, f.kind, f.index, f.edge, f.uv, f.normal, f.refined
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmPointFoot {
+    /// The nearest point, on the boundary.
+    #[func]
+    fn get_point(&self) -> Vector3 {
+        vector3(self.foot.point)
+    }
+
+    /// From the query point to `point`.
+    #[func]
+    fn get_distance(&self) -> f64 {
+        self.foot.distance
+    }
+
+    /// What `point` lies on: `"face"`, `"edge"` or `"vertex"`.
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(&self.foot.kind)
+    }
+
+    /// The kernel's id of the face, edge or vertex `point` lies on.
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.foot.index.into()
+    }
+
+    /// The `edges` index of the edge `point` lies on, -1 for none.
+    #[func]
+    fn get_edge(&self) -> i64 {
+        self.foot.edge.map_or(-1, i64::from)
+    }
+
+    /// The face parameter of a foot inside a face, two doubles; empty for an edge or a vertex.
+    #[func]
+    fn get_uv(&self) -> PackedFloat64Array {
+        self.foot.uv.map_or_else(PackedFloat64Array::new, |uv| doubles(&uv))
+    }
+
+    /// The unit normal at the foot.
+    #[func]
+    fn get_normal(&self) -> Vector3 {
+        vector3(self.foot.normal)
+    }
+
+    /// Whether the foot was refined onto the exact geometry, not the mesh's answer.
+    #[func]
+    fn get_refined(&self) -> bool {
+        self.foot.refined
+    }
+
+    /// `point` as three doubles.
+    #[func]
+    fn get_raw_point(&self) -> PackedFloat64Array {
+        doubles(&self.foot.point)
+    }
+
+    /// `normal` as three doubles.
+    #[func]
+    fn get_raw_normal(&self) -> PackedFloat64Array {
+        doubles(&self.foot.normal)
+    }
+
+    /// Whether `other` is a `CadaclysmPointFoot` with the same fields, every double equal.
+    #[func]
+    fn equals(&self, other: Variant) -> bool {
+        other.try_to::<Gd<CadaclysmPointFoot>>().is_ok_and(|o| o.bind().foot == self.foot)
+    }
+}
+
+/// One solid's reusable nearest-point search (`CadaclysmSolid.projector`), keeping the mesh, its
+/// search tree and each face's trim judge between queries. It keeps its own reference to the
+/// body, so it goes on answering after its solid is closed or freed. Calls on one projector take
+/// turns (a lock inside the library).
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmProjector {
+    projector: Option<bs::Projector>,
+    /// Whether `close` has freed the projector.
+    #[var(get = get_closed, no_set)]
+    closed: PhantomVar<bool>,
+}
+
+impl CadaclysmProjector {
+    fn wrap(projector: bs::Projector) -> Gd<CadaclysmProjector> {
+        Gd::from_object(CadaclysmProjector { projector: Some(projector), closed: PhantomVar::default() })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmProjector {
+    fn to_string(&self) -> GString {
+        gs("Projector")
+    }
+}
+
+#[godot_api]
+impl CadaclysmProjector {
+    /// The nearest point of the body's boundary to `p` (a `Vector3` or three numbers), as a
+    /// `CadaclysmPointFoot` -- `CadaclysmSolid.closest_point`'s answer, at the projector's
+    /// tolerance. `max_distance` NaN or `INF` is no limit. `null` beyond it (then
+    /// `Cadaclysm.last_error()` is empty); `null` with the reason in `Cadaclysm.last_error()` on
+    /// a closed projector, a point that is not three finite numbers, or a negative
+    /// `max_distance`.
+    #[func]
+    fn closest_point(&self, p: Variant, #[opt(default = f64::NAN)] max_distance: f64) -> Option<Gd<CadaclysmPointFoot>> {
+        let Some(projector) = &self.projector else { return fail("projector: closed") };
+        let p = at(&p, "projector_closest_point")?;
+        ok(projector.closest_point(p, Some(max_distance))).flatten().map(CadaclysmPointFoot::wrap)
+    }
+
+    /// The nearest points of `curve` and the body's boundary, as a `CadaclysmCurveBodyFoot` --
+    /// `CadaclysmSolid.curve_closest_points`'s answer, at the projector's tolerance. The
+    /// projector's lock is held for the whole curve query: other threads asking it wait.
+    /// `max_distance` NaN or `INF` is no limit. `null` beyond it (then `Cadaclysm.last_error()`
+    /// is empty); `null` with the reason in `Cadaclysm.last_error()` on a closed projector, a
+    /// negative `max_distance` or a curve too long for the tolerance.
+    #[func]
+    fn curve_closest_points(
+        &self,
+        curve: Gd<CadaclysmNurbsCurve>,
+        #[opt(default = f64::NAN)] max_distance: f64,
+    ) -> Option<Gd<CadaclysmCurveBodyFoot>> {
+        let Some(projector) = &self.projector else { return fail("projector: closed") };
+        ok(projector.curve_closest_points(&curve.bind().curve, Some(max_distance))).flatten().map(CadaclysmCurveBodyFoot::wrap)
+    }
+
+    /// Free the projector now. Idempotent.
+    #[func]
+    fn close(&mut self) {
+        self.projector = None;
+    }
+
+    /// Whether `close` has freed the projector.
+    #[func]
+    fn get_closed(&self) -> bool {
+        self.projector.is_none()
+    }
+}
+
+/// The nearest points of two curves (`CadaclysmNurbsCurve.closest_points`, and a
+/// `CadaclysmNearestObject`'s answer for a curve): `point_a` on the curve asked at its parameter
+/// `t_a`, `point_b` on the other at `t_b`, `distance` apart (0 where they cross). Exact.
+/// `point_a` and `point_b` are `Vector3`s, so floats; `raw_point_a` and `raw_point_b` give the
+/// doubles.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmCurvePair {
+    pair: bs::CurvePair,
+    /// From `point_a` to `point_b`.
+    #[var(get = get_distance, no_set)]
+    distance: PhantomVar<f64>,
+    /// The parameter of `point_a` on the curve asked.
+    #[var(get = get_t_a, no_set)]
+    t_a: PhantomVar<f64>,
+    /// The nearest point on the curve asked.
+    #[var(get = get_point_a, no_set)]
+    point_a: PhantomVar<Vector3>,
+    /// The parameter of `point_b` on the other curve.
+    #[var(get = get_t_b, no_set)]
+    t_b: PhantomVar<f64>,
+    /// The nearest point on the other curve.
+    #[var(get = get_point_b, no_set)]
+    point_b: PhantomVar<Vector3>,
+    /// `point_a` as three doubles.
+    #[var(get = get_raw_point_a, no_set)]
+    raw_point_a: PhantomVar<PackedFloat64Array>,
+    /// `point_b` as three doubles.
+    #[var(get = get_raw_point_b, no_set)]
+    raw_point_b: PhantomVar<PackedFloat64Array>,
+}
+
+impl CadaclysmCurvePair {
+    fn wrap(pair: bs::CurvePair) -> Gd<CadaclysmCurvePair> {
+        Gd::from_object(CadaclysmCurvePair {
+            pair,
+            distance: PhantomVar::default(),
+            t_a: PhantomVar::default(),
+            point_a: PhantomVar::default(),
+            t_b: PhantomVar::default(),
+            point_b: PhantomVar::default(),
+            raw_point_a: PhantomVar::default(),
+            raw_point_b: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmCurvePair {
+    fn to_string(&self) -> GString {
+        let p = &self.pair;
+        gs(format!("CurvePair(distance={}, t_a={}, point_a={:?}, t_b={}, point_b={:?})", p.distance, p.t_a, p.point_a, p.t_b, p.point_b))
+    }
+}
+
+#[godot_api]
+impl CadaclysmCurvePair {
+    /// From `point_a` to `point_b`.
+    #[func]
+    fn get_distance(&self) -> f64 {
+        self.pair.distance
+    }
+
+    /// The parameter of `point_a` on the curve asked.
+    #[func]
+    fn get_t_a(&self) -> f64 {
+        self.pair.t_a
+    }
+
+    /// The nearest point on the curve asked.
+    #[func]
+    fn get_point_a(&self) -> Vector3 {
+        vector3(self.pair.point_a)
+    }
+
+    /// The parameter of `point_b` on the other curve.
+    #[func]
+    fn get_t_b(&self) -> f64 {
+        self.pair.t_b
+    }
+
+    /// The nearest point on the other curve.
+    #[func]
+    fn get_point_b(&self) -> Vector3 {
+        vector3(self.pair.point_b)
+    }
+
+    /// `point_a` as three doubles.
+    #[func]
+    fn get_raw_point_a(&self) -> PackedFloat64Array {
+        doubles(&self.pair.point_a)
+    }
+
+    /// `point_b` as three doubles.
+    #[func]
+    fn get_raw_point_b(&self) -> PackedFloat64Array {
+        doubles(&self.pair.point_b)
+    }
+
+    /// Whether `other` is a `CadaclysmCurvePair` with the same fields, every double equal.
+    #[func]
+    fn equals(&self, other: Variant) -> bool {
+        other.try_to::<Gd<CadaclysmCurvePair>>().is_ok_and(|o| o.bind().pair == self.pair)
+    }
+}
+
+/// The nearest points of a curve and a solid's boundary (`CadaclysmSolid.curve_closest_points`,
+/// `CadaclysmProjector.curve_closest_points`, and a `CadaclysmNearestObject`'s answer for a solid
+/// or a projector): `point_on_curve` at the curve's parameter `t`, `point_on_body` on the
+/// boundary, `distance` apart. `crossing` is true where the curve passes through the boundary:
+/// `distance` is then exactly 0 and the earliest crossing in `t` answers. The body's side is
+/// named as `CadaclysmPointFoot` names its point: `kind`, `index` (the kernel's id), `edge` (the
+/// `edges` index, -1 for none; read it, not `index`), `uv` empty off a face, `normal` unit,
+/// `refined` false the mesh's answer. The points and the normal are `Vector3`s, so floats; the
+/// `raw_` properties give the doubles.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmCurveBodyFoot {
+    foot: bs::CurveBodyFoot,
+    /// From `point_on_curve` to `point_on_body`.
+    #[var(get = get_distance, no_set)]
+    distance: PhantomVar<f64>,
+    /// The curve's parameter at `point_on_curve`.
+    #[var(get = get_t, no_set)]
+    t: PhantomVar<f64>,
+    /// The nearest point on the curve.
+    #[var(get = get_point_on_curve, no_set)]
+    point_on_curve: PhantomVar<Vector3>,
+    /// The nearest point on the body's boundary.
+    #[var(get = get_point_on_body, no_set)]
+    point_on_body: PhantomVar<Vector3>,
+    /// What `point_on_body` lies on: `"face"`, `"edge"` or `"vertex"`.
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    /// The kernel's id of the face, edge or vertex `point_on_body` lies on.
+    #[var(get = get_index, no_set)]
+    index: PhantomVar<i64>,
+    /// The `edges` index of the edge `point_on_body` lies on, -1 for none.
+    #[var(get = get_edge, no_set)]
+    edge: PhantomVar<i64>,
+    /// The face parameter of a foot inside a face, two doubles; empty for an edge or a vertex.
+    #[var(get = get_uv, no_set)]
+    uv: PhantomVar<PackedFloat64Array>,
+    /// The unit normal at the body's foot.
+    #[var(get = get_normal, no_set)]
+    normal: PhantomVar<Vector3>,
+    /// Whether the foot was refined onto the exact geometry, not the mesh's answer.
+    #[var(get = get_refined, no_set)]
+    refined: PhantomVar<bool>,
+    /// Whether the curve passes through the boundary there.
+    #[var(get = get_crossing, no_set)]
+    crossing: PhantomVar<bool>,
+    /// `point_on_curve` as three doubles.
+    #[var(get = get_raw_point_on_curve, no_set)]
+    raw_point_on_curve: PhantomVar<PackedFloat64Array>,
+    /// `point_on_body` as three doubles.
+    #[var(get = get_raw_point_on_body, no_set)]
+    raw_point_on_body: PhantomVar<PackedFloat64Array>,
+    /// `normal` as three doubles.
+    #[var(get = get_raw_normal, no_set)]
+    raw_normal: PhantomVar<PackedFloat64Array>,
+}
+
+impl CadaclysmCurveBodyFoot {
+    fn wrap(foot: bs::CurveBodyFoot) -> Gd<CadaclysmCurveBodyFoot> {
+        Gd::from_object(CadaclysmCurveBodyFoot {
+            foot,
+            distance: PhantomVar::default(),
+            t: PhantomVar::default(),
+            point_on_curve: PhantomVar::default(),
+            point_on_body: PhantomVar::default(),
+            kind: PhantomVar::default(),
+            index: PhantomVar::default(),
+            edge: PhantomVar::default(),
+            uv: PhantomVar::default(),
+            normal: PhantomVar::default(),
+            refined: PhantomVar::default(),
+            crossing: PhantomVar::default(),
+            raw_point_on_curve: PhantomVar::default(),
+            raw_point_on_body: PhantomVar::default(),
+            raw_normal: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmCurveBodyFoot {
+    fn to_string(&self) -> GString {
+        let f = &self.foot;
+        gs(format!(
+            "CurveBodyFoot(distance={}, t={}, point_on_curve={:?}, point_on_body={:?}, kind={}, index={}, edge={:?}, crossing={})",
+            f.distance, f.t, f.point_on_curve, f.point_on_body, f.kind, f.index, f.edge, f.crossing
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmCurveBodyFoot {
+    /// From `point_on_curve` to `point_on_body`.
+    #[func]
+    fn get_distance(&self) -> f64 {
+        self.foot.distance
+    }
+
+    /// The curve's parameter at `point_on_curve`.
+    #[func]
+    fn get_t(&self) -> f64 {
+        self.foot.t
+    }
+
+    /// The nearest point on the curve.
+    #[func]
+    fn get_point_on_curve(&self) -> Vector3 {
+        vector3(self.foot.point_on_curve)
+    }
+
+    /// The nearest point on the body's boundary.
+    #[func]
+    fn get_point_on_body(&self) -> Vector3 {
+        vector3(self.foot.point_on_body)
+    }
+
+    /// What `point_on_body` lies on: `"face"`, `"edge"` or `"vertex"`.
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(&self.foot.kind)
+    }
+
+    /// The kernel's id of the face, edge or vertex `point_on_body` lies on.
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.foot.index.into()
+    }
+
+    /// The `edges` index of the edge `point_on_body` lies on, -1 for none.
+    #[func]
+    fn get_edge(&self) -> i64 {
+        self.foot.edge.map_or(-1, i64::from)
+    }
+
+    /// The face parameter of a foot inside a face, two doubles; empty for an edge or a vertex.
+    #[func]
+    fn get_uv(&self) -> PackedFloat64Array {
+        self.foot.uv.map_or_else(PackedFloat64Array::new, |uv| doubles(&uv))
+    }
+
+    /// The unit normal at the body's foot.
+    #[func]
+    fn get_normal(&self) -> Vector3 {
+        vector3(self.foot.normal)
+    }
+
+    /// Whether the foot was refined onto the exact geometry, not the mesh's answer.
+    #[func]
+    fn get_refined(&self) -> bool {
+        self.foot.refined
+    }
+
+    /// Whether the curve passes through the boundary there.
+    #[func]
+    fn get_crossing(&self) -> bool {
+        self.foot.crossing
+    }
+
+    /// `point_on_curve` as three doubles.
+    #[func]
+    fn get_raw_point_on_curve(&self) -> PackedFloat64Array {
+        doubles(&self.foot.point_on_curve)
+    }
+
+    /// `point_on_body` as three doubles.
+    #[func]
+    fn get_raw_point_on_body(&self) -> PackedFloat64Array {
+        doubles(&self.foot.point_on_body)
+    }
+
+    /// `normal` as three doubles.
+    #[func]
+    fn get_raw_normal(&self) -> PackedFloat64Array {
+        doubles(&self.foot.normal)
+    }
+
+    /// Whether `other` is a `CadaclysmCurveBodyFoot` with the same fields, every double equal.
+    #[func]
+    fn equals(&self, other: Variant) -> bool {
+        other.try_to::<Gd<CadaclysmCurveBodyFoot>>().is_ok_and(|o| o.bind().foot == self.foot)
+    }
+}
+
+/// The nearest of a list of things to a curve (`CadaclysmNurbsCurve.closest_object`): `which`
+/// the item's index in the list, from zero, `distance` from `point_on_curve` (at the curve's
+/// parameter `t`) to `point_on_item`, and `answer`, the item's own answer: a
+/// `CadaclysmCurveBodyFoot` for a solid or a projector, a `CadaclysmCurvePair` (side `a` the
+/// curve asked) for a curve, `null` for a point. The points are `Vector3`s, so floats; the `raw_`
+/// properties give the doubles.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmNearestObject {
+    nearest: bs::NearestObject,
+    /// The item's index in the list asked, from zero.
+    #[var(get = get_which, no_set)]
+    which: PhantomVar<i64>,
+    /// From `point_on_curve` to `point_on_item`.
+    #[var(get = get_distance, no_set)]
+    distance: PhantomVar<f64>,
+    /// The curve's parameter at `point_on_curve`.
+    #[var(get = get_t, no_set)]
+    t: PhantomVar<f64>,
+    /// The nearest point on the curve.
+    #[var(get = get_point_on_curve, no_set)]
+    point_on_curve: PhantomVar<Vector3>,
+    /// The nearest point of the item.
+    #[var(get = get_point_on_item, no_set)]
+    point_on_item: PhantomVar<Vector3>,
+    /// The item's own answer: a `CadaclysmCurveBodyFoot`, a `CadaclysmCurvePair` or `null`.
+    #[var(get = get_answer, no_set)]
+    answer: PhantomVar<Variant>,
+    /// `point_on_curve` as three doubles.
+    #[var(get = get_raw_point_on_curve, no_set)]
+    raw_point_on_curve: PhantomVar<PackedFloat64Array>,
+    /// `point_on_item` as three doubles.
+    #[var(get = get_raw_point_on_item, no_set)]
+    raw_point_on_item: PhantomVar<PackedFloat64Array>,
+}
+
+impl CadaclysmNearestObject {
+    fn wrap(nearest: bs::NearestObject) -> Gd<CadaclysmNearestObject> {
+        Gd::from_object(CadaclysmNearestObject {
+            nearest,
+            which: PhantomVar::default(),
+            distance: PhantomVar::default(),
+            t: PhantomVar::default(),
+            point_on_curve: PhantomVar::default(),
+            point_on_item: PhantomVar::default(),
+            answer: PhantomVar::default(),
+            raw_point_on_curve: PhantomVar::default(),
+            raw_point_on_item: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmNearestObject {
+    fn to_string(&self) -> GString {
+        let n = &self.nearest;
+        gs(format!("NearestObject(which={}, distance={}, t={}, answer={:?})", n.which, n.distance, n.t, n.answer))
+    }
+}
+
+#[godot_api]
+impl CadaclysmNearestObject {
+    /// The item's index in the list asked, from zero.
+    #[func]
+    fn get_which(&self) -> i64 {
+        self.nearest.which as i64
+    }
+
+    /// From `point_on_curve` to `point_on_item`.
+    #[func]
+    fn get_distance(&self) -> f64 {
+        self.nearest.distance
+    }
+
+    /// The curve's parameter at `point_on_curve`.
+    #[func]
+    fn get_t(&self) -> f64 {
+        self.nearest.t
+    }
+
+    /// The nearest point on the curve.
+    #[func]
+    fn get_point_on_curve(&self) -> Vector3 {
+        vector3(self.nearest.point_on_curve)
+    }
+
+    /// The nearest point of the item.
+    #[func]
+    fn get_point_on_item(&self) -> Vector3 {
+        vector3(self.nearest.point_on_item)
+    }
+
+    /// The item's own answer: a `CadaclysmCurveBodyFoot` for a solid or a projector, a
+    /// `CadaclysmCurvePair` for a curve, `null` for a point.
+    #[func]
+    fn get_answer(&self) -> Variant {
+        match &self.nearest.answer {
+            bs::NearestAnswer::Body(foot) => CadaclysmCurveBodyFoot::wrap(foot.clone()).to_variant(),
+            bs::NearestAnswer::Curve(pair) => CadaclysmCurvePair::wrap(pair.clone()).to_variant(),
+            bs::NearestAnswer::Point => Variant::nil(),
+        }
+    }
+
+    /// `point_on_curve` as three doubles.
+    #[func]
+    fn get_raw_point_on_curve(&self) -> PackedFloat64Array {
+        doubles(&self.nearest.point_on_curve)
+    }
+
+    /// `point_on_item` as three doubles.
+    #[func]
+    fn get_raw_point_on_item(&self) -> PackedFloat64Array {
+        doubles(&self.nearest.point_on_item)
+    }
+
+    /// Whether `other` is a `CadaclysmNearestObject` with the same fields, every double equal.
+    #[func]
+    fn equals(&self, other: Variant) -> bool {
+        other.try_to::<Gd<CadaclysmNearestObject>>().is_ok_and(|o| o.bind().nearest == self.nearest)
     }
 }
 
@@ -9327,6 +10080,35 @@ fn sheet_side(side: &GString) -> Option<bs::SheetSide> {
 }
 
 /// An edge argument: a `CadaclysmEdge` or its index.
+/// A `no_inflection` hold as `fair`/`faired` take it: empty for none, else two numbers -- the
+/// span's ends, NaN for an open one (so `[NAN, NAN]` holds the whole curve).
+fn no_inflection_span(span: &PackedFloat64Array, what: &str) -> Option<Option<(Option<f64>, Option<f64>)>> {
+    let end = |v: f64| (!v.is_nan()).then_some(v);
+    match span.as_slice() {
+        [] => Some(None),
+        &[lo, hi] => Some(Some((end(lo), end(hi)))),
+        other => fail(format!("{what}: no_inflection takes two numbers (NAN an open end) or none, not {}", other.len())),
+    }
+}
+
+/// A surface fair's `keep` as `CadaclysmSolid.faired` takes it, in side order `u0`, `u1`, `v0`,
+/// `v1`: empty keeps every side at 2, one level is for all four, four are one per side; -1 a
+/// side free to move.
+fn keep_levels(keep: &PackedInt64Array, what: &str) -> Option<[Option<u32>; 4]> {
+    let level = |k: i64| -> Option<Option<u32>> {
+        if k == -1 {
+            return Some(None);
+        }
+        index(k, &format!("{what}: keep")).map(Some)
+    };
+    match keep.as_slice() {
+        [] => Some([Some(2); 4]),
+        &[k] => Some([level(k)?; 4]),
+        &[a, b, c, d] => Some([level(a)?, level(b)?, level(c)?, level(d)?]),
+        other => fail(format!("{what}: keep takes 4 levels (u0, u1, v0, v1), one for all or none, not {}", other.len())),
+    }
+}
+
 fn edge_arg(v: &Variant, what: &str) -> Option<u32> {
     if v.get_type() == VariantType::INT {
         return index(v.to::<i64>(), what);
@@ -9392,8 +10174,8 @@ pub struct CadaclysmNurbsCurve {
     /// Whether the curve ends where it starts.
     #[var(get = get_is_closed, no_set)]
     is_closed: PhantomVar<bool>,
-    /// On a curve from `fit`, `projected_to_face` or `pulled_to_face`, the largest distance
-    /// found between it and what it was fitted to; `null` on any other.
+    /// On a curve from `fit`, `fair`, `faired`, `projected_to_face` or `pulled_to_face`, the
+    /// largest distance found between it and what it was fitted to; `null` on any other.
     #[var(get = get_fit_error, no_set)]
     fit_error: PhantomVar<Variant>,
 }
@@ -9488,6 +10270,27 @@ impl CadaclysmNurbsCurve {
         let points = point_list(&points, "nurbs_curve_fit")?;
         let degree = index(degree, "nurbs_curve_fit: degree")?;
         Self::made(bs::NurbsCurve::fit(&points, degree, Some(tolerance)))
+    }
+
+    /// The smoothest curve of `degree` (3 to 7) within `tolerance` of every point, through the
+    /// first and the last: least squares plus the curvature's derivative squared, weighed as
+    /// heavily as the tolerance allows. Where `fit` follows the points' noise, this spends the
+    /// tolerance on a calm curvature comb -- a design line traced off a drawing comes back fair.
+    /// `no_inflection` empty holds nothing; two numbers keep the curvature from turning over
+    /// between those points (point indices, fractions between points; `NAN` an open end, so
+    /// `[NAN, NAN]` is the whole curve). `null` where no such curve is within the tolerance.
+    /// Its `fit_error` is the largest distance from a point to it.
+    #[func]
+    fn fair(
+        points: Variant,
+        #[opt(default = 5)] degree: i64,
+        #[opt(default = 1e-3)] tolerance: f64,
+        #[opt(default = &PackedFloat64Array::new())] no_inflection: PackedFloat64Array,
+    ) -> Option<Gd<CadaclysmNurbsCurve>> {
+        let points = point_list(&points, "nurbs_curve_fair")?;
+        let degree = index(degree, "nurbs_curve_fair: degree")?;
+        let span = no_inflection_span(&no_inflection, "nurbs_curve_fair")?;
+        Self::made(bs::NurbsCurve::fair(&points, degree, Some(tolerance), span))
     }
 
     /// Edge `edge` of `solid` (a `CadaclysmEdge` or its index) as an exact NURBS over the
@@ -9696,6 +10499,107 @@ impl CadaclysmNurbsCurve {
         ok(self.curve.point(t)).map_or_else(PackedFloat64Array::new, |p| doubles(&p))
     }
 
+    /// The `CadaclysmCurveFoot` nearest `p` (a `Vector3` or three numbers) over the curve's
+    /// whole domain: `unique` is `false` where another point of the curve is as near (a point on
+    /// a circle's axis) and `point` is a pick among them. Exact. `max_distance` NaN (the
+    /// default) or `INF` is no limit, the same answer as with none. `null` beyond it (then
+    /// `Cadaclysm.last_error()` is empty); `null` with the reason in `Cadaclysm.last_error()` for
+    /// a point that is not three finite numbers or a negative `max_distance`.
+    #[func]
+    fn closest_point(&self, p: Variant, #[opt(default = f64::NAN)] max_distance: f64) -> Option<Gd<CadaclysmCurveFoot>> {
+        if max_distance.is_nan() {
+            let p = at(&p, "nurbs_curve_closest_point")?;
+            return ok(self.curve.closest_point(p)).map(CadaclysmCurveFoot::wrap);
+        }
+        let p = at(&p, "nurbs_curve_closest_point_within")?;
+        ok(self.curve.closest_point_within(p, Some(max_distance))).flatten().map(CadaclysmCurveFoot::wrap)
+    }
+
+    /// The nearest points of this curve and `other`, as a `CadaclysmCurvePair` (side `a` this
+    /// curve, distance 0 where they cross; among equal distances the smallest `t_a`, then
+    /// `t_b`). Exact. `max_distance` NaN or `INF` is no limit. `null` where they lie farther apart
+    /// (then `Cadaclysm.last_error()` is empty); `null` with the reason in
+    /// `Cadaclysm.last_error()` for a negative `max_distance`.
+    #[func]
+    fn closest_points(&self, other: Gd<CadaclysmNurbsCurve>, #[opt(default = f64::NAN)] max_distance: f64) -> Option<Gd<CadaclysmCurvePair>> {
+        ok(self.curve.closest_points(&other.bind().curve, Some(max_distance))).flatten().map(CadaclysmCurvePair::wrap)
+    }
+
+    /// The item of `items` nearest to this curve, as a `CadaclysmNearestObject` -- `which` its
+    /// index, from zero. Each item is a `CadaclysmSolid`, a `CadaclysmNurbsCurve`, a
+    /// `CadaclysmProjector` or a point (a `Vector3` or three numbers). Items are asked in order,
+    /// each with the best distance so far as its limit; equal distances go to the earlier item.
+    /// `max_distance` NaN or `INF` is no limit; `tolerance` 0 or NaN is each solid's effective
+    /// tolerance (a projector keeps its own, and its lock is held for the whole curve query).
+    /// `null` where none lies within `max_distance` or `items` is empty (then
+    /// `Cadaclysm.last_error()` is empty); `null` with the reason in `Cadaclysm.last_error()` for
+    /// an item of none of those kinds or a point not finite (naming `item <i>`), a closed solid or
+    /// projector, a negative `max_distance`, a negative or infinite tolerance, or a body's own
+    /// refusal.
+    #[func]
+    fn closest_object(
+        &self,
+        items: AnyArray,
+        #[opt(default = f64::NAN)] max_distance: f64,
+        #[opt(default = f64::NAN)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmNearestObject>> {
+        const W: &str = "nurbs_curve_closest_object";
+        enum Owner {
+            Solid(Gd<CadaclysmSolid>),
+            Curve(Gd<CadaclysmNurbsCurve>),
+            Projector(Gd<CadaclysmProjector>),
+            Point([f64; 3]),
+        }
+        enum Guard<'a> {
+            Solid(GdRef<'a, CadaclysmSolid>),
+            Curve(GdRef<'a, CadaclysmNurbsCurve>),
+            Projector(GdRef<'a, CadaclysmProjector>),
+            Point([f64; 3]),
+        }
+        let owners = items
+            .iter_shared()
+            .enumerate()
+            .map(|(i, item)| {
+                if let Ok(solid) = item.try_to::<Gd<CadaclysmSolid>>() {
+                    return Some(Owner::Solid(solid));
+                }
+                if let Ok(curve) = item.try_to::<Gd<CadaclysmNurbsCurve>>() {
+                    return Some(Owner::Curve(curve));
+                }
+                if let Ok(projector) = item.try_to::<Gd<CadaclysmProjector>>() {
+                    return Some(Owner::Projector(projector));
+                }
+                match numbers(&item, false) {
+                    Some(v) if v.len() == 3 => Some(Owner::Point([v[0], v[1], v[2]])),
+                    _ => fail(format!("{W}: item {i}: not a CadaclysmSolid, a CadaclysmNurbsCurve, a CadaclysmProjector or a point of 3 numbers, got {item}")),
+                }
+            })
+            .collect::<Option<Vec<Owner>>>()?;
+        let guards: Vec<Guard> = owners
+            .iter()
+            .map(|o| match o {
+                Owner::Solid(s) => Guard::Solid(s.bind()),
+                Owner::Curve(c) => Guard::Curve(c.bind()),
+                Owner::Projector(p) => Guard::Projector(p.bind()),
+                Owner::Point(p) => Guard::Point(*p),
+            })
+            .collect();
+        let near = guards
+            .iter()
+            .enumerate()
+            .map(|(i, g)| match g {
+                Guard::Solid(s) => s.held().map(bs::NearItem::Solid),
+                Guard::Curve(c) => Some(bs::NearItem::Curve(&c.curve)),
+                Guard::Projector(p) => match &p.projector {
+                    Some(projector) => Some(bs::NearItem::Projector(projector)),
+                    None => fail(format!("{W}: item {i}: projector: closed")),
+                },
+                Guard::Point(p) => Some(bs::NearItem::Point(*p)),
+            })
+            .collect::<Option<Vec<bs::NearItem>>>()?;
+        ok(self.curve.closest_object(&near, Some(max_distance), Some(tolerance))).flatten().map(CadaclysmNearestObject::wrap)
+    }
+
     /// The point and its derivatives at `t` up to `order` (at most 8): `[C, C', C'', ...]`,
     /// `order + 1` arrays of three doubles. Empty on a refusal.
     #[func]
@@ -9753,6 +10657,37 @@ impl CadaclysmNurbsCurve {
         let solid = solid.bind();
         let found = (|| Some(self.curve.face_hits(solid.held()?, index(face, "nurbs_curve_face_hits: face")?, Some(tolerance))))();
         Self::samples(found)
+    }
+
+    /// This curve faired: the smoothest curve of `degree` (3 to 7) within `tolerance` of it,
+    /// from its start to its end, as `fair` makes one from points; `no_inflection`'s two
+    /// numbers are this curve's own parameters here (`NAN` an open end). Its `fit_error` is the
+    /// largest distance found between the two.
+    #[func]
+    fn faired(
+        &self,
+        #[opt(default = 5)] degree: i64,
+        #[opt(default = 1e-3)] tolerance: f64,
+        #[opt(default = &PackedFloat64Array::new())] no_inflection: PackedFloat64Array,
+    ) -> Option<Gd<CadaclysmNurbsCurve>> {
+        let degree = index(degree, "nurbs_curve_faired: degree")?;
+        let span = no_inflection_span(&no_inflection, "nurbs_curve_faired")?;
+        self.then(|c| c.faired(degree, Some(tolerance), span))
+    }
+
+    /// Where the curvature turns from one side to the other, in parameter order, each a
+    /// `CadaclysmAt` (`error` zero): the comb flipping sides. Empty for a curve that bends one
+    /// way only -- what a test of a design line asks for -- and on failure.
+    #[func]
+    fn inflections(&self) -> Array<Gd<CadaclysmAt>> {
+        Self::samples(Some(self.curve.inflections()))
+    }
+
+    /// The largest turn of the tangent and jump of the curvature at the curve's own knots, as
+    /// a `CadaclysmKnotContinuity`.
+    #[func]
+    fn knot_continuity(&self) -> Option<Gd<CadaclysmKnotContinuity>> {
+        ok(self.curve.knot_continuity()).map(CadaclysmKnotContinuity::wrap)
     }
 
     /// A curvature comb to draw, as segment pairs: at `n + 1` even parameters the curve point
@@ -9943,6 +10878,285 @@ impl CadaclysmContinuity {
     }
 }
 
+/// How smoothly a curve runs through its own knots (`CadaclysmNurbsCurve.knot_continuity`; a
+/// closed curve's seam among them): the largest turn of its tangent in radians (`angle`) and the
+/// largest jump of its curvature vector `kappa * normal` (`curvature`), each with the parameter
+/// and the point (three doubles) it was found at. A curve with no inner knot reads zero at its
+/// start.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmKnotContinuity {
+    value: bs::KnotContinuity,
+    /// The largest turn of the tangent at a knot, in radians.
+    #[var(get = get_angle, no_set)]
+    angle: PhantomVar<f64>,
+    /// The parameter it is at.
+    #[var(get = get_angle_parameter, no_set)]
+    angle_parameter: PhantomVar<f64>,
+    /// The point it is at.
+    #[var(get = get_angle_at, no_set)]
+    angle_at: PhantomVar<PackedFloat64Array>,
+    /// The largest jump of the curvature vector at a knot.
+    #[var(get = get_curvature, no_set)]
+    curvature: PhantomVar<f64>,
+    /// The parameter it is at.
+    #[var(get = get_curvature_parameter, no_set)]
+    curvature_parameter: PhantomVar<f64>,
+    /// The point it is at.
+    #[var(get = get_curvature_at, no_set)]
+    curvature_at: PhantomVar<PackedFloat64Array>,
+}
+
+impl CadaclysmKnotContinuity {
+    fn wrap(value: bs::KnotContinuity) -> Gd<CadaclysmKnotContinuity> {
+        Gd::from_object(CadaclysmKnotContinuity {
+            value,
+            angle: PhantomVar::default(),
+            angle_parameter: PhantomVar::default(),
+            angle_at: PhantomVar::default(),
+            curvature: PhantomVar::default(),
+            curvature_parameter: PhantomVar::default(),
+            curvature_at: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmKnotContinuity {
+    fn to_string(&self) -> GString {
+        let v = &self.value;
+        gs(format!("KnotContinuity(angle={}, curvature={})", v.angle, v.curvature))
+    }
+}
+
+#[godot_api]
+impl CadaclysmKnotContinuity {
+    /// The largest turn of the tangent at a knot, in radians.
+    #[func]
+    fn get_angle(&self) -> f64 {
+        self.value.angle
+    }
+
+    /// The parameter the largest turn is at.
+    #[func]
+    fn get_angle_parameter(&self) -> f64 {
+        self.value.angle_parameter
+    }
+
+    /// The point the largest turn is at.
+    #[func]
+    fn get_angle_at(&self) -> PackedFloat64Array {
+        doubles(&self.value.angle_at)
+    }
+
+    /// The largest jump of the curvature vector at a knot.
+    #[func]
+    fn get_curvature(&self) -> f64 {
+        self.value.curvature
+    }
+
+    /// The parameter the largest jump is at.
+    #[func]
+    fn get_curvature_parameter(&self) -> f64 {
+        self.value.curvature_parameter
+    }
+
+    /// The point the largest jump is at.
+    #[func]
+    fn get_curvature_at(&self) -> PackedFloat64Array {
+        doubles(&self.value.curvature_at)
+    }
+}
+
+/// Where a face's curvatures change sign (`CadaclysmSolid.curvature_turns`): how many separate
+/// areas the sample grid finds where the Gaussian curvature is positive and negative
+/// (`gaussian_positive`, `gaussian_negative`) and the mean curvature (`mean_positive`,
+/// `mean_negative`, about the face's outward normal), the points between opposite signs
+/// (`gaussian_turns`, `mean_turns`: `CadaclysmAt`s, `tangent` the face's unit normal there,
+/// `parameter` its `u`), and the grid's `samples` steps each way. A sample within a millionth
+/// of the face's size of flat is neither sign: a cylinder's patch reads no Gaussian area.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmCurvatureTurns {
+    value: bs::CurvatureTurns,
+    /// How many separate areas of positive Gaussian curvature.
+    #[var(get = get_gaussian_positive, no_set)]
+    gaussian_positive: PhantomVar<i64>,
+    /// How many separate areas of negative Gaussian curvature.
+    #[var(get = get_gaussian_negative, no_set)]
+    gaussian_negative: PhantomVar<i64>,
+    /// The points between opposite signs of the Gaussian curvature, `CadaclysmAt`s.
+    #[var(get = get_gaussian_turns, no_set)]
+    gaussian_turns: PhantomVar<Array<Gd<CadaclysmAt>>>,
+    /// How many separate areas of positive mean curvature.
+    #[var(get = get_mean_positive, no_set)]
+    mean_positive: PhantomVar<i64>,
+    /// How many separate areas of negative mean curvature.
+    #[var(get = get_mean_negative, no_set)]
+    mean_negative: PhantomVar<i64>,
+    /// The points between opposite signs of the mean curvature, `CadaclysmAt`s.
+    #[var(get = get_mean_turns, no_set)]
+    mean_turns: PhantomVar<Array<Gd<CadaclysmAt>>>,
+    /// The grid's steps each way.
+    #[var(get = get_samples, no_set)]
+    samples: PhantomVar<i64>,
+}
+
+impl CadaclysmCurvatureTurns {
+    fn wrap(value: bs::CurvatureTurns) -> Gd<CadaclysmCurvatureTurns> {
+        Gd::from_object(CadaclysmCurvatureTurns {
+            value,
+            gaussian_positive: PhantomVar::default(),
+            gaussian_negative: PhantomVar::default(),
+            gaussian_turns: PhantomVar::default(),
+            mean_positive: PhantomVar::default(),
+            mean_negative: PhantomVar::default(),
+            mean_turns: PhantomVar::default(),
+            samples: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmCurvatureTurns {
+    fn to_string(&self) -> GString {
+        let v = &self.value;
+        gs(format!(
+            "CurvatureTurns(gaussian=+{}/-{} {} turns, mean=+{}/-{} {} turns)",
+            v.gaussian_positive,
+            v.gaussian_negative,
+            v.gaussian_turns.len(),
+            v.mean_positive,
+            v.mean_negative,
+            v.mean_turns.len()
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmCurvatureTurns {
+    /// How many separate areas of positive Gaussian curvature.
+    #[func]
+    fn get_gaussian_positive(&self) -> i64 {
+        self.value.gaussian_positive.into()
+    }
+
+    /// How many separate areas of negative Gaussian curvature.
+    #[func]
+    fn get_gaussian_negative(&self) -> i64 {
+        self.value.gaussian_negative.into()
+    }
+
+    /// The points between opposite signs of the Gaussian curvature, `CadaclysmAt`s.
+    #[func]
+    fn get_gaussian_turns(&self) -> Array<Gd<CadaclysmAt>> {
+        CadaclysmAt::wrap_all(self.value.gaussian_turns.clone())
+    }
+
+    /// How many separate areas of positive mean curvature.
+    #[func]
+    fn get_mean_positive(&self) -> i64 {
+        self.value.mean_positive.into()
+    }
+
+    /// How many separate areas of negative mean curvature.
+    #[func]
+    fn get_mean_negative(&self) -> i64 {
+        self.value.mean_negative.into()
+    }
+
+    /// The points between opposite signs of the mean curvature, `CadaclysmAt`s.
+    #[func]
+    fn get_mean_turns(&self) -> Array<Gd<CadaclysmAt>> {
+        CadaclysmAt::wrap_all(self.value.mean_turns.clone())
+    }
+
+    /// The grid's steps each way.
+    #[func]
+    fn get_samples(&self) -> i64 {
+        self.value.samples.into()
+    }
+}
+
+/// The worst kink of the highlight lines crossing an edge (`CadaclysmSolid.highlight_kink`):
+/// the `angle` in radians (0 to `PI / 2`) between a line on one face and the same line on the
+/// other, the point `at` along the edge, and the light that shows it -- a straight tube through
+/// `light_point` along `light_direction` (unit; three doubles each) -- from `samples` points
+/// along the edge.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmHighlightKink {
+    value: bs::HighlightKink,
+    /// The kink's angle, in radians.
+    #[var(get = get_angle, no_set)]
+    angle: PhantomVar<f64>,
+    /// The point along the edge it is at.
+    #[var(get = get_at, no_set)]
+    at: PhantomVar<PackedFloat64Array>,
+    /// A point on the light tube that shows it.
+    #[var(get = get_light_point, no_set)]
+    light_point: PhantomVar<PackedFloat64Array>,
+    /// The light tube's unit direction.
+    #[var(get = get_light_direction, no_set)]
+    light_direction: PhantomVar<PackedFloat64Array>,
+    /// How many points along the edge were read.
+    #[var(get = get_samples, no_set)]
+    samples: PhantomVar<i64>,
+}
+
+impl CadaclysmHighlightKink {
+    fn wrap(value: bs::HighlightKink) -> Gd<CadaclysmHighlightKink> {
+        Gd::from_object(CadaclysmHighlightKink {
+            value,
+            angle: PhantomVar::default(),
+            at: PhantomVar::default(),
+            light_point: PhantomVar::default(),
+            light_direction: PhantomVar::default(),
+            samples: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmHighlightKink {
+    fn to_string(&self) -> GString {
+        gs(format!("HighlightKink(angle={})", self.value.angle))
+    }
+}
+
+#[godot_api]
+impl CadaclysmHighlightKink {
+    /// The kink's angle, in radians.
+    #[func]
+    fn get_angle(&self) -> f64 {
+        self.value.angle
+    }
+
+    /// The point along the edge it is at.
+    #[func]
+    fn get_at(&self) -> PackedFloat64Array {
+        doubles(&self.value.at)
+    }
+
+    /// A point on the light tube that shows it.
+    #[func]
+    fn get_light_point(&self) -> PackedFloat64Array {
+        doubles(&self.value.light_point)
+    }
+
+    /// The light tube's unit direction.
+    #[func]
+    fn get_light_direction(&self) -> PackedFloat64Array {
+        doubles(&self.value.light_direction)
+    }
+
+    /// How many points along the edge were read.
+    #[func]
+    fn get_samples(&self) -> i64 {
+        self.value.samples.into()
+    }
+}
+
 /// How well an N-sided patch meets (`CadaclysmSolid.patch_report`): `faces` sub-patches, the
 /// worst `boundary` `CadaclysmContinuity` against the neighbours, the worst `internal` across
 /// the patch's own spokes, and `corner_angle` (radians), what no patch can meet at a corner of
@@ -10009,6 +11223,107 @@ impl CadaclysmPatchReport {
     #[func]
     fn get_corner_angle(&self) -> f64 {
         self.value.corner_angle
+    }
+}
+
+/// What `CadaclysmSolid.mirror_join` did: the `seams` on the plane, the faces `squared` to it and
+/// the furthest a control point `moved` doing it; the seam's worst `gap`, `angle` (radians) and
+/// `curvature`; and the `naked` edges left on the body.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmSymmetryReport {
+    value: bs::SymmetryReport,
+    /// Edges on the plane, each one face of the half and one of its mirror.
+    #[var(get = get_seams, no_set)]
+    seams: PhantomVar<i64>,
+    /// Faces of the half squared to the plane.
+    #[var(get = get_squared, no_set)]
+    squared: PhantomVar<i64>,
+    /// The furthest any control point moved squaring them.
+    #[var(get = get_moved, no_set)]
+    moved: PhantomVar<f64>,
+    /// The seam's largest gap between the two sides (G0).
+    #[var(get = get_gap, no_set)]
+    gap: PhantomVar<f64>,
+    /// The seam's largest angle between the two sides' normals, in radians (G1).
+    #[var(get = get_angle, no_set)]
+    angle: PhantomVar<f64>,
+    /// The seam's largest difference of normal curvature in any one direction (G2).
+    #[var(get = get_curvature, no_set)]
+    curvature: PhantomVar<f64>,
+    /// Naked edges left on the body: the half's own boundary off the plane, and any edge on it with no mirror to sew to.
+    #[var(get = get_naked, no_set)]
+    naked: PhantomVar<i64>,
+}
+
+impl CadaclysmSymmetryReport {
+    fn wrap(value: bs::SymmetryReport) -> Gd<CadaclysmSymmetryReport> {
+        Gd::from_object(CadaclysmSymmetryReport {
+            value,
+            seams: PhantomVar::default(),
+            squared: PhantomVar::default(),
+            moved: PhantomVar::default(),
+            gap: PhantomVar::default(),
+            angle: PhantomVar::default(),
+            curvature: PhantomVar::default(),
+            naked: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmSymmetryReport {
+    fn to_string(&self) -> GString {
+        let v = &self.value;
+        gs(format!(
+            "SymmetryReport(seams={}, squared={}, moved={}, gap={}, angle={}, curvature={}, naked={})",
+            v.seams, v.squared, v.moved, v.gap, v.angle, v.curvature, v.naked
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmSymmetryReport {
+    /// Edges on the plane, each one face of the half and one of its mirror.
+    #[func]
+    fn get_seams(&self) -> i64 {
+        self.value.seams.into()
+    }
+
+    /// Faces of the half squared to the plane.
+    #[func]
+    fn get_squared(&self) -> i64 {
+        self.value.squared.into()
+    }
+
+    /// The furthest any control point moved squaring them.
+    #[func]
+    fn get_moved(&self) -> f64 {
+        self.value.moved
+    }
+
+    /// The seam's largest gap between the two sides (G0).
+    #[func]
+    fn get_gap(&self) -> f64 {
+        self.value.gap
+    }
+
+    /// The seam's largest angle between the two sides' normals, in radians (G1).
+    #[func]
+    fn get_angle(&self) -> f64 {
+        self.value.angle
+    }
+
+    /// The seam's largest difference of normal curvature in any one direction (G2).
+    #[func]
+    fn get_curvature(&self) -> f64 {
+        self.value.curvature
+    }
+
+    /// Naked edges left on the body: the half's own boundary off the plane, and any edge on it with no mirror to sew to.
+    #[func]
+    fn get_naked(&self) -> i64 {
+        self.value.naked.into()
     }
 }
 
@@ -10622,7 +11937,7 @@ impl CadaclysmSolid {
         Self::made(reader::with_node(&node.shared, node.index, |n| bs::Solid::from_node(&n, placed))?)
     }
 
-    /// The body a CAD file holds (STEP, ACIS, Rhino, OCCT `.brep`, IGES or IFC), read
+    /// The body a CAD file holds (STEP, ACIS, Rhino, OCCT `.brep`, IGES, IFC or OpenSCAD), read
     /// where it draws, in the file's own units and axes. A file of several bodies needs
     /// `body` (from 0, in drawing order), or `open_all`.
     #[func]
@@ -10903,10 +12218,25 @@ impl CadaclysmSolid {
         self.then(|s| s.fillet_varying(&edges, radius, optional_number(radius_end), tolerance))
     }
 
+    /// A chain of spline edges (`CadaclysmEdge`s or their indices) rounded with the radius
+    /// following a law along it: `law` is the radius at stations along the chain, each
+    /// `[share, radius]` (an array of pairs or a `PackedVector2Array`) -- the share of the chain's
+    /// arc length from its start, 0 to 1 -- run through smoothly by a monotone cubic, so the
+    /// radius never swings past its stations, and held flat before the first station and after
+    /// the last. The edges must run end to end into one open chain, each running on tangent into
+    /// the next; the chain runs the way the first edge's curve does. One edge is a chain of one.
+    /// `tolerance` is the fillet surfaces' fit.
+    #[func]
+    fn fillet_law(&self, edges: Variant, law: Variant, #[opt(default = 1e-6)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
+        let edges = indices(&edges, "fillet_law: edges")?;
+        let law: Vec<(f64, f64)> = points2(&law, "fillet_law: law")?.into_iter().map(|[f, r]| (f, r)).collect();
+        self.then(|s| s.fillet_law(&edges, &law, tolerance))
+    }
+
     // -- sheets from curves
 
     /// On a sheet from `sweep_rail`, `sweep_two_rails`, `edge_surface`, `network_surface`,
-    /// `fillet_surfaces`, `flange` or `extrude_to`, how far it came from its definition; `null`
+    /// `fillet_surfaces`, `faired`, `flange` or `extrude_to`, how far it came from its definition; `null`
     /// on every other solid.
     #[func]
     fn get_sheet_error(&self) -> Variant {
@@ -11000,6 +12330,89 @@ impl CadaclysmSolid {
         let other_face = Self::face_index(other_face, "continuity")?;
         let samples = index(samples, "continuity: samples")?;
         self.with(&other, |a, b| a.continuity(side, b, other_side, face, other_face, samples)).map(CadaclysmContinuity::wrap)
+    }
+
+    /// How well the two faces of edge `edge` (a `CadaclysmEdge` or its index) meet along it,
+    /// as a `CadaclysmContinuity`: `samples` points along the edge (16 at fewest), each
+    /// projected onto both faces, and the largest gap between the two, angle between the faces'
+    /// normals (each the way its face faces: a square crease reads `PI / 2`) and difference of
+    /// their normal curvatures across the edge -- `continuity`'s figures for any two faces of
+    /// one body, of any kind of surface. `null` for an edge that does not bound exactly two
+    /// faces.
+    #[func]
+    fn edge_continuity(&self, edge: Variant, #[opt(default = 64)] samples: i64) -> Option<Gd<CadaclysmContinuity>> {
+        let edge = edge_arg(&edge, "edge_continuity: edge")?;
+        let samples = index(samples, "edge_continuity: samples")?;
+        self.held().and_then(|s| ok(s.edge_continuity(edge, samples))).map(CadaclysmContinuity::wrap)
+    }
+
+    /// Face `face` faired, as a sheet of its own: the smoothest surface within `tolerance` of
+    /// its NURBS surface -- least squares plus its third derivatives squared (what a zebra's
+    /// ripple costs), weighed as heavily as the tolerance allows. A sheet lofted through traced
+    /// sections wobbles between them; this spends the tolerance on smoothness.
+    ///
+    /// `controls` empty fairs on the face's own net, its degree raised to `degree` (3 to 7) and
+    /// its spans split to a dozen each way at least, so a kept side is kept exactly; two ints
+    /// `[n_u, n_v]` fair on a uniform net that size, its kept sides within the tolerance. `keep`
+    /// says what each side keeps -- empty 2 for all four, one level for all four, or four
+    /// levels in side order `u0`, `u1`, `v0`, `v1`: -1 free to move, 0 its position, 1 the
+    /// tangent plane across it, 2 the curvature too (what `matched` gave it). `no_inflection` `"u"`, `"v"` or `"uv"` holds the isocurves along
+    /// those directions from turning their curvature over -- which turns a roof lofted through
+    /// wobbly sections into a dome. `null` where no such fair is within the tolerance. Its
+    /// `sheet_error` is the largest distance found between the two surfaces.
+    #[func]
+    fn faired(
+        &self,
+        #[opt(default = 1e-3)] tolerance: f64,
+        #[opt(default = 3)] degree: i64,
+        #[opt(default = &PackedInt64Array::new())] controls: PackedInt64Array,
+        #[opt(default = &PackedInt64Array::new())] keep: PackedInt64Array,
+        #[opt(default = "")] no_inflection: GString,
+        #[opt(default = 0)] face: i64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        let w = "surface_faired";
+        let degree = index(degree, "surface_faired: degree")?;
+        let controls = match controls.as_slice() {
+            [] => None,
+            &[u, v] => Some((index(u, "surface_faired: controls")?, index(v, "surface_faired: controls")?)),
+            other => return fail(format!("{w}: controls takes two ints or none, not {}", other.len())),
+        };
+        let keep = keep_levels(&keep, w)?;
+        let held = match no_inflection.to_string().as_str() {
+            "" => (false, false),
+            "u" => (true, false),
+            "v" => (false, true),
+            "uv" | "vu" => (true, true),
+            other => return fail(format!("no_inflection is 'u', 'v', 'uv' or '', not '{other}'")),
+        };
+        let face = Self::face_index(face, w)?;
+        self.then(|s| s.faired(Some(tolerance), degree, controls, keep, held, face))
+    }
+
+    /// Where face `face`'s Gaussian and mean curvature change sign, on a grid of `samples`
+    /// steps each way over its surface (8 at fewest), as a `CadaclysmCurvatureTurns`: how many
+    /// separate areas of each sign, and the points between opposite signs. A dome or a saddle
+    /// reads one area of one sign and no turn; a sheet whose sections wobble reads several --
+    /// the surface's form of `CadaclysmNurbsCurve.inflections`. `null` on failure.
+    #[func]
+    fn curvature_turns(&self, #[opt(default = 0)] face: i64, #[opt(default = 32)] samples: i64) -> Option<Gd<CadaclysmCurvatureTurns>> {
+        let face = Self::face_index(face, "curvature_turns")?;
+        let samples = index(samples, "curvature_turns: samples")?;
+        self.held().and_then(|s| ok(s.curvature_turns(face, samples))).map(CadaclysmCurvatureTurns::wrap)
+    }
+
+    /// The worst kink of the highlight lines crossing edge `edge` (a `CadaclysmEdge` or its
+    /// index), at `samples` points along it (16 at fewest), as a `CadaclysmHighlightKink`: the
+    /// lines of straight light tubes parallel to the surface a body's size away, every tube
+    /// direction tried. They run on through an edge where the two faces' curvatures agree (G2)
+    /// and kink where it jumps -- a fillet's seam with a flat face among them. Beside
+    /// `edge_continuity`'s curvature jump, this is the number a zebra shows. `null` for an edge
+    /// that does not bound exactly two faces.
+    #[func]
+    fn highlight_kink(&self, edge: Variant, #[opt(default = 64)] samples: i64) -> Option<Gd<CadaclysmHighlightKink>> {
+        let edge = edge_arg(&edge, "highlight_kink: edge")?;
+        let samples = index(samples, "highlight_kink: samples")?;
+        self.held().and_then(|s| ok(s.highlight_kink(edge, samples))).map(CadaclysmHighlightKink::wrap)
     }
 
     /// Face `face` as a sheet of its own, its side `side` bent to meet `other`'s `other_side`
@@ -11195,6 +12608,26 @@ impl CadaclysmSolid {
         })();
         match found {
             Some((solid, report)) => varray![&CadaclysmSolid::wrap(solid), &CadaclysmJoinReport::wrap(report)].to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    /// This half and its reflection across `plane` (a `CadaclysmFrame`, a `Transform3D` or 12
+    /// numbers; its z the plane's normal) joined into one symmetric body -- half a car, a hull or
+    /// a bottle modelled once -- the half's faces first. With `snap` above 0, every NURBS face
+    /// that is its whole surface and has a side whose control points all lie within `snap` of the
+    /// plane is squared to it first, so it meets its mirror tangent and curvature continuous;
+    /// `snap` 0 mirrors the half as it is. The halves are sewn within `tolerance` (0: a rounding
+    /// of the body's size). An array `[solid, report]`, the report a `CadaclysmSymmetryReport`, or
+    /// `null` with the reason in `Cadaclysm.last_error()`.
+    #[func]
+    fn mirror_join(&self, plane: Variant, #[opt(default = 0.0)] snap: f64, #[opt(default = 0.0)] tolerance: f64) -> Variant {
+        let found = (|| {
+            let plane = frame(&plane, "mirror_join: plane")?;
+            ok(self.held()?.mirror_join(&plane, snap, Some(tolerance)))
+        })();
+        match found {
+            Some((solid, report)) => varray![&CadaclysmSolid::wrap(solid), &CadaclysmSymmetryReport::wrap(report)].to_variant(),
             None => Variant::nil(),
         }
     }
@@ -11839,6 +13272,99 @@ impl CadaclysmSolid {
         self.held().and_then(|s| ok(s.closest(theirs, tolerance))).map(CadaclysmClosest::wrap)
     }
 
+    /// The nearest point of this solid's boundary to `p` (a `Vector3` or three numbers), as a
+    /// `CadaclysmPointFoot`. `max_distance` NaN or `INF` is no limit; 0 finds a point on the
+    /// body. `tolerance` -- absolute, in model units; 0 or NaN is unset, which the tolerance
+    /// policy resolves to the solid's effective tolerance -- sizes the mesh search only: a
+    /// `refined` false answer is within `[d - 2/3 tolerance, d + tolerance]` of the true
+    /// distance `d`. Meshes the body every call: for more than a few points build a `projector`
+    /// once. `null` beyond `max_distance` (then `Cadaclysm.last_error()` is empty); `null` with
+    /// the reason in `Cadaclysm.last_error()` for a point that is not three finite numbers, a
+    /// negative `max_distance`, or a negative or infinite `tolerance`.
+    #[func]
+    fn closest_point(
+        &self,
+        p: Variant,
+        #[opt(default = f64::NAN)] max_distance: f64,
+        #[opt(default = f64::NAN)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmPointFoot>> {
+        let p = at(&p, "closest_point")?;
+        self.held()
+            .and_then(|s| ok(s.closest_point(p, Some(max_distance), Some(tolerance))))
+            .flatten()
+            .map(CadaclysmPointFoot::wrap)
+    }
+
+    /// A reusable `CadaclysmProjector` for this solid at `tolerance` (0 or NaN: unset, the
+    /// solid's effective tolerance): the body meshed once, then asked
+    /// `CadaclysmProjector.closest_point` point after point. It keeps its own reference to the
+    /// body, so it outlives this solid. Open bodies and sheets are accepted. `null` with the
+    /// reason in `Cadaclysm.last_error()` for a negative or infinite tolerance.
+    #[func]
+    fn projector(&self, #[opt(default = f64::NAN)] tolerance: f64) -> Option<Gd<CadaclysmProjector>> {
+        self.held().and_then(|s| ok(s.projector(Some(tolerance)))).map(CadaclysmProjector::wrap)
+    }
+
+    /// The nearest points of `curve` and this solid's boundary, as a `CadaclysmCurveBodyFoot`:
+    /// `crossing` true, distance 0, where the curve passes through the boundary (the earliest
+    /// crossing in `t`). `max_distance` NaN or `INF` is no limit. `tolerance` -- absolute, in
+    /// model units; 0 or NaN is unset, the solid's effective tolerance -- sizes the march along
+    /// the curve and the mesh search: a `refined` false answer is within
+    /// `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`. Meshes the body every call:
+    /// for more than a few curves build a `projector` once. `null` beyond `max_distance` (then
+    /// `Cadaclysm.last_error()` is empty); `null` with the reason in `Cadaclysm.last_error()` for
+    /// a negative `max_distance`, a negative or infinite `tolerance`, or a curve too long for the
+    /// tolerance.
+    #[func]
+    fn curve_closest_points(
+        &self,
+        curve: Gd<CadaclysmNurbsCurve>,
+        #[opt(default = f64::NAN)] max_distance: f64,
+        #[opt(default = f64::NAN)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmCurveBodyFoot>> {
+        let curve = curve.bind();
+        self.held()
+            .and_then(|s| ok(s.curve_closest_points(&curve.curve, Some(max_distance), Some(tolerance))))
+            .flatten()
+            .map(CadaclysmCurveBodyFoot::wrap)
+    }
+
+    /// The nearest point to `p` (a `Vector3` or three numbers) of face `face` alone, inside its
+    /// trims or on its boundary, as a `CadaclysmPointFoot`: exact, no mesh, always `refined`.
+    /// `null` with the reason in `Cadaclysm.last_error()` for a face past the end or a point that
+    /// is not three finite numbers.
+    #[func]
+    fn face_closest_point(&self, face: i64, p: Variant) -> Option<Gd<CadaclysmPointFoot>> {
+        let face = Self::face_index(face, "face_closest_point")?;
+        let p = at(&p, "face_closest_point")?;
+        self.held().and_then(|s| ok(s.face_closest_point(face, p))).map(CadaclysmPointFoot::wrap)
+    }
+
+    /// The nearest point to `p` (a `Vector3` or three numbers) of edge `edge` (the index `edges`
+    /// uses, a `CadaclysmPointFoot`'s `edge`) on its own curve over its range, as a Dictionary
+    /// `{t, point, raw_point, distance}`: `t` the curve's parameter as `edge_point_at_length`
+    /// gives it, `point` a `Vector3` (`raw_point` its three doubles). Exact. `null` with the
+    /// reason in `Cadaclysm.last_error()` for an edge past the end, one with no exact curve, or
+    /// a point that is not three finite numbers.
+    #[func]
+    fn edge_closest_point(&self, edge: i64, p: Variant) -> Variant {
+        let found = (|| {
+            let Ok(edge) = u32::try_from(edge) else { return fail(format!("edge_closest_point: no edge {edge}")) };
+            let p = at(&p, "edge_closest_point")?;
+            self.held().and_then(|s| ok(s.edge_closest_point(edge, p)))
+        })();
+        match found {
+            Some((t, point, distance)) => dict(&[
+                ("t", t.to_variant()),
+                ("point", vector3(point).to_variant()),
+                ("raw_point", doubles(&point).to_variant()),
+                ("distance", distance.to_variant()),
+            ])
+            .to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
     /// How thick this solid's walls are at face `face`, as a `CadaclysmFaceThickness`, on a
     /// `CadaclysmThicknessGauge` of this solid alone built at `tolerance` (0.01 by default),
     /// asked `thickness_at_face` once and freed: at `at`'s foot on the face (a `Vector3` or
@@ -11882,6 +13408,44 @@ impl CadaclysmSolid {
     #[func]
     fn get_manifold(&self) -> VarDictionary {
         self.held().and_then(|s| ok(s.manifold())).map(reader::manifold).unwrap_or_default()
+    }
+
+    /// The radius of the round face `face` belongs to -- a fillet's face that `unfillet` can
+    /// take back -- 0 where it is none. `NAN`, with the reason logged, for a face the solid
+    /// does not have.
+    #[func]
+    fn face_round_radius(&self, face: i64) -> f64 {
+        Self::face_index(face, "face_round_radius").and_then(|f| ok(self.held()?.face_round_radius(f))).unwrap_or(f64::NAN)
+    }
+
+    /// The distance of the chamfer face `face` belongs to -- a bevel `unchamfer` can take
+    /// back -- 0 where it is none. `NAN`, with the reason logged, for a face the solid does
+    /// not have.
+    #[func]
+    fn face_chamfer_distance(&self, face: i64) -> f64 {
+        Self::face_index(face, "face_chamfer_distance").and_then(|f| ok(self.held()?.face_chamfer_distance(f))).unwrap_or(f64::NAN)
+    }
+
+    /// The edges as rational cubic Béziers, sixteen numbers each (`x y z w` per control
+    /// point): exact where an edge's curve has a Bézier form, flattened within `tolerance`
+    /// where it has none (`NAN`, the default: the solid's effective tolerance). Empty, with
+    /// the reason logged, on a refusal.
+    #[func]
+    fn edge_beziers(&self, #[opt(default = f64::NAN)] tolerance: f64) -> PackedFloat64Array {
+        let t = (!tolerance.is_nan()).then_some(tolerance);
+        self.held().and_then(|s| ok(s.edge_beziers(t))).map(|v| doubles(&v)).unwrap_or_default()
+    }
+
+    /// The faces' isoparametric curves as rational cubic Béziers, sixteen numbers each as
+    /// `edge_beziers` gives them: `density` interior lines each way on every curved face,
+    /// clipped to the face, plus the lines at the ends of its parameter span; a flat face
+    /// draws none. `tolerance` `NAN` (the default) is the solid's effective tolerance. Empty,
+    /// with the reason logged, on a refusal.
+    #[func]
+    fn isocurve_beziers(&self, #[opt(default = 4)] density: i64, #[opt(default = f64::NAN)] tolerance: f64) -> PackedFloat64Array {
+        let Some(d) = index(density, "isocurve_beziers: density") else { return PackedFloat64Array::new() };
+        let t = (!tolerance.is_nan()).then_some(tolerance);
+        self.held().and_then(|s| ok(s.isocurve_beziers(d, t))).map(|v| doubles(&v)).unwrap_or_default()
     }
 
     /// What is wrong with this solid, as a Dictionary with `HealthReport`'s keys -- the same
@@ -13302,7 +14866,8 @@ impl CadaclysmOperation {
 // ---- CadaclysmReportItem, CadaclysmReport ------------------------------------------------
 
 /// One thing `CadaclysmJob.machine` left uncut, one of `CadaclysmReport`'s items: `kind`
-/// (`"corner"`, material the end mill doesn't reach; `"hole"`, a round hole no drill
+/// (`"corner"`, material the end mill doesn't reach; `"relief"`, a corner notched by the
+/// smallest end mill under `corner_relief`; `"hole"`, a round hole no drill
 /// matches or a matched drill can't make; `"slope"`, a face that is neither horizontal nor
 /// vertical, cut as steps; `"undercut"`, material under an overhang; or `"too_deep"`, a
 /// level below the end mill's flute length, cut only that far), `at` (the item's XYZ
@@ -13503,6 +15068,7 @@ impl CadaclysmJob {
         stepdown: f64,
         skin: f64,
         peck: f64,
+        corner_relief: bool,
     ) -> Option<Gd<CadaclysmReport>> {
         let part = part.bind();
         let stepover = (!stepover.is_nan()).then_some(stepover);
@@ -13510,7 +15076,7 @@ impl CadaclysmJob {
         let peck = (!peck.is_nan()).then_some(peck);
         let part_ref = part.held()?;
         let job = self.held_mut()?;
-        let report = ok(job.machine_with(part_ref, end_mills, drills, stepover, stepdown, skin, peck))?;
+        let report = ok(job.machine_relieved(part_ref, end_mills, drills, stepover, stepdown, skin, peck, corner_relief))?;
         Some(CadaclysmReport::wrap(report))
     }
 }
@@ -13634,7 +15200,7 @@ impl CadaclysmJob {
         #[opt(default = f64::NAN)] peck: f64,
     ) -> Option<Gd<CadaclysmReport>> {
         let end_mill = end_mill.bind();
-        self.machined(&part, &[&end_mill.tool], &[], stepover, stepdown, skin, peck)
+        self.machined(&part, &[&end_mill.tool], &[], stepover, stepdown, skin, peck, false)
     }
 
     /// `machine`, with `drills` (`CadaclysmTool`s) tried against each round hole found --
@@ -13657,12 +15223,15 @@ impl CadaclysmJob {
         let guards: Vec<GdRef<CadaclysmTool>> = drill_list.iter().map(|t| t.bind()).collect();
         let refs: Vec<Option<&bs::Tool>> = guards.iter().map(|g| Some(&g.tool)).collect();
         let end_mill = end_mill.bind();
-        self.machined(&part, &[&end_mill.tool], &refs, stepover, stepdown, skin, peck)
+        self.machined(&part, &[&end_mill.tool], &refs, stepover, stepdown, skin, peck, false)
     }
 
     /// `machine_with_drills`, with `end_mills` (`CadaclysmTool`s, at least one) in place of
     /// the one end mill: what the first leaves (inside corners tighter than its radius)
     /// goes to the next. `drills` may be `[]`. An empty `end_mills` is refused.
+    /// `corner_relief` (default `false`) relieves those corners instead of reporting them:
+    /// the smallest end mill cuts a notch into the walls at each one, and the report's item
+    /// is then of kind `"relief"` rather than `"corner"`.
     #[func]
     #[allow(clippy::too_many_arguments)]
     fn machine_with_end_mills(
@@ -13674,6 +15243,7 @@ impl CadaclysmJob {
         #[opt(default = f64::NAN)] stepdown: f64,
         #[opt(default = 0.3)] skin: f64,
         #[opt(default = f64::NAN)] peck: f64,
+        #[opt(default = false)] corner_relief: bool,
     ) -> Option<Gd<CadaclysmReport>> {
         let end_mill_list =
             object_list::<CadaclysmTool>(&end_mills, "machine_with_end_mills: end_mills")?;
@@ -13682,7 +15252,7 @@ impl CadaclysmJob {
         let end_mill_refs: Vec<&bs::Tool> = end_mill_guards.iter().map(|g| &g.tool).collect();
         let guards: Vec<GdRef<CadaclysmTool>> = drill_list.iter().map(|t| t.bind()).collect();
         let refs: Vec<Option<&bs::Tool>> = guards.iter().map(|g| Some(&g.tool)).collect();
-        self.machined(&part, &end_mill_refs, &refs, stepover, stepdown, skin, peck)
+        self.machined(&part, &end_mill_refs, &refs, stepover, stepdown, skin, peck, corner_relief)
     }
 
     /// Every operation added to this job so far, in order -- whether added by `face`,

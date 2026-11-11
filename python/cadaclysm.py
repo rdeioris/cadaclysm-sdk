@@ -4071,8 +4071,7 @@ class Node:
     @property
     def brep(self) -> "Brep | None":
         """Its exact B-rep, for `cadaclysm_blacksmith.Solid.from_node` to operate on,
-        or `None` where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD
-        part). Shared with the scene, not copied; see `Brep`."""
+        or `None` where it has none (a mesh, a curve, a CSG body, an open OpenSCAD polyhedron, or an OpenSCAD file read without the kernel). Shared with the scene, not copied; see `Brep`."""
         pointer = _lib().cadaclysm_node_brep(self.scene._handle, self.index)
         return Brep(pointer) if pointer else None
 

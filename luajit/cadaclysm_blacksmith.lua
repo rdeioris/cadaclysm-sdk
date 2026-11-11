@@ -88,7 +88,7 @@ if not pcall(ffi.typeof, "struct CadaclysmBlacksmithMesh") then
 end
 
 --- This file's own version (the workspace's); `version()` is the loaded library's.
-M.__version__ = "0.13.1"
+M.__version__ = "0.14.0"
 
 --- What the ABI returns for "no such face" and uses for "the whole solid".
 M.NONE = 0xFFFFFFFF
@@ -288,6 +288,9 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_profile_from_loops", "cadaclysm_blacksmith_profile_close_loop", "cadaclysm_blacksmith_profile_polylines",
   "cadaclysm_blacksmith_profile_piece_count", "cadaclysm_blacksmith_profile_piece", "cadaclysm_blacksmith_profile_trim_count",
   "cadaclysm_blacksmith_profile_trim_chain",
+  "cadaclysm_blacksmith_profile_polyline", "cadaclysm_blacksmith_profile_arc", "cadaclysm_blacksmith_profile_arc_through",
+  "cadaclysm_blacksmith_profile_ellipse", "cadaclysm_blacksmith_profile_from_beziers", "cadaclysm_blacksmith_profile_bezier_count",
+  "cadaclysm_blacksmith_profile_beziers", "cadaclysm_blacksmith_profile_loops", "cadaclysm_blacksmith_profile_chain_order",
   "cadaclysm_blacksmith_path_begin", "cadaclysm_blacksmith_path_line_to", "cadaclysm_blacksmith_path_arc_to",
   "cadaclysm_blacksmith_path_bezier_to", "cadaclysm_blacksmith_path_conic_to", "cadaclysm_blacksmith_path_parabola_by_vertex",
   "cadaclysm_blacksmith_path_parabola_by_focus", "cadaclysm_blacksmith_path_parabola",
@@ -323,6 +326,13 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_mass_properties",
   "cadaclysm_blacksmith_oriented_box", "cadaclysm_blacksmith_edge_length", "cadaclysm_blacksmith_profile_length",
   "cadaclysm_blacksmith_classifier_new", "cadaclysm_blacksmith_classifier_contains", "cadaclysm_blacksmith_classifier_free",
+  "cadaclysm_blacksmith_closest_point", "cadaclysm_blacksmith_projector_new",
+  "cadaclysm_blacksmith_projector_closest_point", "cadaclysm_blacksmith_projector_free",
+  "cadaclysm_blacksmith_face_closest_point", "cadaclysm_blacksmith_edge_closest_point",
+  "cadaclysm_blacksmith_nurbs_curve_closest_point",
+  "cadaclysm_blacksmith_nurbs_curve_closest_point_within", "cadaclysm_blacksmith_nurbs_curve_closest_points",
+  "cadaclysm_blacksmith_curve_closest_points", "cadaclysm_blacksmith_projector_curve_closest_points",
+  "cadaclysm_blacksmith_nurbs_curve_closest_object",
   "cadaclysm_blacksmith_contains", "cadaclysm_blacksmith_closest",
   "cadaclysm_blacksmith_edge_point_at_length", "cadaclysm_blacksmith_edge_divide_by_count",
   "cadaclysm_blacksmith_edge_divide_by_length", "cadaclysm_blacksmith_profile_point_at_length",
@@ -354,6 +364,9 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_tessellation_face_triangles", "cadaclysm_blacksmith_tessellation_edge_polylines",
   "cadaclysm_blacksmith_bounds", "cadaclysm_blacksmith_bounds64", "cadaclysm_blacksmith_box", "cadaclysm_blacksmith_leaked_edges", "cadaclysm_blacksmith_unpaired_edges",
   "cadaclysm_blacksmith_manifold", "cadaclysm_blacksmith_step", "cadaclysm_blacksmith_sat_text",
+  "cadaclysm_blacksmith_face_round_radius", "cadaclysm_blacksmith_face_chamfer_distance",
+  "cadaclysm_blacksmith_edge_bezier_count", "cadaclysm_blacksmith_edge_beziers",
+  "cadaclysm_blacksmith_isocurve_bezier_count", "cadaclysm_blacksmith_isocurve_beziers", "cadaclysm_blacksmith_mesh_file",
   "cadaclysm_blacksmith_sat", "cadaclysm_blacksmith_brep_text", "cadaclysm_blacksmith_brep",
   "cadaclysm_blacksmith_string_free",
   "cadaclysm_blacksmith_3dm_bytes", "cadaclysm_blacksmith_3dm", "cadaclysm_blacksmith_assembly_3dm_bytes",
@@ -408,7 +421,7 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_job_free",
   "cadaclysm_blacksmith_programs_count", "cadaclysm_blacksmith_programs_tool", "cadaclysm_blacksmith_programs_name",
   "cadaclysm_blacksmith_programs_text", "cadaclysm_blacksmith_programs_free",
-  "cadaclysm_blacksmith_job_machine", "cadaclysm_blacksmith_job_machine_with",
+  "cadaclysm_blacksmith_job_machine", "cadaclysm_blacksmith_job_machine_with", "cadaclysm_blacksmith_job_machine_relieved",
   "cadaclysm_blacksmith_report_top", "cadaclysm_blacksmith_report_bottom", "cadaclysm_blacksmith_report_count", "cadaclysm_blacksmith_report_kind",
   "cadaclysm_blacksmith_report_at", "cadaclysm_blacksmith_report_size", "cadaclysm_blacksmith_report_reason",
   "cadaclysm_blacksmith_report_region", "cadaclysm_blacksmith_report_text", "cadaclysm_blacksmith_report_free",
@@ -490,8 +503,12 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_nurbs_curve_elevated",
   "cadaclysm_blacksmith_nurbs_curve_extended",
   "cadaclysm_blacksmith_nurbs_curve_face_hits",
+  "cadaclysm_blacksmith_nurbs_curve_fair",
+  "cadaclysm_blacksmith_nurbs_curve_faired",
   "cadaclysm_blacksmith_nurbs_curve_fit",
   "cadaclysm_blacksmith_nurbs_curve_free",
+  "cadaclysm_blacksmith_nurbs_curve_inflections",
+  "cadaclysm_blacksmith_nurbs_curve_knot_continuity",
   "cadaclysm_blacksmith_nurbs_curve_from_edge",
   "cadaclysm_blacksmith_nurbs_curve_from_face_isocurve",
   "cadaclysm_blacksmith_nurbs_curve_is_closed",
@@ -519,23 +536,32 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_edge_surface",
   "cadaclysm_blacksmith_network_surface",
   "cadaclysm_blacksmith_continuity",
+  "cadaclysm_blacksmith_edge_continuity",
+  "cadaclysm_blacksmith_surface_faired",
+  "cadaclysm_blacksmith_curvature_turns",
+  "cadaclysm_blacksmith_curvature_turn_points",
+  "cadaclysm_blacksmith_highlight_kink",
   "cadaclysm_blacksmith_match_side",
   "cadaclysm_blacksmith_blend_sides",
   "cadaclysm_blacksmith_n_sided_patch",
   "cadaclysm_blacksmith_fillet_surfaces",
   "cadaclysm_blacksmith_fillet_varying",
+  "cadaclysm_blacksmith_fillet_law",
   "cadaclysm_blacksmith_split_by_curve",
   "cadaclysm_blacksmith_trim_by_curve",
   "cadaclysm_blacksmith_join_sheets",
   "cadaclysm_blacksmith_flange",
   "cadaclysm_blacksmith_extrude_to",
   "cadaclysm_blacksmith_recess",
+  "cadaclysm_blacksmith_mirror_join",
+  "cadaclysm_blacksmith_split_along_curve", "cadaclysm_blacksmith_panel_gap", "cadaclysm_blacksmith_nurbs_curve_offset_on_sheet",
   "cadaclysm_blacksmith_document_new", "cadaclysm_blacksmith_document_load", "cadaclysm_blacksmith_document_save",
   "cadaclysm_blacksmith_document_apply", "cadaclysm_blacksmith_document_preview",
   "cadaclysm_blacksmith_document_preview_begin", "cadaclysm_blacksmith_document_end_preview",
   "cadaclysm_blacksmith_document_batch_begin", "cadaclysm_blacksmith_document_batch_end",
   "cadaclysm_blacksmith_document_batch_abort", "cadaclysm_blacksmith_document_undo", "cadaclysm_blacksmith_document_redo",
   "cadaclysm_blacksmith_document_params", "cadaclysm_blacksmith_document_evaluate",
+  "cadaclysm_blacksmith_document_evaluate_with",
   "cadaclysm_blacksmith_document_result_kind", "cadaclysm_blacksmith_document_result_solid",
   "cadaclysm_blacksmith_document_result_profile", "cadaclysm_blacksmith_document_result_profile_count",
   "cadaclysm_blacksmith_document_result_profile_at", "cadaclysm_blacksmith_document_result_nurbs_curve",
@@ -1553,6 +1579,105 @@ function Profile.from_loops(loops)
   return new_profile(lib().cadaclysm_blacksmith_profile_from_loops(handles, n))
 end
 
+--- A polyline through `points` ({{x, y}, ...}, at least two), closed back to the
+--- first when `closed`.
+function Profile.polyline(points, closed)
+  local xy, n = pairs_arg(points, "polyline")
+  return new_profile(lib().cadaclysm_blacksmith_profile_polyline(xy, n, closed and true or false), "profile_polyline")
+end
+
+--- The arc of the circle about `centre` ({x, y}) of radius `r` from angle `a0` to
+--- `a1` (radians); equal angles are the full circle.
+function Profile.arc(centre, r, a0, a1)
+  local cx, cy = pair(centre, "centre")
+  return new_profile(lib().cadaclysm_blacksmith_profile_arc(cx, cy, r, a0, a1), "profile_arc")
+end
+
+--- The arc from `start` to `end_` ({x, y} each) that passes `through`, whichever
+--- side it is on. Raises `BuildError` where the three points are in a line.
+function Profile.arc_through(start, through, end_)
+  local x0, y0 = pair(start, "start")
+  local xm, ym = pair(through, "through")
+  local x1, y1 = pair(end_, "end")
+  return new_profile(lib().cadaclysm_blacksmith_profile_arc_through(x0, y0, xm, ym, x1, y1), "profile_arc_through")
+end
+
+--- The ellipse about `centre` ({x, y}) with semi-axes `rx` along x and `ry` along y.
+function Profile.ellipse(centre, rx, ry)
+  local cx, cy = pair(centre, "centre")
+  return new_profile(lib().cadaclysm_blacksmith_profile_ellipse(cx, cy, rx, ry), "profile_ellipse")
+end
+
+--- A profile from flat Beziers (a list of numbers, sixteen a Bezier: four control
+--- points of x, y, z, w); `recognise` (default true) turns circles and lines back
+--- into arcs and segments.
+function Profile.from_beziers(beziers, recognise)
+  if recognise == nil then recognise = true end
+  local n = #beziers
+  local flat = ffi.new("double[?]", math.max(n, 1))
+  for i = 1, n do flat[i - 1] = number(beziers[i], "from_beziers") end
+  return new_profile(lib().cadaclysm_blacksmith_profile_from_beziers(flat, math.floor(n / 16), recognise and true or false),
+    "profile_from_beziers")
+end
+
+--- This curve as flat Beziers (a list of numbers, sixteen a Bezier), in its own
+--- x/y or carried onto `frame` (a Frame or twelve numbers).
+function Profile:beziers(frame)
+  local n = lib().cadaclysm_blacksmith_profile_bezier_count(self._handle)
+  local out = ffi.new("double[?]", 16 * n + 1)
+  if not lib().cadaclysm_blacksmith_profile_beziers(self._handle, frame ~= nil and frame_arg(frame) or nil, out) then
+    fail("profile_beziers")
+  end
+  local flat = {}
+  for i = 1, 16 * n do flat[i] = out[i - 1] end
+  return flat
+end
+
+do
+-- The pieces' handles for the loop calls: a C array, and how many.
+local function piece_handles(pieces, what)
+  local n = #pieces
+  local handles = ffi.new("const struct CadaclysmBlacksmithProfile *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = profile_handle(pieces[i], what) end
+  return handles, n
+end
+
+--- The closed loops the open `pieces` make end to end, each a list of piece
+--- indices (from zero) in order; a corner where three ends meet is ambiguous and
+--- closes no loop. `tolerance` defaults to 1e-6. Raises `BuildError` for a piece
+--- with holes or empty.
+function Profile.loops(pieces, tolerance)
+  if tolerance == nil then tolerance = 1e-6 end
+  local handles, n = piece_handles(pieces, "loops")
+  local out = ffi.new("uint32_t[?]", 2 * n + 1)
+  if not lib().cadaclysm_blacksmith_profile_loops(handles, n, tolerance, out) then fail("profile_loops") end
+  local loops, at = {}, 0
+  while at < 2 * n do
+    local len = tonumber(out[at])
+    at = at + 1
+    if len == 0 or at + len > 2 * n then break end
+    local loop = {}
+    for k = 1, len do loop[k] = tonumber(out[at + k - 1]) end
+    loops[#loops + 1] = loop
+    at = at + len
+  end
+  return loops
+end
+
+--- The order and direction `chain` would join `pieces` in: a list of
+--- `{ index, turned }` pairs, the index from zero, `turned` true where the piece is
+--- turned round. Raises `BuildError` for a piece that meets none of the others.
+function Profile.chain_order(pieces, tolerance)
+  if tolerance == nil then tolerance = 1e-6 end
+  local handles, n = piece_handles(pieces, "chain_order")
+  local out = ffi.new("uint32_t[?]", 2 * n + 1)
+  if not lib().cadaclysm_blacksmith_profile_chain_order(handles, n, tolerance, out) then fail("profile_chain_order") end
+  local order = {}
+  for i = 1, n do order[i] = { tonumber(out[2 * i - 2]), out[2 * i - 1] ~= 0 } end
+  return order
+end
+end
+
 --- This profile closed -- the forge's sketch "close": where its last segment
 --- stops short of its start (a path ended open), a straight segment back to it;
 --- where it already comes back to within 1e-9 of its extent, its last segment
@@ -2357,7 +2482,7 @@ local function from_brep(cadaclysm, node, what, missing_ok)
   if brep == nil then
     if missing_ok then return nil end
     raise(what .. " has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, "
-      .. "IGES, IFC), not a mesh, a curve or a CSG body")
+      .. "IGES, IFC, OpenSCAD), not a mesh, a curve or a CSG body")
   end
   local ok, handle = pcall(function()
     return lib().cadaclysm_blacksmith_from_brep(ffi.cast("const void *", brep.pointer), cadaclysm.Brep.layout_id())
@@ -2394,7 +2519,7 @@ function Solid.from_node(scene, node, placed)
 end
 
 --- The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS `.sat`,
---- Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it draws, in the
+--- Rhino `.3dm`, OCCT `.brep`, IGES, IFC or OpenSCAD file, read where it draws, in the
 --- file's own units and axes. A file drawing several bodies needs `body` (from
 --- zero, in drawing order) or `Solid.open_all`. Fillet and chamfer want line and
 --- circle edges; booleans take any surface, but the new edges they trace on a
@@ -2442,7 +2567,7 @@ function Solid.open_all(path)
   end
   if #solids == 0 then
     raise("open: the ." .. extension .. " file draws no B-rep body -- only a STEP, ACIS, Rhino, OCCT .brep, "
-      .. "IGES or IFC body can be a solid, not a mesh, a curve or a CSG body")
+      .. "IGES, IFC or OpenSCAD body can be a solid, not a mesh, a curve or a CSG body")
   end
   return solids
 end
@@ -2840,6 +2965,58 @@ function Solid_get.manifold(self)
   local row = {}
   for i = 0, 7 do row[i + 1] = out[i] end
   return Manifold.new(row)
+end
+
+--- The radius of the round face `face` belongs to -- a fillet's face that
+--- `unfillet` can take back -- 0 where it is none. Raises `BuildError` for a face
+--- the solid does not have.
+function Solid:face_round_radius(face)
+  local r = lib().cadaclysm_blacksmith_face_round_radius(self:_h(), face)
+  if r ~= r then fail("face_round_radius") end
+  return r
+end
+
+--- The distance of the chamfer face `face` belongs to -- a bevel `unchamfer` can
+--- take back -- 0 where it is none. Raises `BuildError` for a face the solid does
+--- not have.
+function Solid:face_chamfer_distance(face)
+  local d = lib().cadaclysm_blacksmith_face_chamfer_distance(self:_h(), face)
+  if d ~= d then fail("face_chamfer_distance") end
+  return d
+end
+
+--- The edges as rational cubic Beziers, a flat list of numbers, sixteen a Bezier
+--- (`x y z w` per control point, the point Cartesian and its weight beside it) --
+--- what a viewer draws the edges by: exact where an edge's curve has a Bezier
+--- form, flattened within `tolerance` where it has none (nil: the solid's
+--- effective tolerance).
+function Solid:edge_beziers(tolerance)
+  if tolerance == nil then tolerance = 0 / 0 end
+  local h = self:_h()
+  local n = 16 * lib().cadaclysm_blacksmith_edge_bezier_count(h, tolerance)
+  local out = ffi.new("double[?]", n + 1)   -- never empty: the fill refuses a null out
+  if not lib().cadaclysm_blacksmith_edge_beziers(h, tolerance, out) then fail("edge_beziers") end
+  local flat = {}
+  for i = 1, n do flat[i] = out[i - 1] end
+  return flat
+end
+
+--- The faces' isoparametric curves as rational cubic Beziers, sixteen numbers each
+--- as `edge_beziers` gives them: `density` (default 4) interior lines each way on
+--- every curved face, clipped to the face, plus the lines at the ends of its
+--- parameter span; a flat face draws none. Exact where the surface has a closed
+--- form for the line, flattened within `tolerance` elsewhere (nil: the solid's
+--- effective tolerance).
+function Solid:isocurve_beziers(density, tolerance)
+  if density == nil then density = 4 end
+  if tolerance == nil then tolerance = 0 / 0 end
+  local h = self:_h()
+  local n = 16 * lib().cadaclysm_blacksmith_isocurve_bezier_count(h, density, tolerance)
+  local out = ffi.new("double[?]", n + 1)
+  if not lib().cadaclysm_blacksmith_isocurve_beziers(h, density, tolerance, out) then fail("isocurve_beziers") end
+  local flat = {}
+  for i = 1, n do flat[i] = out[i - 1] end
+  return flat
 end
 
 -- ---- health and healing ----------------------------------------------------------
@@ -3997,6 +4174,287 @@ function Solid:closest(other, tolerance, progress)
   })
 end
 
+-- ---- closest point from a point ----------------------------------------------------
+
+--- The nearest point of a solid (or of one face) to a query point (`Solid:closest_point`,
+--- `Projector:closest_point`, `Solid:face_closest_point`). `point` ({x, y, z}) lies on the body's
+--- boundary and `distance` is from the query point to it. What it lies on is named as `Closest`
+--- names each side: `kind` ("face", "edge" or "vertex"), `index` (the kernel's id) and `edge`,
+--- the index `edges` uses (`edge_length`, `fillet` and `edge_closest_point` take it) for an edge
+--- foot, nil for a face, a vertex and an edge the fillet table does not hold -- read `edge`, not
+--- `index`. `uv` ({u, v}) is the face parameter of a foot inside a face, nil otherwise. `normal`
+--- is unit: a face foot's outward normal, an edge or vertex foot's direction from the foot to the
+--- query point, on the body the mean of the adjacent faces' outward normals. `refined` false is
+--- the mesh's answer, within `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`.
+--- A plain record; `==` compares every field.
+---@class PointFoot
+---@field point number[]     {x, y, z}
+---@field distance number
+---@field kind string        "face", "edge" or "vertex"
+---@field index integer      the kernel's id
+---@field edge integer|nil   the `edges` index, nil if none
+---@field uv number[]|nil    {u, v}, nil off a face
+---@field normal number[]    {x, y, z}, unit
+---@field refined boolean
+local PointFoot = {}
+PointFoot.__index = PointFoot
+M.PointFoot = PointFoot
+
+local function same_list(a, b)
+  if a == nil or b == nil then return a == b end
+  if #a ~= #b then return false end
+  for i = 1, #a do
+    if a[i] ~= b[i] then return false end
+  end
+  return true
+end
+
+PointFoot.__eq = function(a, b)
+  return a.distance == b.distance and a.kind == b.kind and a.index == b.index and a.edge == b.edge
+    and a.refined == b.refined and same_list(a.point, b.point) and same_list(a.uv, b.uv)
+    and same_list(a.normal, b.normal)
+end
+
+PointFoot.__tostring = function(self)
+  local p = self.point
+  return ("PointFoot(point=(%.12g, %.12g, %.12g), distance=%.12g, %s %d, edge=%s, refined=%s)"):format(p[1], p[2], p[3],
+    self.distance, self.kind, self.index, tostring(self.edge), tostring(self.refined))
+end
+
+-- A foot the library filled, copied out (`kind` is the library's static string, never freed), and
+-- nil as the NaN that means no limit or an unset tolerance.
+local point_foot_of, nan_or_number
+do
+  point_foot_of = function(f)
+    local uv = nil
+    if f.uv[0] == f.uv[0] and f.uv[1] == f.uv[1] then uv = { f.uv[0], f.uv[1] } end
+    return setmetatable({
+      point = { f.point[0], f.point[1], f.point[2] },
+      distance = f.distance,
+      kind = text(f.kind),
+      index = tonumber(f.index),
+      edge = f.edge ~= NONE and tonumber(f.edge) or nil,
+      uv = uv,
+      normal = { f.normal[0], f.normal[1], f.normal[2] },
+      refined = f.refined ~= 0,
+    }, PointFoot)
+  end
+  nan_or_number = function(v, what)
+    if v == nil then return 0 / 0 end
+    return number(v, what)
+  end
+end
+
+--- The nearest point of this solid's boundary to `p` ({x, y, z}), a `PointFoot`, or nil where it
+--- lies beyond `max_distance` (nil, NaN or math.huge: no limit; 0 finds a point on the body).
+--- `tolerance` -- absolute, in model units; nil (or 0, or NaN) is unset, which the tolerance
+--- policy resolves to the solid's effective tolerance -- sizes the mesh search only: a `refined`
+--- false answer is within `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`. Meshes
+--- the body on every call; for more than a few points build a `projector` once. Raises for a
+--- point not finite, a negative `max_distance`, or a negative or infinite `tolerance`.
+---@param p number[]
+---@param max_distance number|nil
+---@param tolerance number|nil
+---@return PointFoot|nil
+function Solid:closest_point(p, max_distance, tolerance)
+  local w = "closest_point"
+  local out = ffi.new("CadaclysmBlacksmithPointFoot[1]")
+  local found = lib().cadaclysm_blacksmith_closest_point(self:_h(), doubles(p, 3, w), nan_or_number(max_distance, w),
+    nan_or_number(tolerance, w), out)
+  if found < 0 then fail(w) end
+  if found == 0 then return nil end
+  return point_foot_of(out[0])
+end
+
+local function free_projector(h) lib().cadaclysm_blacksmith_projector_free(h) end
+
+--- One solid's reusable nearest-point search (`Solid:projector`), keeping the mesh, its search
+--- tree and each face's trim judge between queries. It keeps its own reference to the body, so it
+--- goes on answering after its `Solid` is closed. Calls on one projector take turns (a lock inside
+--- the library). `close()` frees this handle; so does the garbage collector.
+---@class Projector
+local Projector = {}
+local Projector_get = {}
+class(Projector, Projector_get)
+M.Projector = Projector
+
+--- Whether `close()` has been called.
+function Projector_get.closed(self)
+  return rawget(self, "_ptr") == nil
+end
+
+--- A projector for this solid at `tolerance` (nil, 0 or NaN: unset, the solid's effective
+--- tolerance): the body meshed once, then asked `Projector:closest_point` point after point. Open
+--- bodies and sheets are accepted. Raises for a negative or infinite `tolerance`.
+---@param tolerance number|nil
+---@return Projector
+function Solid:projector(tolerance)
+  local h = lib().cadaclysm_blacksmith_projector_new(self:_h(), nan_or_number(tolerance, "projector_new"))
+  checked(h, "projector_new")
+  return setmetatable({ _ptr = ffi.gc(h, free_projector) }, Projector)
+end
+
+--- Free the projector. Idempotent.
+function Projector:close()
+  local h = rawget(self, "_ptr")
+  if h ~= nil then
+    self._ptr = nil
+    ffi.gc(h, nil)
+    free_projector(h)
+  end
+end
+
+function Projector:_h()
+  local h = rawget(self, "_ptr")
+  if h == nil then raise("projector: closed") end
+  return h
+end
+
+--- The nearest point of the body's boundary to `p` ({x, y, z}), a `PointFoot`, or nil beyond
+--- `max_distance` (nil, NaN or math.huge: no limit) -- `Solid:closest_point`'s answer, at the
+--- projector's tolerance. Raises for a point not finite or a negative `max_distance`.
+---@param p number[]
+---@param max_distance number|nil
+---@return PointFoot|nil
+function Projector:closest_point(p, max_distance)
+  local w = "projector_closest_point"
+  local h = self:_h()
+  local out = ffi.new("CadaclysmBlacksmithPointFoot[1]")
+  local found = lib().cadaclysm_blacksmith_projector_closest_point(h, doubles(p, 3, w), nan_or_number(max_distance, w), out)
+  if found < 0 then fail(w) end
+  if found == 0 then return nil end
+  return point_foot_of(out[0])
+end
+
+--- The nearest point to `p` ({x, y, z}) of face `face` alone, inside its trims or on its boundary,
+--- a `PointFoot`: exact, no mesh, always `refined`. Raises for a face past the end or a point not
+--- finite.
+---@param face integer
+---@param p number[]
+---@return PointFoot
+function Solid:face_closest_point(face, p)
+  local w = "face_closest_point"
+  if type(face) ~= "number" or face < 0 or face > 4294967295 or face ~= math.floor(face) then
+    raise(w .. ": face must be an index, got " .. repr(face))
+  end
+  local out = ffi.new("CadaclysmBlacksmithPointFoot[1]")
+  if lib().cadaclysm_blacksmith_face_closest_point(self:_h(), face, doubles(p, 3, w), out) < 0 then fail(w) end
+  return point_foot_of(out[0])
+end
+
+--- The nearest point to `p` ({x, y, z}) of edge `edge` (the index `edges` uses, a `PointFoot`'s
+--- `edge`) on its own curve over its range, as three values: `t`, the curve's parameter as
+--- `edge_point_at_length` gives it, the point {x, y, z} and its distance from `p`. Exact. Raises
+--- for an edge past the end, one with no exact curve, or a point not finite.
+---@param edge integer
+---@param p number[]
+---@return number t
+---@return number[] point
+---@return number distance
+function Solid:edge_closest_point(edge, p)
+  local w = "edge_closest_point"
+  local out = ffi.new("double[5]")
+  if lib().cadaclysm_blacksmith_edge_closest_point(self:_h(), edge_index(edge, w), doubles(p, 3, w), out) < 0 then fail(w) end
+  return out[0], { out[1], out[2], out[3] }, out[4]
+end
+
+-- ---- closest points from a curve: a solid's and a projector's side -------------------------
+
+--- The nearest points of a curve and a solid's boundary (`Solid:curve_closest_points`,
+--- `Projector:curve_closest_points`, and a `NearestObject`'s answer for a solid or a projector):
+--- `point_on_curve` ({x, y, z}) at the curve's parameter `t`, `point_on_body` on the boundary,
+--- `distance` apart. `crossing` is true where the curve passes through the boundary: `distance` is
+--- then exactly 0 and the earliest crossing in `t` answers. The body's side is named as `PointFoot`
+--- names its point: `kind`, `index` (the kernel's id), `edge` (the `edges` index; read it, not
+--- `index`; nil otherwise), `uv` nil off a face, `normal` unit, `refined` false the mesh's answer.
+--- A plain record; `==` compares every field.
+---@class CurveBodyFoot
+---@field distance number
+---@field t number
+---@field point_on_curve number[]  {x, y, z}
+---@field point_on_body number[]   {x, y, z}
+---@field kind string              "face", "edge" or "vertex"
+---@field index integer            the kernel's id
+---@field edge integer|nil         the `edges` index, nil if none
+---@field uv number[]|nil          {u, v}, nil off a face
+---@field normal number[]          {x, y, z}, unit
+---@field refined boolean
+---@field crossing boolean
+local CurveBodyFoot = {}
+CurveBodyFoot.__index = CurveBodyFoot
+M.CurveBodyFoot = CurveBodyFoot
+
+CurveBodyFoot.__eq = function(a, b)
+  return a.distance == b.distance and a.t == b.t and a.kind == b.kind and a.index == b.index and a.edge == b.edge
+    and a.refined == b.refined and a.crossing == b.crossing and same_list(a.point_on_curve, b.point_on_curve)
+    and same_list(a.point_on_body, b.point_on_body) and same_list(a.uv, b.uv) and same_list(a.normal, b.normal)
+end
+
+CurveBodyFoot.__tostring = function(self)
+  return ("CurveBodyFoot(distance=%.12g, t=%.12g, %s %d, edge=%s, crossing=%s)"):format(self.distance, self.t, self.kind,
+    self.index, tostring(self.edge), tostring(self.crossing))
+end
+
+-- A curve-body foot the library filled, copied out; NurbsCurve:closest_object reads its winner's
+-- with it too.
+M._curve_body_foot_of = function(f)
+  local body = point_foot_of(f.body)
+  return setmetatable({
+    distance = f.distance,
+    t = f.t,
+    point_on_curve = { f.point_on_curve[0], f.point_on_curve[1], f.point_on_curve[2] },
+    point_on_body = body.point,
+    kind = body.kind,
+    index = body.index,
+    edge = body.edge,
+    uv = body.uv,
+    normal = body.normal,
+    refined = body.refined,
+    crossing = f.crossing ~= 0,
+  }, CurveBodyFoot)
+end
+
+--- The nearest points of `curve` (a `NurbsCurve`) and this solid's boundary, a `CurveBodyFoot`, or
+--- nil where the body lies beyond `max_distance` (nil, NaN or math.huge: no limit). `crossing` is
+--- true, distance 0, where the curve passes through the boundary (the earliest crossing in `t`).
+--- `tolerance` -- absolute, in model units; nil (or 0, or NaN) is unset, the solid's effective
+--- tolerance -- sizes the march along the curve and the mesh search: a `refined` false answer is
+--- within `[d - 2/3 tolerance, d + tolerance]` of the true distance `d`. Meshes the body on every
+--- call; for more than a few curves build a `projector` once. Raises for a negative
+--- `max_distance`, a negative or infinite `tolerance`, or a curve too long for the tolerance.
+---@param curve NurbsCurve
+---@param max_distance number|nil
+---@param tolerance number|nil
+---@return CurveBodyFoot|nil
+function Solid:curve_closest_points(curve, max_distance, tolerance)
+  local w = "curve_closest_points"
+  if type(curve) ~= "table" or getmetatable(curve) ~= M.NurbsCurve then raise(w .. ": expected a NurbsCurve, got " .. repr(curve)) end
+  local out = ffi.new("CadaclysmBlacksmithCurveBodyFoot[1]")
+  local found = lib().cadaclysm_blacksmith_curve_closest_points(self:_h(), rawget(curve, "_ptr"), nan_or_number(max_distance, w),
+    nan_or_number(tolerance, w), out)
+  if found < 0 then fail(w) end
+  if found == 0 then return nil end
+  return M._curve_body_foot_of(out[0])
+end
+
+--- The nearest points of `curve` (a `NurbsCurve`) and the body's boundary, a `CurveBodyFoot`, or
+--- nil beyond `max_distance` (nil, NaN or math.huge: no limit) -- `Solid:curve_closest_points`'s
+--- answer, at the projector's tolerance. The projector's lock is held for the whole curve query:
+--- other threads asking it wait. Raises for a negative `max_distance`.
+---@param curve NurbsCurve
+---@param max_distance number|nil
+---@return CurveBodyFoot|nil
+function Projector:curve_closest_points(curve, max_distance)
+  local w = "projector_curve_closest_points"
+  local h = self:_h()
+  if type(curve) ~= "table" or getmetatable(curve) ~= M.NurbsCurve then raise(w .. ": expected a NurbsCurve, got " .. repr(curve)) end
+  local out = ffi.new("CadaclysmBlacksmithCurveBodyFoot[1]")
+  local found = lib().cadaclysm_blacksmith_projector_curve_closest_points(h, rawget(curve, "_ptr"), nan_or_number(max_distance, w), out)
+  if found < 0 then fail(w) end
+  if found == 0 then return nil end
+  return M._curve_body_foot_of(out[0])
+end
+
 end
 
 --- Face `face` by what it is, eight numbers: the surface's kind (plane 0,
@@ -4543,6 +5001,25 @@ function Solid:fillet(edges, radius, tolerance, progress, radius_end)
   local cb, done = progress_callback(progress)
   local h = done(lib().cadaclysm_blacksmith_fillet(a, arr, n, radius, tolerance, cb, nil))
   return new_solid(h)
+end
+
+--- A chain of spline edges rounded with the radius following a law along it: `law` is the
+--- radius at stations along the chain, each `{ share, radius }` -- the share of the chain's arc
+--- length from its start, 0 to 1 -- run through smoothly by a monotone cubic, so the radius
+--- never swings past its stations, and held flat before the first station and after the last.
+--- `edges` (`Edge` records or their indices) must run end to end into one open chain, each
+--- running on tangent into the next; the chain runs the way the first edge's curve does. One
+--- edge is a chain of one. `tolerance` (default 1e-6) is the fillet surfaces' fit.
+function Solid:fillet_law(edges, law, tolerance)
+  if tolerance == nil then tolerance = 1e-6 end
+  local arr, n = edge_indices(edges, "fillet_law")
+  local count = #law
+  local shares, radii = ffi.new("double[?]", math.max(count, 1)), ffi.new("double[?]", math.max(count, 1))
+  for i, station in ipairs(law) do
+    shares[i - 1] = number(station[1], "fillet_law")
+    radii[i - 1] = number(station[2], "fillet_law")
+  end
+  return new_solid(lib().cadaclysm_blacksmith_fillet_law(self:_h(), arr, n, shares, radii, count, tolerance))
 end
 
 --- `fillet` with a flat bevel: each edge cut back `distance` along both its faces.
@@ -9133,6 +9610,50 @@ function M.rhino3dm_bytes(solids, unit)
   return dm3.taken(lib().cadaclysm_blacksmith_3dm_bytes(handles, n, UNITS[unit], len), len, "3dm_bytes")
 end
 
+--- Several solids meshed at `tolerance` (nil: each one's effective tolerance) --
+--- each the mesh `Solid:mesh` hands out -- as one file's bytes (a Lua string) in
+--- `format` (default "stl"): "stl" (binary, every solid in one body), "stl-ascii"
+--- (one body named as the first solid), "obj" (one named object a solid, no
+--- material library), "glb" or "gltf" (one named node a solid in a material of
+--- its own; the .gltf with its buffer embedded). `names` one a solid (nil: each
+--- solid's own name, else "Solid 1", "Solid 2", ...). `looks` one a solid, six
+--- numbers each -- linear {r, g, b, a, metallic, roughness} in 0..1 -- the glTF's
+--- materials (nil: each solid's own colour); STL and OBJ ignore them.
+function M.mesh_file(solids, format, names, looks, tolerance)
+  if format == nil then format = "stl" end
+  if tolerance == nil then tolerance = 0 / 0 end
+  local n = #solids
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle(solids[i], "mesh_file") end
+  local c_names = nil
+  local keep = {}   -- the Lua strings the C array points into, alive across the call
+  if names ~= nil then
+    if #names ~= n then raise(("mesh_file: %d names for %d solids"):format(#names, n)) end
+    c_names = ffi.new("const char *[?]", math.max(n, 1))
+    for i = 1, n do
+      keep[i] = tostring(names[i])
+      c_names[i - 1] = keep[i]
+    end
+  end
+  local c_looks = nil
+  if looks ~= nil then
+    local flat = {}
+    for _, look in ipairs(looks) do
+      for _, v in ipairs(look) do flat[#flat + 1] = v end
+    end
+    if #flat ~= 6 * n then raise(("mesh_file: %d look values for %d solids -- 6 a solid"):format(#flat, n)) end
+    c_looks = ffi.new("double[?]", math.max(#flat, 1))
+    for i = 1, #flat do c_looks[i - 1] = flat[i] end
+  end
+  local len = ffi.new("size_t[1]")
+  local raw = lib().cadaclysm_blacksmith_mesh_file(handles, n, tostring(format), c_names, c_looks, tolerance, len)
+  if raw == nil then fail("mesh_file") end
+  local size = tonumber(len[0])
+  local result = ffi.string(raw, size)
+  lib().cadaclysm_blacksmith_bytes_free(raw, size)
+  return result
+end
+
 --- `rhino3dm_bytes` written to `path` by the library itself, which names the
 --- file in its refusal when it cannot.
 function M.write_3dm(path, solids, unit)
@@ -9991,9 +10512,10 @@ Operation.__tostring = function(self)
   return ("Operation(kind=%s, tool=%d, params={%s})"):format(self.kind, self.tool, table.concat(parts, ", "))
 end
 
---- One thing `Job:machine` left uncut: `kind` ("corner", "hole", "slope", "undercut" or
---- "too_deep"), `at` ({x, y, z}), `size` (its meaning per `kind`), `reason` (one sentence
---- naming the tool involved), `top` and `bottom` (the Z range it stands over: a corner's
+--- One thing `Job:machine` left uncut: `kind` ("corner", "hole", "slope", "undercut",
+--- "too_deep" or "relief"), `at` ({x, y, z}), `size` (its meaning per `kind`; for a relief,
+--- how far the notch reaches into each wall, in mm), `reason` (one sentence naming the tool
+--- involved), `top` and `bottom` (the Z range it stands over: a corner's
 --- band, a hole's depth, a slope's span, or for `too_deep` the flutes' reach down to the
 --- level), and `region` (its XY area, as a table of `Profile`). Copied out; read-only.
 ---@class ReportItem
@@ -10272,10 +10794,13 @@ end
 --- `stepover` and `stepdown` default to the kernel's own (nil asks for that); `skin` (at
 --- least 0, default 0.3) is how far above the part's lowest point the outline stops, so
 --- the part stays attached to the stock -- 0 cuts through; `peck` defaults to none (a
---- drill straight to depth). Returns a `Report` of what could not be cut. Raises
+--- drill straight to depth). `corner_relief` (default false) cuts a notch into the walls at
+--- each corner the last end mill could not reach, rather than leaving it uncut; those are
+--- then reported with kind `relief` instead of `corner`, and a single `Tool` relieved goes
+--- over as a list of one. Returns a `Report` of what could not be cut. Raises
 --- `BuildError` for what the kernel refuses (a drill as `end_mill`, ...); the job changes
 --- only on success -- a refusal leaves it exactly as it was.
-function Job:machine(part, end_mill, drills, stepover, stepdown, skin, peck)
+function Job:machine(part, end_mill, drills, stepover, stepdown, skin, peck, corner_relief)
   if drills == nil then drills = {} end
   if skin == nil then skin = 0.3 end
   local list = drills
@@ -10286,6 +10811,7 @@ function Job:machine(part, end_mill, drills, stepover, stepdown, skin, peck)
   local handles = ffi.new("const struct CadaclysmBlacksmithTool *[?]", math.max(n, 1))
   for i = 1, n do handles[i - 1] = tool_handle(list[i], "machine") end
   local raw
+  if corner_relief and type(end_mill) == "table" and getmetatable(end_mill) == Tool then end_mill = { end_mill } end
   if type(end_mill) == "table" and getmetatable(end_mill) ~= Tool then
     -- A table of end mills, counted by its keys (`#` stops at a hole, so `{ a, nil, c }`
     -- could read as one tool): a hole is a nil tool, refused at its place.
@@ -10302,9 +10828,15 @@ function Job:machine(part, end_mill, drills, stepover, stepdown, skin, peck)
       if type(e) ~= "table" or getmetatable(e) ~= Tool then raise(("machine: end_mill[%d] must be a Tool, got %s"):format(i, repr(e))) end
       ends[i - 1] = e._handle
     end
-    raw = lib().cadaclysm_blacksmith_job_machine_with(h, ph, ends, m, handles, n, or_nan(stepover), or_nan(stepdown), skin,
-      or_nan(peck))
-    if raw == nil then fail("job_machine_with") end
+    if corner_relief then
+      raw = lib().cadaclysm_blacksmith_job_machine_relieved(h, ph, ends, m, handles, n, or_nan(stepover), or_nan(stepdown),
+        skin, or_nan(peck), true)
+      if raw == nil then fail("job_machine_relieved") end
+    else
+      raw = lib().cadaclysm_blacksmith_job_machine_with(h, ph, ends, m, handles, n, or_nan(stepover), or_nan(stepdown), skin,
+        or_nan(peck))
+      if raw == nil then fail("job_machine_with") end
+    end
   else
     local eh = tool_handle(end_mill, "machine")
     raw = lib().cadaclysm_blacksmith_job_machine(h, ph, eh, handles, n, or_nan(stepover), or_nan(stepdown), skin,
@@ -11455,6 +11987,31 @@ Curvature.__tostring = function(self)
     ("(%.6g, %.6g, %.6g)"):format(self.centre[1], self.centre[2], self.centre[3]) or "nil")
 end
 
+--- How smoothly a curve runs through its own knots (`NurbsCurve:knot_continuity`; a closed
+--- curve's seam among them): the largest turn of its tangent in radians (`angle`) and the
+--- largest jump of its curvature vector `kappa * normal` (`curvature`), each with the parameter
+--- (`angle_parameter`, `curvature_parameter`) and the point (`angle_at`, `curvature_at`: three
+--- numbers) it was found at. A curve with no inner knot reads zero at its start.
+---@class KnotContinuity
+---@field angle number
+---@field angle_parameter number
+---@field angle_at number[]      three
+---@field curvature number
+---@field curvature_parameter number
+---@field curvature_at number[]  three
+local KnotContinuity = {}
+class(KnotContinuity)
+callable(KnotContinuity)
+M.KnotContinuity = KnotContinuity
+
+function KnotContinuity.new(fields)
+  return setmetatable(fields, KnotContinuity)
+end
+
+KnotContinuity.__tostring = function(self)
+  return ("KnotContinuity(angle=%.3g, curvature=%.3g)"):format(self.angle, self.curvature)
+end
+
 local function c_slice(out, i, j)
   local r = {}
   for k = i, j do r[#r + 1] = out[k] end
@@ -11569,7 +12126,7 @@ local function free_curve(h) lib().cadaclysm_blacksmith_nurbs_curve_free(h) end
 ---@field domain number[]            {first, last}
 ---@field is_rational boolean
 ---@field is_closed boolean          the answer, not a flag
----@field fit_error number|nil       set only on curves from `fit`, `projected_to_face`, `pulled_to_face`
+---@field fit_error number|nil       set only on curves from `fit`, `fair`, `faired`, `projected_to_face`, `pulled_to_face`
 local NurbsCurve = {}
 local NurbsCurve_get = {}
 class(NurbsCurve, NurbsCurve_get)
@@ -11680,6 +12237,39 @@ function NurbsCurve.fit(points, degree, tolerance)
   local h = lib().cadaclysm_blacksmith_nurbs_curve_fit(xyz, n, index_u32(default(degree, 3), "nurbs_curve_fit", "degree"),
     tol(default(tolerance, 1e-3), "nurbs_curve_fit"), err)
   return curve_of(h, "nurbs_curve_fit", err[0])
+end
+
+-- A fair's `no_inflection` as the C ABI takes it: the flag and the span's two ends, NaN for an
+-- open (nil) one. nil or false is off, true the whole curve, `{ from, to }` a span.
+local function no_inflection_of(span, what)
+  if span == nil or span == false then return false, 0, 0 end
+  if span == true then return true, 0 / 0, 0 / 0 end
+  if type(span) ~= "table" then raise(what .. ": no_inflection is nil, a boolean or { from, to }, got " .. repr(span)) end
+  local lo, hi = span[1], span[2]
+  return true, lo == nil and 0 / 0 or number(lo, what), hi == nil and 0 / 0 or number(hi, what)
+end
+
+--- The smoothest curve of `degree` (3 to 7, default 5) within `tolerance` (default 1e-3; 0 asks
+--- for the effective one) of every point, through the first and the last: least squares
+--- plus the curvature's derivative squared, weighed as heavily as the tolerance allows. Where
+--- `fit` follows the points' noise, this spends the tolerance on a calm curvature comb.
+--- `no_inflection` true keeps the curvature from turning over anywhere; `{ i, j }` (point
+--- indices from 0, fractions between points, nil an open end -- `{ 4, nil }` from point 4 on)
+--- only between those points. Raises `BuildError` where no such curve is within the tolerance.
+--- Its `fit_error` is the largest distance from a point to it.
+---@param points number[][]
+---@param degree integer|nil
+---@param tolerance number|nil
+---@param no_inflection boolean|number[]|nil
+---@return NurbsCurve
+function NurbsCurve.fair(points, degree, tolerance, no_inflection)
+  local w = "nurbs_curve_fair"
+  local xyz, n = xyz_of(points, w)
+  local held, lo, hi = no_inflection_of(no_inflection, w)
+  local err = ffi.new("double[1]")
+  local h = lib().cadaclysm_blacksmith_nurbs_curve_fair(xyz, n, index_u32(default(degree, 5), w, "degree"),
+    tol(default(tolerance, 1e-3), w), held, lo, hi, err)
+  return curve_of(h, w, err[0])
 end
 
 --- Edge `edge` (an `Edge` or its index) of `solid` as an exact NURBS over the edge's own span
@@ -11834,6 +12424,23 @@ function NurbsCurve:pulled_to_face(solid, face, tolerance)
   return curve_of(h, w, err[0])
 end
 
+--- This curve, lying on the sheet `solid` (any of its faces, within ten times `tolerance`), offset
+--- `distance` along it: each point walked that far across the sheet, square to the curve -- left of
+--- its run seen from the outward side for a positive distance -- over the seams of a joined sheet,
+--- and fitted within `tolerance`. `fit_error` is the larger of the fit's error and its distance
+--- off the sheet. Refused where the curve does not lie on the sheet. `tolerance` defaults to 1e-3.
+---@param solid Solid
+---@param distance number
+---@param tolerance number|nil
+---@return NurbsCurve
+function NurbsCurve:offset_on_sheet(solid, distance, tolerance)
+  local w = "nurbs_curve_offset_on_sheet"
+  local err = ffi.new("double[1]")
+  local h = lib().cadaclysm_blacksmith_nurbs_curve_offset_on_sheet(curve_handle(self, w), solid_handle(solid, w),
+    number(distance, w), tol(default(tolerance, 1e-3), w), err)
+  return curve_of(h, w, err[0])
+end
+
 --- The same curve run the other way over the same domain.
 ---@return NurbsCurve
 function NurbsCurve:reversed()
@@ -11947,6 +12554,169 @@ function NurbsCurve:point(t)
   return { out[0], out[1], out[2] }
 end
 
+--- The `CurveFoot` nearest `p` ({x, y, z}) over the curve's whole domain: `unique` is false where
+--- another point of the curve is as near (a point on a circle's axis) and `point` is a pick among
+--- them. Exact. nil where it lies beyond `max_distance` (nil, NaN or math.huge: no limit, the same
+--- answer as with none). Raises for a point not finite or a negative `max_distance`.
+---@param p number[]
+---@param max_distance number|nil
+---@return CurveFoot|nil
+function NurbsCurve:closest_point(p, max_distance)
+  local out = ffi.new("double[5]")
+  if max_distance == nil then
+    local w = "nurbs_curve_closest_point"
+    if lib().cadaclysm_blacksmith_nurbs_curve_closest_point(curve_handle(self, w), point3(p, w), out) < 0 then fail(w) end
+  else
+    local w = "nurbs_curve_closest_point_within"
+    local found = lib().cadaclysm_blacksmith_nurbs_curve_closest_point_within(curve_handle(self, w), point3(p, w),
+      number(max_distance, w), out)
+    if found < 0 then fail(w) end
+    if found == 0 then return nil end
+  end
+  return M.CurveFoot.new(out[0], { out[1], out[2], out[3] }, out[4] ~= 0)
+end
+
+-- ---- closest points from a curve: two curves and the nearest object ------------------------
+do
+local function same_xyz(a, b) return a[1] == b[1] and a[2] == b[2] and a[3] == b[3] end
+local function xyz(v) return { v[0], v[1], v[2] } end
+
+--- The nearest points of two curves (`NurbsCurve:closest_points`, and a `NearestObject`'s answer
+--- for a curve): `point_a` ({x, y, z}) on the curve asked at its parameter `t_a`, `point_b` on the
+--- other at `t_b`, `distance` apart (0 where they cross). Exact. A plain record; `==` compares
+--- every field.
+---@class CurvePair
+---@field distance number
+---@field t_a number
+---@field point_a number[]  {x, y, z}
+---@field t_b number
+---@field point_b number[]  {x, y, z}
+local CurvePair = {}
+CurvePair.__index = CurvePair
+M.CurvePair = CurvePair
+CurvePair.__eq = function(a, b)
+  return a.distance == b.distance and a.t_a == b.t_a and a.t_b == b.t_b and same_xyz(a.point_a, b.point_a)
+    and same_xyz(a.point_b, b.point_b)
+end
+CurvePair.__tostring = function(self)
+  return ("CurvePair(distance=%.12g, t_a=%.12g, t_b=%.12g)"):format(self.distance, self.t_a, self.t_b)
+end
+local function curve_pair_of(r)
+  return setmetatable({ distance = r.distance, t_a = r.t_a, point_a = xyz(r.point_a), t_b = r.t_b, point_b = xyz(r.point_b) },
+    CurvePair)
+end
+
+--- The nearest of a list of things to a curve (`NurbsCurve:closest_object`): `which` the item's
+--- index in the list, from zero, `distance` from `point_on_curve` ({x, y, z}, at the curve's
+--- parameter `t`) to `point_on_item`, and `answer`, the item's own answer: a `CurveBodyFoot` for a
+--- solid or a projector, a `CurvePair` (side `a` the curve asked) for a curve, nil for a point.
+---@class NearestObject
+---@field which integer                         from zero
+---@field distance number
+---@field t number
+---@field point_on_curve number[]               {x, y, z}
+---@field point_on_item number[]                {x, y, z}
+---@field answer CurveBodyFoot|CurvePair|nil
+local NearestObject = {}
+NearestObject.__index = NearestObject
+M.NearestObject = NearestObject
+NearestObject.__tostring = function(self)
+  return ("NearestObject(which=%d, distance=%.12g, t=%.12g, answer=%s)"):format(self.which, self.distance, self.t,
+    tostring(self.answer))
+end
+
+--- The nearest points of this curve and `other` (a `NurbsCurve`), a `CurvePair` (side `a` this
+--- curve, distance 0 where they cross; among equal distances the smallest `t_a`, then `t_b`), or
+--- nil where they lie farther apart than `max_distance` (nil, NaN or math.huge: no limit). Exact.
+--- Raises for a negative `max_distance`.
+---@param other NurbsCurve
+---@param max_distance number|nil
+---@return CurvePair|nil
+function NurbsCurve:closest_points(other, max_distance)
+  local w = "nurbs_curve_closest_points"
+  local out = ffi.new("CadaclysmBlacksmithCurvePair[1]")
+  local found = lib().cadaclysm_blacksmith_nurbs_curve_closest_points(curve_handle(self, w), curve_handle(other, w),
+    max_distance == nil and 0 / 0 or number(max_distance, w), out)
+  if found < 0 then fail(w) end
+  if found == 0 then return nil end
+  return curve_pair_of(out[0])
+end
+
+--- The item of `items` nearest to this curve, a `NearestObject` -- `which` its index, from zero --
+--- or nil where none lies within `max_distance` (nil, NaN or math.huge: no limit) or the list is
+--- empty. Each item is a `Solid`, a `NurbsCurve`, a `Projector` or a point ({x, y, z}). Items are
+--- asked in order, each with the best distance so far as its limit; equal distances go to the
+--- earlier item. `tolerance` (nil, 0 or NaN: each solid's effective tolerance) sizes each solid's
+--- search; a projector keeps its own, and its lock is held for the whole curve query. Raises for an
+--- item of none of those kinds or a point not finite (naming `item <i>`, from zero), a negative
+--- `max_distance`, a negative or infinite `tolerance`, or a body's own refusal.
+---@param items any[]
+---@param max_distance number|nil
+---@param tolerance number|nil
+---@return NearestObject|nil
+function NurbsCurve:closest_object(items, max_distance, tolerance)
+  local w = "nurbs_curve_closest_object"
+  local h = curve_handle(self, w)
+  if type(items) ~= "table" then raise(w .. ": expected a list of items, got " .. repr(items)) end
+  local n = #items
+  local kinds = ffi.new("uint8_t[?]", math.max(n, 1))
+  local solids, curves, points, projectors = {}, {}, {}, {}
+  for i = 1, n do
+    local item = items[i]
+    local mt = type(item) == "table" and getmetatable(item) or nil
+    if mt == Solid then
+      kinds[i - 1] = 0
+      solids[#solids + 1] = solid_handle(item, w)
+    elseif mt == NurbsCurve then
+      kinds[i - 1] = 1
+      curves[#curves + 1] = rawget(item, "_ptr")
+    elseif mt == M.Projector then
+      kinds[i - 1] = 3
+      projectors[#projectors + 1] = item:_h()
+    elseif mt == nil and type(item) == "table" and #item == 3 and type(item[1]) == "number" and type(item[2]) == "number"
+      and type(item[3]) == "number" then
+      kinds[i - 1] = 2
+      points[#points + 1] = item
+    else
+      raise(("%s: item %d: not a Solid, a NurbsCurve, a Projector or a point of 3 numbers, got %s"):format(w, i - 1, repr(item)))
+    end
+  end
+  local function handles(list, ctype)
+    local out = ffi.new(ctype .. "[?]", math.max(#list, 1))
+    for i = 1, #list do out[i - 1] = list[i] end
+    return out
+  end
+  local flat = ffi.new("double[?]", math.max(3 * #points, 1))
+  for i = 1, #points do
+    flat[3 * i - 3], flat[3 * i - 2], flat[3 * i - 1] = points[i][1], points[i][2], points[i][3]
+  end
+  local out = ffi.new("CadaclysmBlacksmithNearestObject[1]")
+  -- `items` holds every owner, so each handle stays alive through the call.
+  local found = lib().cadaclysm_blacksmith_nurbs_curve_closest_object(h, kinds, n,
+    handles(solids, "const CadaclysmBlacksmithSolid *"), #solids, handles(curves, "const CadaclysmBlacksmithNurbsCurve *"), #curves,
+    flat, #points, handles(projectors, "const CadaclysmBlacksmithProjector *"), #projectors,
+    max_distance == nil and 0 / 0 or number(max_distance, w), tolerance == nil and 0 / 0 or number(tolerance, w), out)
+  if found < 0 then fail(w) end
+  if found == 0 then return nil end
+  local r = out[0]
+  -- Only the member `answer_kind` names is read: the other is zero bytes, its `kind` a null pointer.
+  local answer = nil
+  if r.answer_kind == 0 then
+    answer = M._curve_body_foot_of(r.body)
+  elseif r.answer_kind == 1 then
+    answer = curve_pair_of(r.pair)
+  end
+  return setmetatable({
+    which = tonumber(r.which),
+    distance = r.distance,
+    t = r.t,
+    point_on_curve = xyz(r.point_on_curve),
+    point_on_item = xyz(r.point_on_item),
+    answer = answer,
+  }, NearestObject)
+end
+end
+
 --- The point and its derivatives at `t` up to `order` (default 2, at most 8): a list of
 --- `order + 1` {x, y, z}, `{C, C', C'', ...}`.
 ---@param t number
@@ -12041,6 +12811,47 @@ function NurbsCurve:face_hits(solid, face, tolerance)
   local w = "nurbs_curve_face_hits"
   return read_samples(lib().cadaclysm_blacksmith_nurbs_curve_face_hits(curve_handle(self, w), solid_handle(solid, w),
     index_u32(face, w, "face"), tol(default(tolerance, 1e-3), w)), w)
+end
+
+--- This curve faired: the smoothest curve of `degree` (default 5) within `tolerance` (default
+--- 1e-3) of it, from its start to its end, as `NurbsCurve.fair` makes one from points;
+--- `no_inflection`'s `{ from, to }` is this curve's own parameters here. Its `fit_error` is the
+--- largest distance found between them.
+---@param degree integer|nil
+---@param tolerance number|nil
+---@param no_inflection boolean|number[]|nil
+---@return NurbsCurve
+function NurbsCurve:faired(degree, tolerance, no_inflection)
+  local w = "nurbs_curve_faired"
+  local held, lo, hi = no_inflection_of(no_inflection, w)
+  local err = ffi.new("double[1]")
+  local h = lib().cadaclysm_blacksmith_nurbs_curve_faired(curve_handle(self, w), index_u32(default(degree, 5), w, "degree"),
+    tol(default(tolerance, 1e-3), w), held, lo, hi, err)
+  return curve_of(h, w, err[0])
+end
+
+--- Where the curvature turns from one side to the other, a list of `At` in parameter order
+--- (`error` zero): the comb flipping sides. Empty for a curve that bends one way only.
+---@return At[]
+function NurbsCurve:inflections()
+  local w = "nurbs_curve_inflections"
+  return read_samples(lib().cadaclysm_blacksmith_nurbs_curve_inflections(curve_handle(self, w)), w)
+end
+
+--- The largest turn of the tangent and jump of the curvature at the curve's knots, a
+--- `KnotContinuity`.
+---@return KnotContinuity
+function NurbsCurve:knot_continuity()
+  local w = "nurbs_curve_knot_continuity"
+  local out = ffi.new("struct CadaclysmBlacksmithKnotContinuity[1]")
+  if not lib().cadaclysm_blacksmith_nurbs_curve_knot_continuity(curve_handle(self, w), out) then fail(w) end
+  local raw = out[0]
+  return KnotContinuity.new({
+    angle = raw.angle, angle_parameter = raw.angle_parameter,
+    angle_at = { raw.angle_at[0], raw.angle_at[1], raw.angle_at[2] },
+    curvature = raw.curvature, curvature_parameter = raw.curvature_parameter,
+    curvature_at = { raw.curvature_at[0], raw.curvature_at[1], raw.curvature_at[2] },
+  })
 end
 
 --- A curvature comb to draw: at `n + 1` even parameters (`n` default 64, at least 1 step), a
@@ -12184,6 +12995,35 @@ JoinReport.__tostring = function(self)
     self.sewn, self.naked_before, self.naked_after, self.refused, self.turned, self.worst_gap, tostring(self.closed))
 end
 
+--- What `Solid:mirror_join` did: the `seams` (edges on the plane, one face of the half and one of
+--- its mirror), the faces `squared` to the plane and the furthest a control point `moved` doing
+--- it; the seam's worst `gap`, `angle` between the two sides' normals (radians) and `curvature`
+--- (the largest difference of their normal curvatures in any one direction); and the `naked`
+--- edges left on the body.
+---@class SymmetryReport
+---@field seams integer
+---@field squared integer
+---@field moved number
+---@field gap number
+---@field angle number
+---@field curvature number
+---@field naked integer
+do
+  local SymmetryReport = {}
+  class(SymmetryReport)
+  callable(SymmetryReport)
+  M.SymmetryReport = SymmetryReport
+
+  function SymmetryReport.new(fields)
+    return setmetatable(fields, SymmetryReport)
+  end
+
+  SymmetryReport.__tostring = function(self)
+    return ("SymmetryReport(seams=%d, squared=%d, moved=%.3g, gap=%.3g, angle=%.3g, curvature=%.3g, naked=%d)"):format(
+      self.seams, self.squared, self.moved, self.gap, self.angle, self.curvature, self.naked)
+  end
+end
+
 -- ---- the arguments -------------------------------------------------------------------------
 
 local SIDES = { u0 = 0, u1 = 1, v0 = 2, v1 = 3 }
@@ -12256,7 +13096,7 @@ local function fitted(handle, err, call)
 end
 
 --- Set on the sheets `Solid.sweep_rail`, `sweep_two_rails`, `edge_surface`, `network_surface`,
---- `fillet_surfaces`, `Solid:flange` and `Solid:extrude_to` fit: the largest distance from the
+--- `fillet_surfaces`, `Solid:faired`, `Solid:flange` and `Solid:extrude_to` fit: the largest distance from the
 --- sheet to what it was fitted to.
 --- nil on every other solid. Read-only.
 ---@return number|nil
@@ -12379,6 +13219,244 @@ function Solid:continuity(side, other, other_side, face, other_face, samples)
   local out = ffi.new("struct CadaclysmBlacksmithContinuity[1]")
   if not lib().cadaclysm_blacksmith_continuity(self:_h(), fa, sa, b, fb, sb, ns, out) then fail(w) end
   return continuity_of(out[0])
+end
+
+--- How well the two faces of edge `edge` (an `Edge` or its index) meet along it: `samples`
+--- (default 64) points along the edge, each projected onto both faces, and the largest gap,
+--- angle between the faces' normals (a square crease reads pi/2) and difference of their
+--- normal curvatures across it, a `Continuity` -- `Solid:continuity`'s figures for any two
+--- faces of one body, of any kind of surface. Raises `BuildError` for an edge of one face.
+---@param edge Edge|integer
+---@param samples integer|nil
+---@return Continuity
+function Solid:edge_continuity(edge, samples)
+  local w = "edge_continuity"
+  if type(edge) == "table" and getmetatable(edge) == M.Edge then edge = edge.index end
+  local e = whole(edge, w, "edge")
+  local ns = whole(or_default(samples, 64), w, "samples")
+  local out = ffi.new("struct CadaclysmBlacksmithContinuity[1]")
+  if not lib().cadaclysm_blacksmith_edge_continuity(self:_h(), e, ns, out) then fail(w) end
+  return continuity_of(out[0])
+end
+
+-- Surface fairing and its tests: the records and the helpers live in this block, since the main
+-- chunk sits near LuaJIT's 200-locals limit.
+do
+--- Where a face's curvatures change sign (`Solid:curvature_turns`): how many separate areas
+--- the sample grid finds where the Gaussian curvature is positive and negative
+--- (`gaussian_positive`, `gaussian_negative`) and the mean curvature (`mean_positive`,
+--- `mean_negative`, about the face's outward normal), the points between opposite signs
+--- (`gaussian_turns`, `mean_turns`: lists of `At`, `tangent` the face's unit normal there,
+--- `parameter` its `u`), and the grid's `samples` steps each way. A sample within a millionth
+--- of the face's size of flat is neither sign: a cylinder's patch reads no Gaussian area.
+---@class CurvatureTurns
+---@field gaussian_positive integer
+---@field gaussian_negative integer
+---@field gaussian_turns At[]
+---@field mean_positive integer
+---@field mean_negative integer
+---@field mean_turns At[]
+---@field samples integer
+local CurvatureTurns = {}
+class(CurvatureTurns)
+callable(CurvatureTurns)
+M.CurvatureTurns = CurvatureTurns
+
+function CurvatureTurns.new(fields)
+  return setmetatable(fields, CurvatureTurns)
+end
+
+CurvatureTurns.__tostring = function(self)
+  return ("CurvatureTurns(gaussian=+%d/-%d %d turns, mean=+%d/-%d %d turns)"):format(self.gaussian_positive,
+    self.gaussian_negative, #self.gaussian_turns, self.mean_positive, self.mean_negative, #self.mean_turns)
+end
+
+--- The worst kink of the highlight lines crossing an edge (`Solid:highlight_kink`): the
+--- `angle` in radians (0 to pi/2) between a line on one face and the same line on the other,
+--- the point `at` along the edge, and the light that shows it -- a straight tube through
+--- `light_point` along `light_direction` (unit; three numbers each) -- from `samples` points
+--- along the edge.
+---@class HighlightKink
+---@field angle number
+---@field at number[]               three
+---@field light_point number[]      three
+---@field light_direction number[]  three
+---@field samples integer
+local HighlightKink = {}
+class(HighlightKink)
+callable(HighlightKink)
+M.HighlightKink = HighlightKink
+
+function HighlightKink.new(fields)
+  return setmetatable(fields, HighlightKink)
+end
+
+HighlightKink.__tostring = function(self)
+  return ("HighlightKink(angle=%.3g)"):format(self.angle)
+end
+
+-- A turn-point list read into `At`s and freed on every path (the curves' reader lives in their
+-- own function); a null list raises the library's reason.
+local function turn_points(list, what)
+  local L = lib()
+  if list == nil then fail(what) end
+  local out, reason = {}, nil
+  local raw = ffi.new("CadaclysmBlacksmithAt[1]")
+  for i = 0, L.cadaclysm_blacksmith_samples_count(list) - 1 do
+    if not L.cadaclysm_blacksmith_samples_at(list, i, raw) then
+      reason = last_error()
+      break
+    end
+    local a = raw[0]
+    out[i + 1] = M.At.new({
+      point = { a.point[0], a.point[1], a.point[2] }, tangent = { a.tangent[0], a.tangent[1], a.tangent[2] },
+      parameter = a.parameter, segment = a.segment ~= NONE and tonumber(a.segment) or nil,
+      error = a.error, from_polyline = a.from_polyline ~= 0,
+    })
+  end
+  L.cadaclysm_blacksmith_samples_free(list)
+  if reason ~= nil then
+    error(setmetatable({ message = reason ~= "" and reason or "samples_at", ids = {} }, BuildError), 2)
+  end
+  return out
+end
+
+local KEEP_ORDER = { "u0", "u1", "v0", "v1" }
+local HELD = { u = 1, v = 2, uv = 3, vu = 3 }
+
+-- `keep` as the C ABI takes it: four int32 levels, -1 a free side. nil keeps every side at 2;
+-- a number is one level for all four; a table is by side (`{ u0 = false, v0 = 0 }`, a missing
+-- side 2, false free) or four levels in side order (`{ false, false, 0, 0 }`, nil or false free).
+local function keep_levels(keep, w)
+  local levels = ffi.new("int32_t[4]")
+  local function level(v, side)
+    if v == nil or v == false then return -1 end
+    return whole(v, w, "keep " .. side)
+  end
+  if keep == nil then
+    for i = 0, 3 do levels[i] = 2 end
+  elseif type(keep) == "number" then
+    local v = whole(keep, w, "keep")
+    for i = 0, 3 do levels[i] = v end
+  elseif type(keep) == "table" then
+    local by_side = false
+    for k in pairs(keep) do
+      if type(k) == "string" then
+        if SIDES[k] == nil then raise(("a side is 'u0', 'u1', 'v0' or 'v1', not %s"):format(repr(k))) end
+        by_side = true
+      elseif type(k) ~= "number" or k < 1 or k > 4 or k ~= math.floor(k) then
+        raise(("%s: keep takes 4 levels (u0, u1, v0, v1), not a key %s"):format(w, repr(k)))
+      end
+    end
+    for i, side in ipairs(KEEP_ORDER) do
+      if by_side then
+        local v = keep[side]
+        levels[i - 1] = v == nil and 2 or level(v, side)
+      else
+        levels[i - 1] = level(keep[i], side)
+      end
+    end
+  else
+    raise(("%s: keep is nil, a level or a table of levels, got %s"):format(w, repr(keep)))
+  end
+  return levels
+end
+
+--- Face `face` (default 0) faired, as a sheet of its own: the smoothest surface within
+--- `tolerance` (default 1e-3; 0 the effective one) of its NURBS surface -- least squares plus
+--- its third derivatives squared (what a zebra's ripple costs), weighed as heavily as the
+--- tolerance allows. A sheet lofted through traced sections wobbles between them; this spends
+--- the tolerance on smoothness.
+---
+--- `controls` nil fairs on the face's own net, its degree raised to `degree` (3 to 7, default
+--- 3) and its spans split to a dozen each way at least, so a kept side is kept exactly;
+--- `{ n_u, n_v }` fairs on a uniform net that size, its kept sides within the tolerance.
+--- `keep` says what each side keeps -- one level for all four (default 2), or a table by
+--- side (`u0`, `u1`, `v0`, `v1`; a missing side 2) or of four levels in that order: false (or
+--- nil in the list) free to move, 0 its position, 1 the tangent plane across it, 2 the
+--- curvature too (what `Solid:matched` gave it). `no_inflection` `"u"`, `"v"` or `"uv"` holds
+--- the isocurves along those directions from turning their curvature over -- which turns a
+--- roof lofted through wobbly sections into a dome. Raises `BuildError` where no such fair is
+--- within the tolerance. Its `sheet_error` is the largest distance found between the two.
+---@param tolerance number|nil
+---@param degree integer|nil
+---@param controls integer[]|nil
+---@param keep integer|table|nil
+---@param no_inflection string|nil
+---@param face integer|nil
+---@return Solid
+function Solid:faired(tolerance, degree, controls, keep, no_inflection, face)
+  local w = "surface_faired"
+  local levels = keep_levels(keep, w)
+  local bits = 0
+  if no_inflection ~= nil and no_inflection ~= "" then
+    bits = HELD[no_inflection]
+    if bits == nil then raise(("no_inflection is 'u', 'v', 'uv' or nil, not %s"):format(repr(no_inflection))) end
+  end
+  local cu, cv = 0, 0
+  if controls ~= nil then
+    if type(controls) ~= "table" then raise(("%s: controls is nil or { n_u, n_v }, got %s"):format(w, repr(controls))) end
+    cu, cv = whole(controls[1], w, "controls"), whole(controls[2], w, "controls")
+  end
+  local err = ffi.new("double[1]")
+  local h = lib().cadaclysm_blacksmith_surface_faired(self:_h(), whole(or_default(face, 0), w, "face"), tolerance_arg(or_default(tolerance, 1e-3), w),
+    whole(or_default(degree, 3), w, "degree"), cu, cv, levels, bits, err)
+  return fitted(h, err, w)
+end
+
+--- Where face `face`'s (default 0) Gaussian and mean curvature change sign, on a grid of
+--- `samples` (default 32; 8 at fewest) steps each way over its surface: how many separate
+--- areas of each sign, and the points between opposite signs, a `CurvatureTurns`. A dome or
+--- a saddle reads one area of one sign and no turn; a sheet whose sections wobble reads
+--- several -- the surface's form of `NurbsCurve:inflections`.
+---@param face integer|nil
+---@param samples integer|nil
+---@return CurvatureTurns
+function Solid:curvature_turns(face, samples)
+  local w = "curvature_turns"
+  local f, n = whole(or_default(face, 0), w, "face"), whole(or_default(samples, 32), w, "samples")
+  local out = ffi.new("struct CadaclysmBlacksmithCurvatureTurns[1]")
+  if not lib().cadaclysm_blacksmith_curvature_turns(self:_h(), f, n, out) then fail(w) end
+  local raw = out[0]
+  local function points(mean, count)
+    if count == 0 then return {} end
+    return turn_points(lib().cadaclysm_blacksmith_curvature_turn_points(self:_h(), f, n, mean), "curvature_turn_points")
+  end
+  return CurvatureTurns.new({
+    gaussian_positive = tonumber(raw.gaussian_positive), gaussian_negative = tonumber(raw.gaussian_negative),
+    gaussian_turns = points(false, tonumber(raw.gaussian_turns)),
+    mean_positive = tonumber(raw.mean_positive), mean_negative = tonumber(raw.mean_negative),
+    mean_turns = points(true, tonumber(raw.mean_turns)),
+    samples = tonumber(raw.samples),
+  })
+end
+
+--- The worst kink of the highlight lines crossing edge `edge` (an `Edge` or its index), at
+--- `samples` (default 64; 16 at fewest) points along it, a `HighlightKink`: the lines of
+--- straight light tubes parallel to the surface a body's size away, every tube direction
+--- tried. They run on through an edge where the two faces' curvatures agree (G2) and kink
+--- where it jumps -- a fillet's seam with a flat face among them. Beside
+--- `Solid:edge_continuity`'s curvature jump, this is the number a zebra shows. Raises
+--- `BuildError` for an edge of one face.
+---@param edge Edge|integer
+---@param samples integer|nil
+---@return HighlightKink
+function Solid:highlight_kink(edge, samples)
+  local w = "highlight_kink"
+  if type(edge) == "table" and getmetatable(edge) == M.Edge then edge = edge.index end
+  local e = whole(edge, w, "edge")
+  local ns = whole(or_default(samples, 64), w, "samples")
+  local out = ffi.new("struct CadaclysmBlacksmithHighlightKink[1]")
+  if not lib().cadaclysm_blacksmith_highlight_kink(self:_h(), e, ns, out) then fail(w) end
+  local raw = out[0]
+  return HighlightKink.new({
+    angle = raw.angle,
+    at = { raw.at[0], raw.at[1], raw.at[2] },
+    light_point = { raw.light_point[0], raw.light_point[1], raw.light_point[2] },
+    light_direction = { raw.light_direction[0], raw.light_direction[1], raw.light_direction[2] },
+    samples = tonumber(raw.samples),
+  })
+end
 end
 
 --- Face `face` as a sheet of its own, its side `side` bent to meet `other`'s `other_side` at
@@ -12645,6 +13723,45 @@ function Solid.join_sheets(sheets, tolerance)
   })
 end
 
+--- This sheet cut along `curve`, a curve lying on it (within ten times `tolerance`), with no
+--- direction: the cut is made in each face's own parameters, so it follows the curve however far
+--- the sheet rolls, and runs across the seams of a joined sheet. An open curve is carried on along
+--- the sheet past both ends to its boundary; a closed one cuts out the island it bounds. Nothing is
+--- removed. Where the cut lies on the curve the rim is one edge carrying the curve's own span
+--- exactly. Refused where the curve leaves the sheet. `tolerance` defaults to 0.01.
+---@param curve NurbsCurve
+---@param tolerance number|nil
+---@return Solid
+function Solid:split_along_curve(curve, tolerance)
+  local w = "split_along_curve"
+  local c = handle_of_curve(curve, w)
+  return new_solid(lib().cadaclysm_blacksmith_split_along_curve(self:_h(), c, tolerance_arg(or_default(tolerance, 0.01), w)), w)
+end
+
+--- This sheet parted along `curve` (lying on it, as for split_along_curve) into two panels with a
+--- shut line between them: each trimmed back `gap / 2` from the curve along the sheet, with a
+--- flange `flange` along the faces' outward normals on its cut edge only (negative turns it under;
+--- 0 for none), ending square where the curve runs off the sheet. The panel left of the curve's run
+--- (seen from the outward side) first, then the right one; a loop run counter-clockwise from that
+--- side has the island on its left. Refused where the curve leaves the sheet or the gap leaves
+--- nothing of a panel. Defaults: `gap` 4, `flange` -10, `tolerance` 0.01.
+---@param curve NurbsCurve
+---@param gap number|nil
+---@param flange number|nil
+---@param tolerance number|nil
+---@return Solid
+---@return Solid
+function Solid:panel_gap(curve, gap, flange, tolerance)
+  local w = "panel_gap"
+  local c = handle_of_curve(curve, w)
+  local out = ffi.new("struct CadaclysmBlacksmithSolid *[2]")
+  if not lib().cadaclysm_blacksmith_panel_gap(self:_h(), c, number(or_default(gap, 4), w), number(or_default(flange, -10), w),
+      tolerance_arg(or_default(tolerance, 0.01), w), out) then
+    fail(w)
+  end
+  return new_solid(out[0], w), new_solid(out[1], w)
+end
+
 --- This sheet with an opening recessed into it along `outline` -- a window, a lamp, a grille or
 --- an air intake set into a panel -- and how many of the result's faces are each part's:
 --- `{ sheet, fillet, walls, pane }`, the faces in that order. `outline` is a closed curve on the
@@ -12673,6 +13790,32 @@ function Solid:recess(outline, depth, draft, fillet, pane, tolerance)
   local out = new_solid(lib().cadaclysm_blacksmith_recess(self:_h(), c, number(depth, w), number(or_default(draft, 0), w),
     number(or_default(fillet, 0), w), pane ~= false, tolerance_arg(or_default(tolerance, 0.05), w), faces), w)
   return out, { tonumber(faces[0]), tonumber(faces[1]), tonumber(faces[2]), tonumber(faces[3]) }
+end
+
+--- This half and its reflection across `plane` (a frame, its z the plane's normal) joined into
+--- one symmetric body -- half a car, a hull or a bottle modelled once -- the half's faces first,
+--- and a `SymmetryReport` of how well the seam on the plane meets. With `snap` above 0 (default
+--- 0), every NURBS face that is its whole surface and has a side whose control points all lie
+--- within `snap` of the plane is squared to it first: that side pulled onto the plane, the next
+--- row of control points stood straight off it along the normal (keeping its distance from the
+--- plane). The surface then crosses the plane at 90 degrees, so it meets its mirror tangent and
+--- curvature continuous; nothing past that row moves. `snap` 0 mirrors the half as it is, a
+--- crease wherever it leans. The halves are sewn within `tolerance` (default 0: a rounding of the
+--- body's size). Raises `BuildError` for a half on both sides of the plane, no edge of it on the
+--- plane, or a face that cannot be squared (its next row on the plane or past it).
+---@param plane Frame|number[]
+---@param snap number|nil
+---@param tolerance number|nil
+---@return Solid
+---@return SymmetryReport
+function Solid:mirror_join(plane, snap, tolerance)
+  local w = "mirror_join"
+  local r = ffi.new("double[7]")
+  local out = new_solid(lib().cadaclysm_blacksmith_mirror_join(self:_h(), frame_arg(plane), number(or_default(snap, 0), w),
+    tolerance_arg(or_default(tolerance, 0), w), r), w)
+  return out, M.SymmetryReport.new({
+    seams = tonumber(r[0]), squared = tonumber(r[1]), moved = r[2], gap = r[3], angle = r[4], curvature = r[5], naked = tonumber(r[6]),
+  })
 end
 
 end
@@ -13064,6 +14207,34 @@ end
 ---@return string
 function Document:evaluate(cheap_only)
   return owned_text(lib().cadaclysm_blacksmith_document_evaluate(self:_h(), cheap_only and true or false), "document_evaluate")
+end
+
+--- `evaluate`, every kernel call's progress heard by `progress(node, phase, done, total)`:
+--- `node` the id of the node being built (a progress bar, or a note of which node was being
+--- built when the process died). The same statuses; a cheap-only pass reports nothing.
+--- `progress` must not touch the document; an error it raises is raised once the call has
+--- returned (never through the library's frames). nil is silent.
+---@param progress fun(node: string, phase: string, done: number, total: number)|nil
+---@param cheap_only boolean|nil
+---@return string
+function Document:evaluate_with(progress, cheap_only)
+  local h = self:_h()
+  if progress == nil then
+    return owned_text(lib().cadaclysm_blacksmith_document_evaluate_with(h, cheap_only and true or false, nil, nil), "document_evaluate_with")
+  end
+  local raised
+  local cb = ffi.cast("CadaclysmBlacksmithDocumentProgress", function(node, phase, done, total, _user)
+    if raised ~= nil then return end
+    local ok, err = pcall(progress, text(node), text(phase), tonumber(done), tonumber(total))
+    if not ok then raised = err end
+  end)
+  local raw = lib().cadaclysm_blacksmith_document_evaluate_with(h, cheap_only and true or false, cb, nil)
+  cb:free()
+  if raised ~= nil then
+    if raw ~= nil then lib().cadaclysm_blacksmith_string_free(raw) end
+    error(raised, 0)
+  end
+  return owned_text(raw, "document_evaluate_with")
 end
 
 -- The document brought up to date, its handle and `id` as C takes it.

@@ -1,7 +1,7 @@
 // Sheets from curves -- loft_curves, sweep_rail, sweep_two_rails, edge_surface, network_surface,
 // continuity, matched, blend_sides, n_sided_patch, fillet_surfaces, the varying-radius fillet,
-// split_by_curve, trim_by_curve, join_sheets, flange and extrude_to, with the Continuity,
-// PatchReport and JoinReport records -- at parity with the Python reference's tests of the same names in
+// split_by_curve, trim_by_curve, join_sheets, flange, extrude_to, faired, curvature_turns and
+// highlight_kink, with the Continuity, PatchReport, JoinReport, CurvatureTurns and HighlightKink records -- at parity with the Python reference's tests of the same names in
 // test_cadaclysm_blacksmith.py. The kernel's own correctness is the kernel's tests' job. Needs the
 // kernel library and a license; the exit code is the verdict.
 //
@@ -25,13 +25,16 @@ namespace bs = cadaclysm::blacksmith;
 using bs::Continuity;
 using bs::Frame;
 using bs::JoinedSheets;
+using bs::Mirrored;
 using bs::NurbsCurve;
 using bs::PatchBoundary;
 using bs::Profile;
+using bs::Panels;
 using bs::Recessed;
 using bs::Solid;
 using bs::Solids;
 using bs::SurfaceFillet;
+using bs::SymmetryReport;
 using bs::Vec3;
 
 static int failures = 0;
@@ -265,6 +268,59 @@ static Result<void> recess_sets_a_square_window_into_a_flat_sheet() {
     return {};
 }
 
+// 6b': half a roof domed both ways, lofted out from the centre plane y = 0, leaning as it leaves
+// the plane: mirrored as it is, the seam is a crease; squared first, it is smooth
+static Result<void> mirror_join_squares_a_half_roof_to_its_mirror() {
+    std::vector<NurbsCurve> sections;
+    for (double y : {0.0, 10.0, 20.0, 30.0}) {
+        std::vector<Vec3> row;
+        for (int i = 0; i <= 8; ++i) {
+            double x = 10.0 * i;
+            row.push_back({x, y, 20 * std::sin(PI * x / 80) - 0.01 * y * y + 0.05 * y + 0.002 * x * y});
+        }
+        sections.push_back(must(NurbsCurve::through(row), "section"));
+    }
+    Solid half = must(Solid::loft_curves(sections), "half");
+    Frame plane = must(Frame::make({0, 0, 0}, {1, 0, 0}, {0, 0, -1}, {0, 1, 0}), "plane");
+    Mirrored creased = must(half.mirror_join(plane, 0, 0.01), "mirror_join as it is");
+    SymmetryReport r = creased.report;
+    check(creased.solid.faces() == 2 && r.seams == 1 && r.squared == 0 && r.moved == 0,
+          "mirror_join as it is: seams " + std::to_string(r.seams) + ", squared " + std::to_string(r.squared) + ", moved " + num(r.moved));
+    check(r.gap < 1e-9 && r.angle > 5 * PI / 180 && r.curvature > 1e-4,
+          "mirror_join crease: gap " + num(r.gap) + ", angle " + num(r.angle) + ", curvature " + num(r.curvature));
+    Mirrored smooth = must(half.mirror_join(plane, 0.5, 0.01), "mirror_join squared");
+    r = smooth.report;
+    check(smooth.solid.faces() == 2 && r.seams == 1 && r.squared == 1 && r.naked == 6,
+          "mirror_join squared: seams " + std::to_string(r.seams) + ", squared " + std::to_string(r.squared) + ", naked " + std::to_string(r.naked));
+    check(r.moved > 0 && r.gap < 1e-9 && r.angle < 1e-9 && r.curvature < 1e-9,
+          "mirror_join smooth: moved " + num(r.moved) + ", gap " + num(r.gap) + ", angle " + num(r.angle) + ", curvature " + num(r.curvature));
+    double body = area_of(smooth.solid), one = area_of(half);
+    check(std::abs(body - 2 * one) < 0.01 * one, "mirror_join: area " + num(body) + " against " + num(one));
+    refused(smooth.solid.mirror_join(plane), "mirror_join: the half lies on both sides of the plane", "", "mirror_join a whole body");
+    return {};
+}
+
+// 6c: a ring on a square offset along it, split along it, parted by a panel gap
+static Result<void> a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap() {
+    Solid sq = rect_sheet({0, 0, 0}, {1, 0, 0}, {0, 1, 0}, 40, 40);
+    std::vector<Vec3> pts;
+    for (int i = 0; i < 48; ++i) {
+        double a = 2 * 3.14159265358979323846 * i / 48;
+        pts.push_back({8 * std::cos(a), 8 * std::sin(a), 0});
+    }
+    NurbsCurve ring = must(NurbsCurve::through(pts, 3, true), "ring");
+    NurbsCurve inner = must(ring.offset_on_sheet(sq, 2.0, 1e-3), "offset_on_sheet");
+    std::pair<double, double> domain = must(inner.domain(), "domain");
+    Vec3 p0 = must(inner.point(domain.first), "point");
+    check(inner.fit_error() && *inner.fit_error() <= 1e-3 && std::abs(std::hypot(p0[0], p0[1]) - 6) < 1e-3, "offset_on_sheet");
+    Solid halves = must(sq.split_along_curve(ring, 1e-3), "split_along_curve");
+    check(halves.faces() == 2, "split_along_curve: " + std::to_string(halves.faces()) + " faces");
+    Panels panels = must(sq.panel_gap(ring, 4.0, -10.0, 1e-3), "panel_gap");
+    check(panels.left.faces() == 3 && panels.right.faces() == 3,
+          "panel_gap: " + std::to_string(panels.left.faces()) + "/" + std::to_string(panels.right.faces()) + " faces");
+    return {};
+}
+
 // 7: continuity_match_and_blend
 static Result<void> continuity_match_and_blend() {
     Solid a = must(Solid::loft_curves(many(line({-1, 0, 0}, {0, 0, 0}), line({-1, 1, 0}, {0, 1, 0})), 1), "a");
@@ -432,6 +488,28 @@ static Result<void> fillet_rounds_a_spline_edge_at_a_constant_and_a_varying_radi
     return {};
 }
 
+// 10b: fillet_law with stations at the chain's ends is the varying fillet
+static Result<void> fillet_law_with_stations_at_the_ends_is_the_varying_fillet() {
+    Solid shell = fender_and_door();
+    std::vector<std::uint32_t> crease;
+    for (const bs::Edge& e : must(shell.edges(), "edges")) {
+        if (e.faces.size() == 2) crease.push_back(e.index);
+    }
+    Solid varying = must(shell.fillet(crease, 8.0, 1e-3, {}, 20.0), "varying");
+    Solid lawed = must(shell.fillet_law(crease, {{0.0, 8.0}, {1.0, 20.0}}, 1e-3), "fillet_law");
+    double v = must(varying.mass(1e-6), "mass").area, l = must(lawed.mass(1e-6), "mass").area;
+    check(lawed.faces() == 3 && std::fabs(l - v) < 1e-3, "fillet_law " + num(l) + " against the varying fillet's " + num(v));
+    // A swell in the middle takes more than 8 all along and less than 20 all along.
+    double swell = must(must(shell.fillet_law(crease, {{0.0, 8.0}, {0.5, 20.0}, {1.0, 8.0}}, 1e-3), "swell").mass(1e-6), "mass").area;
+    double low = must(must(shell.fillet(crease, 8.0, 1e-3), "8").mass(1e-6), "mass").area;
+    double high = must(must(shell.fillet(crease, 20.0, 1e-3), "20").mass(1e-6), "mass").area;
+    check(swell < low && swell > high, "the swell's area " + num(swell) + " between " + num(low) + " and " + num(high));
+    refused(shell.fillet_law(crease, {}, 1e-3), "", "at least one station", "no stations");
+    refused(must(Solid::cuboid(10, 10, 10), "cuboid").fillet_law({0}, {{0.0, 1.0}, {1.0, 2.0}}), "", "a radius law rounds only spline edges",
+            "radius law on a box");
+    return {};
+}
+
 // 11: the sheet_error / patch_report fields and the rest of the wrapper-side refusals
 static Result<void> sheet_error_and_patch_report_are_set_where_made() {
     Solid box = must(Solid::cuboid(1, 1, 1), "cuboid");
@@ -568,6 +646,62 @@ static Result<void> flange_and_extrude_to_refuse_by_name() {
     return {};
 }
 
+// 16: a_wobbly_loft_faired_turns_no_curvature_over
+static Result<void> a_wobbly_loft_faired_turns_no_curvature_over() {
+    // Eleven lines across a shallow arch, each lifted or dropped by 0.4 in turn: a loft through
+    // them ripples between every pair.
+    std::vector<NurbsCurve> lines;
+    for (int k = 0; k < 11; ++k) {
+        double x = 10.0 * k;
+        double z = -0.01 * (x - 50.0) * (x - 50.0) + (k % 2 == 0 ? 0.4 : -0.4);
+        lines.push_back(line({x, 0, z}, {x, 40, z}));
+    }
+    Solid loft = must(Solid::loft_curves(lines, 3), "loft_curves");
+    bs::CurvatureTurns t = must(loft.curvature_turns(0, 32), "curvature_turns");
+    check(t.samples == 32 && !t.mean_turns.empty() && t.mean_positive + t.mean_negative > 1,
+          "the wobbly loft's mean curvature turns over between several areas");
+    for (const bs::At& a : t.mean_turns) {
+        double n = std::sqrt(a.tangent[0] * a.tangent[0] + a.tangent[1] * a.tangent[1] + a.tangent[2] * a.tangent[2]);
+        check(std::abs(n - 1.0) < 1e-9 && a.point[0] >= 0 && a.point[0] <= 100 && a.point[2] > -26 && a.point[2] < 1,
+              "a mean turn is on the sheet with a unit normal");
+    }
+    // The lines run along u, the loft's v across them: the end lines kept, held along v.
+    std::vector<std::optional<std::int32_t>> ends_kept = {std::nullopt, std::nullopt, 0, 0};
+    Solid faired = must(loft.faired(1.0, 3, std::nullopt, ends_kept, "v"), "faired");
+    check(faired.sheet_error().has_value() && *faired.sheet_error() >= 0 && *faired.sheet_error() <= 1.05,
+          "the faired sheet is within its tolerance: " + num(faired.sheet_error().value_or(-1)));
+    bs::CurvatureTurns f = must(faired.curvature_turns(0, 32), "faired curvature_turns");
+    check(f.mean_turns.empty() && f.mean_positive + f.mean_negative == 1, "the faired sheet's mean curvature keeps one sign");
+    Solid coarse = must(loft.faired(1.0, 3, std::make_pair(std::uint32_t(6), std::uint32_t(8)), ends_kept, "v"), "faired on 6 x 8");
+    check(*coarse.sheet_error() <= 1.05 && must(coarse.curvature_turns(), "coarse curvature_turns").mean_turns.empty(),
+          "the fair on a 6 x 8 net is within its tolerance and turns no curvature over");
+    refused(loft.faired(1.0, 2), "surface_faired: ", "degree 2", "faired at degree 2");
+    refused(loft.faired(0.01, 3, std::nullopt, ends_kept, "v"), "surface_faired: ", "no fair free of inflections", "faired too tight");
+    refused(loft.faired(1.0, 3, std::nullopt, {0, 0}), "keep takes 4 levels (u0, u1, v0, v1), not 2", "", "faired with 2 levels");
+    refused(loft.faired(1.0, 3, std::nullopt, {2}, "w"), "no_inflection is 'u', 'v', 'uv' or empty, not 'w'", "", "faired along w");
+    refused(loft.curvature_turns(7), "curvature_turns: ", "", "curvature_turns of face 7");
+    return {};
+}
+
+// 17: highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam
+static Result<void> highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam() {
+    Solid block = must(Solid::cuboid(2, 2, 2), "cuboid");
+    bs::HighlightKink k = must(block.highlight_kink(0, 16), "highlight_kink");
+    check(k.angle < 1e-9 && k.samples == 17, "the highlight lines run straight across a box's edge, 17 samples");
+    Solid rounded = must(block.fillet({0}, 0.5), "fillet");
+    std::size_t edges = must(rounded.edges(), "edges").size();
+    double worst = 0.0;
+    for (std::uint32_t e = 0; e < edges; ++e) {
+        Result<bs::HighlightKink> kink = rounded.highlight_kink(e);
+        if (!kink) continue;   // an edge of one face
+        worst = std::max(worst, kink->angle);
+    }
+    // Where the fillet's curvature meets a flat face's, the highlight lines break.
+    check(worst > PI / 4, "a fillet seam kinks the highlight lines past 45 degrees: " + num(worst));
+    refused(block.highlight_kink(999), "highlight_kink: ", "", "highlight_kink of edge 999");
+    return {};
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) {
         Result<void> loaded = bs::license(argv[1]);
@@ -588,15 +722,21 @@ int main(int argc, char** argv) {
         {"join_sheets_sews_a_t_junction", join_sheets_sews_a_t_junction},
         {"trim_by_curve_and_join_refuse_by_name", trim_by_curve_and_join_refuse_by_name},
         {"recess_sets_a_square_window_into_a_flat_sheet", recess_sets_a_square_window_into_a_flat_sheet},
+        {"mirror_join_squares_a_half_roof_to_its_mirror", mirror_join_squares_a_half_roof_to_its_mirror},
+        {"a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap", a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap},
         {"continuity_match_and_blend", continuity_match_and_blend},
         {"n_sided_patch_fills_a_pentagon_of_strips", n_sided_patch_fills_a_pentagon_of_strips},
         {"fillet_surfaces_rolls_a_ball_between_two_sheets", fillet_surfaces_rolls_a_ball_between_two_sheets},
         {"fillet_rounds_a_spline_edge_at_a_constant_and_a_varying_radius", fillet_rounds_a_spline_edge_at_a_constant_and_a_varying_radius},
+        {"fillet_law_with_stations_at_the_ends_is_the_varying_fillet", fillet_law_with_stations_at_the_ends_is_the_varying_fillet},
         {"sheet_error_and_patch_report_are_set_where_made", sheet_error_and_patch_report_are_set_where_made},
         {"continuity_says_where", continuity_says_where},
         {"a_flange_turns_a_hole_under_and_carries_it_inward", a_flange_turns_a_hole_under_and_carries_it_inward},
         {"a_liner_runs_a_hole_down_to_a_tilted_floor", a_liner_runs_a_hole_down_to_a_tilted_floor},
         {"flange_and_extrude_to_refuse_by_name", flange_and_extrude_to_refuse_by_name},
+        {"a_wobbly_loft_faired_turns_no_curvature_over", a_wobbly_loft_faired_turns_no_curvature_over},
+        {"highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam",
+         highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam},
     };
     for (const Test& t : tests) {
         int before = failures;

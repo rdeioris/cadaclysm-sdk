@@ -136,6 +136,56 @@ static uint32_t rig_navigation_of(CadaclysmView *v) {
     rig_note("navigation");
     return rig_navigation;
 }
+// 1.22's snapping: what set_snap was handed and how often; the answer snap_result hands back
+// while rig_snap_landed (else false, rig_said saying why); request_snap_in, clear_snap and the
+// work plane calls go to rig_log.
+static CadaclysmViewSnapSettings rig_snap_settings;
+static int rig_snap_sets;
+static CadaclysmViewSnap rig_snap;
+static int rig_snap_landed = 1;
+static bool rig_set_snap(CadaclysmView *v, const CadaclysmViewSnapSettings *s) {
+    (void)v;
+    rig_snap_settings = *s;
+    ++rig_snap_sets;
+    return true;
+}
+static void rig_request_snap_in(CadaclysmView *v, uint32_t viewport, uint32_t x, uint32_t y) {
+    char text[64];
+    (void)v;
+    snprintf(text, sizeof text, "snap %u %u %u", (unsigned)viewport, (unsigned)x, (unsigned)y);
+    rig_note(text);
+}
+// rig_snap, up to `s->size` as the library writes it.
+static bool rig_snap_result(CadaclysmView *v, CadaclysmViewSnap *s) {
+    CadaclysmViewSnap answer = rig_snap;
+    uint32_t size = s->size;
+    (void)v;
+    if (!rig_snap_landed) return false;
+    answer.size = size;
+    memcpy(s, &answer, size < sizeof answer ? size : sizeof answer);
+    return true;
+}
+static void rig_clear_snap(CadaclysmView *v) {
+    (void)v;
+    rig_note("clear snap");
+}
+static bool rig_set_work_plane(CadaclysmView *v, const double *o, const double *x, const double *n, double step) {
+    char text[256];
+    (void)v;
+    snprintf(text, sizeof text, "work plane %g %g %g, %g %g %g, %g %g %g, %g", o[0], o[1], o[2], x[0], x[1], x[2], n[0],
+             n[1], n[2], step);
+    rig_note(text);
+    return true;
+}
+static bool rig_clear_work_plane(CadaclysmView *v) {
+    (void)v;
+    rig_note("ground plane");
+    return true;
+}
+static const CadaclysmViewSnapSettings *rig_seen_snap_settings(void) { return &rig_snap_settings; }
+static int rig_snap_set_calls(void) { return rig_snap_sets; }
+static void rig_set_snap_answer(const CadaclysmViewSnap *s) { rig_snap = *s; }
+static void rig_set_snap_landed(int on) { rig_snap_landed = on; }
 static bool rig_remove(CadaclysmView *v, uint32_t item) {
     (void)v;
     (void)item;
@@ -430,6 +480,12 @@ static void *rig_fn(const char *name) {
         {"set_double_click_frames", (void *)rig_set_double_click_frames},
         {"focus", (void *)rig_focus},
         {"navigation", (void *)rig_navigation_of},
+        {"set_snap", (void *)rig_set_snap},
+        {"request_snap_in", (void *)rig_request_snap_in},
+        {"snap_result", (void *)rig_snap_result},
+        {"clear_snap", (void *)rig_clear_snap},
+        {"set_work_plane", (void *)rig_set_work_plane},
+        {"clear_work_plane", (void *)rig_clear_work_plane},
         {"show_machining", (void *)rig_show_machining},
         {"machining_seek", (void *)rig_machining_seek},
         {"machining_colour_by", (void *)rig_machining_colour_by},
@@ -459,6 +515,10 @@ static void rig_reset(void) {
     memset(&rig_pick, 0, sizeof rig_pick);
     rig_log[0] = 0;
     rig_navigation = 0;
+    memset(&rig_snap_settings, 0, sizeof rig_snap_settings);
+    rig_snap_sets = 0;
+    memset(&rig_snap, 0, sizeof rig_snap);
+    rig_snap_landed = 1;
     memset(rig_points, 0, sizeof rig_points);
     memset(rig_points_rgb, 0, sizeof rig_points_rgb);
     rig_points_size = 0.0f;
@@ -571,6 +631,51 @@ func SetNavigation(n uint32) { C.rig_set_navigation(C.uint32_t(n)) }
 // Log is what set_double_click_frames, focus and navigation were called with since Reset,
 // "; " between calls.
 func Log() string { return C.GoString(C.rig_logged()) }
+
+// SnapSettings is what the last set_snap was handed -- its size, kinds, aperture and marker
+// -- and how many set_snap calls were made since Reset.
+func SnapSettings() (size, kinds uint32, aperturePx float32, marker uint32, calls int) {
+	s := C.rig_seen_snap_settings()
+	return uint32(s.size), uint32(s.kinds), float32(s.aperture_px), uint32(s.marker), int(C.rig_snap_set_calls())
+}
+
+// Answer is a snap answer as snap_result hands it back: CadaclysmViewSnap's fields but size.
+type Answer struct {
+	Kind             uint32
+	Point            [3]float64
+	Item, Node, Face uint32
+	Edge             uint32
+	Tangent, Axis    [3]float32
+	Radius           float64
+	DistancePx       float32
+	Clicks           uint32
+}
+
+// SetSnapAnswer is what snap_result hands back from now on (Kind 0: nothing snapped).
+func SetSnapAnswer(a Answer) {
+	var s C.CadaclysmViewSnap
+	s.kind = C.uint32_t(a.Kind)
+	s.item, s.node, s.face, s.edge = C.uint32_t(a.Item), C.uint32_t(a.Node), C.uint32_t(a.Face), C.uint32_t(a.Edge)
+	for i := 0; i < 3; i++ {
+		s.point[i] = C.double(a.Point[i])
+		s.tangent[i] = C.float(a.Tangent[i])
+		s.axis[i] = C.float(a.Axis[i])
+	}
+	s.radius = C.double(a.Radius)
+	s.distance_px = C.float(a.DistancePx)
+	s.clicks = C.uint32_t(a.Clicks)
+	C.rig_set_snap_answer(&s)
+}
+
+// SnapLanded is whether snap_result answers (true after Reset); false answers false, with
+// whatever Say set as the reason.
+func SnapLanded(on bool) {
+	l := C.int(0)
+	if on {
+		l = 1
+	}
+	C.rig_set_snap_landed(l)
+}
 
 // Points is what the last show_points was handed: its floats (up to 12), its rgb (nil for
 // NULL) and its size, and how many show_points calls were made since Reset.

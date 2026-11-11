@@ -66,6 +66,10 @@ func main() {
 		(bounds.Min != [3]float64{0, 0, 0} || bounds.Max != [3]float64{20, 20, 20} || triangles != 12) {
 		fail("the cube did not come back as a 20-unit cube of 12 triangles")
 	}
+	// cube.scad is a mesh with no brep in the Reader flavour and an exact box where the kernel's
+	// builder is linked (`openscad-brep`, as every shipped desktop library is): the figures below
+	// that only a mesh has are pinned for the first, and the other has its own.
+	cubeIsMesh := filepath.Base(path) == "cube.scad" && !sceneHasBrep(scene)
 	// scene.Bounds64's max narrowed to float32 equals bounds's max: narrowing (round to
 	// nearest) is monotonic, so this holds for any file, not only the small-coordinate cube.
 	sceneBounds64 := scene.Bounds64()
@@ -491,7 +495,7 @@ func main() {
 	if past, _ := first.MeshLod(4); past != nil {
 		fail("a level past LodLevels is not empty")
 	}
-	if strings.HasSuffix(path, "cube.scad") {
+	if cubeIsMesh {
 		lod1, _ := first.MeshLod(1)
 		if lod1 == nil || lod1.TriangleCount() != 3 || first.EdgeBeziers().Count() != 12 || len(first.EdgeBeziers().Points) != 12*12 {
 			fail("the cube's LOD 1 or Béziers are off")
@@ -579,11 +583,16 @@ func main() {
 			}
 		}
 	}
+	// The mesh cube is fitted as a hull of 8 vertices; the exact cube is the box it is, with no hull.
+	wantHull := 8
+	if strings.HasSuffix(path, "cube.scad") && !cubeIsMesh {
+		wantHull = 0
+	}
 	fit, ok := first.Collision(0)
-	if !ok || fit.Error != 0 || fit.HullVertexCount != 8 || fit.ShapeName() == "" {
+	if !ok || fit.Error != 0 || int(fit.HullVertexCount) != wantHull || fit.ShapeName() == "" {
 		fail("the collision fit is off")
 	}
-	if hull := first.CollisionHull(0); hull.VertexCount() != 8 || hull.IndexCount() != 36 {
+	if hull := first.CollisionHull(0); fit.HullVertexCount != 0 && (hull.VertexCount() != 8 || hull.IndexCount() != 36) {
 		fail("the collision hull is off")
 	}
 
@@ -598,7 +607,12 @@ func main() {
 	if len(one.Positions) != one.VertexCount*3 || len(one.Indices) != one.TriangleCount*3 || one.Level != 0 {
 		fail("meshlet 0 is off")
 	}
-	if strings.HasSuffix(path, "cube.scad") && (meshlets.Count() != 1 || one.TriangleCount != 12 || one.VertexCount != 36) {
+	// The mesh cube is 36 vertices; the exact cube's mesh shares its corners per face (24).
+	cubeVertices := 36
+	if !cubeIsMesh {
+		cubeVertices = 24
+	}
+	if strings.HasSuffix(path, "cube.scad") && (meshlets.Count() != 1 || one.TriangleCount != 12 || one.VertexCount != cubeVertices) {
 		fail("the cube's meshlets are off")
 	}
 	meshlets.Close()
@@ -610,7 +624,7 @@ func main() {
 	if est := first.TriangleEstimate(); est <= 0 && est != -1 {
 		fail("triangle estimate is neither a count nor -1")
 	}
-	if strings.HasSuffix(path, "cube.scad") {
+	if cubeIsMesh {
 		proxy, _ := first.SurfaceProxyMesh(4)
 		if first.TriangleEstimate() != 12 || first.SurfaceEdges().PolylineCount() != 0 || proxy != nil {
 			fail("the cube has no surface products")
@@ -3051,11 +3065,32 @@ func mustPositions(m *blacksmith.Mesh) []float32 {
 // smoke names it here, once, for both halves.
 const femNone = ^uint32(0)
 
-// femReader is the FEM surface mesh through the reader binding, on a **mesh-only** body:
+// sceneHasBrep says whether any node of the scene carries an exact B-rep: OpenSCAD does where the
+// reader library was built with the kernel's builder (`cadaclysm-capi`'s `openscad-brep`).
+func sceneHasBrep(scene *cadaclysm.Scene) bool {
+	for _, n := range scene.Walk() {
+		if b, _ := n.Brep(); b != nil {
+			b.Close()
+			return true
+		}
+	}
+	return false
+}
+
+// femReader is the FEM surface mesh through the reader binding. In the Reader flavour
 // cube.scad carries no brep, so the body falls back to the scene's own mesh -- one face,
 // every node on it, no B-rep topology at all, and the scene's convention rather than the
-// file's. Every check below says which wrong implementation it catches.
+// file's; where the reader library carries the kernel's `openscad-brep` (every shipped
+// desktop library) it is an exact box, and its topology is pinned instead. The mesh-only
+// options sweep runs on open-sheet.scad, mesh-only in every flavour. Every check below says
+// which wrong implementation it catches.
 func femReader(node *cadaclysm.Node, path string) {
+	isCube := strings.HasSuffix(path, "cube.scad")
+	exactCube := false
+	if b, _ := node.Brep(); b != nil {
+		b.Close()
+		exactCube = isCube
+	}
 	mesh, err := node.FemMesh(0.5, 0, nil)
 	if err != nil {
 		fail("fem: " + err.Error())
@@ -3126,7 +3161,13 @@ func femReader(node *cadaclysm.Node, path string) {
 			fail(fmt.Sprintf("fem: a census row reads %v, past this mesh", row))
 		}
 	}
-	if strings.HasSuffix(path, "cube.scad") {
+	// The exact cube (the kernel's `openscad-brep`): six faces, twelve edges, eight corners,
+	// in the file's own space.
+	if exactCube && (mesh.FromMesh || mesh.FaceCount != 6 || len(edges) != 12 || len(vertices) != 8) {
+		fail("fem: the exact cube reads " + mesh.String() + fmt.Sprintf(" with %d edges and %d vertices, not a box of 6 faces, 12 edges, 8 vertices", len(edges), len(vertices)))
+	}
+	// The mesh cube (the Reader flavour's) is a mesh-only body.
+	if isCube && !exactCube {
 		// Catches FromMesh read off the neighbouring Watertight field -- which is true for
 		// this body too, so only a body where the two differ separates them (femBrep).
 		if !mesh.FromMesh || mesh.FaceCount != 1 || len(edges) != 0 || len(vertices) != 0 {
@@ -3191,19 +3232,36 @@ func femReader(node *cadaclysm.Node, path string) {
 	// no options at all, so on the mesh-only path the library reads neither field: all six
 	// of these return a mesh. A wrapper that checked either itself would refuse six calls
 	// the ABI accepts, and would pass every test shaped like Python's. (A B-rep body *does*
-	// read the tolerance and refuses it; femBrep checks that half.)
+	// read the tolerance and refuses it; femBrep checks that half.) The body is open-sheet.scad,
+	// beside the sample: mesh-only in every flavour, where the cube is an exact box (which reads
+	// both fields) wherever the kernel's builder is linked.
+	sheetScene, err := cadaclysm.Open(filepath.Join(filepath.Dir(path), "open-sheet.scad"))
+	if err != nil {
+		fail("fem sweep: " + err.Error())
+	}
+	var sheet *cadaclysm.Node
+	for _, n := range sheetScene.Walk() {
+		if n.CanMesh() {
+			sheet = n
+			break
+		}
+	}
+	if sheet == nil {
+		fail("fem sweep: open-sheet.scad has no meshable node")
+	}
 	for _, o := range [][2]float64{
 		{0, 0}, {-1, 0}, {math.NaN(), 0}, {0.5, -1}, {0.5, math.NaN()}, {0.5, math.Inf(1)},
 	} {
-		any, err := node.FemMesh(o[0], o[1], nil)
+		any, err := sheet.FemMesh(o[0], o[1], nil)
 		if err != nil {
 			fail(fmt.Sprintf("fem: tolerance %g maxSize %g was refused by the wrapper: %s", o[0], o[1], err))
 		}
-		if len(any.Nodes) != len(mesh.Nodes) {
-			fail(fmt.Sprintf("fem: tolerance %g maxSize %g meshed %d nodes, not %d", o[0], o[1], len(any.Nodes)/3, nodeCount))
+		if !any.FromMesh || len(any.Nodes) != 15 {
+			fail(fmt.Sprintf("fem: tolerance %g maxSize %g meshed the open sheet to %v, not 5 mesh-only nodes", o[0], o[1], any))
 		}
 		any.Close()
 	}
+	sheetScene.Close()
 	// A closed handle refuses every call that hands it to the library, and says so in this
 	// package's own words. **The struct fields cannot refuse**: mesh.Nodes after a Close is
 	// a slice over freed memory, and Go has no way to mark it so -- exactly what the package
@@ -3986,6 +4044,56 @@ func machining() {
 			fail(fmt.Sprintf("machine_with: item top/bottom are %v/%v, not 10/2", item.Top, item.Bottom))
 		}
 	}
+	relStock, err := blacksmith.StockAround(block, 2)
+	if err != nil {
+		fail(err.Error())
+	}
+	relJob, err := blacksmith.NewJob(relStock, 30, blacksmith.JobDefaultClearance, blacksmith.JobDefaultTolerance,
+		blacksmith.JobDefaultName, blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer relJob.Close()
+	relReport, err := relJob.MachineRelieved(block, []*blacksmith.Tool{endMill, small}, nil, nil, nil, 0.3, nil, true)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(relReport.Items) != 4 {
+		fail(fmt.Sprintf("machine_relieved: %d item(s), not 4:\n%s", len(relReport.Items), relReport.Text))
+	}
+	for _, item := range relReport.Items {
+		if item.Kind != "relief" {
+			fail(fmt.Sprintf("machine_relieved: item kind is %q, not relief", item.Kind))
+		}
+		if !strings.HasPrefix(item.Reason, "corner relieved by T2 (2 mm): a notch 0.293 mm into the walls") {
+			fail(fmt.Sprintf("machine_relieved: reason is not the relief one: %s", item.Reason))
+		}
+	}
+	if math.Abs(relReport.Items[0].Size-(1-math.Sqrt(0.5))) > 1e-6 {
+		fail(fmt.Sprintf("machine_relieved: item 0 size is %v, not 1-sqrt(0.5)", relReport.Items[0].Size))
+	}
+	offStock, err := blacksmith.StockAround(block, 2)
+	if err != nil {
+		fail(err.Error())
+	}
+	offJob, err := blacksmith.NewJob(offStock, 30, blacksmith.JobDefaultClearance, blacksmith.JobDefaultTolerance,
+		blacksmith.JobDefaultName, blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer offJob.Close()
+	offReport, err := offJob.MachineRelieved(block, []*blacksmith.Tool{endMill, small}, nil, nil, nil, 0.3, nil, false)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(offReport.Items) != 4 {
+		fail(fmt.Sprintf("machine_relieved off: %d item(s), not 4:\n%s", len(offReport.Items), offReport.Text))
+	}
+	for _, item := range offReport.Items {
+		if item.Kind != "corner" {
+			fail(fmt.Sprintf("machine_relieved off: item kind is %q, not corner", item.Kind))
+		}
+	}
 	restOps, err := restJob.Operations()
 	if err != nil {
 		fail(err.Error())
@@ -4025,6 +4133,7 @@ func machining() {
 		fail("machine_with: a refused call changed the job")
 	}
 	fmt.Println("machine_with: two end mills leave four corners naming T2, z 10 down to 2; empty and nil lists refused")
+	fmt.Println("machine_relieved: the flag on gives four relief items naming T2 with a 0.293 mm notch; off gives four corners")
 
 	// The plate of spec 2026-09-28: machined cleanly by one end mill and one drill.
 	plateOutline0, err := blacksmith.Rect(80, 50)
@@ -7152,6 +7261,77 @@ func nurbsCurves() {
 		check(math.Abs(dist(point(circleCurve, clo2+(chi2-clo2)*float64(n)/16), [3]float64{})-3) < 1e-12, "a circle value's curve leaves its radius")
 	}
 
+	// 7b: fairing (test_a_traced_roof_faired_has_no_inflection_past_the_header). The fastback's
+	// roof on its centreline, (x, z) in mm, traced off the side view of the reference drawing
+	// (2.625 mm a pixel): the windshield's foot, the header (the fifth point), the crown, the
+	// backlight, the deck.
+	roofXZ := [][2]float64{{1717, 1110}, {1848, 1191}, {1979, 1262}, {2110, 1330}, {2242, 1356}, {2504, 1367}, {2767, 1369}, {3029, 1364},
+		{3160, 1354}, {3423, 1304}, {3554, 1251}, {3686, 1207}, {3817, 1165}, {3948, 1123}, {4079, 1078}}
+	roofPts := make([][3]float64, len(roofXZ))
+	for i, p := range roofXZ {
+		roofPts[i] = [3]float64{p[0], 0, p[1]}
+	}
+	headerAt := func(c *blacksmith.NurbsCurve) float64 {
+		samples, err := c.DivideByCount(400, 0)
+		must(err)
+		best, bestD := 0.0, math.Inf(1)
+		for _, a := range samples {
+			if d := dist(a.Point, roofPts[4]); d < bestD {
+				best, bestD = a.Parameter, d
+			}
+		}
+		return best
+	}
+	roofThrough, err := blacksmith.NurbsCurveThrough(roofPts, 3, false, nil, nil)
+	must(err)
+	defer roofThrough.Close()
+	tHeader := headerAt(roofThrough)
+	throughInfl, err := roofThrough.Inflections()
+	must(err)
+	var wobbles []blacksmith.At
+	for _, a := range throughInfl {
+		if a.Parameter > tHeader {
+			wobbles = append(wobbles, a)
+		}
+	}
+	check(len(wobbles) >= 3, fmt.Sprintf("the traced roof wobbles %d times past the header", len(wobbles)))
+	for _, a := range wobbles {
+		check(dist(point(roofThrough, a.Parameter), a.Point) < 1e-9 && a.Error == 0, fmt.Sprintf("inflection %+v is off the curve", a))
+	}
+	const roofTol = 5.25 // two pixels of the drawing
+	roof, err := blacksmith.NurbsCurveFair(roofPts, 5, roofTol, &[2]float64{4, math.NaN()})
+	must(err)
+	defer roof.Close()
+	roofDeg, err := roof.Degree()
+	must(err)
+	check(roofDeg == 5 && roof.FitError != nil && *roof.FitError >= 0 && *roof.FitError <= roofTol, fmt.Sprintf("faired roof degree %d, fit error %v", roofDeg, roof.FitError))
+	tHeader = headerAt(roof)
+	roofInfl, err := roof.Inflections()
+	must(err)
+	for _, a := range roofInfl {
+		check(a.Parameter <= tHeader+1e-6, fmt.Sprintf("the faired roof turns over past the header at %v", a.Parameter))
+	}
+	kc, err := roof.KnotContinuity()
+	must(err)
+	check(kc.Angle < 1e-6 && kc.Curvature < 1e-9, fmt.Sprintf("faired roof knot continuity %+v", kc))
+	// Too tight to hold: refused in the library's words, not a curve that turns over.
+	_, err = blacksmith.NurbsCurveFair(roofPts, 5, 0.05, &[2]float64{math.NaN(), math.NaN()})
+	refused(err, "nurbs_curve_fair: ")
+	check(strings.Contains(err.Error(), "no curve free of inflections"), err.Error())
+	_, err = blacksmith.NurbsCurveFair(roofPts, 2, roofTol, nil)
+	refused(err, "nurbs_curve_fair: ")
+	check(strings.Contains(err.Error(), "degree 2"), err.Error())
+	// Faired from the wobbly curve itself, its own parameters naming the span.
+	thLo, thHi := domain(roofThrough)
+	faired, err := roofThrough.Faired(5, 1.5*roofTol, &[2]float64{thLo, thHi})
+	must(err)
+	defer faired.Close()
+	fairedInfl, err := faired.Inflections()
+	must(err)
+	check(len(fairedInfl) == 0 && faired.FitError != nil && *faired.FitError <= 1.6*roofTol, fmt.Sprintf("faired curve: %d inflections, fit error %v", len(fairedInfl), faired.FitError))
+	_, err = roofThrough.Faired(2, roofTol, nil)
+	refused(err, "nurbs_curve_faired: ")
+
 	// 8: lifetime. A tween list and an edge's curve outlive what they came from.
 	x := curve([][3]float64{{0, 0, 0}, {1, 1, 0}, {2, 0, 0}}, 2, nil, nil)
 	y := curve([][3]float64{{0, 0, 1}, {1, 1, 1}, {2, 0, 1}}, 2, nil, nil)
@@ -7462,6 +7642,59 @@ func curveSheets() {
 	must(err)
 	check(wf == blacksmith.RecessFaces{Sheet: 1, Fillet: 0, Walls: 4, Pane: 1} && faces(window) == 6, fmt.Sprintf("recess faces %+v, %d in all", wf, faces(window)))
 
+	// 6b': half a roof domed both ways, lofted out from the centre plane y = 0, leaning as it
+	// leaves the plane: mirrored as it is, the seam is a crease; squared first, it is smooth.
+	section := func(y float64) *blacksmith.NurbsCurve {
+		var pts [][3]float64
+		for x := 0.0; x <= 80; x += 10 {
+			pts = append(pts, [3]float64{x, y, 20*math.Sin(math.Pi*x/80) - 0.01*y*y + 0.05*y + 0.002*x*y})
+		}
+		c, err := blacksmith.NurbsCurveThrough(pts, 3, false, nil, nil)
+		must(err)
+		return c
+	}
+	roof := solid(blacksmith.LoftCurves(curves(section(0), section(10), section(20), section(30)), 3, false, false))
+	mirror, err := blacksmith.NewFrame([3]float64{}, [3]float64{1, 0, 0}, [3]float64{0, 0, -1}, [3]float64{0, 1, 0})
+	must(err)
+	creased, sr, err := roof.MirrorJoin(mirror, 0, 0.01)
+	must(err)
+	check(faces(creased) == 2 && sr.Seams == 1 && sr.Squared == 0 && sr.Moved == 0, fmt.Sprintf("mirror_join as it is: %+v", sr))
+	check(sr.Gap < 1e-9 && sr.Angle > 5*math.Pi/180 && sr.Curvature > 1e-4, fmt.Sprintf("mirror_join crease: %+v", sr))
+	smooth, sr, err := roof.MirrorJoin(mirror, 0.5, 0.01)
+	must(err)
+	check(faces(smooth) == 2 && sr.Seams == 1 && sr.Squared == 1 && sr.Naked == 6, fmt.Sprintf("mirror_join squared: %+v", sr))
+	check(sr.Moved > 0 && sr.Gap < 1e-9 && sr.Angle < 1e-9 && sr.Curvature < 1e-9, fmt.Sprintf("mirror_join smooth: %+v", sr))
+	body, err := smooth.Mass(0)
+	must(err)
+	one, err := roof.Mass(0)
+	must(err)
+	check(math.Abs(body.Area-2*one.Area) < 0.01*one.Area, fmt.Sprintf("mirror_join area %g against %g", body.Area, one.Area))
+	_, _, err = smooth.MirrorJoin(mirror, 0, 0)
+	refused(err, "mirror_join: the half lies on both sides of the plane")
+
+	// 6c: curves on a sheet -- a ring on a square offset along it, split along it, parted by a panel gap.
+	sq := rect([3]float64{}, x, y, 40, 40)
+	var ringPts [][3]float64
+	for i := 0; i < 48; i++ {
+		a := 2 * math.Pi * float64(i) / 48
+		ringPts = append(ringPts, [3]float64{8 * math.Cos(a), 8 * math.Sin(a), 0})
+	}
+	ringOn, err := blacksmith.NurbsCurveThrough(ringPts, 3, true, nil, nil)
+	must(err)
+	inner, err := ringOn.OffsetOnSheet(sq, 2, 1e-3)
+	must(err)
+	lo, _, err := inner.Domain()
+	must(err)
+	p0, err := inner.Point(lo)
+	must(err)
+	check(inner.FitError != nil && *inner.FitError <= 1e-3 && math.Abs(math.Hypot(p0[0], p0[1])-6) < 1e-3, fmt.Sprintf("offset_on_sheet %v", p0))
+	halves, err := sq.SplitAlongCurve(ringOn, 1e-3)
+	must(err)
+	check(faces(halves) == 2, fmt.Sprintf("split_along_curve %d faces", faces(halves)))
+	island, rest, err := sq.PanelGap(ringOn, 4, -10, 1e-3)
+	must(err)
+	check(faces(island) == 3 && faces(rest) == 3, fmt.Sprintf("panel_gap %d/%d faces", faces(island), faces(rest)))
+
 	// 7: continuity, matching and blending.
 	sa := solid(blacksmith.LoftCurves(curves(line([3]float64{-1, 0, 0}, [3]float64{0, 0, 0}), line([3]float64{-1, 1, 0}, [3]float64{0, 1, 0})), 1, false, false))
 	sb := solid(blacksmith.LoftCurves(curves(line([3]float64{0, 0, 0}, [3]float64{0, 0, 1}), line([3]float64{0, 1, 0}, [3]float64{0, 1, 1})), 1, false, false))
@@ -7486,6 +7719,91 @@ func curveSheets() {
 	check(err != nil && err.Error() == "a side is 'u0', 'u1', 'v0' or 'v1', not 'w2'", fmt.Sprintf("side refusal: %v", err))
 	_, err = sa.Matched("u1", sb, "u0", 3, 0, 0)
 	refused(err, "match_side: ")
+	// Edge continuity (test_edge_continuity_reads_a_crease_and_a_fillet_seam): a box's square
+	// crease, then a fillet's two tangent seams, its curvature a quarter where the flats' is zero.
+	block := solid(blacksmith.Cuboid(40, 30, 20))
+	r, err = block.EdgeContinuity(0, 16)
+	must(err)
+	check(math.Abs(r.Angle-math.Pi/2) < 1e-9 && r.Gap < 1e-9 && r.Curvature < 1e-9 && r.Samples == 17, fmt.Sprintf("crease %+v", r))
+	rounded := solid(block.Fillet([]int{0}, 4.0, blacksmith.FilletTolerance))
+	roundedEdges, err := rounded.Edges()
+	must(err)
+	var seams []blacksmith.Continuity
+	for _, e := range roundedEdges {
+		k, err := rounded.EdgeContinuity(e.Index, 64)
+		if err != nil {
+			continue // an edge of one face
+		}
+		if k.Angle < 1e-6 {
+			seams = append(seams, k)
+		}
+	}
+	check(len(seams) == 2, fmt.Sprintf("fillet seams %+v", seams))
+	for _, k := range seams {
+		check(math.Abs(k.Curvature-0.25) < 1e-4, fmt.Sprintf("fillet seam %+v", k))
+	}
+	_, err = block.EdgeContinuity(999, 64)
+	refused(err, "edge_continuity: ")
+	// Surface fairing (test_a_wobbly_loft_faired_turns_no_curvature_over): eleven lines across a
+	// shallow arch, each lifted or dropped by 0.4 in turn -- a loft through them ripples.
+	var wobbly []*blacksmith.NurbsCurve
+	for k := 0; k < 11; k++ {
+		wx := 10.0 * float64(k)
+		wz := -0.01*(wx-50)*(wx-50) - 0.4
+		if k%2 == 0 {
+			wz += 0.8
+		}
+		wobbly = append(wobbly, line([3]float64{wx, 0, wz}, [3]float64{wx, 40, wz}))
+	}
+	wloft := solid(blacksmith.LoftCurves(wobbly, 3, false, false))
+	wt, err := wloft.CurvatureTurns(0, 32)
+	must(err)
+	check(wt.Samples == 32 && len(wt.MeanTurns) > 0 && wt.MeanPositive+wt.MeanNegative > 1, fmt.Sprintf("wobbly loft turns %+v", wt))
+	for _, a := range wt.MeanTurns {
+		check(math.Abs(math.Sqrt(a.Tangent[0]*a.Tangent[0]+a.Tangent[1]*a.Tangent[1]+a.Tangent[2]*a.Tangent[2])-1) < 1e-9 &&
+			a.Point[0] >= 0 && a.Point[0] <= 100 && a.Point[2] > -26 && a.Point[2] < 1, fmt.Sprintf("mean turn %+v", a))
+	}
+	// The lines run along u, the loft's v across them: the end lines kept, held along v.
+	wfaired := solid(wloft.Faired(1.0, 3, nil, []int{-1, -1, 0, 0}, "v", 0))
+	check(wfaired.SheetError() != nil && *wfaired.SheetError() >= 0 && *wfaired.SheetError() <= 1.05, fmt.Sprintf("faired sheet error %v", wfaired.SheetError()))
+	ft, err := wfaired.CurvatureTurns(0, 32)
+	must(err)
+	check(len(ft.MeanTurns) == 0 && ft.MeanPositive+ft.MeanNegative == 1, fmt.Sprintf("faired turns %+v", ft))
+	coarse := solid(wloft.Faired(1.0, 3, &[2]int{6, 8}, []int{-1, -1, 0, 0}, "v", 0))
+	ct, err := coarse.CurvatureTurns(0, 32)
+	must(err)
+	check(*coarse.SheetError() <= 1.05 && len(ct.MeanTurns) == 0, fmt.Sprintf("coarse fair %v %+v", *coarse.SheetError(), ct))
+	_, err = wloft.Faired(1.0, 2, nil, []int{2}, "", 0)
+	refused(err, "surface_faired: ")
+	check(strings.Contains(err.Error(), "degree 2"), err.Error())
+	_, err = wloft.Faired(0.01, 3, nil, []int{-1, -1, 0, 0}, "v", 0)
+	refused(err, "surface_faired: ")
+	check(strings.Contains(err.Error(), "no fair free of inflections"), err.Error())
+	_, err = wloft.Faired(1.0, 3, nil, []int{0, 0}, "", 0)
+	check(err != nil && strings.Contains(err.Error(), "keep takes 4 levels"), fmt.Sprintf("keep refusal: %v", err))
+	_, err = wloft.Faired(1.0, 3, nil, nil, "w", 0)
+	check(err != nil && strings.Contains(err.Error(), "no_inflection"), fmt.Sprintf("no_inflection refusal: %v", err))
+	_, err = wloft.CurvatureTurns(7, 32)
+	refused(err, "curvature_turns: ")
+	// Highlight kink (test_highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam).
+	cube2 := solid(blacksmith.Cuboid(2, 2, 2))
+	hk, err := cube2.HighlightKink(0, 16)
+	must(err)
+	check(hk.Angle < 1e-9 && hk.Samples == 17, fmt.Sprintf("cube edge kink %+v", hk))
+	round2 := solid(cube2.Fillet([]int{0}, 0.5, blacksmith.FilletTolerance))
+	round2Edges, err := round2.Edges()
+	must(err)
+	worstKink := 0.0
+	for _, e := range round2Edges {
+		k, err := round2.HighlightKink(e.Index, 64)
+		if err != nil {
+			continue // an edge of one face
+		}
+		worstKink = math.Max(worstKink, k.Angle)
+	}
+	check(worstKink > math.Pi/4, fmt.Sprintf("fillet seam kink %v", worstKink))
+	_, err = cube2.HighlightKink(999, 64)
+	refused(err, "highlight_kink: ")
 
 	// 8: the N-sided patch fills a pentagon of strips.
 	var corners [5][3]float64
@@ -7636,6 +7954,20 @@ func curveSheets() {
 	_, err = cube.FilletRadiusEnd([]int{0}, 1, &two, 1e-6)
 	refused(err, "fillet: ")
 	check(strings.Contains(err.Error(), "a varying radius rounds only spline edges"), err.Error())
+	// A chain of one with two stations at its ends is the varying fillet.
+	law := []blacksmith.LawStation{{0, 8}, {1, 20}}
+	lawed := solid(fshell.FilletLaw(crease, law, 1e-3))
+	check(faces(lawed) == 3 && math.Abs(area(lawed)-area(varying)) < 1e-3, fmt.Sprintf("fillet_law: area %v against the varying fillet's %v", area(lawed), area(varying)))
+	swell := solid(fshell.FilletLaw(crease, []blacksmith.LawStation{{0, 8}, {0.5, 20}, {1, 8}}, 1e-3))
+	low := solid(fshell.FilletRadiusEnd(crease, 8, nil, 1e-3))
+	high := solid(fshell.FilletRadiusEnd(crease, 20, nil, 1e-3))
+	check(area(swell) < area(low) && area(swell) > area(high), fmt.Sprintf("fillet_law: the swell's area %v is not between %v and %v", area(swell), area(low), area(high)))
+	_, err = fshell.FilletLaw(crease, nil, 1e-3)
+	refused(err, "fillet: ")
+	check(strings.Contains(err.Error(), "at least one station"), err.Error())
+	_, err = cube.FilletLaw([]int{0}, law, 1e-6)
+	refused(err, "fillet: ")
+	check(strings.Contains(err.Error(), "a radius law rounds only spline edges"), err.Error())
 
 	// records of a plain solid
 	check(cube.SheetError() == nil && cube.PatchReport() == nil, "a plain solid has a sheet error or a patch report")

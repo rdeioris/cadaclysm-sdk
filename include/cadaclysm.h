@@ -3883,10 +3883,12 @@ const char *cadaclysm_brep_layout_id(void);
  *
  * Null, with [`cadaclysm_last_error`](crate::cadaclysm_last_error) saying why,
  * where the part is not a B-rep: a mesh, a curve, a CSG or tessellated body, a
- * part of a JT or OpenSCAD file. The B-rep readers are STEP (AP203/214/242),
- * ACIS, Rhino, OCCT `.brep`, IGES (each surface a one-face sheet) and IFC (a
- * product's solids, openings cut, as one brep). Built on first ask where the
- * reader had not built it already (STEP, IGES, IFC).
+ * mesh-only part (an open OpenSCAD polyhedron, or an OpenSCAD file read without the
+ * kernel). The B-rep readers are STEP (AP203/214/242), ACIS, Rhino, OCCT
+ * `.brep`, IGES (each surface a one-face sheet), IFC (a product's solids,
+ * openings cut, as one brep) and OpenSCAD (each region's solid, where the
+ * kernel is linked). Built on first ask where the reader had not built it
+ * already (STEP, IGES, IFC).
  *
  * **The blacksmith library must come from the same release as this one**, and
  * both must allocate from the process heap -- see

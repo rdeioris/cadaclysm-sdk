@@ -18,7 +18,7 @@ using System.IO.Compression;
 using System.Runtime.InteropServices;
 using Cadaclysm.Blacksmith;
 
-namespace Cadaclysm.Viewer;
+namespace Cadaclysm.Views;
 
 /// <summary>What a view library refused, in its own words.</summary>
 public sealed class ViewException : Exception
@@ -76,6 +76,49 @@ internal struct RawViewLod
     public uint Size;
     public uint MinTriangles;
     public uint Motion;
+}
+
+internal unsafe struct RawOccludedStyle
+{
+    public uint Size;
+    public float Dash;
+    public float Gap;
+    public float Dim;
+    public uint HasColour;
+    public fixed float Colour[3];
+}
+
+/// <summary>How every "dashed" item's hidden lines and points look: a dash and a gap in points, the share of
+/// coverage kept (above 0, at most 1), and optionally one colour (3 numbers in 0..1) for all of them.</summary>
+public readonly record struct OccludedStyle(float Dash = 6f, float Gap = 4f, float Dim = 0.5f, float[]? Colour = null)
+{
+    /// <summary>The defaults (6, 4, 0.5, no colour): a parameterless <c>new OccludedStyle()</c> would otherwise be all zeros,
+    /// because a struct's own parameterless constructor ignores the parameter defaults above.</summary>
+    public OccludedStyle() : this(6f, 4f, 0.5f, null) { }
+}
+
+internal unsafe struct RawViewSnap
+{
+    public uint Size;
+    public uint Kind;
+    public fixed double Point[3];
+    public uint Item;
+    public uint Node;
+    public uint Face;
+    public uint Edge;
+    public fixed float Tangent[3];
+    public fixed float Axis[3];
+    public double Radius;
+    public float DistancePx;
+    public uint Clicks;
+}
+
+internal struct RawViewSnapSettings
+{
+    public uint Size;
+    public uint Kinds;
+    public float AperturePx;
+    public uint Marker;
 }
 
 internal unsafe struct RawViewViewport
@@ -278,6 +321,10 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] internal static extern void cadaclysm_view_set_background(ViewHandle view, float* rgb);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_lod(ViewHandle view, RawViewLod* lod);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_occluded_style(ViewHandle view, RawOccludedStyle* style);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_occluded_style(ViewHandle view, RawOccludedStyle* style);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_wake_ms(ViewHandle view);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_node_visible(ViewHandle view, uint item, uint node, [MarshalAs(UnmanagedType.I1)] bool visible);
@@ -291,6 +338,16 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] internal static extern void cadaclysm_view_request_pick_in(ViewHandle view, uint viewport, uint x, uint y);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_pick_result(ViewHandle view, RawViewPick* output);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_snap(ViewHandle view, RawViewSnapSettings* settings);
+    [DllImport(Lib)] internal static extern void cadaclysm_view_request_snap_in(ViewHandle view, uint viewport, uint x, uint y);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_snap_result(ViewHandle view, RawViewSnap* output);
+    [DllImport(Lib)] internal static extern void cadaclysm_view_clear_snap(ViewHandle view);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_work_plane(ViewHandle view, double* origin, double* xAxis, double* normal, double step);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_clear_work_plane(ViewHandle view);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_frame_node(ViewHandle view, uint item, uint node);
     [DllImport(Lib)] internal static extern void cadaclysm_view_look(ViewHandle view, float dx, float dy);
@@ -331,6 +388,7 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_timeline_playing(ViewHandle view);
     [DllImport(Lib)] internal static extern nuint cadaclysm_view_timeline_status(ViewHandle view, byte* text, nuint capacity);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_show_solid(ViewHandle view, SolidHandle solid, double tolerance, float* rgb);
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_show_solid_faces(ViewHandle view, SolidHandle solid, double tolerance, float* rgb, uint material, float opacity, uint* faces, uint faceCount);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_image(ViewHandle view, byte* rgba, nuint capacity);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -500,7 +558,7 @@ public static unsafe class ViewLibrary
     }
 
     /// <summary>Why the library at `path`, answering `version` from cadaclysm_view_abi_version, is
-    /// refused -- null when this wrapper takes it (1.18 or a later 1.x).</summary>
+    /// refused -- null when this wrapper takes it (1.22 or a later 1.x).</summary>
     internal static string? AbiRefusal(string path, uint version)
     {
         uint major = version >> 16, minor = version & 0xFFFF;
@@ -508,8 +566,9 @@ public static unsafe class ViewLibrary
         // timeline calls (bound: ShowMachining, Machining, the transport). 1.8: the pick's clicks and point,
         // set_double_click_frames, focus, navigation. 1.9: set_lighting and lighting. 1.10: the
         // viewport cameras (bound; C#'s own API for them comes later). 1.11: show_points. 1.13: set_occluded.
-        // 1.18: set_finish.
-        return major != 1 || minor < 18 ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.18 or a later 1.x" : null;
+        // 1.18: set_finish. 1.20: set_occluded_style and occluded_style. 1.21: show_solid_faces.
+        // 1.22: snapping -- set_snap, request_snap_in, snap_result, clear_snap, set_work_plane, clear_work_plane.
+        return major != 1 || minor < 22 ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.22 or a later 1.x" : null;
     }
 
     private static bool SamePath(string a, string? b) =>
@@ -689,6 +748,14 @@ public sealed unsafe class Machining : Item
 /// library read no depth (a machining stock, the terminal library).</summary>
 public sealed record Pick(uint Item, uint Node, uint Face, uint Clicks = 1, float[]? Point = null);
 
+/// <summary>A snap answer (view ABI 1.22): its Kind ("vertex", "midpoint", "centre", "quadrant", "edge", "face",
+/// "grid" or "plane"), the Point snapped to (x, y, z, in the coordinates the items were shown in), the item, node
+/// and face it lies on (0 for a grid or plane snap), its Edge (null for a face, grid or plane snap), the edge's
+/// unit Tangent there, a circular edge's unit Axis and Radius (centre and quadrant), how many pixels the cursor
+/// was from it, and Clicks: 0 for <c>View.Snap</c> and a hover, 1 for a click's snap, 2 for a double click's.</summary>
+public sealed record Snap(string Kind, double[] Point, uint Item, uint Node, uint Face, uint? Edge, float[] Tangent,
+    float[] Axis, double Radius, float DistancePx, uint Clicks);
+
 public sealed record Camera(float[] Eye, float[] Target, float[] Up, bool Orthographic, double Azimuth, double Elevation, Pick? Pick);
 
 /// <summary>RGBA8, rows from the top.</summary>
@@ -840,7 +907,19 @@ public sealed unsafe class View : IDisposable
         ["right"] = 5, ["bottom-left"] = 6, ["bottom"] = 7, ["bottom-right"] = 8,
     };
     internal static readonly Dictionary<string, uint> OccludedModes = new() { ["off"] = 0, ["solid"] = 1, ["dashed"] = 2 };
+    /// <summary>The CADACLYSM_VIEW_SNAP_* bits by the names SetSnap takes and Snap.Kind reports; "all" is every one (1.22).</summary>
+    internal static readonly Dictionary<string, uint> SnapKinds = new()
+    {
+        ["vertex"] = 1, ["midpoint"] = 2, ["centre"] = 4, ["quadrant"] = 8, ["edge"] = 16, ["face"] = 32, ["grid"] = 64, ["plane"] = 128,
+        ["all"] = 0xFF,
+    };
+    private const uint SnapNoEdge = 0xFFFFFFFF;   // CadaclysmViewSnap.edge where the snap is on no edge
     internal static readonly Dictionary<string, uint> Finishes = new() { ["gloss"] = 0, ["satin"] = 1, ["matte"] = 2 };
+    /// <summary>A shown solid's material (CADACLYSM_VIEW_MATERIAL_*, 1.21).</summary>
+    internal static readonly Dictionary<string, uint> Materials = new()
+    {
+        ["default"] = 0, ["plastic"] = 1, ["metal"] = 2, ["matte"] = 3, ["paint"] = 4, ["brushed"] = 5, ["glass"] = 6,
+    };
     private static readonly Dictionary<string, uint> TextModes = new() { ["label"] = 0, ["world"] = 1 };
     private static readonly Dictionary<string, uint> Events = new()
     {
@@ -1018,14 +1097,34 @@ public sealed unsafe class View : IDisposable
     /// <summary><see cref="Show(object, float[], double)"/> with the colour as text (`"#rgb"`, `"#rrggbb"`, a CSS name).</summary>
     public Item Show(object obj, string rgb, double tolerance = 0.05) => Show(obj, ViewNative.Colour(rgb), tolerance);
 
-    /// <summary><see cref="ShowSolid(Solid, double, float[])"/> with the colour as text.</summary>
-    public Item ShowSolid(Solid solid, double tolerance, string rgb) => ShowSolid(solid, tolerance, ViewNative.Colour(rgb));
+    /// <summary><see cref="ShowSolid(Solid, double, float[], string, float?, uint[])"/> with the colour as text.</summary>
+    public Item ShowSolid(Solid solid, double tolerance, string rgb, string? material = null, float? opacity = null, uint[]? faces = null) =>
+        ShowSolid(solid, tolerance, ViewNative.Colour(rgb), material, opacity, faces);
 
-    public Item ShowSolid(Solid solid, double tolerance = 0.05, float[]? rgb = null)
+    /// <summary>A blacksmith Solid by handle, read in place. `material` (1.21) "default", "plastic",
+    /// "metal", "matte", "paint", "brushed" or "glass"; `opacity` 0..1 (1 opaque); `faces` the
+    /// solid's face numbers to show alone, with no edges -- a trim's ghost (null: every face).
+    /// Without any of the three, the 1.4 call. The item's faces are numbered as the solid numbers
+    /// them.</summary>
+    public Item ShowSolid(Solid solid, double tolerance = 0.05, float[]? rgb = null, string? material = null, float? opacity = null, uint[]? faces = null)
     {
         Exact(rgb, 3, "showSolid rgb");
-        var h = Live("cadaclysm_view_show_solid");
-        fixed (float* c = rgb) return NewItem(ViewNative.cadaclysm_view_show_solid(h, solid.Handle, tolerance, c), solid);
+        uint m = 0;
+        if (material is not null && !Materials.TryGetValue(material, out m))
+            throw new ViewException($"material: '{material}' is not 'default', 'plastic', 'metal', 'matte', 'paint', 'brushed' or 'glass'");
+        if (material is null && opacity is null && faces is null)
+        {
+            var h = Live("cadaclysm_view_show_solid");
+            fixed (float* c = rgb) return NewItem(ViewNative.cadaclysm_view_show_solid(h, solid.Handle, tolerance, c), solid);
+        }
+        var hf = Live("cadaclysm_view_show_solid_faces");
+        uint none = 0;
+        fixed (float* c = rgb)
+        fixed (uint* f = faces)
+        {
+            uint* only = faces is null ? null : faces.Length == 0 ? &none : f;
+            return NewItem(ViewNative.cadaclysm_view_show_solid_faces(hf, solid.Handle, tolerance, c, m, opacity ?? 1f, only, (uint)(faces?.Length ?? 0)), solid);
+        }
     }
 
     public Item ShowScene(Scene scene) => ShowScene(scene, scene);
@@ -1400,6 +1499,25 @@ public sealed unsafe class View : IDisposable
         set => Ok(ViewNative.cadaclysm_view_set_lighting(Live("cadaclysm_view_set_lighting"), Named(LightingKinds, value, "lighting")));
     }
 
+    /// <summary>The view-wide occluded style (see <see cref="OccludedStyle"/>); "solid" and "off" items never use it.</summary>
+    public unsafe OccludedStyle OccludedStyle
+    {
+        get
+        {
+            var raw = new RawOccludedStyle { Size = (uint)sizeof(RawOccludedStyle) };
+            Ok(ViewNative.cadaclysm_view_occluded_style(Live("cadaclysm_view_occluded_style"), &raw));
+            float[]? colour = raw.HasColour != 0 ? new[] { raw.Colour[0], raw.Colour[1], raw.Colour[2] } : null;
+            return new OccludedStyle(raw.Dash, raw.Gap, raw.Dim, colour);
+        }
+        set
+        {
+            if (value.Colour is { Length: not 3 }) throw new ArgumentException("occluded style: Colour is 3 numbers in 0..1");
+            var raw = new RawOccludedStyle { Size = (uint)sizeof(RawOccludedStyle), Dash = value.Dash, Gap = value.Gap, Dim = value.Dim, HasColour = value.Colour is null ? 0u : 1u };
+            if (value.Colour is { } c) { raw.Colour[0] = c[0]; raw.Colour[1] = c[1]; raw.Colour[2] = c[2]; }
+            Ok(ViewNative.cadaclysm_view_set_occluded_style(Live("cadaclysm_view_set_occluded_style"), &raw));
+        }
+    }
+
     public bool NeedsDraw => ViewNative.cadaclysm_view_needs_draw(Live("cadaclysm_view_needs_draw"));
 
     // ---- the rest
@@ -1443,6 +1561,102 @@ public sealed unsafe class View : IDisposable
         if (waiting.Length > 0 && !waiting.EndsWith("no pick result", StringComparison.Ordinal)) throw new ViewException(waiting);
         pick = null;
         return false;
+    }
+
+    /// <summary><see cref="SetSnap(string[], float, bool)"/> with the library's default aperture and the marker drawn:
+    /// "all", or any of the kinds' names; no names is "all", as Python's <c>set_snap()</c>; null switches snapping off.</summary>
+    public void SetSnap(params string[]? kinds) => SetSnap(kinds, 0f, true);
+
+    /// <summary>What a snap may land on: "all", or any of "vertex", "midpoint", "centre" (a circular edge's),
+    /// "quadrant", "edge", "face", "grid" and "plane"; no names is "all", and null switches snapping off, as a view starts.
+    /// `aperturePx` is how far from the cursor a point kind may lie (0: the library's default, 10 points; otherwise
+    /// 2..32), `marker` whether the view draws the marker at the snap. Once on, a mouse hovering over a view in its
+    /// own window snaps, and so does a click (<see cref="LastSnap"/> reads them); <see cref="Snap(uint, uint, uint)"/>
+    /// asks one at any pixel. Where kinds compete, a corner beats the face it sits on.</summary>
+    /// <remarks>An unknown name is refused before the call; the library refuses an aperture that is negative or not
+    /// finite with its own reason.</remarks>
+    public void SetSnap(string[]? kinds, float aperturePx, bool marker = true)
+    {
+        uint bits = 0;
+        if (kinds is { Length: 0 }) bits = SnapKinds["all"];
+        foreach (var name in kinds ?? Array.Empty<string>()) bits |= Named(SnapKinds, name, "snap kind");
+        var raw = new RawViewSnapSettings { Size = (uint)sizeof(RawViewSnapSettings), Kinds = bits, AperturePx = aperturePx, Marker = marker ? 1u : 0u };
+        Ok(ViewNative.cadaclysm_view_set_snap(Live("cadaclysm_view_set_snap"), &raw));
+    }
+
+    /// <summary>The snap under pixel (x, y) of `viewport` (see <see cref="Cadaclysm.Views.Snap"/>), or null where nothing in the
+    /// kinds SetSnap chose lies there -- and always null while snapping is off.</summary>
+    /// <remarks>Draws until the answer lands, as <see cref="Pick(uint, uint, uint)"/> does, a never-drawn view first.
+    /// A failure other than "no answer yet" throws at once with the library's own message.</remarks>
+    public Snap? Snap(uint x, uint y, uint viewport = 0)
+    {
+        if (!_drawn) Draw();
+        var h = Live("cadaclysm_view_request_snap_in");
+        Void("cadaclysm_view_request_snap_in", v => ViewNative.cadaclysm_view_request_snap_in(v, viewport, x, y));
+        var output = new RawViewSnap { Size = (uint)sizeof(RawViewSnap) };
+        var waiting = "";
+        for (var i = 0; i < 200; i++)
+        {
+            Draw();
+            if (ViewNative.cadaclysm_view_snap_result(h, &output)) return SnapOf(output);
+            waiting = ViewNative.LastError();
+            if (waiting.Length > 0 && !waiting.EndsWith("no snap result", StringComparison.Ordinal)) throw new ViewException(waiting);
+            Thread.Sleep(10);
+        }
+        throw new ViewException($"snap: the answer never landed ({(waiting.Length > 0 ? waiting : "no error reported")})");
+    }
+
+    /// <summary>The newest snap answer that has landed, without asking or waiting (Python's `last_snap`): a hover or
+    /// click in the view's own window (`Pump` lands them as it draws), or one asked with Snap's request. False while
+    /// none has; true with `snap` null when the snap found nothing, or the snap. Each answer is read once; a hover's
+    /// never replaces a click's not read yet.</summary>
+    /// <remarks>A failure other than "no answer yet" throws the library's own message.</remarks>
+    public bool LastSnap(out Snap? snap)
+    {
+        var output = new RawViewSnap { Size = (uint)sizeof(RawViewSnap) };
+        if (ViewNative.cadaclysm_view_snap_result(Live("cadaclysm_view_snap_result"), &output))
+        {
+            snap = SnapOf(output);
+            return true;
+        }
+        var waiting = ViewNative.LastError();
+        if (waiting.Length > 0 && !waiting.EndsWith("no snap result", StringComparison.Ordinal)) throw new ViewException(waiting);
+        snap = null;
+        return false;
+    }
+
+    /// <summary>Hides the snap marker and drops any snap asked or answered and not yet read.</summary>
+    public void ClearSnap() => Void("cadaclysm_view_clear_snap", h => ViewNative.cadaclysm_view_clear_snap(h));
+
+    /// <summary>The plane "grid" and "plane" snaps land on, in place of the ground grid: through `origin`, its grid
+    /// lines along `xAxis` (default 1, 0, 0) and across it, `step` apart (0: the ground grid's spacing), square to
+    /// `normal` (default 0, 0, 1). The axes need not be unit length, but must not be parallel. A null `origin`
+    /// puts the ground grid back.</summary>
+    /// <remarks>Other than three numbers is refused before the call; the library refuses a value that is not finite,
+    /// a negative step and parallel or zero axes with its own reason.</remarks>
+    public void SetWorkPlane(double[]? origin, double[]? xAxis = null, double[]? normal = null, double step = 0)
+    {
+        if (origin is null)
+        {
+            Ok(ViewNative.cadaclysm_view_clear_work_plane(Live("cadaclysm_view_clear_work_plane")));
+            return;
+        }
+        double[] o = Exact(origin, 3, "work plane origin")!, x = Exact(xAxis ?? new[] { 1.0, 0, 0 }, 3, "work plane xAxis")!,
+            n = Exact(normal ?? new[] { 0.0, 0, 1 }, 3, "work plane normal")!;
+        var h = Live("cadaclysm_view_set_work_plane");
+        fixed (double* po = o, px = x, pn = n) Ok(ViewNative.cadaclysm_view_set_work_plane(h, po, px, pn, step));
+    }
+
+    /// <summary>A CadaclysmViewSnap as the answer: null for kind 0 (nothing snapped); Edge null where the snap is on
+    /// no edge (Python's `_snap_dict`).</summary>
+    internal static Snap? SnapOf(RawViewSnap raw)
+    {
+        var kind = raw.Kind;
+        return kind == 0 ? null : new Snap(SnapKinds.FirstOrDefault(k => k.Value == kind && k.Key != "all").Key ?? kind.ToString(),
+            new[] { raw.Point[0], raw.Point[1], raw.Point[2] }, raw.Item, raw.Node, raw.Face,
+            raw.Edge == SnapNoEdge ? null : (uint?)raw.Edge,
+            new[] { raw.Tangent[0], raw.Tangent[1], raw.Tangent[2] }, new[] { raw.Axis[0], raw.Axis[1], raw.Axis[2] },
+            raw.Radius, raw.DistancePx, raw.Clicks);
     }
 
     public void Draw() { Ok(ViewNative.cadaclysm_view_draw(Live("cadaclysm_view_draw"))); _drawn = true; }

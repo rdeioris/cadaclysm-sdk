@@ -20,6 +20,8 @@ export function current(): Library;
 export function pump(timeoutMs?: number): number;
 export type TextAlign = 'top-left' | 'top' | 'top-right' | 'left' | 'centre' | 'center' | 'right' | 'bottom-left' | 'bottom' | 'bottom-right';
 /** showText's options; every field optional (a white 12 px label, bottom-left on its anchor). */
+/** `View.showSolid`'s options (view ABI 1.21). */
+export interface SolidOptions { material?: 'default' | 'plastic' | 'metal' | 'matte' | 'paint' | 'brushed' | 'glass' | null; opacity?: number | null; faces?: ArrayLike<number> | null; }
 export interface TextOptions { mode?: 'label' | 'world'; size?: number; colour?: Colour; align?: TextAlign; offset?: ArrayLike<number>; box?: ColourAlpha | null; padding?: number; onTop?: boolean; font?: number; right?: ArrayLike<number>; up?: ArrayLike<number>; }
 /**
  * A TTF/OTF font for every view of the library in use (bytes or a path); its id for TextOptions.font.
@@ -37,6 +39,10 @@ export type ViewName = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom' | 
 export interface ShowOptions { view?: ViewName | [azimuth: number, elevation: number]; azimuth?: number; elevation?: number; zoom?: number; up?: 'z' | 'y'; edges?: boolean; width?: number; height?: number; title?: string; tolerance?: number; rgb?: Colour; }
 /** A pick answer: `clicks` 2 for a double click, else 1; `point` where the ray met the model, null where no depth was read. */
 export interface Pick { item: number; node: number; face: number; clicks: number; point: [number, number, number] | null; }
+/** What a snap lands on (view ABI 1.22). */
+export type SnapKind = 'vertex' | 'midpoint' | 'centre' | 'quadrant' | 'edge' | 'face' | 'grid' | 'plane';
+/** A snap answer: the point snapped to, in the coordinates the items were shown in; `edge` null for a face, grid or plane snap; `clicks` 0 for snap() and a hover, 1 or 2 for a click's. */
+export interface Snap { kind: SnapKind; point: [number, number, number]; item: number; node: number; face: number; edge: number | null; tangent: [number, number, number]; axis: [number, number, number]; radius: number; distancePx: number; clicks: number; }
 export interface Camera { eye: number[]; target: number[]; up: number[]; orthographic: boolean; azimuth: number; elevation: number; pick: Pick | null; }
 export interface Image { width: number; height: number; rgba: Uint8Array; }
 export interface ViewEvent { type: 'pointer_down' | 'pointer_move' | 'pointer_up' | 'pointer_cancel' | 'wheel' | 'key'; x?: number; y?: number; button?: number; shift?: boolean; pointerId?: number; pointer?: 'mouse' | 'touch' | 'pen'; wheelY?: number; key?: string; keyDown?: boolean; timeMs?: number; }
@@ -83,6 +89,7 @@ export class Machining extends Item {
   heights(): Float32Array;
 }
 
+export interface OccludedStyle { dash: number; gap: number; dim: number; colour: [number, number, number] | null; }
 export class View {
   constructor(options?: ViewOptions);
   static inWindow(window: NativeWindow, options?: ViewOptions): View;
@@ -94,9 +101,13 @@ export class View {
   surfaces: 'exact' | 'triangles';
   /** How plain parts are lit (view ABI 1.9): 'headlight' (the default) or 'studio'. */
   lighting: 'headlight' | 'studio';
+  /** How every 'dashed' item's hidden lines and points look, view-wide (view ABI 1.20): dash and gap in points (6, 4), dim the coverage kept (0.5), one colour or null. Set a partial style (unset keys take the default) or null for the defaults. */
+  get occludedStyle(): OccludedStyle;
+  set occludedStyle(style: Partial<Omit<OccludedStyle, 'colour'>> & { colour?: Colour | null } | null);
   lod(motion?: 'detailed' | 'smooth' | null, minTriangles?: number): void;
   show(obj: Solid | Scene | Node, rgb?: Colour | null, tolerance?: number): Item;
-  showSolid(solid: Solid, tolerance?: number, rgb?: Colour | null): Item;
+  /** A kernel solid, read in place; `options` (view ABI 1.21) a material, an opacity 0..1 (1 opaque) and the solid's face numbers to show alone, with no edges (null: every face). */
+  showSolid(solid: Solid, tolerance?: number, rgb?: Colour | null, options?: SolidOptions): Item;
   showScene(scene: Scene): Item;
   showNode(node: Node): Item;
   showMesh(mesh: MeshData): Item;
@@ -139,6 +150,16 @@ export class View {
   pick(x: number, y: number, viewport?: number): Pick | null;
   /** The newest pick answer that landed (a click, a double click), without waiting: undefined while none has, null for a click on nothing; each read once. */
   lastPick(): Pick | null | undefined;
+  /** What a snap may land on (view ABI 1.22): 'all' (the default), one kind, several, or null to switch snapping off. A view starts with snapping off. */
+  setSnap(kinds?: 'all' | SnapKind | SnapKind[] | null, options?: { aperturePx?: number; marker?: boolean }): void;
+  /** The snap under pixel (x, y) of `viewport`, drawing until it lands; null where nothing snaps (always, while snapping is off). */
+  snap(x: number, y: number, viewport?: number): Snap | null;
+  /** The newest snap that landed (a hover, a click), without waiting: undefined while none has, null for one that found nothing; each read once. */
+  lastSnap(): Snap | null | undefined;
+  /** Hides the snap marker and drops any snap asked or answered and not yet read. */
+  clearSnap(): void;
+  /** The plane 'grid' and 'plane' snaps land on, in place of the ground grid; null puts the ground grid back. */
+  setWorkPlane(origin: ArrayLike<number> | null, xAxis?: ArrayLike<number>, normal?: ArrayLike<number>, step?: number): void;
   draw(): void;
   run(): Camera;
   image(): Image;

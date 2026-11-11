@@ -1011,6 +1011,63 @@ return function(t)
     t.eq(e.message, "chain: piece 1 does not meet the others")
   end)
 
+  t.test("sketch curves are profiles that draw as beziers", function()
+    local function volume(p) return bs.Solid.extrude(p, XY, 1):mass().volume end
+    local line = bs.Profile.polyline({ { 1, 2 }, { 4, 6 } })
+    t.ok(all_near(line:beziers(), { 1, 2, 0, 1, 2, 10 / 3, 0, 1, 3, 14 / 3, 0, 1, 4, 6, 0, 1 }, 1e-9))
+    t.eq(#bs.Profile.polyline({ { 0, 0 }, { 4, 0 }, { 4, 3 } }, true):beziers(), 3 * 16)
+    local circle = bs.Profile.arc({ 1, 2 }, 3, 0, 0)
+    local flat = circle:beziers()
+    t.eq(#flat, 4 * 16)
+    for k = 1, #flat, 16 do
+      t.ok(math.abs(math.sqrt((flat[k] - 1) ^ 2 + (flat[k + 1] - 2) ^ 2) - 3) < 1e-9)
+      t.ok(math.abs(flat[k + 3] - 1) < 1e-9 and math.abs(flat[k + 7] - (math.sqrt(0.5) * 2 / 3 + 1 / 3)) < 1e-9)
+    end
+    local ref = volume(bs.Profile.circle(3))
+    t.ok(math.abs(volume(circle) - ref) <= 1e-6 * ref)
+    local quarter = bs.Profile.arc({ 0, 0 }, 2, 0, pi / 2):beziers()
+    t.ok(math.abs(quarter[13]) < 1e-12 and math.abs(quarter[14] - 2) < 1e-12)
+    t.eq(#bs.Profile.ellipse({ 0, 0 }, 3, 1):beziers(), 4 * 16)
+    t.ok(math.abs(volume(bs.Profile.ellipse({ 0, 0 }, 3, 1)) - pi * 3) <= 1e-2 * pi * 3)
+    local up = bs.Profile.arc_through({ 0, 0 }, { 2, 2 }, { 4, 0 }):beziers()
+    local down = bs.Profile.arc_through({ 0, 0 }, { 2, -2 }, { 4, 0 }):beziers()
+    local top, bottom = -math.huge, math.huge
+    for i = 2, #up, 4 do top = math.max(top, up[i]) end
+    for i = 2, #down, 4 do bottom = math.min(bottom, down[i]) end
+    t.ok(math.abs(top - 2) < 1e-9 and math.abs(bottom + 2) < 1e-9)
+    local on_front = line:beziers({ 0, -5, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0 })
+    t.ok(all_near({ on_front[1], on_front[2], on_front[3], on_front[13], on_front[14], on_front[15] }, { 1, -5, 2, 4, -5, 6 }, 1e-9))
+    t.ok(all_near(bs.Profile.from_beziers(flat, false):beziers(), flat, 1e-9))
+    local again = bs.Solid.extrude(bs.Profile.from_beziers(flat), XY, 1)
+    for i = 0, again.faces - 1 do
+      local kind = again:face_kind(i)
+      t.ok(kind == "cylinder" or kind == "plane", kind)
+    end
+    t.raises(function() bs.Profile.arc_through({ 0, 0 }, { 1, 1 }, { 2, 2 }) end,
+      "^profile_arc_through: the arc's three points are in a line$")
+    t.raises(function() bs.Profile.polyline({ { 0, 0 } }) end, "^profile_polyline: a polyline needs at least two points")
+    t.raises(function() bs.Profile.from_beziers({}) end, "^profile_from_beziers: ")
+  end)
+
+  t.test("open sketch curves close into loops", function()
+    local d_line = bs.Profile.polyline({ { 0, 0 }, { 4, 0 } })
+    local d_arc = bs.Profile.arc_through({ 4, 0 }, { 2, 2 }, { 0, 0 })
+    local stray = bs.Profile.polyline({ { 9, 9 }, { 10, 9 } })
+    local ring = bs.Profile.arc({ 20, 0 }, 1, 0, 0)
+    local loops = bs.Profile.loops({ stray, d_line, ring, d_arc })
+    t.eq(#loops, 2)
+    t.ok(same(loops[1], { 1, 3 }) and same(loops[2], { 2 }))
+    local spur = bs.Profile.polyline({ { 0, 0 }, { -3, 0 } })
+    t.eq(#bs.Profile.loops({ d_line, d_arc, spur }), 0)
+    local order = bs.Profile.chain_order({ d_arc, d_line })
+    t.ok(order[1][1] == 0 and order[1][2] == false and order[2][1] == 1 and order[2][2] == false)
+    order = bs.Profile.chain_order({ d_line, bs.Profile.polyline({ { 7, 0 }, { 4, 0 } }) })
+    t.ok(order[1][1] == 0 and order[1][2] == false and order[2][1] == 1 and order[2][2] == true)
+    t.raises(function() bs.Profile.chain_order({ d_line, stray }) end, "^chain: piece 1 does not meet the others$")
+    t.raises(function() bs.Profile.loops({ bs.Profile.rect(9, 9):with_hole(bs.Profile.circle(1)) }) end,
+      "^profile_loops: piece 0 has holes$")
+  end)
+
   t.test("colours are set, read back and inherited", function()
     local block = bs.Solid.cuboid(10, 10, 10)
     t.eq(block.colour, nil)
@@ -2224,6 +2281,76 @@ return function(t)
     t.ok(tostring(sheet):match("^Manifold%(faces=4, "), tostring(sheet))
   end)
 
+  t.test("a face tells its round radius and chamfer distance", function()
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    local vertical = {}
+    for _, e in ipairs(cube.edges) do
+      if e.is_line and math.abs(e.direction[3]) > 0.99 then vertical[#vertical + 1] = e end
+    end
+    local rounded = cube:fillet(vertical, 1.5)
+    local zero, round, other = 0, 0, 0
+    for f = 0, rounded.faces - 1 do
+      local r = rounded:face_round_radius(f)
+      if r == 0 then zero = zero + 1 elseif math.abs(r - 1.5) < 1e-9 then round = round + 1 else other = other + 1 end
+      t.eq(rounded:face_chamfer_distance(f), 0)
+    end
+    t.ok(zero > 0 and other == 0, "the radii are 0 and 1.5")
+    t.eq(round, 4, "one round a vertical edge")
+    local bevelled = cube:chamfer(vertical, 2.0)
+    local bevels = 0
+    for f = 0, bevelled.faces - 1 do
+      if math.abs(bevelled:face_chamfer_distance(f) - 2.0) < 1e-9 then bevels = bevels + 1 end
+      t.eq(bevelled:face_round_radius(f), 0)
+    end
+    t.eq(bevels, 4)
+    t.ok(is_build_error(t.raises(function() cube:face_round_radius(6) end, "face_round_radius: face 6 of 6")))
+    t.raises(function() cube:face_chamfer_distance(6) end, "face_chamfer_distance: face 6 of 6")
+  end)
+
+  t.test("edges and isocurves come as Beziers", function()
+    local cube = bs.Solid.cuboid(2, 2, 2)
+    local edges = cube:edge_beziers()
+    t.eq(#edges, 12 * 16, "one straight Bezier an edge")
+    for k = 4, #edges, 4 do t.eq(edges[k], 1.0, "a line's weights are one") end
+    t.eq(#cube:isocurve_beziers(4), 0, "a flat face draws no isocurve")
+    local cylinder = bs.Solid.cylinder(1, 3)
+    local rings = cylinder:isocurve_beziers(3)
+    t.ok(#rings > 0 and #rings % 16 == 0)
+    t.ok(#cylinder:isocurve_beziers(6) > #rings, "a denser grid draws more lines")
+    -- A circle's Beziers are exact conics: some weight below one.
+    local circles = cylinder:edge_beziers()
+    local conic = false
+    for k = 4, #circles, 4 do conic = conic or circles[k] < 0.99 end
+    t.ok(conic, "a circle's weights dip below one")
+    t.raises(function() cube:edge_beziers(-1) end, "tolerance must be positive and finite")
+  end)
+
+  t.test("mesh_file writes several solids in each format", function()
+    local a, b = bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(1, 1, 1):translate(5, 0, 0)
+    local stl = bs.mesh_file({ a, b }, "stl")
+    local b0, b1, b2, b3 = stl:byte(81, 84)
+    t.eq(b0 + 256 * (b1 + 256 * (b2 + 256 * b3)), 24, "two boxes, twelve triangles each")
+    t.eq(#stl, 84 + 50 * 24)
+    local text = bs.mesh_file({ a, b }, "stl-ascii", { "plate", "pin" })
+    t.ok(text:sub(1, 11) == "solid plate", text:sub(1, 40))
+    local _, facets = text:gsub("facet normal", "")
+    t.eq(facets, 24)
+    local obj = bs.mesh_file({ a, b }, "obj", { "plate", "pin" })
+    t.ok(obj:find("o plate", 1, true) and obj:find("o pin", 1, true))
+    local glb = bs.mesh_file({ a, b }, "glb", nil, { { 1, 0, 0, 1, 0, 0.5 }, { 0, 0, 1, 0.5, 1, 0.2 } })
+    t.eq(glb:sub(1, 4), "glTF")
+    local gltf = bs.mesh_file({ a, b }, "gltf")
+    local node_names = {}
+    -- the top-level "nodes" (a scene's "nodes" lists indices, no names)
+    for list in gltf:gmatch('"nodes"%s*:%s*(%b[])') do
+      for name in list:gmatch('"name"%s*:%s*"([^"]*)"') do node_names[#node_names + 1] = name end
+    end
+    t.ok(same(node_names, { "Solid 1", "Solid 2" }), table.concat(node_names, ", "))
+    t.raises(function() bs.mesh_file({ a }, "step") end, 'mesh_file: format "step" is not one of')
+    t.raises(function() bs.mesh_file({}, "stl") end, "mesh_file: no solids")
+    t.raises(function() bs.mesh_file({ a }, "obj", { "a", "b" }) end, "2 names for 1 solids")
+  end)
+
   t.test("split_sheet cuts a sheet along a solid's boundary", function()
     local sheet = bs.Solid.extrude_open(bs.Profile.rect(40, 40), XY, 20)
     t.eq(sheet.faces, 4)
@@ -2609,7 +2736,7 @@ return function(t)
     t.eq(picked[2], 6)
     t.raises(function() bs.Solid.open(two, 5) end, "has no body 5: it holds 2")
     -- A mesh-only document: no brep to hand across.
-    local mesh = cad.open_memory("cube(10);", "scad")
+    local mesh = cad.open_memory("square(10);", "scad")
     local cube
     for _, n in ipairs(mesh.nodes) do
       if cube == nil and n.brep == nil then cube = n end
@@ -2617,11 +2744,25 @@ return function(t)
     t.ok(cube, "a node with no brep")
     t.raises(function() bs.Solid.from_node(mesh, cube) end, "from_node: node %d+ .*has no brep")
     mesh:close()
-    local scad = t.tmp("cube.scad")
-    local f = assert(io.open(scad, "w"))
-    f:write("cube(10);\n")
+    -- A flat OpenSCAD sheet draws no solid; a cube is one exact solid of volume 1000.
+    local sheet = t.tmp("sheet.scad")
+    local f = assert(io.open(sheet, "w"))
+    f:write("square(10);\n")
     f:close()
-    t.raises(function() bs.Solid.open(scad) end, "open: the %.scad file draws no B%-rep body")
+    t.raises(function() bs.Solid.open(sheet) end, "open: the %.scad file draws no B%-rep body")
+    -- A cube is a B-rep only where the reader library was built with the kernel
+    -- (`cadaclysm-capi`'s `openscad-brep`); in the Reader flavour OpenSCAD is a mesh.
+    local probe = cad.open_memory("cube(10);", "scad")
+    local exact = probe.nodes[1].brep ~= nil
+    probe:close()
+    if exact then
+      local scad = t.tmp("cube.scad")
+      f = assert(io.open(scad, "w"))
+      f:write("cube(10);\n")
+      f:close()
+      t.eq(#bs.Solid.open_all(scad), 1)
+      t.ok(math.abs(bs.Solid.open(scad):mass().volume - 1000) <= 1e-6, "the cube's volume")
+    end
   end)
 
   t.test("push_pull on several faces at once", function()
@@ -3870,6 +4011,45 @@ return function(t)
     job:close()
   end)
 
+  t.test("corner_relief true notches the corners with the second end mill", function()
+    local part = pocketed_block()
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    local big = bs.Tool.flat(1, 6.0, 20.0, 800.0, 200.0, 12000.0)
+    local small = bs.Tool.flat(2, 2.0, 20.0, 800.0, 200.0, 12000.0)
+    local report = job:machine(part, { big, small }, nil, nil, nil, 0.3, nil, true)
+    t.eq(#report, 4)
+    for _, item in ipairs(report) do
+      t.eq(item.kind, "relief")
+      t.ok(item.reason:find("corner relieved by T2 (2 mm): a notch 0.293 mm into the walls", 1, true) == 1, item.reason)
+    end
+    t.near(report[1].size, 1 - math.sqrt(0.5), 1e-6)
+    job:close()
+  end)
+
+  t.test("corner_relief true with a single Tool notches its own corners", function()
+    local part = pocketed_block()
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    local small = bs.Tool.flat(2, 2.0, 20.0, 800.0, 200.0, 12000.0)
+    local report = job:machine(part, small, nil, nil, nil, 0.3, nil, true)
+    t.eq(#report, 4)
+    for _, item in ipairs(report) do
+      t.eq(item.kind, "relief")
+      t.ok(item.reason:find("corner relieved by T2 (2 mm): a notch 0.293 mm into the walls", 1, true) == 1, item.reason)
+    end
+    job:close()
+  end)
+
+  t.test("corner_relief false or left out keeps the corners", function()
+    local part = pocketed_block()
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    local big = bs.Tool.flat(1, 6.0, 20.0, 800.0, 200.0, 12000.0)
+    local small = bs.Tool.flat(2, 2.0, 20.0, 800.0, 200.0, 12000.0)
+    local report = job:machine(part, { big, small }, nil, nil, nil, 0.3, nil, false)
+    t.eq(#report, 4)
+    for _, item in ipairs(report) do t.eq(item.kind, "corner") end
+    job:close()
+  end)
+
   t.test("an empty list of end mills is refused and leaves the job as it was", function()
     local part = pocketed_block()
     local job = bs.Job(bs.Stock.around(part, 2), 30)
@@ -4625,6 +4805,284 @@ return function(t)
     b:close()
     t.raises(function() a:closest(b) end, "solid: closed")
   end)
+
+  -- ---- closest point from a point: the cube's face, edge and vertex feet and the sphere's pinned to
+  -- their closed forms (literals, not read back through the wrapper), max_distance on both sides,
+  -- the projector equal to the one-shot (uv included) after its solid is closed, and the refusals.
+  do
+    local SQRT_HALF, INV_SQRT3 = 0.7071067811865476, 0.5773502691896258
+    -- query, point, distance, kind, uv (nil off a face), normal
+    local CUBE_FEET = {
+      { { 20, 0, 0 }, { 5, 0, 0 }, 15, "face", { 5, 5 }, { 1, 0, 0 } },
+      { { 8, 8, 0 }, { 5, 5, 0 }, 4.242640687119285, "edge", nil, { SQRT_HALF, SQRT_HALF, 0 } },
+      { { 8, 8, 8 }, { 5, 5, 5 }, 5.196152422706632, "vertex", nil, { INV_SQRT3, INV_SQRT3, INV_SQRT3 } },
+      { { 1, 0, 0 }, { 5, 0, 0 }, 4, "face", { 5, 5 }, { 1, 0, 0 } },
+      { { 0, -7, 2 }, { 0, -5, 2 }, 2, "face", { 5, 7 }, { 0, -1, 0 } },
+      { { 5, 1, 2 }, { 5, 1, 2 }, 0, "face", { 6, 7 }, { 1, 0, 0 } },
+    }
+    local function foot_is(foot, row)
+      local what = tostring(foot)
+      t.eq(getmetatable(foot), bs.PointFoot, what)
+      t.ok(all_near(foot.point, row[2]) and math.abs(foot.distance - row[3]) <= 1e-9, what)
+      t.ok(foot.kind == row[4] and foot.refined == true and all_near(foot.normal, row[6]), what)
+      if row[5] == nil then t.eq(foot.uv, nil, what) else t.ok(foot.uv ~= nil and all_near(foot.uv, row[5]), what) end
+      if row[4] == "edge" then
+        t.ok(type(foot.edge) == "number" and foot.edge >= 0 and foot.edge < 12, what)
+      else
+        t.eq(foot.edge, nil, what)
+      end
+    end
+
+    t.test("closest point: a cube names its face, edge and vertex in closed form", function()
+      local cube = bs.Solid.cuboid(10, 10, 10)
+      for _, row in ipairs(CUBE_FEET) do foot_is(cube:closest_point(row[1]), row) end
+      local p = CUBE_FEET[1][1]
+      t.ok(cube:closest_point(p, 0 / 0, 0 / 0) == cube:closest_point(p), "NaN is nil: no limit, unset tolerance")
+      local sphere = bs.Solid.sphere(2)
+      local foot = sphere:closest_point({ 0, 3, 4 })
+      t.near(foot.distance, 3)
+      t.ok(all_near(foot.point, { 0, 1.2, 1.6 }) and all_near(foot.normal, { 0, 0.6, 0.8 }), tostring(foot))
+      t.eq(foot.kind, "face")
+      local inside = sphere:closest_point({ 0, 0, 0.5 })
+      t.near(inside.distance, 1.5)
+      t.ok(all_near(inside.point, { 0, 0, 2 }), tostring(inside))
+    end)
+
+    t.test("closest point: the edge is the public edge number", function()
+      local cube = bs.Solid.cuboid(10, 10, 10)
+      local p = { 8, 8, 1 }
+      local edge = cube:closest_point(p).edge
+      local tp, point, distance = cube:edge_closest_point(edge, p)
+      t.ok(all_near(point, { 5, 5, 1 }), "edge_closest_point point")
+      t.near(distance, 4.242640687119285)
+      -- A straight edge: the arc length to the foot is the chord from the edge's start.
+      local start = cube:edge_point_at_length(edge, 0).point
+      local s = math.sqrt((start[1] - point[1]) ^ 2 + (start[2] - point[2]) ^ 2 + (start[3] - point[3]) ^ 2)
+      local at = cube:edge_point_at_length(edge, s)
+      t.ok(all_near(at.point, point), "the point at that arc length")
+      t.near(at.parameter, tp)
+      t.raises(function() cube:edge_closest_point(99, p) end, "^edge_closest_point: edge 99 of 12$")
+    end)
+
+    t.test("closest point: max_distance on both sides", function()
+      local cube = bs.Solid.cuboid(10, 10, 10)
+      local far = { 20, 0, 0 }
+      t.eq(cube:closest_point(far, 14.9), nil)
+      t.near(cube:closest_point(far, 15.1).distance, 15)
+      t.ok(cube:closest_point(far, math.huge) ~= nil, "math.huge is no limit")
+      t.ok(cube:closest_point({ 5, 1, 2 }, 0) ~= nil, "0 keeps a point on the body")
+      t.eq(cube:closest_point({ 5.5, 1, 2 }, 0), nil)
+      local e = t.raises(function() cube:closest_point({ 0, 0, 0 }, -1) end,
+        "^closest_point: the max distance must not be negative$")
+      t.ok(is_build_error(e), "a refusal is a BuildError")
+      t.raises(function() cube:closest_point({ 0, 0, 0 }, nil, -1) end, "^closest_point: ")
+      t.raises(function() cube:closest_point({ 0, 0, 0 }, nil, math.huge) end, "^closest_point: ")
+      t.raises(function() cube:closest_point({ 0 / 0, 0, 0 }) end, "^closest_point: ")
+      t.raises(function() cube:closest_point({ 0, 0 }) end, "^closest_point: ")
+    end)
+
+    t.test("closest point: a projector answers as the one-shot and outlives its solid", function()
+      local points = { { 20, 0, 0 }, { 8, 8, 0 }, { 8, 8, 8 }, { 1, 0, 0 }, { 0, -7, 2 }, { 5, 1, 2 } }
+      local cube = bs.Solid.cuboid(10, 10, 10)
+      local want = {}
+      for i, p in ipairs(points) do want[i] = cube:closest_point(p) end
+      local projector = cube:projector()
+      t.eq(getmetatable(projector), bs.Projector)
+      cube:close()
+      cube = nil
+      collectgarbage()
+      collectgarbage()
+      for i, p in ipairs(points) do
+        local got = projector:closest_point(p)
+        t.ok(got == want[i], ("%s ~= %s"):format(tostring(got), tostring(want[i])))
+        foot_is(got, CUBE_FEET[i])
+      end
+      t.eq(projector:closest_point(points[1], 14.9), nil)
+      t.ok(projector:closest_point(points[1], 15.1) == want[1], "within 15.1")
+      t.raises(function() projector:closest_point({ 0, 0, 0 }, -1) end,
+        "^projector_closest_point: the max distance must not be negative$")
+      t.raises(function() bs.Solid.sphere(1):projector(-1) end, "^projector_new: ")
+      t.eq(projector.closed, false)
+      projector:close()
+      t.eq(projector.closed, true)
+      projector:close()   -- closing twice is a no-op
+      local e = t.raises(function() projector:closest_point({ 0, 0, 0 }) end, "^projector: closed$")
+      t.ok(is_build_error(e), "a closed projector refuses with a BuildError")
+    end)
+
+    t.test("closest point: face_closest_point stays on its face", function()
+      local cube = bs.Solid.cuboid(10, 10, 10)
+      local top
+      for f = 0, cube.faces - 1 do
+        if cube:face_ref(f)[7] > 0.5 then top = f end
+      end
+      local foot = cube:face_closest_point(top, { 20, 0, 0 })
+      t.ok(all_near(foot.point, { 5, 0, 5 }), tostring(foot))
+      t.near(foot.distance, 15.811388300841896)
+      t.ok(foot.kind == "edge" and foot.refined, tostring(foot))
+      local inner = cube:face_closest_point(top, { 1, 2, 9 })
+      t.ok(all_near(inner.point, { 1, 2, 5 }) and all_near(inner.normal, { 0, 0, 1 }), tostring(inner))
+      t.ok(inner.kind == "face" and inner.index == top and inner.edge == nil and inner.uv ~= nil, tostring(inner))
+      t.raises(function() cube:face_closest_point(99, { 0, 0, 0 }) end, "^face_closest_point: face 99 of 6$")
+      t.raises(function() cube:face_closest_point(-1, { 0, 0, 0 }) end, "^face_closest_point: face must be an index")
+    end)
+
+    t.test("closest point: a NURBS curve's foot and its axis", function()
+      local circle = bs.Circle(bs.Frame.xy(), 2):to_nurbs()
+      local foot = circle:closest_point({ 0, 5, 0 })
+      t.eq(getmetatable(foot), bs.CurveFoot)
+      t.ok(all_near(foot.point, { 0, 2, 0 }) and foot.unique == true, tostring(foot))
+      t.ok(all_near(circle:point(foot.t), foot.point, 1e-12), "the foot's parameter")
+      local axis = circle:closest_point({ 0, 0, 3 })
+      t.eq(axis.unique, false, tostring(axis))
+      t.near(math.sqrt(axis.point[1] ^ 2 + axis.point[2] ^ 2 + axis.point[3] ^ 2), 2)
+      t.raises(function() circle:closest_point({ math.huge, 0, 0 }) end, "^nurbs_curve_closest_point: ")
+    end)
+  end
+
+  -- ---- closest points from a curve: a point within reach of a line, two skew lines and a line
+  -- through or past the 2-cube pinned to their closed forms (literals, not read back through the
+  -- wrapper), max_distance on both sides, the projector equal to the one-shot, the nearest object
+  -- naming its item with a curve's and a point's answer, and the refusals' words.
+  do
+    local SHIFTS = { { 0, 0, 0 }, { 1e4, -1e4, 5e3 }, { 1e6, -1e6, 5e5 } }
+    local function plus(s, p) return { s[1] + p[1], s[2] + p[2], s[3] + p[3] } end
+    local function segment(a, b) return bs.NurbsCurve.new({ a, b }, 1) end
+    -- 1e-12 (or `base`) relative to the shift's largest coordinate, as the other wrappers' tests take it.
+    local function scaled(s, base)
+      return (base or 1e-12) * (1 + math.max(math.abs(s[1]), math.abs(s[2]), math.abs(s[3])))
+    end
+
+    t.test("curve closest points: a point within reach of a line", function()
+      for _, s in ipairs(SHIFTS) do
+        local line = segment(s, plus(s, { 10, 0, 0 }))
+        local p = plus(s, { 3, 4, 0 })
+        local foot = line:closest_point(p, 4.1)
+        t.ok(foot ~= nil, "found within 4.1")
+        t.near(foot.t, 0.3, 1e-12)
+        t.ok(all_near(foot.point, plus(s, { 3, 0, 0 }), scaled(s)) and foot.unique, tostring(foot))
+        t.eq(line:closest_point(p, 3.9), nil)
+        local unlimited = line:closest_point(p)
+        t.ok(line:closest_point(p, 0 / 0) == unlimited, "NaN is no limit")
+        t.ok(line:closest_point(p, math.huge) == unlimited, "math.huge is no limit")
+      end
+      local line = segment({ 0, 0, 0 }, { 10, 0, 0 })
+      local e = t.raises(function() line:closest_point({ 3, 4, 0 }, -1) end,
+        "^nurbs_curve_closest_point_within: the max distance must not be negative$")
+      t.ok(is_build_error(e), "a refusal is a BuildError")
+    end)
+
+    t.test("curve closest points: two skew lines meet at their closed form", function()
+      for _, s in ipairs(SHIFTS) do
+        local a = segment(s, plus(s, { 10, 0, 0 }))
+        local b = segment(plus(s, { 3, -5, 2 }), plus(s, { 3, 5, 2 }))
+        for _, limit in ipairs({ 2.1, 0 / 0, math.huge, false }) do
+          local pair = a:closest_points(b, limit or nil)
+          t.eq(getmetatable(pair), bs.CurvePair, "limit " .. tostring(limit))
+          t.near(pair.distance, 2)
+          t.near(pair.t_a, 0.3, 1e-12)
+          t.near(pair.t_b, 0.5, 1e-12)
+          t.ok(all_near(pair.point_a, plus(s, { 3, 0, 0 }), scaled(s)), tostring(pair))
+          t.ok(all_near(pair.point_b, plus(s, { 3, 0, 2 }), scaled(s)), tostring(pair))
+        end
+        local swapped = b:closest_points(a)
+        t.near(swapped.t_a, 0.5, 1e-12)
+        t.near(swapped.t_b, 0.3, 1e-12)
+        t.ok(all_near(swapped.point_a, plus(s, { 3, 0, 2 }), scaled(s)), tostring(swapped))
+        t.eq(a:closest_points(b, 1.9), nil)
+        t.raises(function() a:closest_points(b, -1) end, "^nurbs_curve_closest_points: the max distance must not be negative$")
+        t.raises(function() a:closest_points({ 0, 0, 0 }) end, "^nurbs_curve_closest_points: expected a NurbsCurve")
+      end
+    end)
+
+    t.test("curve closest points: a line through the cube crosses its first face", function()
+      local cube = bs.Solid.cuboid(2, 2, 2)
+      local through = segment({ -3, 0.1, 0.2 }, { 3, 0.1, 0.2 })
+      local foot = cube:curve_closest_points(through)
+      t.eq(getmetatable(foot), bs.CurveBodyFoot)
+      t.ok(foot.crossing == true and foot.distance == 0, tostring(foot))
+      t.near(foot.t, 1 / 3)
+      t.ok(all_near(foot.point_on_curve, { -1, 0.1, 0.2 }) and all_near(foot.point_on_body, { -1, 0.1, 0.2 }), tostring(foot))
+      t.ok(foot.kind == "face" and foot.edge == nil and foot.uv ~= nil and all_near(foot.normal, { -1, 0, 0 }), tostring(foot))
+      local projector = cube:projector()
+      t.ok(projector:curve_closest_points(through) == foot, "the projector answers as the one-shot")
+      for _, bad in ipairs({ -1, math.huge }) do
+        t.raises(function() cube:curve_closest_points(through, nil, bad) end,
+          "^curve_closest_points: tolerance must be positive and finite$")
+      end
+      t.ok(cube:curve_closest_points(through, nil, 0) ~= nil, "0 is an unset tolerance")
+      t.raises(function() cube:curve_closest_points(through, -1) end, "^curve_closest_points: the max distance must not be negative$")
+      t.raises(function() projector:curve_closest_points(through, -1) end,
+        "^projector_curve_closest_points: the max distance must not be negative$")
+      projector:close()
+      t.raises(function() projector:curve_closest_points(through) end, "^projector: closed$")
+    end)
+
+    t.test("curve closest points: a line past an edge, and a projector answering as the one-shot", function()
+      for _, s in ipairs(SHIFTS) do
+        local tol = scaled(s, 1e-9)
+        local cube = bs.Solid.cuboid(2, 2, 2):translate(s[1], s[2], s[3])
+        local line = segment(plus(s, { 2, -0.5, 2 }), plus(s, { 2.5, 0.5, 2.5 }))
+        local projector = cube:projector()
+        local foot = cube:curve_closest_points(line, 1.5)
+        t.ok(foot ~= nil and not foot.crossing and foot.kind == "edge" and foot.uv == nil, tostring(foot))
+        t.near(foot.distance, math.sqrt(2), tol)
+        t.near(foot.t, 0)
+        t.ok(all_near(foot.point_on_curve, plus(s, { 2, -0.5, 2 }), tol), tostring(foot))
+        t.ok(all_near(foot.point_on_body, plus(s, { 1, -0.5, 1 }), tol), tostring(foot))
+        t.eq(type(foot.edge), "number")
+        local _, at, distance = cube:edge_closest_point(foot.edge, foot.point_on_curve)
+        t.ok(all_near(at, foot.point_on_body, tol), "the public edge's foot")
+        t.near(distance, foot.distance, tol)
+        t.eq(cube:curve_closest_points(line, 1.4), nil)
+        t.eq(projector:curve_closest_points(line, 1.4), nil)
+        t.ok(projector:curve_closest_points(line, 1.5) == foot, "within 1.5")
+        t.ok(projector:curve_closest_points(line) == cube:curve_closest_points(line), "no limit")
+        t.ok(cube:curve_closest_points(line, 0 / 0) == cube:curve_closest_points(line, math.huge), "NaN and math.huge")
+      end
+    end)
+
+    t.test("curve closest points: the nearest object names its item", function()
+      local cube = bs.Solid.cuboid(2, 2, 2)
+      local line = segment({ 2, -0.5, 2 }, { 2.5, 0.5, 2.5 })
+      local other = segment({ 2, -0.5, 2.3 }, { 2, 5, 2.3 })   -- sqrt(0.045) off `line`, at t 0.3
+      local projector = cube:projector()
+
+      -- A curve wins (answer kind 1): its pair.
+      local near = line:closest_object({ { 0, 0, 10 }, cube, other, projector, { 9, 9, 9 } })
+      local pair = line:closest_points(other)
+      t.eq(getmetatable(near), bs.NearestObject)
+      t.eq(near.which, 2)
+      t.eq(getmetatable(near.answer), bs.CurvePair)
+      t.ok(near.answer == pair, tostring(near.answer))
+      t.near(near.distance, math.sqrt(0.045))
+      t.near(near.t, 0.3)
+      t.ok(near.distance == pair.distance and near.t == pair.t_a, tostring(near))
+      t.ok(same(near.point_on_curve, pair.point_a) and same(near.point_on_item, pair.point_b), tostring(near))
+
+      -- A point wins (answer kind 2): no answer of its own.
+      local point = line:closest_object({ cube, { 2.5, 0.6, 2.5 } })
+      t.eq(point.which, 1)
+      t.eq(point.answer, nil)
+      t.near(point.distance, 0.1)
+      t.near(point.t, 1)
+      t.ok(same(point.point_on_item, { 2.5, 0.6, 2.5 }) and all_near(point.point_on_curve, { 2.5, 0.5, 2.5 }), tostring(point))
+
+      -- A solid or a projector alone: the body's answer.
+      local solid = line:closest_object({ cube })
+      t.eq(solid.which, 0)
+      t.ok(solid.answer == cube:curve_closest_points(line), tostring(solid.answer))
+      local prepared = line:closest_object({ projector }, nil, nil)
+      t.ok(prepared.answer == projector:curve_closest_points(line), tostring(prepared.answer))
+
+      t.eq(line:closest_object({ cube, other }, 0.2), nil)
+      t.eq(line:closest_object({ cube, other }, 0.25).which, 1)
+      t.eq(line:closest_object({}), nil)
+      t.raises(function() line:closest_object({ cube }, -1) end, "^nurbs_curve_closest_object: the max distance must not be negative$")
+      t.raises(function() line:closest_object({ cube, "hello" }) end, "^nurbs_curve_closest_object: item 1: ")
+      t.raises(function() line:closest_object({ { 0 / 0, 0, 0 } }) end, "^nurbs_curve_closest_object: ")
+    end)
+  end
 
   -- ---- Sketch: the 2D constraint sketcher -- facts S1-S8 and S10-S12 of the sketch-constraints
   -- plan, the values of test_cadaclysm_blacksmith.py's test_a_sketch_* tests (S9 is finalize_test's).
@@ -5614,6 +6072,48 @@ return function(t)
       t.eq(window.faces, 6)
     end)
 
+    t.test("sheets from curves: mirror_join squares a half roof to its mirror", function()
+      -- Half a roof domed both ways, lofted out from the centre plane y = 0, leaning as it leaves
+      -- the plane: mirrored as it is, the seam is a crease; squared first, it is smooth.
+      local sections = {}
+      for _, y in ipairs({ 0, 10, 20, 30 }) do
+        local row = {}
+        for x = 0, 80, 10 do
+          row[#row + 1] = { x, y, 20 * math.sin(math.pi * x / 80) - 0.01 * y * y + 0.05 * y + 0.002 * x * y }
+        end
+        sections[#sections + 1] = bs.NurbsCurve.through(row)
+      end
+      local half = bs.Solid.loft_curves(sections)
+      local plane = { 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 1, 0 }
+      local creased, r = half:mirror_join(plane, 0, 0.01)
+      t.eq(("%d %d %d %g"):format(creased.faces, r.seams, r.squared, r.moved), "2 1 0 0")
+      t.ok(r.gap < 1e-9 and r.angle > math.rad(5) and r.curvature > 1e-4, tostring(r))
+      local smooth, s = half:mirror_join(plane, 0.5, 0.01)
+      t.eq(("%d %d %d %d"):format(smooth.faces, s.seams, s.squared, s.naked), "2 1 1 6")
+      t.ok(s.moved > 0 and s.gap < 1e-9 and s.angle < 1e-9 and s.curvature < 1e-9, tostring(s))
+      -- Only the first two rows moved: the body is near twice the half.
+      local body, one = smooth:mass().area, half:mass().area
+      t.ok(math.abs(body - 2 * one) < 0.01 * one, body .. " against " .. one)
+      t.raises(function() smooth:mirror_join(plane) end, "^mirror_join: the half lies on both sides of the plane")
+    end)
+
+    t.test("sheets from curves: a ring on a square offsets, splits and parts with a panel gap", function()
+      local sq = rect_sheet({ 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, 40, 40)
+      local pts = {}
+      for i = 0, 47 do
+        local a = 2 * math.pi * i / 48
+        pts[#pts + 1] = { 8 * math.cos(a), 8 * math.sin(a), 0 }
+      end
+      local ring = bs.NurbsCurve.through(pts, 3, true)
+      local inner = ring:offset_on_sheet(sq, 2, 1e-3)
+      local p0 = inner:point(inner.domain[1])
+      t.ok(inner.fit_error <= 1e-3 and math.abs(math.sqrt(p0[1] ^ 2 + p0[2] ^ 2) - 6) < 1e-3)
+      t.eq(sq:split_along_curve(ring, 1e-3).faces, 2)
+      local island, rest = sq:panel_gap(ring, 4, -10, 1e-3)
+      t.eq(island.faces, 3)
+      t.eq(rest.faces, 3)
+    end)
+
     t.test("sheets from curves: trim_by_curve and join refuse by name", function()
       local sheet = rect_sheet({ 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, 20, 20)
       local ring = exact_circle({ 0, 0, 0 }, 5)
@@ -5655,6 +6155,143 @@ return function(t)
       t.raises(function() a:matched("u1", b, "x") end, "^a side is 'u0'")
       t.raises(function() bs.Solid.blend_sides(a, "u0", b, nil) end, "^a side is 'u0'")
       t.raises(function() a:matched("u1", b, "u0", 3) end, "^match_side: ")
+    end)
+
+    -- The Python reference's test_a_traced_roof_faired_has_no_inflection_past_the_header.
+    t.test("fair: a traced roof faired has no inflection past the header", function()
+      local roof_xz = { { 1717, 1110 }, { 1848, 1191 }, { 1979, 1262 }, { 2110, 1330 }, { 2242, 1356 }, { 2504, 1367 },
+        { 2767, 1369 }, { 3029, 1364 }, { 3160, 1354 }, { 3423, 1304 }, { 3554, 1251 }, { 3686, 1207 }, { 3817, 1165 },
+        { 3948, 1123 }, { 4079, 1078 } }
+      local pts = {}
+      for i, p in ipairs(roof_xz) do pts[i] = { p[1], 0.0, p[2] } end
+      local function d3(a, b) return math.sqrt((a[1] - b[1]) ^ 2 + (a[2] - b[2]) ^ 2 + (a[3] - b[3]) ^ 2) end
+      -- the parameter of the curve's nearest of 400 even samples to point 4 (the header)
+      local function header(c)
+        local best
+        for _, a in ipairs(c:divide_by_count(400)) do
+          if best == nil or d3(a.point, pts[5]) < d3(best.point, pts[5]) then best = a end
+        end
+        return best.parameter
+      end
+      local through = bs.NurbsCurve.through(pts)
+      local t_header = header(through)
+      local wobbles = {}
+      for _, a in ipairs(through:inflections()) do
+        if a.parameter > t_header then wobbles[#wobbles + 1] = a end
+      end
+      t.ok(#wobbles >= 3, "wobbles past the header: " .. #wobbles)
+      for _, a in ipairs(wobbles) do
+        t.ok(d3(through:point(a.parameter), a.point) < 1e-9 and a.error == 0, "an inflection lies on the curve")
+      end
+      local tolerance = 5.25   -- two pixels of the drawing
+      local roof = bs.NurbsCurve.fair(pts, nil, tolerance, { 4, nil })
+      t.eq(roof.degree, 5)
+      t.ok(roof.fit_error >= 0 and roof.fit_error <= tolerance, "fit_error " .. tostring(roof.fit_error))
+      t_header = header(roof)
+      local past = 0
+      for _, a in ipairs(roof:inflections()) do
+        if a.parameter > t_header + 1e-6 then past = past + 1 end
+      end
+      t.eq(past, 0, "no inflection past the header")
+      local k = roof:knot_continuity()
+      t.eq(getmetatable(k), bs.KnotContinuity)
+      t.ok(k.angle < 1e-6 and k.curvature < 1e-9, tostring(k))
+      t.eq(#k.angle_at, 3)
+      t.eq(#k.curvature_at, 3)
+      t.ok(tostring(k):find("KnotContinuity(angle=", 1, true) ~= nil, tostring(k))
+      -- Too tight to hold: refused in the library's words, not a curve that turns over.
+      t.raises(function() bs.NurbsCurve.fair(pts, nil, 0.05, true) end, "^nurbs_curve_fair: .*no curve free of inflections")
+      t.raises(function() bs.NurbsCurve.fair(pts, 2, tolerance) end, "^nurbs_curve_fair: .*degree 2")
+      -- Faired from the wobbly curve itself, its own parameters naming the span.
+      local faired = through:faired(nil, 1.5 * tolerance, through.domain)
+      t.eq(#faired:inflections(), 0)
+      t.ok(faired.fit_error <= 1.6 * tolerance, "faired fit_error " .. tostring(faired.fit_error))
+    end)
+
+    -- The Python reference's test_edge_continuity_reads_a_crease_and_a_fillet_seam.
+    t.test("edge continuity: reads a crease and a fillet seam", function()
+      local block = bs.Solid.cuboid(40, 30, 20)
+      local r = block:edge_continuity(0, 16)
+      t.eq(getmetatable(r), bs.Continuity)
+      t.ok(math.abs(r.angle - pi / 2) < 1e-9 and r.gap < 1e-9 and r.curvature < 1e-9, tostring(r))
+      t.eq(r.samples, 17)
+      local rounded = block:fillet({ 0 }, 4.0)
+      local seams = {}
+      for _, e in ipairs(rounded.edges) do
+        local ok, k = pcall(function() return rounded:edge_continuity(e) end)
+        if ok then
+          if k.angle < 1e-6 then seams[#seams + 1] = k end
+        else
+          t.eq(getmetatable(k), bs.BuildError, "an edge of one face")
+        end
+      end
+      -- The fillet's two tangent seams, its curvature a quarter where the flat faces' is zero.
+      t.eq(#seams, 2)
+      for _, k in ipairs(seams) do t.ok(math.abs(k.curvature - 0.25) < 1e-4, tostring(k.curvature)) end
+      t.raises(function() block:edge_continuity(999) end, "^edge_continuity: ")
+    end)
+
+    -- The Python reference's test_a_wobbly_loft_faired_turns_no_curvature_over.
+    t.test("surface fairing: a wobbly loft faired turns no curvature over", function()
+      -- Eleven lines across a shallow arch, each lifted or dropped by 0.4 in turn: a loft
+      -- through them ripples between every pair.
+      local lines = {}
+      for k = 0, 10 do
+        local x = 10.0 * k
+        local z = -0.01 * (x - 50.0) ^ 2 + (k % 2 == 0 and 0.4 or -0.4)
+        lines[#lines + 1] = line({ x, 0.0, z }, { x, 40.0, z })
+      end
+      local loft = bs.Solid.loft_curves(lines, 3)
+      local tt = loft:curvature_turns(nil, 32)
+      t.eq(getmetatable(tt), bs.CurvatureTurns)
+      t.eq(tt.samples, 32)
+      t.ok(#tt.mean_turns > 0 and tt.mean_positive + tt.mean_negative > 1, tostring(tt))
+      for _, a in ipairs(tt.mean_turns) do
+        local n = math.sqrt(a.tangent[1] ^ 2 + a.tangent[2] ^ 2 + a.tangent[3] ^ 2)
+        t.ok(math.abs(n - 1) < 1e-9 and a.point[1] >= 0 and a.point[1] <= 100 and a.point[3] > -26 and a.point[3] < 1, "a turn on the sheet")
+      end
+      t.ok(tostring(tt):find("CurvatureTurns(gaussian=", 1, true) ~= nil, tostring(tt))
+      -- The lines run along u, the loft's v across them: the end lines kept, held along v.
+      local faired = loft:faired(1.0, nil, nil, { u0 = false, u1 = false, v0 = 0, v1 = 0 }, "v")
+      t.ok(faired.sheet_error >= 0 and faired.sheet_error <= 1.05, "sheet_error " .. tostring(faired.sheet_error))
+      local f = faired:curvature_turns()
+      t.eq(#f.mean_turns, 0)
+      t.eq(f.mean_positive + f.mean_negative, 1)
+      -- The same levels in side order.
+      local same = loft:faired(1.0, nil, nil, { false, false, 0, 0 }, "v")
+      t.ok(math.abs(same.sheet_error - faired.sheet_error) < 1e-12, "the list form reads the same")
+      local coarse = loft:faired(1.0, nil, { 6, 8 }, { false, false, 0, 0 }, "v")
+      t.ok(coarse.sheet_error <= 1.05 and #coarse:curvature_turns().mean_turns == 0, "on a coarse net")
+      t.raises(function() loft:faired(1.0, 2) end, "^surface_faired: .*degree 2")
+      t.raises(function() loft:faired(0.01, nil, nil, { false, false, 0, 0 }, "v") end, "^surface_faired: .*no fair free of inflections")
+      t.raises(function() loft:faired(nil, nil, nil, { w0 = 0 }) end, "'u0', 'u1', 'v0' or 'v1'")
+      t.raises(function() loft:faired(nil, nil, nil, nil, "w") end, "no_inflection")
+      t.raises(function() loft:curvature_turns(7) end, "^curvature_turns: ")
+    end)
+
+    -- The Python reference's test_highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam.
+    t.test("highlight kink: runs straight across planes and kinks at a fillet seam", function()
+      local block = bs.Solid.cuboid(2, 2, 2)
+      local k = block:highlight_kink(0, 16)
+      t.eq(getmetatable(k), bs.HighlightKink)
+      t.ok(k.angle < 1e-9, tostring(k))
+      t.eq(k.samples, 17)
+      t.eq(#k.at, 3)
+      local rounded = block:fillet({ 0 }, 0.5)
+      local worst
+      for _, e in ipairs(rounded.edges) do
+        local ok, kk = pcall(function() return rounded:highlight_kink(e) end)
+        if ok then
+          if worst == nil or kk.angle > worst.angle then worst = kk end
+        else
+          t.eq(getmetatable(kk), bs.BuildError, "an edge of one face")
+        end
+      end
+      -- Where the fillet's curvature meets a flat face's, the highlight lines break.
+      t.ok(worst.angle > math.rad(45), tostring(worst))
+      local d = worst.light_direction
+      t.ok(math.abs(math.sqrt(d[1] ^ 2 + d[2] ^ 2 + d[3] ^ 2) - 1) < 1e-9, "a unit light direction")
+      t.raises(function() block:highlight_kink(999) end, "^highlight_kink: ")
     end)
 
     t.test("sheets from curves: an n-sided patch fills a pentagon of strips", function()
@@ -5808,6 +6445,17 @@ return function(t)
       t.eq(shell:fillet(crease, 12.0, 1e-3, nil, 12.0).faces, 3)
       t.raises(function() bs.Solid.cuboid(10, 10, 10):fillet({ 0 }, 1.0, nil, nil, 2.0) end,
         "a varying radius rounds only spline edges")
+      -- A chain of one with two stations at its ends is the varying fillet (fillet_law).
+      local lawed = shell:fillet_law(crease, { { 0, 8 }, { 1, 20 } }, 1e-3)
+      t.eq(lawed.faces, 3)
+      t.ok(math.abs(area(lawed) - area(varying)) < 1e-3, "fillet_law matches the varying fillet")
+      -- A swell in the middle takes more than 8 all along and less than 20 all along.
+      local swell = area(shell:fillet_law({ crease[1].index }, { { 0, 8 }, { 0.5, 20 }, { 1, 8 } }, 1e-3))
+      t.ok(swell < area(shell:fillet(crease, 8.0, 1e-3)) and swell > area(shell:fillet(crease, 20.0, 1e-3)),
+        "the swell lies between 8 and 20")
+      t.raises(function() shell:fillet_law(crease, {}, 1e-3) end, "at least one station")
+      t.raises(function() bs.Solid.cuboid(10, 10, 10):fillet_law({ 0 }, { { 0, 1 }, { 1, 2 } }) end,
+        "a radius law rounds only spline edges")
     end)
 
     -- ---- flange and extrude_to (the Python reference's _holed_sheet,

@@ -60,6 +60,16 @@ static_assert(sizeof(CadaclysmViewPick) == 36, "CadaclysmViewPick (1.8) is 36 by
 static_assert(offsetof(CadaclysmViewPick, clicks) == 16 && offsetof(CadaclysmViewPick, has_point) == 20 &&
                   offsetof(CadaclysmViewPick, point) == 24,
               "CadaclysmViewPick's 1.8 fields are at 16, 20 and 24");
+// The snap structs as 1.22 reads and writes them: settings size, kinds, aperture_px, marker
+// (16 bytes); the answer size, kind, point[3] (doubles), item, node, face, edge, tangent[3],
+// axis[3], radius, distance_px, clicks (88 bytes).
+static_assert(sizeof(CadaclysmViewSnapSettings) == 16 && offsetof(CadaclysmViewSnapSettings, aperture_px) == 8 &&
+                  offsetof(CadaclysmViewSnapSettings, marker) == 12,
+              "CadaclysmViewSnapSettings (1.22) is 16 bytes, aperture_px at 8, marker at 12");
+static_assert(sizeof(CadaclysmViewSnap) == 88 && offsetof(CadaclysmViewSnap, point) == 8 &&
+                  offsetof(CadaclysmViewSnap, item) == 32 && offsetof(CadaclysmViewSnap, tangent) == 48 &&
+                  offsetof(CadaclysmViewSnap, radius) == 72 && offsetof(CadaclysmViewSnap, clicks) == 84,
+              "CadaclysmViewSnap (1.22) is 88 bytes, point at 8, item at 32, tangent at 48, radius at 72, clicks at 84");
 
 namespace cadaclysm {
 inline namespace CADACLYSM_ABI {
@@ -101,6 +111,24 @@ struct ViewPick {
     std::optional<std::array<float, 3>> point;
 };
 
+// What a snap found, as Python's Snap: its kind ("vertex", "midpoint", "centre", "quadrant",
+// "edge", "face", "grid" or "plane"; "" where nothing in the kinds set_snap chose lay within
+// the aperture, or snapping is off), the point snapped to, in world coordinates, the item,
+// node and face it lies on, its edge (std::nullopt for a face, grid or plane snap), the
+// edge's unit tangent there, a circular edge's axis and radius (zeros otherwise), how many
+// pixels the cursor was from it, and `clicks`: 0 for snap() and a hover, 1 for a click's
+// snap, 2 for a double click's.
+struct ViewSnap {
+    std::string kind;
+    std::array<double, 3> point{};
+    std::uint32_t item = 0, node = 0, face = 0;
+    std::optional<std::uint32_t> edge;
+    std::array<float, 3> tangent{}, axis{};
+    double radius = 0.0;
+    float distance_px = 0.0f;
+    std::uint32_t clicks = 0;
+};
+
 // How a left drag moves the camera: about the target (orbit) or turning about the eye (fly).
 // A fly key (W, A, S, D, E, Q) through View::input enters fly mode and it stays after the key
 // is let go; Tab toggles it; frame(), standard() and focus() leave it.
@@ -116,6 +144,37 @@ inline ViewPick pick_of(const CadaclysmViewPick& raw) {
     p.clicks = raw.clicks;
     if (raw.has_point) p.point = std::array<float, 3>{raw.point[0], raw.point[1], raw.point[2]};
     return p;
+}
+// The CADACLYSM_VIEW_SNAP_* kinds by the names set_snap takes and ViewSnap::kind reports.
+struct SnapKindName {
+    const char* name;
+    std::uint32_t bit;
+};
+inline constexpr SnapKindName snap_kinds[] = {
+    {"vertex", CADACLYSM_VIEW_SNAP_VERTEX}, {"midpoint", CADACLYSM_VIEW_SNAP_MIDPOINT},
+    {"centre", CADACLYSM_VIEW_SNAP_CENTRE}, {"quadrant", CADACLYSM_VIEW_SNAP_QUADRANT},
+    {"edge", CADACLYSM_VIEW_SNAP_EDGE},     {"face", CADACLYSM_VIEW_SNAP_FACE},
+    {"grid", CADACLYSM_VIEW_SNAP_GRID},     {"plane", CADACLYSM_VIEW_SNAP_PLANE},
+};
+// A library's snap answer as a ViewSnap.
+inline ViewSnap snap_of(const CadaclysmViewSnap& raw) {
+    ViewSnap s;
+    if (raw.kind) {
+        s.kind = std::to_string(raw.kind);
+        for (const SnapKindName& k : snap_kinds)
+            if (k.bit == raw.kind) s.kind = k.name;
+    }
+    s.point = {raw.point[0], raw.point[1], raw.point[2]};
+    s.item = raw.item;
+    s.node = raw.node;
+    s.face = raw.face;
+    if (raw.edge != 0xFFFFFFFFu) s.edge = raw.edge;
+    s.tangent = {raw.tangent[0], raw.tangent[1], raw.tangent[2]};
+    s.axis = {raw.axis[0], raw.axis[1], raw.axis[2]};
+    s.radius = raw.radius;
+    s.distance_px = raw.distance_px;
+    s.clicks = raw.clicks;
+    return s;
 }
 }  // namespace detail
 
@@ -213,6 +272,16 @@ struct TextOptions {
     bool on_top = false;
     std::uint32_t font = 0;
     std::optional<std::array<float, 3>> right, up;
+};
+
+// How View::show draws a solid (view ABI 1.21): `material` "default", "plastic", "metal",
+// "matte", "paint", "brushed" or "glass" (empty: default); `opacity` 0..1 (1 opaque); `faces`
+// the solid's face numbers to show alone, with no edges -- a trim's ghost (none: every face).
+// The item's faces are numbered as the solid numbers them, `faces` or not.
+struct SolidOptions {
+    std::string material;
+    std::optional<float> opacity;
+    std::optional<std::vector<std::uint32_t>> faces;
 };
 
 // A loaded view library. Never unloaded.
@@ -899,6 +968,16 @@ private:
     explicit Machining(const Item& item) : Item(item) {}
 };
 
+// How every "dashed" item's hidden lines and points look, as Python's OccludedStyle: a dash
+// and a gap in points, the share of coverage kept (above 0, at most 1), and optionally one
+// colour (0..1 RGB) for all of them.
+struct OccludedStyle {
+    float dash = 6.0f;
+    float gap = 4.0f;
+    float dim = 0.5f;
+    std::optional<std::array<float, 3>> colour;
+};
+
 class View {
 public:
     View(View&&) noexcept = default;
@@ -941,14 +1020,37 @@ public:
     }
 
     // -- showing: each returns the Item
-    // A solid by handle; the item keeps it alive.
+    // A solid by handle; the item keeps it alive. `options` (1.21): a material, an opacity and
+    // the faces to show alone (SolidOptions); without any, the 1.4 call.
     Result<Item> show(const blacksmith::Solid& solid, double tolerance = 0.05,
-                      const std::optional<Colour>& rgb = std::nullopt) {
+                      const std::optional<Colour>& rgb = std::nullopt, const SolidOptions& options = {}) {
         if (solid.closed()) return detail::view_error("solid: closed");
-        auto c = detail::paint_for(state_.get(), "cadaclysm_view_show_solid", rgb);
+        static constexpr std::pair<std::string_view, std::uint32_t> materials[] = {
+            {"default", CADACLYSM_VIEW_MATERIAL_DEFAULT}, {"plastic", CADACLYSM_VIEW_MATERIAL_PLASTIC},
+            {"metal", CADACLYSM_VIEW_MATERIAL_METAL},     {"matte", CADACLYSM_VIEW_MATERIAL_MATTE},
+            {"paint", CADACLYSM_VIEW_MATERIAL_PAINT},     {"brushed", CADACLYSM_VIEW_MATERIAL_BRUSHED},
+            {"glass", CADACLYSM_VIEW_MATERIAL_GLASS}};
+        std::uint32_t material = CADACLYSM_VIEW_MATERIAL_DEFAULT;
+        if (!options.material.empty()) {
+            const auto* found = std::find_if(std::begin(materials), std::end(materials),
+                                             [&](const auto& m) { return m.first == options.material; });
+            if (found == std::end(materials))
+                return detail::view_error("material: '" + options.material +
+                                          "' is not 'default', 'plastic', 'metal', 'matte', 'paint', 'brushed' or 'glass'");
+            material = found->second;
+        }
+        const bool plain = options.material.empty() && !options.opacity && !options.faces;
+        const char* call = plain ? "cadaclysm_view_show_solid" : "cadaclysm_view_show_solid_faces";
+        auto c = detail::paint_for(state_.get(), call, rgb);
         if (!c) return c.error();
-        return add("cadaclysm_view_show_solid", [&](detail::ViewState& s) {
-            return s.t->show_solid(s.handle, detail::ViewAccess::handle(solid), tolerance, c->data());
+        return add(call, [&](detail::ViewState& s) {
+            if (plain) return s.t->show_solid(s.handle, detail::ViewAccess::handle(solid), tolerance, c->data());
+            const std::uint32_t* faces = options.faces ? options.faces->data() : nullptr;
+            static const std::uint32_t none = 0;
+            if (options.faces && options.faces->empty()) faces = &none;
+            return s.t->show_solid_faces(s.handle, detail::ViewAccess::handle(solid), tolerance, c->data(), material,
+                                         options.opacity.value_or(1.0f), faces,
+                                         options.faces ? static_cast<std::uint32_t>(options.faces->size()) : 0u);
         }, detail::ViewShown{detail::ViewAccess::keep(solid), nullptr});
     }
     // A scene by handle; the item keeps it alive.
@@ -1312,6 +1414,36 @@ public:
         if (auto no = detail::refusal(state_.get(), "cadaclysm_view_lighting")) return *no;
         return std::string(state_->t->lighting(state_->handle) == CADACLYSM_VIEW_LIGHTING_STUDIO ? "studio" : "headlight");
     }
+    // The view-wide occluded style (see OccludedStyle); "solid" and "off" items never use it.
+    Result<void> occluded_style(const OccludedStyle& style) {
+        CadaclysmViewOccludedStyle raw{};
+        raw.size = sizeof raw;
+        raw.dash = style.dash;
+        raw.gap = style.gap;
+        raw.dim = style.dim;
+        raw.has_colour = style.colour.has_value() ? 1u : 0u;
+        if (style.colour) {
+            raw.colour[0] = (*style.colour)[0];
+            raw.colour[1] = (*style.colour)[1];
+            raw.colour[2] = (*style.colour)[2];
+        }
+        return ok("cadaclysm_view_set_occluded_style",
+                  [&](detail::ViewState& s) { return s.t->set_occluded_style(s.handle, &raw); });
+    }
+    // The style in use, defaults filled in.
+    Result<OccludedStyle> occluded_style() {
+        CadaclysmViewOccludedStyle raw{};
+        raw.size = sizeof raw;
+        Result<void> got = ok("cadaclysm_view_occluded_style",
+                              [&](detail::ViewState& s) { return s.t->occluded_style(s.handle, &raw); });
+        if (!got) return got.error();
+        OccludedStyle style;
+        style.dash = raw.dash;
+        style.gap = raw.gap;
+        style.dim = raw.dim;
+        if (raw.has_colour) style.colour = std::array<float, 3>{raw.colour[0], raw.colour[1], raw.colour[2]};
+        return style;
+    }
     // The timeline of machining jobs. play: at `speed` times real time, stopping at its end
     // unless loop() is on (play at the end starts again from 0).
     Result<void> play(double speed = 1.0) {
@@ -1420,6 +1552,87 @@ public:
             (waiting.size() < none.size() || waiting.compare(waiting.size() - none.size(), none.size(), none) != 0))
             return detail::view_error(waiting);
         return std::optional<ViewPick>();
+    }
+    // What a snap may land on, as Python's set_snap: {"all"} (the default), kind names
+    // ("vertex", "midpoint", "centre" -- a circular edge's -- "quadrant", "edge", "face", "grid",
+    // "plane"), or std::nullopt to switch snapping off, as a view starts. `aperture_px` is how far
+    // from the cursor a point kind may lie (0: the library's default, 10 points); `marker`
+    // whether the view draws the marker at the snap. Once on, a mouse hovering over a view in
+    // its own window snaps, and so does a click (last_snap reads them); snap() asks one at any
+    // pixel. Where kinds compete, a corner beats the face it sits on.
+    Result<void> set_snap(const std::optional<std::vector<std::string>>& kinds = std::vector<std::string>{"all"},
+                          float aperture_px = 0.0f, bool marker = true) {
+        std::uint32_t bits = 0;
+        if (kinds) {
+            for (const std::string& name : *kinds) {
+                if (name == "all") {
+                    bits |= CADACLYSM_VIEW_SNAP_ALL;
+                    continue;
+                }
+                std::uint32_t bit = 0;
+                for (const detail::SnapKindName& k : detail::snap_kinds)
+                    if (name == k.name) bit = k.bit;
+                if (!bit)
+                    return detail::view_error("snap kind '" + name +
+                                              "': one of vertex, midpoint, centre, quadrant, edge, face, grid, plane");
+                bits |= bit;
+            }
+        }
+        CadaclysmViewSnapSettings raw{};
+        raw.size = sizeof raw;
+        raw.kinds = bits;
+        raw.aperture_px = aperture_px;
+        raw.marker = marker ? 1u : 0u;
+        return ok("cadaclysm_view_set_snap", [&](detail::ViewState& s) { return s.t->set_snap(s.handle, &raw); });
+    }
+    // The snap under (x, y) of `viewport` (see ViewSnap); kind "" where nothing in the kinds
+    // set_snap chose lies there -- always, while snapping is off. Python's snap: a view never
+    // drawn is drawn first, then frames until the answer lands; the library's own error, or
+    // "snap: the answer never landed (...)".
+    Result<ViewSnap> snap(std::uint32_t x, std::uint32_t y, std::uint32_t viewport = 0) {
+        const char* call = state_ && state_->drawn ? "cadaclysm_view_request_snap_in" : "cadaclysm_view_draw";
+        if (auto no = detail::refusal(state_.get(), call)) return *no;
+        CadaclysmViewSnap raw;
+        std::vector<char> err(CVL_ERROR, 0);
+        if (!cvl_snap(state_->t, state_->handle, &state_->drawn, viewport, x, y, &raw, err.data(), err.size()))
+            return detail::view_error(err.data());
+        return detail::snap_of(raw);
+    }
+    // The newest snap answer that has landed, without asking or waiting -- Python's last_snap:
+    // a hover or click in the view's own window (pump lands them as it draws), or one an
+    // input() asked for. std::nullopt while none has; a ViewSnap of kind "" for one that found
+    // nothing. Each answer is read once; a hover's never replaces a click's not read yet. A
+    // failure other than "no answer yet" is the library's own message.
+    Result<std::optional<ViewSnap>> last_snap() {
+        if (auto no = detail::refusal(state_.get(), "cadaclysm_view_snap_result")) return *no;
+        CadaclysmViewSnap raw{};
+        raw.size = sizeof raw;
+        if (state_->t->snap_result(state_->handle, &raw)) return std::optional<ViewSnap>(detail::snap_of(raw));
+        const char* said = state_->t->last_error();
+        const std::string waiting = said ? said : "";
+        const std::string none = "no snap result";
+        if (!waiting.empty() &&
+            (waiting.size() < none.size() || waiting.compare(waiting.size() - none.size(), none.size(), none) != 0))
+            return detail::view_error(waiting);
+        return std::optional<ViewSnap>();
+    }
+    // Hides the snap marker and drops any snap asked or answered and not yet read.
+    Result<void> clear_snap() {
+        return act("cadaclysm_view_clear_snap", [&](detail::ViewState& s) { s.t->clear_snap(s.handle); });
+    }
+    // The plane "grid" and "plane" snaps land on, in place of the ground grid: through
+    // `origin`, its grid lines along `x_axis` and across it, `step` apart (0: the ground grid's
+    // spacing). The axes need not be unit length, but must not be parallel. std::nullopt as
+    // `origin` puts the ground grid back.
+    Result<void> set_work_plane(const std::optional<std::array<double, 3>>& origin,
+                                const std::array<double, 3>& x_axis = {1.0, 0.0, 0.0},
+                                const std::array<double, 3>& normal = {0.0, 0.0, 1.0}, double step = 0.0) {
+        if (!origin)
+            return ok("cadaclysm_view_clear_work_plane",
+                      [&](detail::ViewState& s) { return s.t->clear_work_plane(s.handle); });
+        return ok("cadaclysm_view_set_work_plane", [&](detail::ViewState& s) {
+            return s.t->set_work_plane(s.handle, origin->data(), x_axis.data(), normal.data(), step);
+        });
     }
     Result<void> draw() {
         auto done = ok("cadaclysm_view_draw", [&](detail::ViewState& s) { return s.t->draw(s.handle); });

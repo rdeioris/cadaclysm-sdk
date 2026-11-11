@@ -144,6 +144,25 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_sketch_test>")
   add_test(NAME sketch COMMAND cadaclysm_sketch_test ${CADACLYSM_LICENSE})
 
+  # Solid::face_round_radius/face_chamfer_distance/edge_beziers/isocurve_beziers and mesh_file, at
+  # parity with the Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_solid_drawing_test tests/solid_drawing_test.cpp)
+  target_link_libraries(cadaclysm_solid_drawing_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_solid_drawing_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_solid_drawing_test>")
+  add_test(NAME solid_drawing COMMAND cadaclysm_solid_drawing_test ${CADACLYSM_LICENSE})
+  # Profile::polyline/arc/arc_through/ellipse/from_beziers/beziers/loops/chain_order, at parity
+  # with the Python reference's sketch-curve tests. Needs a license, no sample file.
+  add_executable(cadaclysm_curves_test tests/curves_test.cpp)
+  target_link_libraries(cadaclysm_curves_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_curves_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_curves_test>")
+  add_test(NAME curves COMMAND cadaclysm_curves_test ${CADACLYSM_LICENSE})
+
   # The oriented box, edge and profile lengths, containment (one-shot and Classifier) and
   # closest points, at parity with the Python reference's measure tests. Needs a license, no
   # sample file.
@@ -154,6 +173,27 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_measure_test>")
   add_test(NAME measure COMMAND cadaclysm_measure_test ${CADACLYSM_LICENSE})
+
+  # Closest point from a point: a solid's, a projector's, one face's, one edge's and a NURBS
+  # curve's, at parity with the Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_closest_point_test tests/closest_point_test.cpp)
+  target_link_libraries(cadaclysm_closest_point_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_closest_point_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_closest_point_test>")
+  add_test(NAME closest_point COMMAND cadaclysm_closest_point_test ${CADACLYSM_LICENSE})
+
+  # Closest points from a curve: to a point within reach, to another curve, to a solid and a
+  # projector, and the nearest object of a mixed list, at parity with the Python reference's tests.
+  # Needs a license, no sample file.
+  add_executable(cadaclysm_curve_closest_test tests/curve_closest_test.cpp)
+  target_link_libraries(cadaclysm_curve_closest_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_curve_closest_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_curve_closest_test>")
+  add_test(NAME curve_closest COMMAND cadaclysm_curve_closest_test ${CADACLYSM_LICENSE})
 
   # Point at length, divide by count and divide by length on edges and a profile's outer loop,
   # at parity with the Python reference's arc-length tests. Needs a license, no sample file.

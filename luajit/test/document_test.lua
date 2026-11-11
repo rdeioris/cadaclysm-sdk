@@ -127,7 +127,38 @@ local function result_types()
   return doc
 end
 
+-- The plate with a 4 x 4 bar `x2` cut through it (`c1`): a node that reports its progress.
+local function cut_plate()
+  local doc = plate()
+  add(doc, '{"id": "r2", "kind": "profile.rect", "w": 4, "h": 4}')
+  add(doc, '{"id": "x2", "kind": "solid.extrude", "profile": "r2", "frame": "xy", "distance": 20}')
+  add(doc, '{"id": "c1", "kind": "solid.cut", "target": "x1", "tool": "x2", "tolerance": 0.01}')
+  return doc
+end
+
 return function(t)
+  t.test("document: evaluate_with reports the node being built and gives the same statuses", function()
+    local plain = cut_plate():evaluate()
+    t.eq(states(plain), "ok,ok,ok,ok,ok")
+    local doc = cut_plate()
+    local ticks = {}
+    local function heard(node, phase) ticks[#ticks + 1] = { node, phase } end
+    doc:evaluate_with(heard, true)
+    t.eq(#ticks, 0, "a cheap-only pass reports nothing")
+    t.eq(doc:evaluate_with(heard), plain)
+    local cut, named = false, true
+    local nodes = { r1 = true, x1 = true, r2 = true, x2 = true, c1 = true }
+    for _, tick in ipairs(ticks) do
+      cut = cut or (tick[1] == "c1" and tick[2] ~= "start")
+      named = named and nodes[tick[1]] == true
+    end
+    t.ok(cut, "the cut's own progress")
+    t.ok(named, "every tick names a node")
+    t.eq(cut_plate():evaluate_with(nil), plain)
+    -- An error the callback raises comes out once the call has returned.
+    t.raises(function() cut_plate():evaluate_with(function() error("stop", 0) end) end, "^stop$")
+  end)
+
   t.test("document: P evaluates, and a result outlives the edit that replaced it", function()
     local doc = plate()
     t.eq(states(doc:evaluate()), "ok,ok")

@@ -51,7 +51,7 @@ The `CadaclysmView` product draws through a view library opened at run time -- t
 by default, the GPU window after `ViewLibrary.useWgpu()`, any other with
 `ViewLibrary.use(path)` or `CADACLYSM_VIEW`. `Cadaclysm` and `Blacksmith` depend on it, so a
 package that imports either already links it; add the product when you use `View` yourself.
-A missing library throws "no view library: ...", and the view library must speak ABI 1.18.
+A missing library throws "no view library: ...", and the view library must speak ABI 1.22.
 
 ```swift
 import Blacksmith

@@ -23,6 +23,7 @@ import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.StructLayout;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
@@ -61,8 +62,12 @@ public final class View implements AutoCloseable {
      * 1.11: {@code cadaclysm_view_show_points}.
      * 1.13: {@code cadaclysm_view_set_occluded}.
      * 1.18: {@code cadaclysm_view_set_finish}.
+     * 1.20: {@code cadaclysm_view_set_occluded_style} and {@code _occluded_style}.
+     * 1.21: {@code cadaclysm_view_show_solid_faces} (a solid in a material and an opacity, all or some faces).
+     * 1.22: snapping -- {@code cadaclysm_view_set_snap}, {@code _request_snap_in}, {@code _snap_result},
+     * {@code _clear_snap}, {@code _set_work_plane}, {@code _clear_work_plane}.
      */
-    static final int ABI_MINOR = 18;
+    static final int ABI_MINOR = 22;
     /** CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0). */
     static final int NAVIGATION_FLY = 1;
     static final int OPEN = 1;
@@ -82,6 +87,14 @@ public final class View implements AutoCloseable {
             "center", 4, "right", 5, "bottom-left", 6, "bottom", 7, "bottom-right", 8);
     static final Map<String, Integer> OCCLUDED = Map.of("off", 0, "solid", 1, "dashed", 2);
     static final Map<String, Integer> FINISHES = Map.of("gloss", 0, "satin", 1, "matte", 2);
+    /** A shown solid's material (CADACLYSM_VIEW_MATERIAL_*, 1.21). */
+    static final Map<String, Integer> MATERIALS = Map.of("default", 0, "plastic", 1, "metal", 2, "matte", 3, "paint", 4,
+            "brushed", 5, "glass", 6);
+    /** The CADACLYSM_VIEW_SNAP_* bits by the names setSnap takes and Snap.kind reports; "all" is every one (1.22). */
+    static final Map<String, Integer> SNAP_KINDS = Map.of("vertex", 1, "midpoint", 2, "centre", 4, "quadrant", 8, "edge", 16,
+            "face", 32, "grid", 64, "plane", 128, "all", 0xFF);
+    /** CadaclysmViewSnap.edge where the snap is on no edge. */
+    static final int SNAP_NO_EDGE = 0xFFFFFFFF;
     static final Map<String, Integer> TEXT_MODES = Map.of("label", 0, "world", 1);
     static final Map<String, Integer> EVENTS = Map.of("pointer_down", 1, "pointer_move", 2, "pointer_up", 3,
             "pointer_cancel", 4, "wheel", 5, "key", 6);
@@ -136,6 +149,34 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("size"),
             ValueLayout.JAVA_INT.withName("min_triangles"),
             ValueLayout.JAVA_INT.withName("motion"));
+    static final StructLayout OCCLUDED_STYLE = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"), ValueLayout.JAVA_FLOAT.withName("dash"), ValueLayout.JAVA_FLOAT.withName("gap"),
+            ValueLayout.JAVA_FLOAT.withName("dim"), ValueLayout.JAVA_INT.withName("has_colour"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("colour"));
+    static final MemoryLayout SNAP_SETTINGS = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("kinds"),
+            ValueLayout.JAVA_FLOAT.withName("aperture_px"),
+            ValueLayout.JAVA_INT.withName("marker"));
+    static final MemoryLayout SNAP = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("kind"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point"),
+            ValueLayout.JAVA_INT.withName("item"),
+            ValueLayout.JAVA_INT.withName("node"),
+            ValueLayout.JAVA_INT.withName("face"),
+            ValueLayout.JAVA_INT.withName("edge"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("tangent"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("axis"),
+            ValueLayout.JAVA_DOUBLE.withName("radius"),
+            ValueLayout.JAVA_FLOAT.withName("distance_px"),
+            ValueLayout.JAVA_INT.withName("clicks"));
+
+    /** How every "dashed" item's hidden lines and points look: dash and gap in points, the coverage kept (0..1, above 0), an optional colour (3 numbers in 0..1). */
+    public record OccludedStyle(float dash, float gap, float dim, float[] colour) {
+        public static final OccludedStyle DEFAULT = new OccludedStyle(6f, 4f, 0.5f, null);
+    }
+
     static final MemoryLayout VIEWPORT = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
             MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_INT).withName("rect"),
@@ -305,8 +346,9 @@ public final class View implements AutoCloseable {
                 surfaces, orbit, pan, zoom, frame, standard, setOrthographic, setLayer, setBackground, setNodeVisible,
                 setNodeColor, setNodeHighlight, setViewports, requestPick, requestPickIn, pickResult, frameNode, look,
                 dolly, input, showMesh, showLines, showPoints, showCurves, showImage, setColour, setXray, setOccluded, setFinish, setFaceColours,
-                setPlacement, showSolid, image, size, setLod, wakeMs, setNodeTransforms, parseColour, loadFont, showText,
-                setText, setDoubleClickFrames, focus, navigation, setLighting, lighting, viewportCamera,
+                setPlacement, showSolid, showSolidFaces, image, size, setLod, wakeMs, setNodeTransforms, parseColour, loadFont, showText,
+                setText, setDoubleClickFrames, focus, navigation, setLighting, lighting, setOccludedStyle, occludedStyle,
+                setSnap, requestSnapIn, snapResult, clearSnap, setWorkPlane, clearWorkPlane, viewportCamera,
                 setViewportCamera, setViewportRects, aim, setPivot, setTap, orbitIn, panIn, zoomIn, lookIn, dollyIn,
                 frameIn, standardIn, showMachining, machiningSeek, machiningColourBy, machiningOverlays, machiningInfo,
                 machiningHeights, timelinePlay, timelinePause, timelineSeek, timelineSetLoop, timelineTime,
@@ -376,6 +418,7 @@ public final class View implements AutoCloseable {
             setPlacement = bind(linker, lib, "cadaclysm_view_set_placement", FunctionDescriptor.of(B, A, I, A));
             setNodeTransforms = bind(linker, lib, "cadaclysm_view_set_node_transforms", FunctionDescriptor.of(B, A, I, A, I));
             showSolid = bind(linker, lib, "cadaclysm_view_show_solid", FunctionDescriptor.of(I, A, A, D, A));
+            showSolidFaces = bind(linker, lib, "cadaclysm_view_show_solid_faces", FunctionDescriptor.of(I, A, A, D, A, I, F, A, I));
             image = bind(linker, lib, "cadaclysm_view_image", FunctionDescriptor.of(B, A, A, L));
             size = bind(linker, lib, "cadaclysm_view_size", FunctionDescriptor.of(B, A, A, A));
             loadFont = bind(linker, lib, "cadaclysm_view_load_font", FunctionDescriptor.of(I, A, L));
@@ -386,6 +429,14 @@ public final class View implements AutoCloseable {
             navigation = bind(linker, lib, "cadaclysm_view_navigation", FunctionDescriptor.of(I, A));
             setLighting = bind(linker, lib, "cadaclysm_view_set_lighting", FunctionDescriptor.of(B, A, I));
             lighting = bind(linker, lib, "cadaclysm_view_lighting", FunctionDescriptor.of(I, A));
+            setOccludedStyle = bind(linker, lib, "cadaclysm_view_set_occluded_style", FunctionDescriptor.of(B, A, A));
+            occludedStyle = bind(linker, lib, "cadaclysm_view_occluded_style", FunctionDescriptor.of(B, A, A));
+            setSnap = bind(linker, lib, "cadaclysm_view_set_snap", FunctionDescriptor.of(B, A, A));
+            requestSnapIn = bind(linker, lib, "cadaclysm_view_request_snap_in", FunctionDescriptor.ofVoid(A, I, I, I));
+            snapResult = bind(linker, lib, "cadaclysm_view_snap_result", FunctionDescriptor.of(B, A, A));
+            clearSnap = bind(linker, lib, "cadaclysm_view_clear_snap", FunctionDescriptor.ofVoid(A));
+            setWorkPlane = bind(linker, lib, "cadaclysm_view_set_work_plane", FunctionDescriptor.of(B, A, A, A, A, D));
+            clearWorkPlane = bind(linker, lib, "cadaclysm_view_clear_work_plane", FunctionDescriptor.of(B, A));
             // 1.10: bound only; the viewport cameras get a Java API in a later wrappers plan.
             viewportCamera = bind(linker, lib, "cadaclysm_view_viewport_camera", FunctionDescriptor.of(B, A, I, A));
             setViewportCamera = bind(linker, lib, "cadaclysm_view_set_viewport_camera", FunctionDescriptor.of(B, A, I, A));
@@ -705,8 +756,41 @@ public final class View implements AutoCloseable {
     }
 
     /**
+     * A snap answer (1.22): its {@code kind} ("vertex", "midpoint", "centre", "quadrant", "edge", "face",
+     * "grid" or "plane"; "none" from {@link #lastSnap()} for a snap that found nothing), the {@code point}
+     * snapped to, in the coordinates the items were shown in, the item, node and face it lies on (0 for a
+     * grid or plane snap), its {@code edge} (null for a face, grid or plane snap), the edge's unit
+     * {@code tangent} there, a circular edge's unit {@code axis} and {@code radius} (centre and quadrant),
+     * how many pixels the cursor was from it, and {@code clicks}: 0 for {@link #snap(int, int, int)} and a
+     * hover, 1 for a click's snap, 2 for a double click's.
+     */
+    public record Snap(String kind, double[] point, int item, int node, int face, Integer edge, float[] tangent,
+                       float[] axis, double radius, float distancePx, int clicks) {
+    }
+
+    /** A CadaclysmViewSnap as the answer: null for kind 0 (nothing snapped) (Python's _snap_dict). */
+    static Snap snapOf(MemorySegment raw) {
+        return raw.get(ValueLayout.JAVA_INT, off(SNAP, "kind")) == 0 ? null : snapAnswerOf(raw);
+    }
+
+    /** A CadaclysmViewSnap as it was answered, kind 0 ("none": nothing snapped) included; edge null where it is on none. */
+    static Snap snapAnswerOf(MemorySegment raw) {
+        int kind = raw.get(ValueLayout.JAVA_INT, off(SNAP, "kind")), edge = raw.get(ValueLayout.JAVA_INT, off(SNAP, "edge"));
+        String name = kind == 0 ? "none" : SNAP_KINDS.entrySet().stream()
+                .filter(e -> e.getValue() == kind && !"all".equals(e.getKey())).map(Map.Entry::getKey).findFirst()
+                .orElse(Integer.toString(kind));
+        return new Snap(name, raw.asSlice(off(SNAP, "point"), 24).toArray(ValueLayout.JAVA_DOUBLE),
+                raw.get(ValueLayout.JAVA_INT, off(SNAP, "item")), raw.get(ValueLayout.JAVA_INT, off(SNAP, "node")),
+                raw.get(ValueLayout.JAVA_INT, off(SNAP, "face")), edge == SNAP_NO_EDGE ? null : edge,
+                raw.asSlice(off(SNAP, "tangent"), 12).toArray(ValueLayout.JAVA_FLOAT),
+                raw.asSlice(off(SNAP, "axis"), 12).toArray(ValueLayout.JAVA_FLOAT),
+                raw.get(ValueLayout.JAVA_DOUBLE, off(SNAP, "radius")), raw.get(ValueLayout.JAVA_FLOAT, off(SNAP, "distance_px")),
+                raw.get(ValueLayout.JAVA_INT, off(SNAP, "clicks")));
+    }
+
+    /**
      * Why the library at {@code path}, answering {@code version} from cadaclysm_view_abi_version,
-     * is refused -- null when this wrapper takes it (1.18 or a later 1.x).
+     * is refused -- null when this wrapper takes it (1.22 or a later 1.x).
      */
     static String abiRefusal(String path, int version) {
         int major = version >>> 16, minor = version & 0xFFFF;
@@ -980,12 +1064,38 @@ public final class View implements AutoCloseable {
     }
 
     public Item showSolid(Blacksmith.Solid solid, double tolerance, float[] rgb) {
+        return showSolid(solid, tolerance, rgb, null, null, null);
+    }
+
+    /** {@link #showSolid(Blacksmith.Solid, double, float[], String, Float, int[])} with the colour as text. */
+    public Item showSolid(Blacksmith.Solid solid, double tolerance, String rgb, String material, Float opacity, int[] faces) {
+        return showSolid(solid, tolerance, lib.colour(rgb), material, opacity, faces);
+    }
+
+    /**
+     * A blacksmith solid by handle, read in place. {@code material} (1.21) "default", "plastic",
+     * "metal", "matte", "paint", "brushed" or "glass"; {@code opacity} 0..1 (1 opaque); {@code faces}
+     * the solid's face numbers to show alone, with no edges -- a trim's ghost (null: every face).
+     * All three null: the 1.4 call. The item's faces are numbered as the solid numbers them.
+     */
+    public Item showSolid(Blacksmith.Solid solid, double tolerance, float[] rgb, String material, Float opacity, int[] faces) {
         exact(rgb, 3, "showSolid rgb");
-        MemorySegment p = live(c("show_solid"));
+        Integer m = material == null ? Integer.valueOf(0) : MATERIALS.get(material);
+        if (m == null) {
+            throw new ViewException("material: '" + material + "' is not 'default', 'plastic', 'metal', 'matte', 'paint', 'brushed' or 'glass'");
+        }
+        boolean plain = material == null && opacity == null && faces == null;
+        MemorySegment p = live(c(plain ? "show_solid" : "show_solid_faces"));
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment colour = floats(arena, rgb);
             MemorySegment h = solid.handle();
-            return item(call(() -> (int) lib.showSolid.invoke(p, h, tolerance, colour)), solid, "showSolid");
+            if (plain) return item(call(() -> (int) lib.showSolid.invoke(p, h, tolerance, colour)), solid, "showSolid");
+            MemorySegment f = faces == null ? MemorySegment.NULL
+                    : arena.allocateFrom(ValueLayout.JAVA_INT, faces.length == 0 ? new int[1] : faces);
+            int n = faces == null ? 0 : faces.length;
+            int look = m;
+            float o = opacity == null ? 1f : opacity;
+            return item(call(() -> (int) lib.showSolidFaces.invoke(p, h, tolerance, colour, look, o, f, n)), solid, "showSolid");
         }
     }
 
@@ -1459,6 +1569,41 @@ public final class View implements AutoCloseable {
         ok(call(() -> (boolean) lib.setLighting.invoke(p, which)), "lighting");
     }
 
+    /** The view-wide occluded style; "solid" and "off" items never use it. */
+    public void occludedStyle(OccludedStyle style) {
+        if (style.colour() != null && style.colour().length != 3) throw new ViewException("occludedStyle: colour is 3 numbers in 0..1");
+        MemorySegment p = live(c("set_occluded_style"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment raw = arena.allocate(OCCLUDED_STYLE);
+            raw.set(ValueLayout.JAVA_INT, off(OCCLUDED_STYLE, "size"), (int) OCCLUDED_STYLE.byteSize());
+            raw.set(ValueLayout.JAVA_FLOAT, off(OCCLUDED_STYLE, "dash"), style.dash());
+            raw.set(ValueLayout.JAVA_FLOAT, off(OCCLUDED_STYLE, "gap"), style.gap());
+            raw.set(ValueLayout.JAVA_FLOAT, off(OCCLUDED_STYLE, "dim"), style.dim());
+            raw.set(ValueLayout.JAVA_INT, off(OCCLUDED_STYLE, "has_colour"), style.colour() == null ? 0 : 1);
+            if (style.colour() != null) {
+                for (int i = 0; i < 3; i++) raw.set(ValueLayout.JAVA_FLOAT, off(OCCLUDED_STYLE, "colour") + 4L * i, style.colour()[i]);
+            }
+            ok(call(() -> (boolean) lib.setOccludedStyle.invoke(p, raw)), "occludedStyle");
+        }
+    }
+
+    /** The view's occluded style, the defaults as their values. */
+    public OccludedStyle occludedStyle() {
+        MemorySegment p = live(c("occluded_style"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment raw = arena.allocate(OCCLUDED_STYLE);
+            raw.set(ValueLayout.JAVA_INT, off(OCCLUDED_STYLE, "size"), (int) OCCLUDED_STYLE.byteSize());
+            ok(call(() -> (boolean) lib.occludedStyle.invoke(p, raw)), "occludedStyle");
+            float[] colour = null;
+            if (raw.get(ValueLayout.JAVA_INT, off(OCCLUDED_STYLE, "has_colour")) != 0) {
+                colour = new float[3];
+                for (int i = 0; i < 3; i++) colour[i] = raw.get(ValueLayout.JAVA_FLOAT, off(OCCLUDED_STYLE, "colour") + 4L * i);
+            }
+            return new OccludedStyle(raw.get(ValueLayout.JAVA_FLOAT, off(OCCLUDED_STYLE, "dash")),
+                    raw.get(ValueLayout.JAVA_FLOAT, off(OCCLUDED_STYLE, "gap")), raw.get(ValueLayout.JAVA_FLOAT, off(OCCLUDED_STYLE, "dim")), colour);
+        }
+    }
+
     // -- the timeline (1.7): one per view, shared by whatever it shows
 
     /** {@link #play(double)} at normal speed. */
@@ -1576,6 +1721,118 @@ public final class View implements AutoCloseable {
         String waiting = lib.lastErrorText();
         if (!waiting.isEmpty() && !waiting.endsWith("no pick result")) throw new ViewException(waiting);
         return Optional.empty();
+    }
+
+    /** {@link #setSnap(String[], float, boolean)} with the library's default aperture and the marker drawn. */
+    public void setSnap(String... kinds) {
+        setSnap(kinds, 0f, true);
+    }
+
+    /**
+     * What a snap may land on: "all", or any of "vertex", "midpoint", "centre" (a circular edge's),
+     * "quadrant", "edge", "face", "grid" and "plane"; no names is "all", and null switches snapping off, as a view
+     * starts. {@code aperturePx} is how far from the cursor a point kind may lie (0: the library's default,
+     * 10 points; otherwise 2..32), {@code marker} whether the view draws the marker at the snap. Once on, a
+     * mouse hovering over a view in its own window snaps, and so does a click ({@link #lastSnap()} reads
+     * them); {@link #snap(int, int, int)} asks one at any pixel. Where kinds compete, a corner beats the face
+     * it sits on. An unknown name is refused before the call; the library refuses an aperture that is
+     * negative or not finite, in its own words.
+     */
+    public void setSnap(String[] kinds, float aperturePx, boolean marker) {
+        int bits = 0;
+        if (kinds != null && kinds.length == 0) bits = SNAP_KINDS.get("all");
+        if (kinds != null) for (String name : kinds) bits |= named(SNAP_KINDS, name, "snap kind");
+        MemorySegment p = live(c("set_snap"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment raw = arena.allocate(SNAP_SETTINGS);
+            raw.set(ValueLayout.JAVA_INT, off(SNAP_SETTINGS, "size"), (int) SNAP_SETTINGS.byteSize());
+            raw.set(ValueLayout.JAVA_INT, off(SNAP_SETTINGS, "kinds"), bits);
+            raw.set(ValueLayout.JAVA_FLOAT, off(SNAP_SETTINGS, "aperture_px"), aperturePx);
+            raw.set(ValueLayout.JAVA_INT, off(SNAP_SETTINGS, "marker"), marker ? 1 : 0);
+            ok(call(() -> (boolean) lib.setSnap.invoke(p, raw)), "setSnap");
+        }
+    }
+
+    /**
+     * The snap under pixel (x, y) of {@code viewport} (see {@link Snap}), or null where nothing in the kinds
+     * {@code setSnap} chose lies there -- and always null while snapping is off. Draws until the answer
+     * lands, as {@link #pick(int, int, int)} does, a never-drawn view first. A failure other than "no answer
+     * yet" throws at once with the library's own message.
+     */
+    public Snap snap(int x, int y, int viewport) {
+        if (!drawn) draw();
+        MemorySegment p = live(c("request_snap_in"));
+        voidCall("request_snap_in", lib.requestSnapIn, viewport, x, y);
+        String waiting = "";
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(SNAP);
+            out.set(ValueLayout.JAVA_INT, off(SNAP, "size"), (int) SNAP.byteSize());
+            for (int i = 0; i < 200; i++) {
+                draw();
+                if (call(() -> (boolean) lib.snapResult.invoke(p, out))) return snapOf(out);
+                waiting = lib.lastErrorText();
+                if (!waiting.isEmpty() && !waiting.endsWith("no snap result")) throw new ViewException(waiting);
+                sleep(10);
+            }
+        }
+        throw new ViewException("snap: the answer never landed (" + (waiting.isEmpty() ? "no error reported" : waiting) + ")");
+    }
+
+    public Snap snap(int x, int y) {
+        return snap(x, y, 0);
+    }
+
+    /**
+     * The newest snap answer that has landed, without asking or waiting (Python's {@code last_snap}): a
+     * hover or click in the view's own window ({@code pump} lands them as it draws), or one asked with
+     * snap's request. Empty while none has; a snap that found nothing is a Snap of kind "none"; else the
+     * snap. Each answer is read once; a hover's never replaces a click's not read yet. A failure other than
+     * "no answer yet" throws the library's own message.
+     */
+    public Optional<Snap> lastSnap() {
+        MemorySegment p = live(c("snap_result"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(SNAP);
+            out.set(ValueLayout.JAVA_INT, off(SNAP, "size"), (int) SNAP.byteSize());
+            if (call(() -> (boolean) lib.snapResult.invoke(p, out))) return Optional.of(snapAnswerOf(out));
+        }
+        String waiting = lib.lastErrorText();
+        if (!waiting.isEmpty() && !waiting.endsWith("no snap result")) throw new ViewException(waiting);
+        return Optional.empty();
+    }
+
+    /** Hides the snap marker and drops any snap asked or answered and not yet read. */
+    public void clearSnap() {
+        voidCall("clear_snap", lib.clearSnap);
+    }
+
+    /** {@link #setWorkPlane(double[], double[], double[], double)} along x, square to z, at the ground grid's spacing; null puts the ground grid back. */
+    public void setWorkPlane(double[] origin) {
+        setWorkPlane(origin, null, null, 0);
+    }
+
+    /**
+     * The plane "grid" and "plane" snaps land on, in place of the ground grid: through {@code origin}, its
+     * grid lines along {@code xAxis} (null: 1, 0, 0) and across it, {@code step} apart (0: the ground grid's
+     * spacing), square to {@code normal} (null: 0, 0, 1). The axes need not be unit length, but must not be
+     * parallel. A null {@code origin} puts the ground grid back. Other than three numbers is refused before
+     * the call; the library refuses a value that is not finite, a negative step and parallel or zero axes.
+     */
+    public void setWorkPlane(double[] origin, double[] xAxis, double[] normal, double step) {
+        if (origin == null) {
+            MemorySegment p = live(c("clear_work_plane"));
+            ok(call(() -> (boolean) lib.clearWorkPlane.invoke(p)), "setWorkPlane");
+            return;
+        }
+        double[] o = exact(origin, 3, "setWorkPlane origin");
+        double[] x = exact(xAxis == null ? new double[]{1, 0, 0} : xAxis, 3, "setWorkPlane xAxis");
+        double[] n = exact(normal == null ? new double[]{0, 0, 1} : normal, 3, "setWorkPlane normal");
+        MemorySegment p = live(c("set_work_plane"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment so = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, o), sx = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, x),
+                    sn = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, n);
+            ok(call(() -> (boolean) lib.setWorkPlane.invoke(p, so, sx, sn, step)), "setWorkPlane");
+        }
     }
 
     private static void sleep(long ms) {

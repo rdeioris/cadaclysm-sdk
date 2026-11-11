@@ -25,6 +25,10 @@ private func sample(_ relative: String) throws -> String {
 }
 
 private let cube = "samples/cube.scad"
+/// cube.scad is a mesh with no brep in the Reader flavour and an exact box where the reader
+/// library carries the kernel's builder (`cadaclysm-capi`'s `openscad-brep`, every shipped
+/// desktop library): the cube's figures that differ are pinned both ways, by this.
+private func cubeIsExact(_ scene: Scene) -> Bool { scene.nodes[0].brep != nil }
 private let mechanism = "samples/mechanism.stp"
 private let openSheet = "samples/open-sheet.scad"
 private let dentedBox = "samples/dented-box.stp"
@@ -109,7 +113,8 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(scene.schema, "")
         XCTAssertEqual(scene.metresPerUnit, 1)
         XCTAssertNil(scene.sourceName)
-        XCTAssertEqual(scene.diagnostics, [])
+        // The Reader flavour says why the cube is a mesh; the exact cube has nothing to say.
+        XCTAssertEqual(scene.diagnostics, cubeIsExact(scene) ? [] : ["OpenSCAD read as a mesh: this build has no kernel"])
         XCTAssertEqual(scene.convention, .native)
         XCTAssertNil(scene.schemaPath)
         XCTAssertFalse(scene.substituted)
@@ -117,10 +122,14 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(scene.surfaceMatrix.flatMap { $0 }, identity)
 
         let node = scene.roots[0]
+        let exact = cubeIsExact(scene)
+        // The mesh cube is 36 vertices, one per triangle corner; the exact cube's shares its
+        // corners per face (24).
+        let vertices = exact ? 24 : 36
         XCTAssertEqual(node.name, "cube")
         XCTAssertEqual(node.kind, "solid")
         XCTAssertEqual(node.label, "cube")
-        XCTAssertEqual(node.generator, "csg")
+        XCTAssertEqual(node.generator, exact ? "brep" : "csg")
         XCTAssertEqual(node.depth, 0)
         XCTAssertTrue(node.canMesh)
         XCTAssertTrue(node.visible)
@@ -136,19 +145,19 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(node.bounds.max, SIMD3(20, 20, 20))
 
         let mesh = node.mesh
-        XCTAssertEqual(mesh.vertexCount, 36)
+        XCTAssertEqual(mesh.vertexCount, vertices)
         XCTAssertEqual(mesh.indexCount, 36)
         XCTAssertEqual(mesh.triangleCount, 12)
         XCTAssertFalse(mesh.isEmpty)
-        XCTAssertEqual(mesh.positions.count, 36 * 3)
-        XCTAssertEqual(mesh.normals?.count, 36 * 3)
+        XCTAssertEqual(mesh.positions.count, vertices * 3)
+        XCTAssertEqual(mesh.normals?.count, vertices * 3)
         XCTAssertNil(mesh.uvs)
         XCTAssertNil(mesh.colors)
         XCTAssertEqual(mesh.indices.count, 36)
         let positions = Array(mesh.positions)
         XCTAssertEqual(positions.min(), 0)
         XCTAssertEqual(positions.max(), 20)
-        XCTAssertEqual(mesh.indices.max(), 35)
+        XCTAssertEqual(mesh.indices.max(), UInt32(vertices - 1))
         XCTAssertEqual(mesh.positions.withUnsafeBufferPointer { $0.reduce(0, +) }, positions.reduce(0, +))
 
         let edges = node.edges
@@ -157,9 +166,10 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(edges.segmentIndices().count, 24)
         XCTAssertEqual(edges.segments().count, 24 * 3)
         XCTAssertTrue(node.curves.isEmpty)
-        XCTAssertEqual(node.isocurves.polylineCount, 12)
-        XCTAssertTrue(node.surfaces.isEmpty)
-        XCTAssertNil(node.brep)
+        // 12 axis sections of the mesh; the exact cube's isocurves are its surfaces' to draw.
+        XCTAssertEqual(node.isocurves.polylineCount, exact ? 0 : 12)
+        XCTAssertEqual(node.surfaces.count, exact ? 6 : 0)
+        XCTAssertEqual(node.brep != nil, exact)
 
         XCTAssertEqual(scene.placements.count, 1)
         XCTAssertEqual(scene.placements[0].geometry, node)
@@ -452,7 +462,7 @@ final class ReaderTests: XCTestCase {
 
         XCTAssertEqual(Array(copy.positions), expected)
         XCTAssertEqual(Array(copy.indices), expectedIndices)
-        XCTAssertEqual(copy.normals?.count, 36 * 3)
+        XCTAssertEqual(copy.normals?.count, copy.positions.count)
         XCTAssertEqual(copy.triangleCount, 12)
         XCTAssertNil(copy.positions.owner.nativeMemoryInvalidReason)
         XCTAssertEqual(Array(edges), expectedEdges)
@@ -590,7 +600,8 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(node.edgeBeziers.points.count, 12 * 12)
         XCTAssertEqual(node.edgeBeziers.weights.count, 12 * 4)
         XCTAssertTrue(node.curveBeziers.isEmpty)
-        XCTAssertEqual(node.isocurveBeziers.count, 12)
+        // 12 axis sections of the mesh; the exact cube's isocurves are its surfaces' to draw.
+        XCTAssertEqual(node.isocurveBeziers.count, cubeIsExact(scene) ? 0 : 12)
     }
 
     func testCollision() throws {
@@ -600,8 +611,14 @@ final class ReaderTests: XCTestCase {
         let fit = try XCTUnwrap(node.collision())
         XCTAssertEqual(fit.error, 0)
         XCTAssertEqual(fit.frame.count, 16)
-        XCTAssertEqual(fit.hullVertexCount, 8)
         XCTAssertTrue(["box", "hull"].contains(fit.shapeName))
+        if cubeIsExact(scene) {
+            // The exact cube is fitted as the box it is: no hull to hand over.
+            XCTAssertEqual(fit.shapeName, "box")
+            XCTAssertEqual(fit.hullVertexCount, 0)
+            return
+        }
+        XCTAssertEqual(fit.hullVertexCount, 8)
         let hull = node.collisionHull()
         XCTAssertEqual(hull.vertexCount, 8)
         XCTAssertEqual(hull.indices.count, 36)
@@ -616,9 +633,11 @@ final class ReaderTests: XCTestCase {
                                           indices: Array(mesh.indices), maxTriangles: 124, maxVertices: 64)
         XCTAssertEqual(meshlets.count, 1)
         let one = meshlets.meshlet(0)
+        // The mesh cube is 36 vertices; the exact cube's mesh shares its corners per face (24).
+        let vertices = cubeIsExact(scene) ? 24 : 36
         XCTAssertEqual(one.triangleCount, 12)
-        XCTAssertEqual(one.vertexCount, 36)
-        XCTAssertEqual(one.positions.count, 36 * 3)
+        XCTAssertEqual(one.vertexCount, vertices)
+        XCTAssertEqual(one.positions.count, vertices * 3)
         XCTAssertEqual(one.indices.count, 36)
         XCTAssertEqual(one.level, 0)
         XCTAssertEqual(one.children.count, 0)
@@ -1155,14 +1174,23 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(mesh.nodeKind.count, 8)
         XCTAssertEqual(mesh.nodeEntity.count, 8)
         XCTAssertTrue(mesh.triangles.allSatisfy { Int($0) < 8 })
-        XCTAssertTrue(mesh.triangleFace.allSatisfy { $0 == 0 })
-        // A mesh-only body: one face, every node on it (kind 2), no edges and no vertices.
-        XCTAssertTrue(mesh.fromMesh)
-        XCTAssertEqual(mesh.faceCount, 1)
-        XCTAssertTrue(mesh.nodeKind.allSatisfy { $0 == 2 })
-        XCTAssertTrue(mesh.nodeEntity.allSatisfy { $0 == 0 })
-        XCTAssertEqual(try mesh.edges.count, 0)
-        XCTAssertEqual(try mesh.vertices.count, 0)
+        if cubeIsExact(scene) {
+            // Where the reader library carries the kernel's `openscad-brep` the cube is an exact
+            // box, not a mesh-only body: six faces, twelve edges, eight corners.
+            XCTAssertFalse(mesh.fromMesh)
+            XCTAssertEqual(mesh.faceCount, 6)
+            XCTAssertEqual(try mesh.edges.count, 12)
+            XCTAssertEqual(try mesh.vertices.count, 8)
+        } else {
+            XCTAssertTrue(mesh.triangleFace.allSatisfy { $0 == 0 })
+            // A mesh-only body: one face, every node on it (kind 2), no edges and no vertices.
+            XCTAssertTrue(mesh.fromMesh)
+            XCTAssertEqual(mesh.faceCount, 1)
+            XCTAssertTrue(mesh.nodeKind.allSatisfy { $0 == 2 })
+            XCTAssertTrue(mesh.nodeEntity.allSatisfy { $0 == 0 })
+            XCTAssertEqual(try mesh.edges.count, 0)
+            XCTAssertEqual(try mesh.vertices.count, 0)
+        }
         // The census ran: for a bare mesh an empty one really does mean "nothing found".
         XCTAssertTrue(mesh.watertight)
         XCTAssertEqual(try mesh.openEdges.count, 0)
@@ -1305,14 +1333,18 @@ final class ReaderTests: XCTestCase {
     /// **Neither `tolerance` nor `maxSize` is validated by this wrapper**, and the mesh-only
     /// path reads neither: `fem_mesh_of_mesh` takes no options at all. Catches a wrapper that
     /// checked either field itself -- which passes every Python-shaped test and is wrong.
+    ///
+    /// The open sheet, not the cube: it is mesh-only in every flavour, where the cube is an
+    /// exact box (which reads both fields) wherever the kernel's builder is linked.
     func testFemMeshValidatesNeitherToleranceNorMaxSizeOnTheMeshOnlyPath() throws {
-        let scene = try Cadaclysm.open(try sample(cube))
+        let scene = try Cadaclysm.open(try sample(openSheet))
         defer { scene.close() }
-        let node = scene.roots[0]
+        let node = try XCTUnwrap(scene.walk().first { $0.canMesh })
         for (tolerance, maxSize) in [(0.0, 0.0), (-1.0, 0.0), (Double.nan, 0.0),
                                      (0.01, -1.0), (0.01, Double.nan), (0.01, Double.infinity)] {
             let mesh = try node.femMesh(tolerance: tolerance, maxSize: maxSize)
-            XCTAssertEqual(mesh.nodes.count, 8 * 3, "tolerance \(tolerance) maxSize \(maxSize)")
+            XCTAssertTrue(mesh.fromMesh, "the open sheet is a mesh-only body")
+            XCTAssertEqual(mesh.nodes.count, 5 * 3, "tolerance \(tolerance) maxSize \(maxSize)")
             mesh.free()
         }
     }

@@ -19,6 +19,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import ctypes
+import dataclasses
 import math
 import os
 import sys
@@ -48,7 +49,10 @@ ABI_MAJOR = 1
 # 1.17: `CADACLYSM_VIEW_WINDOW_KMS` (drawn straight onto a Linux display; not a Python window kind).
 # 1.18: `cadaclysm_view_set_finish` (an item's finish: gloss, satin or matte).
 # 1.19: `cadaclysm_view_kms_info` and `_kms_probe` (how a KMS view draws onto its display).
-ABI_MINOR = 19
+# 1.20: `cadaclysm_view_set_occluded_style` and `_occluded_style` (hidden lines' dash, gap, dim, colour).
+# 1.21: `cadaclysm_view_show_solid_faces` (a solid in a material and an opacity, all or some of its faces).
+# 1.22: snapping -- `cadaclysm_view_set_snap`, `_request_snap_in`, `_snap_result`, `_clear_snap`, `_set_work_plane`, `_clear_work_plane`.
+ABI_MINOR = 22
 
 #: A colour: text -- "#rgb", "#rrggbb" (the "#" optional) or one of the 148 CSS colour names,
 #: any case, read by the view library's own `cadaclysm_view_parse_colour`, so the forms are
@@ -72,6 +76,12 @@ _LIGHTING = {"headlight": 0, "studio": 1, "showroom": 2}
 _ANALYSIS = {"zebra": 1, "isophotes": 2, "gaussian": 3, "mean": 4, "min": 5, "max": 6}
 _OCCLUDED = {"off": 0, "solid": 1, "dashed": 2}
 _FINISH = {"gloss": 0, "satin": 1, "matte": 2}
+#: A shown solid's material (`show_solid(..., material=)`, 1.21): CADACLYSM_VIEW_MATERIAL_*.
+_MATERIAL = {"default": 0, "plastic": 1, "metal": 2, "matte": 3, "paint": 4, "brushed": 5, "glass": 6}
+#: The `CADACLYSM_VIEW_SNAP_*` bits, by the names `View.set_snap` takes and `Snap.kind` reports.
+_SNAP_KINDS = {"vertex": 1 << 0, "midpoint": 1 << 1, "centre": 1 << 2, "quadrant": 1 << 3,
+               "edge": 1 << 4, "face": 1 << 5, "grid": 1 << 6, "plane": 1 << 7}
+_SNAP_NONE = 0xFFFFFFFF  # CadaclysmViewSnap.edge where the snap is on no edge
 _LOD_MOTION = {"detailed": 0, "smooth": 1}
 _STANDARD = {"top": 0, "front": 1, "right": 2, "iso": 3}
 _LAYERS = {"surfaces": 0, "edges": 1, "curves": 2, "isocurves": 3, "grid": 4, "text": 5}
@@ -143,6 +153,38 @@ class _Pick(ctypes.Structure):
                 ("clicks", c_uint32), ("has_point", c_uint32), ("point", c_float * 3)]
 
 
+class Snap(TypedDict):
+    """What a snap answers: its `kind` ("vertex", "midpoint", "centre", "quadrant", "edge",
+    "face", "grid" or "plane"), the `point` snapped to, in the coordinates the items were shown
+    in, the item, node and face it lies on, its `edge` (None for a face, grid or plane snap),
+    the edge's unit `tangent` there, a circular edge's `axis` and `radius` (zeros otherwise),
+    how many pixels the cursor was from it, and `clicks`: 0 for `snap` and a hover, 1 for a
+    click's snap, 2 for a double click's."""
+    kind: str
+    point: Tuple[float, float, float]
+    item: int
+    node: int
+    face: int
+    edge: Optional[int]
+    tangent: Tuple[float, float, float]
+    axis: Tuple[float, float, float]
+    radius: float
+    distance_px: float
+    clicks: int
+
+
+class _SnapSettings(ctypes.Structure):
+    #: CadaclysmViewSnapSettings, cadaclysm_view.h 1.22.
+    _fields_ = [("size", c_uint32), ("kinds", c_uint32), ("aperture_px", c_float), ("marker", c_uint32)]
+
+
+class _Snap(ctypes.Structure):
+    #: CadaclysmViewSnap, cadaclysm_view.h 1.22.
+    _fields_ = [("size", c_uint32), ("kind", c_uint32), ("point", c_double * 3), ("item", c_uint32), ("node", c_uint32),
+                ("face", c_uint32), ("edge", c_uint32), ("tangent", c_float * 3), ("axis", c_float * 3),
+                ("radius", c_double), ("distance_px", c_float), ("clicks", c_uint32)]
+
+
 class _Lod(ctypes.Structure):
     #: CadaclysmViewLod, cadaclysm_view.h 1.4.
     _fields_ = [("size", c_uint32), ("min_triangles", c_uint32), ("motion", c_uint32)]
@@ -152,6 +194,23 @@ class _Analysis(ctypes.Structure):
     #: CadaclysmViewAnalysis, cadaclysm_view.h 1.14.
     _fields_ = [("size", c_uint32), ("mode", c_uint32), ("count", c_uint32), ("angle", c_float), ("width", c_float),
                 ("light", c_float * 3), ("range", c_double)]
+
+
+class _OccludedStyle(ctypes.Structure):
+    #: CadaclysmViewOccludedStyle, cadaclysm_view.h 1.20.
+    _fields_ = [("size", c_uint32), ("dash", c_float), ("gap", c_float), ("dim", c_float),
+                ("has_colour", c_uint32), ("colour", c_float * 3)]
+
+
+@dataclasses.dataclass(frozen=True)
+class OccludedStyle:
+    """How every "dashed" item's hidden lines and points look (`View.occluded_style`): a dash
+    and a gap in points, the share of coverage kept (0..1, above 0), and optionally one colour
+    for all of them -- text ("#rgb", a CSS name) or 3 numbers in 0..1."""
+    dash: float = 6.0
+    gap: float = 4.0
+    dim: float = 0.5
+    colour: Optional[Any] = None
 
 
 class _Text(ctypes.Structure):
@@ -223,6 +282,14 @@ _SIGNATURES = {
     "cadaclysm_view_set_lighting": (c_bool, [V, c_uint32]),
     "cadaclysm_view_lighting": (c_uint32, [V]),
     "cadaclysm_view_set_analysis": (c_bool, [V, POINTER(_Analysis)]),
+    "cadaclysm_view_set_occluded_style": (c_bool, [V, POINTER(_OccludedStyle)]),
+    "cadaclysm_view_set_snap": (c_bool, [V, POINTER(_SnapSettings)]),
+    "cadaclysm_view_request_snap_in": (None, [V, c_uint32, c_uint32, c_uint32]),
+    "cadaclysm_view_snap_result": (c_bool, [V, POINTER(_Snap)]),
+    "cadaclysm_view_clear_snap": (None, [V]),
+    "cadaclysm_view_set_work_plane": (c_bool, [V, POINTER(c_double), POINTER(c_double), POINTER(c_double), c_double]),
+    "cadaclysm_view_clear_work_plane": (c_bool, [V]),
+    "cadaclysm_view_occluded_style": (c_bool, [V, POINTER(_OccludedStyle)]),
     "cadaclysm_view_analysis": (c_bool, [V, POINTER(_Analysis)]),
     "cadaclysm_view_orbit": (None, [V, c_float, c_float]),
     "cadaclysm_view_pan": (None, [V, c_float, c_float]),
@@ -260,6 +327,7 @@ _SIGNATURES = {
     "cadaclysm_view_set_lod": (c_bool, [V, POINTER(_Lod)]),
     "cadaclysm_view_wake_ms": (c_uint32, [V]),
     "cadaclysm_view_show_solid": (c_uint32, [V, V, c_double, F]),
+    "cadaclysm_view_show_solid_faces": (c_uint32, [V, V, c_double, F, c_uint32, c_float, POINTER(c_uint32), c_uint32]),
     "cadaclysm_view_load_font": (c_uint32, [POINTER(ctypes.c_uint8), ctypes.c_size_t]),
     "cadaclysm_view_show_text": (c_uint32, [V, POINTER(_Text)]),
     "cadaclysm_view_set_text": (c_bool, [V, c_uint32, c_char_p]),
@@ -628,6 +696,14 @@ def _pick_dict(pick: _Pick) -> "Pick":
     machining stock, the terminal library)."""
     return {"item": pick.item, "node": pick.node, "face": pick.face, "clicks": pick.clicks,
             "point": tuple(pick.point) if pick.has_point else None}
+
+
+def _snap_dict(snap: _Snap) -> "Snap":
+    """A snap's answer as the dict `View.snap` and `View.last_snap` return (see `Snap`)."""
+    kind = next((name for name, bit in _SNAP_KINDS.items() if bit == snap.kind), str(snap.kind))
+    return {"kind": kind, "point": tuple(snap.point), "item": snap.item, "node": snap.node, "face": snap.face,
+            "edge": None if snap.edge == _SNAP_NONE else snap.edge, "tangent": tuple(snap.tangent),
+            "axis": tuple(snap.axis), "radius": snap.radius, "distance_px": snap.distance_px, "clicks": snap.clicks}
 
 
 def _camera(cam: _Camera, pick: _Pick, y_up: bool) -> dict:
@@ -1030,6 +1106,14 @@ def _remove_hook() -> None:
         if shell is not None:
             shell.enable_gui(None)
     _hook = None
+
+
+def _f64(values, n):
+    """`n` numbers as a ctypes double array; a short `values` raises before building it."""
+    values = list(values)
+    if len(values) < n:
+        raise ValueError(f"{n} numbers, not {len(values)}")
+    return (c_double * n)(*[float(x) for x in values[:n]])
 
 
 def _f32(values, n):
@@ -1467,14 +1551,30 @@ class View:
         return self.show_mesh(points, np.arange(len(points), dtype=np.uint32), rgb=rgb)
 
     def show_solid(self, solid: Any, tolerance: float = 0.05, rgb: Optional[Colour] = None,
-                   finish: Optional[str] = None) -> Item:
+                   finish: Optional[str] = None, material: Optional[str] = None,
+                   opacity: Optional[float] = None, faces: Optional[Iterable[int]] = None) -> Item:
         """A kernel solid, read in place; `finish` "gloss", "satin" or "matte" (`Item.finish`),
-        None the gloss every item shows with."""
+        None the gloss every item shows with. `material` (1.21) "default", "plastic", "metal",
+        "matte", "paint", "brushed" or "glass"; `opacity` 0..1 (1 opaque); `faces` the solid's
+        face numbers to show alone, with no edges -- a trim's ghost (None: every face). The
+        item's faces are numbered as the solid numbers them, `faces` or not."""
         if finish is not None and finish not in _FINISH:
             raise ValueError(f"finish: {finish!r} is not 'gloss', 'satin' or 'matte'")
+        if material is not None and material not in _MATERIAL:
+            raise ValueError(f"material: {material!r} is not 'default', 'plastic', 'metal', 'matte', "
+                             "'paint', 'brushed' or 'glass'")
         packed = _rgb3(rgb, self._lib)
-        item = self._item(self._ok("cadaclysm_view_show_solid", solid._h(), float(tolerance),
-                                   None if packed is None else packed[1]), solid)
+        rgb_arg = None if packed is None else packed[1]
+        if material is None and opacity is None and faces is None:
+            shown = self._ok("cadaclysm_view_show_solid", solid._h(), float(tolerance), rgb_arg)
+        else:
+            numbers = None if faces is None else [int(f) for f in faces]
+            array = None if numbers is None else (c_uint32 * max(len(numbers), 1))(*numbers)
+            shown = self._ok("cadaclysm_view_show_solid_faces", solid._h(), float(tolerance), rgb_arg,
+                             _MATERIAL[material or "default"], 1.0 if opacity is None else float(opacity),
+                             None if array is None else ctypes.cast(array, POINTER(c_uint32)),
+                             0 if numbers is None else len(numbers))
+        item = self._item(shown, solid)
         if finish not in (None, "gloss"):
             try:
                 item.finish(finish)
@@ -1763,6 +1863,79 @@ class View:
             raise ViewError(waiting)
         return None
 
+    def set_snap(self, kinds: Union[str, Iterable[str], None] = "all", aperture_px: float = 0.0,
+                 marker: bool = True) -> None:
+        """What a snap may land on: "all", one kind's name, several, or None to switch snapping
+        off -- the kinds are "vertex", "midpoint", "centre" (a circular edge's), "quadrant",
+        "edge", "face", "grid" and "plane". `aperture_px` is how far from the cursor a point
+        kind may lie (0: the library's default, 10 pixels); `marker` whether the view draws the
+        marker at the snap. A view starts with snapping off. Once on, a mouse hovering over a
+        view in its own window snaps, and so does a click (`last_snap` reads them); `snap` asks
+        one at any pixel. Where kinds compete, a corner beats the face it sits on."""
+        if kinds is None:
+            bits = 0
+        elif kinds == "all":
+            bits = 0xFF
+        else:
+            bits = 0
+            for name in [kinds] if isinstance(kinds, str) else kinds:
+                if name not in _SNAP_KINDS:
+                    raise ValueError(f"snap kind {name!r}: one of {', '.join(_SNAP_KINDS)}")
+                bits |= _SNAP_KINDS[name]
+        s = _SnapSettings(ctypes.sizeof(_SnapSettings), bits, float(aperture_px), int(bool(marker)))
+        self._ok("cadaclysm_view_set_snap", ctypes.byref(s))
+
+    def snap(self, x: int, y: int, viewport: int = 0) -> Optional[Snap]:
+        """The snap under pixel (x, y) of `viewport` (see `Snap`), or None where nothing in the
+        kinds `set_snap` chose lies there -- and always None while snapping is off. Draws until
+        the answer lands, as `pick` does, a never-drawn view first. A failure other than "no
+        answer yet" raises at once with the library's own message."""
+        if not self._drawn:
+            self.draw()
+        self._void("cadaclysm_view_request_snap_in", int(viewport), int(x), int(y))
+        out = _Snap()
+        out.size = ctypes.sizeof(_Snap)
+        waiting = ""
+        for _ in range(200):
+            self.draw()
+            if self._call("cadaclysm_view_snap_result", ctypes.byref(out)):
+                return _snap_dict(out) if out.kind else None
+            waiting = _text(self._lib.cadaclysm_view_last_error())
+            if waiting and not waiting.endswith("no snap result"):
+                raise ViewError(waiting)
+            time.sleep(0.01)
+        raise ViewError(f"snap: the answer never landed ({waiting or 'no error reported'})")
+
+    def last_snap(self) -> Optional[Snap]:
+        """The newest snap answer that has landed since the last call, without waiting: a hover
+        or click in the view's own window (`pump()` lands them as it draws), or one asked with
+        `snap`'s request. None while none has landed; `{}` when the snap found nothing; else a
+        `Snap`. Each answer is read once; a hover's never replaces a click's not read yet."""
+        out = _Snap()
+        out.size = ctypes.sizeof(_Snap)
+        if self._call("cadaclysm_view_snap_result", ctypes.byref(out)):
+            return _snap_dict(out) if out.kind else {}
+        waiting = _text(self._lib.cadaclysm_view_last_error())
+        if waiting and not waiting.endswith("no snap result"):
+            raise ViewError(waiting)
+        return None
+
+    def clear_snap(self) -> None:
+        """Hides the snap marker and drops any snap asked or answered and not yet read."""
+        self._void("cadaclysm_view_clear_snap")
+
+    def set_work_plane(self, origin: Optional[Sequence[float]], x_axis: Sequence[float] = (1.0, 0.0, 0.0),
+                       normal: Sequence[float] = (0.0, 0.0, 1.0), step: float = 0.0) -> None:
+        """The plane "grid" and "plane" snaps land on, in place of the ground grid: through
+        `origin`, its grid lines along `x_axis` and across it, `step` apart (0: the ground grid's
+        spacing). `x_axis` and `normal` need not be unit length, but must not be parallel. None
+        as `origin` puts the ground grid back."""
+        if origin is None:
+            self._ok("cadaclysm_view_clear_work_plane")
+            return
+        o, x, n = (_f64(v, 3) for v in (origin, x_axis, normal))
+        self._ok("cadaclysm_view_set_work_plane", o, x, n, float(step))
+
     @property
     def closed(self) -> bool:
         """True once the view's own window has closed (its close button, Escape, the end of
@@ -1911,6 +2084,26 @@ class View:
         if kind not in ("gaussian", "mean", "min", "max"):
             raise ValueError(f"curvature {kind!r}: one of gaussian, mean, min, max")
         self._analyse(_ANALYSIS[kind], range=range)
+
+    @property
+    def occluded_style(self) -> OccludedStyle:
+        """How every "dashed" item's hidden lines and points look, view-wide (see
+        `OccludedStyle`); None sets the default back: 6 points on, 4 off, half the coverage,
+        each line's own colour. "solid" and "off" items never use it."""
+        out = _OccludedStyle(ctypes.sizeof(_OccludedStyle))
+        self._ok("cadaclysm_view_occluded_style", ctypes.byref(out))
+        colour = tuple(out.colour) if out.has_colour else None
+        return OccludedStyle(out.dash, out.gap, out.dim, colour)
+
+    @occluded_style.setter
+    def occluded_style(self, value: Optional[OccludedStyle]) -> None:
+        if value is None:
+            self._ok("cadaclysm_view_set_occluded_style", None)
+            return
+        has = value.colour is not None
+        rgb = _f32(_colour(value.colour, self._lib), 3) if has else (c_float * 3)()
+        s = _OccludedStyle(ctypes.sizeof(_OccludedStyle), float(value.dash), float(value.gap), float(value.dim), int(has), rgb)
+        self._ok("cadaclysm_view_set_occluded_style", ctypes.byref(s))
 
     def layer(self, name: str, on: bool = True) -> None:
         if name not in _LAYERS:

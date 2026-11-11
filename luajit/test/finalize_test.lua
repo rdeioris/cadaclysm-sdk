@@ -48,6 +48,7 @@ return function(t)
       { "sketch", function() return handle_of(bs.Sketch.new()) end },
       { "collider", function() return handle_of(bs.Collider.new({ a, b }, 0.05)) end },
       { "thickness_gauge", function() return handle_of(bs.ThicknessGauge.new({ a }, 0.05)) end },
+      { "projector", function() return handle_of(a:projector()) end },
       { "collisions", function() return collider:check({ IDENTITY, IDENTITY })[1]._collisions end },
       { "fem_mesh", function() return handle_of(a:fem_mesh(0.5)) end },
       { "tessellation", function() return (a:mesh(0.5))._held._ptr end },

@@ -74,8 +74,8 @@ final class KernelFileTests: XCTestCase {
     }
 
     func testANodeWithNoBrepOrNoSuchIndexIsRefused() throws {
-        // OpenSCAD is evaluated to triangles: a mesh, and no brep.
-        let scene = try Cadaclysm.openMemory(Array("cube(10);".utf8), format: "scad")
+        // A flat OpenSCAD sheet is drawn as a mesh, and has no brep.
+        let scene = try Cadaclysm.openMemory(Array("square(10);".utf8), format: "scad")
         defer { scene.close() }
         let empty = try XCTUnwrap(scene.nodes.first { $0.brep == nil })
         let message = refusal { _ = try Solid.fromNode(scene, empty) } ?? ""
@@ -108,9 +108,23 @@ final class KernelFileTests: XCTestCase {
         XCTAssertEqual(try Solid.openAll(path).map { try $0.faces }, [try original.faces])
         let missing = directory.appendingPathComponent("missing.stp").path
         XCTAssertTrue(refusal { _ = try Solid.open(missing) }?.hasPrefix("open: ") ?? false)
-        let mesh = directory.appendingPathComponent("cube.scad").path
-        try "cube(10);".write(toFile: mesh, atomically: true, encoding: .utf8)
+        // A flat OpenSCAD sheet draws no solid; a cube is one exact solid of volume 1000.
+        let mesh = directory.appendingPathComponent("sheet.scad").path
+        try "square(10);".write(toFile: mesh, atomically: true, encoding: .utf8)
         XCTAssertTrue(refusal { _ = try Solid.openAll(mesh) }?.hasPrefix("open: the .scad file draws no B-rep body") ?? false)
+    }
+
+    func testOpenReadsAnOpenScadFileAsAnExactSolid() throws {
+        // A cube is a B-rep only where the reader library was built with the kernel
+        // (`cadaclysm-capi`'s `openscad-brep`); in the Reader flavour OpenSCAD is a mesh.
+        let probe = try Cadaclysm.openMemory(Array("cube(10);".utf8), format: "scad")
+        defer { probe.close() }
+        try XCTSkipIf(probe.nodes.first?.brep == nil, "this reader library reads OpenSCAD as a mesh")
+        let path = directory.appendingPathComponent("cube.scad").path
+        try "cube(10);".write(toFile: path, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try Solid.openAll(path).count, 1)
+        let mass: Mass = try Solid.open(path).mass()
+        XCTAssertEqual(mass.volume, 1000, accuracy: 1e-6)
     }
 
     func testAFileOfSeveralBodiesNeedsTheBodyNamed() throws {

@@ -43,8 +43,17 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
  * rubber and trim draw under the showroom's lights without its clear coat.
  * 1.19 appended `cadaclysm_view_kms_info` and `cadaclysm_view_kms_probe`, and
  * `CadaclysmViewKmsInfo`: how a KMS view draws onto its display, and how one would.
+ * 1.20 appended `cadaclysm_view_set_occluded_style` and `_occluded_style`, and
+ * `CadaclysmViewOccludedStyle`: the dash, gap, dim and colour of every DASHED item's hidden
+ * lines and points.
+ * 1.21 appended `cadaclysm_view_show_solid_faces` and `CADACLYSM_VIEW_MATERIAL_*`: a solid
+ * in a material and an opacity, all its faces or only some (a trim's ghost); and a shown
+ * solid's faces are numbered as the solid numbers them, exact or as triangles.
+ * 1.22 appended snapping: `CadaclysmViewSnapSettings`, `CadaclysmViewSnap`, the
+ * `CADACLYSM_VIEW_SNAP_*` kinds and six calls -- the vertex, midpoint, arc centre, quadrant,
+ * edge, face, grid or plane point under the cursor, and the marker the view draws there.
  */
-#define CADACLYSM_VIEW_ABI_MINOR 19
+#define CADACLYSM_VIEW_ABI_MINOR 22
 
 #define CADACLYSM_VIEW_WINDOW_WIN32 1
 
@@ -114,6 +123,89 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
  * Matte: no mirror at all, a faint grey sheen at a grazing angle -- rubber, cloth, primer.
  */
 #define CADACLYSM_VIEW_FINISH_MATTE 2
+
+/**
+ * A shown solid's material (`cadaclysm_view_show_solid_faces`, 1.21): the headlight every
+ * other item is drawn with.
+ */
+#define CADACLYSM_VIEW_MATERIAL_DEFAULT 0
+
+/**
+ * Plastic.
+ */
+#define CADACLYSM_VIEW_MATERIAL_PLASTIC 1
+
+/**
+ * Metal: a dimmer diffuse and a broad highlight in the body's own colour.
+ */
+#define CADACLYSM_VIEW_MATERIAL_METAL 2
+
+/**
+ * Matte rubber: hardly any highlight.
+ */
+#define CADACLYSM_VIEW_MATERIAL_MATTE 3
+
+/**
+ * Gloss paint: a small, hard white highlight.
+ */
+#define CADACLYSM_VIEW_MATERIAL_PAINT 4
+
+/**
+ * Brushed metal: the highlight smeared along the surface.
+ */
+#define CADACLYSM_VIEW_MATERIAL_BRUSHED 5
+
+/**
+ * Glass: drawn at its opacity, dithered as any translucent part is.
+ */
+#define CADACLYSM_VIEW_MATERIAL_GLASS 6
+
+/**
+ * What a snap may land on (`CadaclysmViewSnapSettings.kinds`, 1.22), and the one it landed on
+ * (`CadaclysmViewSnap.kind`): an item's vertex.
+ */
+#define CADACLYSM_VIEW_SNAP_VERTEX 1
+
+/**
+ * An edge's midpoint.
+ */
+#define CADACLYSM_VIEW_SNAP_MIDPOINT 2
+
+/**
+ * A circular edge's centre, found by hovering the edge or the centre.
+ */
+#define CADACLYSM_VIEW_SNAP_CENTRE 4
+
+/**
+ * A circular edge's quadrant point: 0, 90, 180 or 270 degrees around its axis.
+ */
+#define CADACLYSM_VIEW_SNAP_QUADRANT 8
+
+/**
+ * The nearest point on an edge.
+ */
+#define CADACLYSM_VIEW_SNAP_EDGE 16
+
+/**
+ * The point on the surface under the cursor.
+ */
+#define CADACLYSM_VIEW_SNAP_FACE 32
+
+/**
+ * The nearest grid intersection on the work plane (`cadaclysm_view_set_work_plane`), or on the
+ * viewport's grid plane.
+ */
+#define CADACLYSM_VIEW_SNAP_GRID 64
+
+/**
+ * The point on the work plane, or the viewport's grid plane, under the cursor.
+ */
+#define CADACLYSM_VIEW_SNAP_PLANE 128
+
+/**
+ * Every kind.
+ */
+#define CADACLYSM_VIEW_SNAP_ALL 255
 
 /**
  * `CadaclysmViewAnalysis.mode` (1.14): surfaces drawn as lit, the default.
@@ -610,6 +702,37 @@ typedef struct CadaclysmViewAnalysis {
    */
   double range;
 } CadaclysmViewAnalysis;
+
+/**
+ * How every DASHED item's hidden lines and points look, view-wide
+ * (`cadaclysm_view_set_occluded_style`, 1.20). Zeroes are the defaults.
+ */
+typedef struct CadaclysmViewOccludedStyle {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.20 struct's.
+   */
+  uint32_t size;
+  /**
+   * A dash's length on screen, in points (times the view's point scale); 0: 6.
+   */
+  float dash;
+  /**
+   * The gap between dashes, in points; 0: 4.
+   */
+  float gap;
+  /**
+   * How much of an occluded dash's or ring's coverage is kept, (0, 1]; 0: 0.5.
+   */
+  float dim;
+  /**
+   * Nonzero: occluded dashes and rings take `colour` instead of their own.
+   */
+  uint32_t has_colour;
+  /**
+   * 0..1 RGB, as `cadaclysm_view_set_colour` takes it; read only where `has_colour`.
+   */
+  float colour[3];
+} CadaclysmViewOccludedStyle;
 
 /**
  * Levels of detail, as `cadaclysm_view_set_lod` takes them (1.4).
@@ -1313,6 +1436,86 @@ typedef struct CadaclysmViewKmsInfo {
   char adapter[128];
 } CadaclysmViewKmsInfo;
 
+/**
+ * How the view snaps (`cadaclysm_view_set_snap`, 1.22). Snapping starts off.
+ */
+typedef struct CadaclysmViewSnapSettings {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.22 struct's.
+   */
+  uint32_t size;
+  /**
+   * The `CADACLYSM_VIEW_SNAP_*` kinds a snap may land on; 0 switches snapping off.
+   */
+  uint32_t kinds;
+  /**
+   * How far from the cursor a snap reaches, in points: 0 for the default, 10; otherwise
+   * clamped to 2-32. Multiplied by the screen density.
+   */
+  float aperture_px;
+  /**
+   * 1: the view draws a marker at the last snap, shaped by its kind; 0: it draws none.
+   */
+  uint32_t marker;
+} CadaclysmViewSnapSettings;
+
+/**
+ * A snap's answer (`cadaclysm_view_snap_result`, 1.22).
+ */
+typedef struct CadaclysmViewSnap {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.22 struct's.
+   */
+  uint32_t size;
+  /**
+   * The one `CADACLYSM_VIEW_SNAP_*` kind it landed on; 0 for none (nothing in the kinds
+   * asked for within the aperture, or snapping off), the other fields then zero.
+   */
+  uint32_t kind;
+  /**
+   * The snapped point, in world coordinates, as `cadaclysm_view_project_in` takes them.
+   */
+  double point[3];
+  /**
+   * The item, as the pick names it; 0 for `GRID` and `PLANE`.
+   */
+  uint32_t item;
+  /**
+   * The assembly node, as the pick names it; 0 where there is none.
+   */
+  uint32_t node;
+  /**
+   * The face under the cursor (`FACE`), or the face the snapped edge was found beside; 0
+   * where there is none (a curves item, `GRID`, `PLANE`).
+   */
+  uint32_t face;
+  /**
+   * The item's edge the snap landed on; `0xFFFFFFFF` for `FACE`, `GRID` and `PLANE`.
+   */
+  uint32_t edge;
+  /**
+   * The edge's unit tangent at `point` (the edge kinds); zero otherwise.
+   */
+  float tangent[3];
+  /**
+   * `CENTRE` and `QUADRANT`: the arc's unit axis; zero otherwise.
+   */
+  float axis[3];
+  /**
+   * `CENTRE` and `QUADRANT`: the arc's radius; zero otherwise.
+   */
+  double radius;
+  /**
+   * From the cursor to `point`'s pixel, in physical pixels; 0 for `CENTRE` found by hovering
+   * its arc, `FACE`, `GRID` and `PLANE`.
+   */
+  float distance_px;
+  /**
+   * 0 for the host's own request or a hover, 1 for a click's snap, 2 for a double click's.
+   */
+  uint32_t clicks;
+} CadaclysmViewSnap;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -1423,6 +1626,10 @@ void cadaclysm_view_destroy(struct CadaclysmView *view);
  * `cadaclysm_view_set_double_click_frames(view, true)`. The thread that makes the first own
  * window must outlive them: once it has exited, own windows are unavailable for the rest of
  * the process.
+ *
+ * With snapping on (`cadaclysm_view_set_snap`, 1.22) the mouse hovering the window snaps, and
+ * the marker follows it, as `cadaclysm_view_input` describes; each answer waits for
+ * `cadaclysm_view_snap_result`.
  * A panic inside the pump (in a draw, say) is caught and reported, but leaves that window's
  * view in an unknown state. `view` must be NULL or a live view.
  */
@@ -1436,6 +1643,9 @@ uint32_t cadaclysm_view_pump(struct CadaclysmView *view, uint32_t timeout_ms);
  * none), taking it -- a later `cadaclysm_view_pick_result` or `run` does not report it again.
  * A pick still in flight when the window closes (a click, then Escape before the next frame)
  * is waited for briefly -- at most a quarter of a second -- and reported if it lands.
+ * With snapping on (1.22) the mouse hovering the window snaps and shows the marker, as
+ * `cadaclysm_view_input` describes; the last snap answer stays for
+ * `cadaclysm_view_snap_result`.
  * Either out may be NULL, and neither out's own `size` is ever changed -- only the fields
  * after it -- so a host reusing the same struct across calls (a REPL's `run` in a loop)
  * keeps reading back the size it put there. Only for a view made with no window; false with
@@ -1468,7 +1678,9 @@ bool cadaclysm_view_resize(struct CadaclysmView *view, uint32_t width, uint32_t 
 
 /**
  * Whether a draw is owed: a change, an upload or exact refinement still settling, a
- * pick waiting for its answer. True, too, while the device is lost or the document is
+ * pick or a snap waiting for its answer. A snap's answer that has landed and not been read
+ * owes none, unlike a pick's: the draw that landed it drew its marker, and a hover's answers
+ * are many and may go unread (1.22). True, too, while the device is lost or the document is
  * still owed to a rebuilt one: the next `cadaclysm_view_draw` rebuilds or re-uploads.
  * True while the view's timeline plays or a track is still catching up (1.7).
  *
@@ -1492,7 +1704,7 @@ bool cadaclysm_view_needs_draw(const struct CadaclysmView *view);
  * once, by the draw that meets it, after the frame is drawn.
  *
  * An offscreen view (1.4): renders without presenting -- nothing is shown anywhere -- and
- * lands a pick in flight, as a window's draw does; read the frame with `cadaclysm_view_image`.
+ * lands a pick in flight, as a window's draw does; every draw lands a snap in flight (1.22); read the frame with `cadaclysm_view_image`.
  *
  * The items shown since the last draw are merged and uploaded here, all at once (a show
  * only keeps its item, so filling a view costs each item's own work): false with the reason
@@ -1706,6 +1918,34 @@ bool cadaclysm_view_set_analysis(struct CadaclysmView *view,
  * bytes.
  */
 bool cadaclysm_view_analysis(const struct CadaclysmView *view, struct CadaclysmViewAnalysis *out);
+
+/**
+ * How every `CADACLYSM_VIEW_OCCLUDED_DASHED` item's hidden lines and points look (1.20):
+ * the dash and gap in points, the share of coverage kept, and optionally one colour for all
+ * of them, ahead of every other line colour. NULL, or a struct of zeroes, is the default: 6
+ * points on, 4 off, half the coverage, each line's own colour. Never applies to SOLID or OFF.
+ * Kept across uploads, removes and surface switches. No upload. The terminal library and
+ * render-view keep it and draw as before (neither draws DASHED). False, changing nothing, with
+ * `cadaclysm_view_last_error` naming the call and the field, for a `size` below the 1.20
+ * struct's, a dash, gap or dim negative or not finite, a dim above 1, a dash or gap above
+ * 1000 points, or a colour component outside 0..1 where `has_colour`.
+ *
+ * `view` must be NULL or a live view; `style` NULL or a `CadaclysmViewOccludedStyle` of
+ * `style->size` bytes.
+ */
+bool cadaclysm_view_set_occluded_style(struct CadaclysmView *view,
+                                       const struct CadaclysmViewOccludedStyle *style);
+
+/**
+ * The occluded style in use (1.20), resolved: the defaults as their values (6, 4, 0.5),
+ * never zeroes; `has_colour` 0 or 1. Only `out->size` bytes are written, and `out->size`
+ * must be at least the 1.20 struct's. False for a NULL view or `out`.
+ *
+ * `view` must be NULL or a live view; `out` NULL or a `CadaclysmViewOccludedStyle` of
+ * `out->size` bytes.
+ */
+bool cadaclysm_view_occluded_style(const struct CadaclysmView *view,
+                                   struct CadaclysmViewOccludedStyle *out);
 
 /**
  * The view's level-of-detail policy, for the device the host runs on (1.4). NULL -- the
@@ -1930,6 +2170,15 @@ void cadaclysm_view_dolly(struct CadaclysmView *view, float ratio);
  * `cadaclysm_view_needs_draw` stays true until that call takes the answer. A double click
  * moves nothing unless the host opted in with `cadaclysm_view_set_double_click_frames`: then
  * it frames what it hit when that call takes the answer.
+ *
+ * With snapping on (`cadaclysm_view_set_snap`, 1.22), a mouse move with no button down asks
+ * the snap under the cursor, so the marker follows the hover. One snap is in flight at a
+ * time: a move made meanwhile waits, the latest replacing the one before, and is asked when
+ * that snap lands. A click asks a snap too, as well as its pick: `cadaclysm_view_snap_result`
+ * then answers with `clicks` 1 (2 for a double click). A hover never replaces a click's snap,
+ * in flight or answered and not read; the move waiting behind a click is dropped as the
+ * click's answer lands, and the next move asks. A drag, or a touch, asks no snap. With
+ * snapping off, as a view starts, input behaves exactly as at 1.19.
  *
  * The event carries no repeat flag: a host forwarding its system's key-downs drops the
  * auto-repeats of a held Tab, or fly mode flips at the repeat rate (a held fly key's
@@ -2271,6 +2520,10 @@ size_t cadaclysm_view_timeline_status(const struct CadaclysmView *view,
  * Fails, with the reason, where the kernel is not loaded or is too old for this library (it
  * lacks a call the view reads a solid through).
  *
+ * The item's faces -- what a pick reports and `cadaclysm_view_set_face_colours` takes --
+ * are numbered as the solid numbers them (`cadaclysm_blacksmith_face_count`'s faces),
+ * exact or as triangles.
+ *
  * `view` must be NULL or a live view; `solid` NULL or a live solid of the loaded kernel;
  * `rgb` NULL or three floats.
  */
@@ -2278,6 +2531,26 @@ uint32_t cadaclysm_view_show_solid(struct CadaclysmView *view,
                                    const CadaclysmBlacksmithSolid *solid,
                                    double tolerance,
                                    const float *rgb);
+
+/**
+ * `cadaclysm_view_show_solid` in a material and an opacity, all the solid's faces or only
+ * some (1.21): `material` one of `CADACLYSM_VIEW_MATERIAL_*`, `opacity` 0..1 (1 opaque),
+ * `faces` NULL for every face, else `face_count` of the solid's face numbers to show
+ * alone, with no edges -- a trim's ghost. The item's faces are numbered as the solid
+ * numbers them, `faces` or not. 0 on failure: `cadaclysm_view_show_solid`'s, a material
+ * not one of the seven, an opacity outside 0..1, or a face the solid does not have.
+ *
+ * `view` must be NULL or a live view; `solid` NULL or a live solid of the loaded kernel;
+ * `rgb` NULL or three floats; `faces` NULL or `face_count` words.
+ */
+uint32_t cadaclysm_view_show_solid_faces(struct CadaclysmView *view,
+                                         const CadaclysmBlacksmithSolid *solid,
+                                         double tolerance,
+                                         const float *rgb,
+                                         uint32_t material,
+                                         float opacity,
+                                         const uint32_t *faces,
+                                         uint32_t face_count);
 
 /**
  * A font for every view of this library: TTF or OTF bytes, copied in. Font 0 is the
@@ -2584,6 +2857,99 @@ bool cadaclysm_view_kms_info(const struct CadaclysmView *view, struct CadaclysmV
  */
 bool cadaclysm_view_kms_probe(const struct CadaclysmViewWindow *window,
                               struct CadaclysmViewKmsInfo *out);
+
+/**
+ * How the view snaps from now on: the `CADACLYSM_VIEW_SNAP_*` kinds a snap may land on (0
+ * switches snapping off, as a new view starts), how far from the cursor it reaches
+ * (`aperture_px` points, 0 for the default 10, otherwise clamped to 2-32, times the screen
+ * density), and whether the view draws the marker at the last snap (`marker` 1). Turning
+ * snapping or the marker off hides the marker shown.
+ *
+ * False, changing nothing, for a NULL or undersized `settings`, `kinds` with bits past
+ * `CADACLYSM_VIEW_SNAP_ALL`, an `aperture_px` that is negative or not finite, and a `marker`
+ * other than 0 or 1.
+ *
+ * The terminal library refuses it: "snapping needs the wgpu view library".
+ *
+ * `view` must be NULL or a live view; `settings` NULL or a `CadaclysmViewSnapSettings` of
+ * at least `settings->size` bytes.
+ */
+bool cadaclysm_view_set_snap(struct CadaclysmView *view,
+                             const struct CadaclysmViewSnapSettings *settings);
+
+/**
+ * Asks for the snap under pixel (`x`, `y`) of `viewport`, in physical pixels from its own top
+ * left, as `cadaclysm_view_request_pick_in` asks for a pick. The answer comes on a later call
+ * to `cadaclysm_view_snap_result`, after a draw; `cadaclysm_view_needs_draw` is true until it
+ * has landed. A new request replaces one still pending; a device loss drops it.
+ *
+ * A view fed `cadaclysm_view_input`, or in its own window, also asks snaps itself once
+ * snapping is on: under a mouse hovering with no button down, and under each click (the
+ * answer's `clicks` 1 or 2). `snap_result` answers the latest; a hover's never replaces a
+ * click's not read yet.
+ *
+ * The terminal library refuses it: "snapping needs the wgpu view library".
+ *
+ * `view` must be NULL or a live view.
+ */
+void cadaclysm_view_request_snap_in(struct CadaclysmView *view,
+                                    uint32_t viewport,
+                                    uint32_t x,
+                                    uint32_t y);
+
+/**
+ * The answer to the last snap asked -- by `cadaclysm_view_request_snap_in`, or by the mouse
+ * over a view in its own window or one fed `cadaclysm_view_input` -- into `out`, once it has
+ * landed (a draw lands it). `kind` 0 where nothing in the kinds set lies within the aperture,
+ * or snapping is off. False, with "no snap result", while none has landed; each answer is
+ * read once. Still answers once the view's window is closed, as `cadaclysm_view_pick_result`
+ * does.
+ *
+ * The terminal library refuses it: "snapping needs the wgpu view library".
+ *
+ * `view` must be NULL or a live view; `out` NULL or a `CadaclysmViewSnap` of at least
+ * `out->size` bytes.
+ */
+bool cadaclysm_view_snap_result(struct CadaclysmView *view, struct CadaclysmViewSnap *out);
+
+/**
+ * Hides the snap marker and drops any snap asked and not yet answered, or answered and not
+ * yet read. The next snap shows the marker again.
+ *
+ * The terminal library refuses it: "snapping needs the wgpu view library".
+ *
+ * `view` must be NULL or a live view.
+ */
+void cadaclysm_view_clear_snap(struct CadaclysmView *view);
+
+/**
+ * A work plane for `CADACLYSM_VIEW_SNAP_GRID` and `_PLANE` snaps in place of the viewport's
+ * grid plane: its `origin`, its `x_axis` and its `normal`, three doubles each in world
+ * coordinates (the axes need not be unit; the x axis is made square to the normal), and its
+ * grid's `step`, 0 for the drawn grid's.
+ *
+ * False, changing nothing, for a NULL array, a value that is not finite, a negative `step`,
+ * and an `x_axis` or `normal` of no length, or the two parallel.
+ *
+ * The terminal library refuses it: "snapping needs the wgpu view library".
+ *
+ * `view` must be NULL or a live view; `origin`, `x_axis` and `normal` NULL or three doubles
+ * each.
+ */
+bool cadaclysm_view_set_work_plane(struct CadaclysmView *view,
+                                   const double *origin,
+                                   const double *x_axis,
+                                   const double *normal,
+                                   double step);
+
+/**
+ * Goes back to the viewport's grid plane for `CADACLYSM_VIEW_SNAP_GRID` and `_PLANE` snaps.
+ *
+ * The terminal library refuses it: "snapping needs the wgpu view library".
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_clear_work_plane(struct CadaclysmView *view);
 
 #ifdef __cplusplus
 }  // extern "C"

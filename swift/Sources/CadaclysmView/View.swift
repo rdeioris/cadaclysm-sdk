@@ -310,6 +310,19 @@ public func loadFont(path: String) throws -> UInt32 {
 
 // ---- values ----------------------------------------------------------------------------------
 
+/// How every "dashed" item's hidden lines and points look, as Python's `OccludedStyle`: a
+/// dash and a gap in points, the share of coverage kept (above 0, at most 1), and optionally
+/// one colour (0..1 RGB).
+public struct OccludedStyle: Equatable {
+    public var dash: Float
+    public var gap: Float
+    public var dim: Float
+    public var colour: SIMD3<Float>?
+    public init(dash: Float = 6, gap: Float = 4, dim: Float = 0.5, colour: SIMD3<Float>? = nil) {
+        self.dash = dash; self.gap = gap; self.dim = dim; self.colour = colour
+    }
+}
+
 /// What is under a pixel: the item, the scene node (or a solid's 0) and the face; `clicks` 2
 /// for a double click's pick, else 1; `point` where the ray met the model, in the coordinates
 /// the items were shown in -- nil where the library read no depth (no hit, a machining stock,
@@ -324,6 +337,37 @@ public struct ViewPick: Equatable {
 func pickOf(_ p: CadaclysmViewPick) -> ViewPick {
     ViewPick(item: p.item, node: p.node, face: p.face, clicks: p.clicks,
              point: p.has_point != 0 ? SIMD3(p.point.0, p.point.1, p.point.2) : nil)
+}
+
+/// What a snap may land on, and what it landed on: Python's names, the `CADACLYSM_VIEW_SNAP_*`
+/// bits as raw values. `centre` is a circular edge's centre.
+public enum SnapKind: UInt32, CaseIterable, Sendable {
+    case vertex = 1, midpoint = 2, centre = 4, quadrant = 8, edge = 16, face = 32, grid = 64, plane = 128
+}
+
+/// What a snap found, as Python's `Snap`: its `kind`, the `point` snapped to, in world
+/// coordinates, the item, node and face it lies on, its `edge` (nil for a face, grid or plane
+/// snap), the edge's unit `tangent` there, a circular edge's `axis` and `radius` (zeros
+/// otherwise), how many pixels the cursor was from it, and `clicks`: 0 for `snap` and a hover,
+/// 1 for a click's snap, 2 for a double click's.
+public struct ViewSnap: Equatable {
+    public let kind: SnapKind
+    public let point: SIMD3<Double>
+    public let item: UInt32, node: UInt32, face: UInt32
+    public let edge: UInt32?
+    public let tangent: SIMD3<Float>, axis: SIMD3<Float>
+    public let radius: Double
+    public let distancePx: Float
+    public let clicks: UInt32
+}
+
+/// A library's snap answer as a ViewSnap; nil for kind 0 (nothing snapped).
+func snapOf(_ s: CadaclysmViewSnap) -> ViewSnap? {
+    guard let kind = SnapKind(rawValue: s.kind) else { return nil }
+    return ViewSnap(kind: kind, point: SIMD3(s.point.0, s.point.1, s.point.2), item: s.item, node: s.node, face: s.face,
+                    edge: s.edge == UInt32.max ? nil : s.edge, tangent: SIMD3(s.tangent.0, s.tangent.1, s.tangent.2),
+                    axis: SIMD3(s.axis.0, s.axis.1, s.axis.2), radius: s.radius, distancePx: s.distance_px,
+                    clicks: s.clicks)
 }
 
 /// Where run()/view() left the camera (azimuth and elevation as ShowOptions takes them), and
@@ -842,14 +886,32 @@ public final class View {
 
     // -- showing: each returns the Item
 
+    /// A shown solid's material (`CADACLYSM_VIEW_MATERIAL_*`, view ABI 1.21): `default` the
+    /// headlight every other item is drawn with.
+    public enum Material: UInt32, Sendable {
+        case `default` = 0, plastic = 1, metal = 2, matte = 3, paint = 4, brushed = 5, glass = 6
+    }
+
     /// The by-handle shows Blacksmith and Cadaclysm build on (View+Solid.swift,
-    /// View+Scene.swift): `owner` is what the item keeps alive.
+    /// View+Scene.swift): `owner` is what the item keeps alive. A solid with a `material`, an
+    /// `opacity` or `faces` (1.21) goes through show_solid_faces, else show_solid.
     package func showHandle(solid: OpaquePointer?, scene: OpaquePointer?, tolerance: Double, rgb: (any Colour)?,
-                            owner: AnyObject?) throws -> Item {
+                            owner: AnyObject?, material: Material? = nil, opacity: Float? = nil,
+                            faces: [UInt32]? = nil) throws -> Item {
         if let solid {
-            let c = try paint("cadaclysm_view_show_solid", rgb)
-            return try add("cadaclysm_view_show_solid", owner: owner) { t, v in
-                withColour(c) { t.pointee.show_solid!(v, solid, tolerance, $0) }
+            if material == nil && opacity == nil && faces == nil {
+                let c = try paint("cadaclysm_view_show_solid", rgb)
+                return try add("cadaclysm_view_show_solid", owner: owner) { t, v in
+                    withColour(c) { t.pointee.show_solid!(v, solid, tolerance, $0) }
+                }
+            }
+            let c = try paint("cadaclysm_view_show_solid_faces", rgb)
+            let look = (material ?? .default).rawValue, alpha = opacity ?? 1
+            return try add("cadaclysm_view_show_solid_faces", owner: owner) { t, v in
+                withColour(c) { rgb in
+                    guard let faces else { return t.pointee.show_solid_faces!(v, solid, tolerance, rgb, look, alpha, nil, 0) }
+                    return withUInt32s(faces) { t.pointee.show_solid_faces!(v, solid, tolerance, rgb, look, alpha, $0, UInt32(faces.count)) }
+                }
             }
         }
         return try add("cadaclysm_view_show", owner: owner) { t, v in t.pointee.show!(v, scene) }
@@ -1275,6 +1337,28 @@ public final class View {
         lod.motion = UInt32(motion == "smooth" ? CADACLYSM_VIEW_LOD_SMOOTH : CADACLYSM_VIEW_LOD_DETAILED)
         try ok("cadaclysm_view_set_lod") { t, v in t.pointee.set_lod!(v, &lod) }
     }
+    /// The view-wide occluded style; nil sets the default back. "solid" and "off" items never use it.
+    public func setOccludedStyle(_ style: OccludedStyle?) throws {
+        guard let style else { return try ok("cadaclysm_view_set_occluded_style") { t, v in t.pointee.set_occluded_style!(v, nil) } }
+        var raw = CadaclysmViewOccludedStyle()
+        raw.size = UInt32(MemoryLayout<CadaclysmViewOccludedStyle>.size)
+        raw.dash = style.dash
+        raw.gap = style.gap
+        raw.dim = style.dim
+        if let c = style.colour {
+            raw.has_colour = 1
+            raw.colour = (c.x, c.y, c.z)
+        }
+        try ok("cadaclysm_view_set_occluded_style") { t, v in t.pointee.set_occluded_style!(v, &raw) }
+    }
+    /// The view's occluded style, the defaults as their values.
+    public func occludedStyle() throws -> OccludedStyle {
+        var raw = CadaclysmViewOccludedStyle()
+        raw.size = UInt32(MemoryLayout<CadaclysmViewOccludedStyle>.size)
+        try ok("cadaclysm_view_occluded_style") { t, v in t.pointee.occluded_style!(v, &raw) }
+        let colour = raw.has_colour != 0 ? SIMD3<Float>(raw.colour.0, raw.colour.1, raw.colour.2) : nil
+        return OccludedStyle(dash: raw.dash, gap: raw.gap, dim: raw.dim, colour: colour)
+    }
     /// Milliseconds until `needsDraw` turns true by itself (a resting frame refining the
     /// picture); 0 when one is owed now, nil when none is coming.
     public func wakeMs() throws -> UInt32? {
@@ -1312,6 +1396,65 @@ public final class View {
         let said = lastError(t)
         if !said.isEmpty && !said.hasSuffix("no pick result") { throw ViewError(said) }
         return (false, nil)
+    }
+    /// What a snap may land on: every kind (the default), some, or nil (or none) to switch
+    /// snapping off, as a view starts. `aperturePx` is how far from the cursor a point kind may
+    /// lie (0: the library's default, 10 points); `marker` whether the view draws the marker at
+    /// the snap. Once on, a mouse hovering over a view in its own window snaps, and so does a
+    /// click (`lastSnap` reads them); `snap` asks one at any pixel. Where kinds compete, a
+    /// corner beats the face it sits on.
+    public func setSnap(_ kinds: Set<SnapKind>? = Set(SnapKind.allCases), aperturePx: Float = 0, marker: Bool = true) throws {
+        var raw = CadaclysmViewSnapSettings()
+        raw.size = UInt32(MemoryLayout<CadaclysmViewSnapSettings>.size)
+        raw.kinds = (kinds ?? []).reduce(0) { $0 | $1.rawValue }
+        raw.aperture_px = aperturePx
+        raw.marker = marker ? 1 : 0
+        try ok("cadaclysm_view_set_snap") { t, v in t.pointee.set_snap!(v, &raw) }
+    }
+    /// The snap under (x, y) of a viewport, nil where nothing in the kinds `setSnap` chose lies
+    /// there -- always, while snapping is off. As Python's snap: a view never drawn is drawn
+    /// first, then frames until the answer lands; the library's own error, or "snap: the answer
+    /// never landed (...)".
+    public func snap(x: UInt32, y: UInt32, viewport: UInt32 = 0) throws -> ViewSnap? {
+        let (t, v) = try live(drawn != 0 ? "cadaclysm_view_request_snap_in" : "cadaclysm_view_draw")
+        var raw = CadaclysmViewSnap()
+        var err = [CChar](repeating: 0, count: Int(CVL_ERROR))
+        let errCount = err.count
+        var once = drawn
+        let found = cvl_snap(t, v, &once, viewport, x, y, &raw, &err, errCount)
+        drawn = once
+        if found == 0 { throw ViewError(text(err)) }
+        return snapOf(raw)
+    }
+    /// The newest snap answer that has landed, without asking or waiting -- Python's
+    /// last_snap: a hover or click in the view's own window (pump lands them as it draws), or
+    /// one an `input` asked for. `landed` false while none has; landed with `snap` nil for one
+    /// that found nothing. Each answer is read once; a hover's never replaces a click's not read
+    /// yet. A failure other than "no answer yet" is the library's own message.
+    public func lastSnap() throws -> (landed: Bool, snap: ViewSnap?) {
+        let (t, v) = try live("cadaclysm_view_snap_result")
+        var raw = CadaclysmViewSnap()
+        raw.size = UInt32(MemoryLayout<CadaclysmViewSnap>.size)
+        if t.pointee.snap_result!(v, &raw) { return (true, snapOf(raw)) }
+        let said = lastError(t)
+        if !said.isEmpty && !said.hasSuffix("no snap result") { throw ViewError(said) }
+        return (false, nil)
+    }
+    /// Hides the snap marker and drops any snap asked or answered and not yet read.
+    public func clearSnap() throws {
+        try act("cadaclysm_view_clear_snap") { t, v in t.pointee.clear_snap!(v) }
+    }
+    /// The plane `grid` and `plane` snaps land on, in place of the ground grid: through
+    /// `origin`, its grid lines along `xAxis` and across it, `step` apart (0: the ground grid's
+    /// spacing). The axes need not be unit length, but must not be parallel. nil as `origin`
+    /// puts the ground grid back.
+    public func setWorkPlane(origin: SIMD3<Double>?, xAxis: SIMD3<Double> = SIMD3(1, 0, 0),
+                             normal: SIMD3<Double> = SIMD3(0, 0, 1), step: Double = 0) throws {
+        guard let origin else {
+            return try ok("cadaclysm_view_clear_work_plane") { t, v in t.pointee.clear_work_plane!(v) }
+        }
+        let o = [origin.x, origin.y, origin.z], x = [xAxis.x, xAxis.y, xAxis.z], n = [normal.x, normal.y, normal.z]
+        try ok("cadaclysm_view_set_work_plane") { t, v in t.pointee.set_work_plane!(v, o, x, n, step) }
     }
     /// Draws one frame.
     public func draw() throws {

@@ -325,4 +325,70 @@ final class NurbsCurveTests: XCTestCase {
         let copy = try r.copy()
         XCTAssertEqual(try copy.controlPoints, try r.controlPoints)
     }
+
+    // The fastback's roof on its centreline, (x, z) in mm, traced off the side view of the
+    // reference drawing (2.625 mm a pixel): the windshield's foot, the header (the fifth point),
+    // the crown, the backlight, the deck.
+    private static let roof: [(Double, Double)] = [
+        (1717, 1110), (1848, 1191), (1979, 1262), (2110, 1330), (2242, 1356), (2504, 1367), (2767, 1369), (3029, 1364),
+        (3160, 1354), (3423, 1304), (3554, 1251), (3686, 1207), (3817, 1165), (3948, 1123), (4079, 1078),
+    ]
+
+    /// The parameter of `curve` nearest `p`, read off 400 even arc-length pieces.
+    private func nearest(_ curve: NurbsCurve, _ p: P) throws -> Double {
+        let samples = try curve.divideByCount(400)
+        return try XCTUnwrap(samples.min { distance($0.point, p) < distance($1.point, p) }).parameter
+    }
+
+    func testATracedRoofFairedHasNoInflectionPastTheHeader() throws {
+        let pts = Self.roof.map { P($0.0, 0, $0.1) }
+        let through = try NurbsCurve.through(pts)
+        var tHeader = try nearest(through, pts[4])
+        let wobbles = try through.inflections().filter { $0.parameter > tHeader }
+        XCTAssertGreaterThanOrEqual(wobbles.count, 3, "\(wobbles)")
+        for a in wobbles {
+            XCTAssertLessThan(distance(try through.point(a.parameter), a.point), 1e-9)
+            XCTAssertEqual(a.error, 0.0)
+        }
+        let tolerance = 5.25   // two pixels of the drawing
+        let roof = try NurbsCurve.fair(pts, tolerance: tolerance, noInflection: .between(4, nil))
+        XCTAssertEqual(roof.degree, 5)
+        let fitError = try XCTUnwrap(roof.fitError)
+        XCTAssertTrue(fitError >= 0 && fitError <= tolerance, "\(fitError)")
+        tHeader = try nearest(roof, pts[4])
+        XCTAssertEqual(try roof.inflections().filter { $0.parameter > tHeader + 1e-6 }.count, 0)
+        let k = try roof.knotContinuity()
+        XCTAssertLessThan(k.angle, 1e-6, "\(k)")
+        XCTAssertLessThan(k.curvature, 1e-9, "\(k)")
+        // Too tight to hold: refused in the library's words, not a curve that turns over.
+        let tight = try XCTUnwrap(refusal { _ = try NurbsCurve.fair(pts, tolerance: 0.05, noInflection: .whole) })
+        XCTAssertTrue(tight.hasPrefix("nurbs_curve_fair: ") && tight.contains("no curve free of inflections"), tight)
+        let low = try XCTUnwrap(refusal { _ = try NurbsCurve.fair(pts, degree: 2, tolerance: tolerance) })
+        XCTAssertTrue(low.hasPrefix("nurbs_curve_fair: ") && low.contains("degree 2"), low)
+        // Faired from the wobbly curve itself, its own parameters naming the span.
+        let d = try through.domain
+        let faired = try through.faired(tolerance: 1.5 * tolerance, noInflection: .between(d.lo, d.hi))
+        XCTAssertEqual(try faired.inflections().count, 0)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(faired.fitError), 1.6 * tolerance)
+    }
+
+    func testEdgeContinuityReadsACreaseAndAFilletSeam() throws {
+        let block = try Solid.cuboid(40, 30, 20)
+        let r = try block.edgeContinuity(0, samples: 16)
+        XCTAssertLessThan(abs(r.angle - Double.pi / 2), 1e-9, "\(r)")
+        XCTAssertLessThan(r.gap, 1e-9, "\(r)")
+        XCTAssertLessThan(r.curvature, 1e-9, "\(r)")
+        XCTAssertEqual(r.samples, 17)
+        let rounded = try block.fillet([0], 4.0)
+        var seams: [Continuity] = []
+        for e in try rounded.edges {
+            guard let k = try? rounded.edgeContinuity(e) else { continue }   // an edge of one face
+            if k.angle < 1e-6 { seams.append(k) }
+        }
+        // The fillet's two tangent seams, its curvature a quarter where the flat faces' is zero.
+        XCTAssertEqual(seams.count, 2, "\(seams)")
+        for k in seams { XCTAssertEqual(k.curvature, 0.25, accuracy: 1e-4) }
+        let bad = try XCTUnwrap(refusal { _ = try block.edgeContinuity(999) })
+        XCTAssertTrue(bad.hasPrefix("edge_continuity: "), bad)
+    }
 }

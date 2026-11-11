@@ -1,7 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS  // std::fopen under MSVC /W4 /WX and Windows clang -Werror
 // view_loader.h on its own: the search and its messages, the camera maths, the PNG
-// writer, a refused non-library, the ABI 1.18 the table needs (a 1.17 stand-in refused), and -- over a table of fakes -- the order and the
-// refusals of cvl_draw_object and cvl_pick. Needs no view library and no GPU; the exit
+// writer, a refused non-library, the ABI 1.22 the table needs (a 1.21 stand-in refused), and -- over a table of fakes -- the order and the
+// refusals of cvl_draw_object, cvl_pick and cvl_snap. Needs no view library and no GPU; the exit
 // code is the verdict.
 #include <cadaclysm/view_loader.h>
 
@@ -44,6 +44,9 @@ long flushed = -1;       // its size on disk while create ran
 int pick_waits = 0;      // pick_result answers `wait_message` this many times first
 std::string wait_message;
 std::string pick_refusal;  // pick_result's message after the waits ("": it lands)
+int snap_waits = 0;        // snap_result answers `snap_wait_message` this many times first
+std::string snap_wait_message;
+std::string snap_refusal;  // snap_result's message after the waits ("": it lands)
 CadaclysmViewOptions options;
 int view_object = 0;
 
@@ -58,6 +61,9 @@ void reset() {
     pick_waits = 0;
     wait_message = "cadaclysm_view_pick_result: no pick result";
     pick_refusal.clear();
+    snap_waits = 0;
+    snap_wait_message = "cadaclysm_view_snap_result: no snap result";
+    snap_refusal.clear();
     std::memset(&options, 0, sizeof options);
 }
 
@@ -172,6 +178,36 @@ static bool fake_pick_result(CadaclysmView*, CadaclysmViewPick* out) {
     out->point[2] = 0.25f;
     return true;
 }
+static void fake_request_snap_in(CadaclysmView*, uint32_t viewport, uint32_t x, uint32_t y) {
+    fake::note("request_snap_in " + std::to_string(viewport) + " " + std::to_string(x) + " " + std::to_string(y));
+    fake::refused("request_snap_in");
+}
+static bool fake_snap_result(CadaclysmView*, CadaclysmViewSnap* out) {
+    fake::note("snap_result");
+    if (fake::snap_waits > 0) {
+        --fake::snap_waits;
+        fake::error = fake::snap_wait_message;
+        return false;
+    }
+    if (!fake::snap_refusal.empty()) {
+        fake::error = fake::snap_refusal;
+        return false;
+    }
+    fake::error.clear();
+    out->kind = CADACLYSM_VIEW_SNAP_VERTEX;
+    out->point[0] = -1.0;
+    out->point[1] = 1.0;
+    out->point[2] = 0.0;
+    out->item = 7;
+    out->node = 3;
+    out->face = 11;
+    out->edge = 2;
+    out->tangent[1] = 1.0f;
+    out->radius = 0.5;
+    out->distance_px = 2.5f;
+    out->clicks = 1;
+    return true;
+}
 }
 
 static CvlTable fake_table(const char* label) {
@@ -195,6 +231,8 @@ static CvlTable fake_table(const char* label) {
     t.zoom = fake_zoom;
     t.request_pick_in = fake_request_pick_in;
     t.pick_result = fake_pick_result;
+    t.request_snap_in = fake_request_snap_in;
+    t.snap_result = fake_snap_result;
     return t;
 }
 
@@ -672,18 +710,69 @@ static void test_png(const char* empty) {
           "%s", err.data());
 }
 
-// ---- the ABI the table needs: 1.18 (parse_colour 1.5; load_font, show_text, set_text 1.6; set_double_click_frames,
+// cvl_snap, Python's View.snap, as cvl_pick: a never-drawn view drawn first, the request, then
+// draws until the answer lands -- every field of the 88-byte answer through; the library's own
+// refusal at once; "snap: the answer never landed (...)" after 200 draws.
+static void test_snap() {
+    std::vector<char> err(CVL_ERROR, 0);
+    CvlTable t = fake_table("cadaclysm-view 0.9.0");
+    CadaclysmViewSnap out;
+
+    fake::reset();
+    fake::snap_waits = 2;
+    int drawn = 0;
+    CHECK(cvl_snap(&t, fake::view(), &drawn, 1, 10, 20, &out, err.data(), err.size()), "%s", err.data());
+    CHECK(drawn == 1, "drawn not set");
+    CHECK(out.size == 88 && out.kind == CADACLYSM_VIEW_SNAP_VERTEX && out.point[0] == -1.0 && out.point[1] == 1.0 &&
+              out.point[2] == 0.0 && out.item == 7 && out.node == 3 && out.face == 11 && out.edge == 2 &&
+              out.tangent[1] == 1.0f && out.radius == 0.5 && out.distance_px == 2.5f && out.clicks == 1,
+          "the snap: size %u kind %u item %u edge %u clicks %u", out.size, out.kind, out.item, out.edge, out.clicks);
+    CHECK(fake::log == "draw;request_snap_in 1 10 20;draw;snap_result;draw;snap_result;draw;snap_result;", "%s",
+          fake::log.c_str());
+
+    // Drawn already: asked at once.
+    fake::reset();
+    CHECK(cvl_snap(&t, fake::view(), &drawn, 0, 1, 2, &out, err.data(), err.size()), "%s", err.data());
+    CHECK(fake::log == "request_snap_in 0 1 2;draw;snap_result;", "%s", fake::log.c_str());
+
+    // A refused request: its message, at once.
+    fake::reset();
+    fake::refuse = "request_snap_in";
+    fake::refusal = "cadaclysm_view_request_snap_in: snapping needs the wgpu view library";
+    CHECK(!cvl_snap(&t, fake::view(), &drawn, 4, 1, 2, &out, err.data(), err.size()), "a refused request snapped");
+    CHECK(std::string(err.data()) == fake::refusal, "%s", err.data());
+    CHECK(fake::log == "request_snap_in 4 1 2;", "%s", fake::log.c_str());
+
+    // A failure other than "no snap result": its message, no more waiting.
+    fake::reset();
+    fake::snap_waits = 1;
+    fake::snap_refusal = "cadaclysm_view_snap_result: the device was lost";
+    CHECK(!cvl_snap(&t, fake::view(), &drawn, 0, 1, 2, &out, err.data(), err.size()), "a failed snap snapped");
+    CHECK(std::string(err.data()) == fake::snap_refusal, "%s", err.data());
+    CHECK(fake::log == "request_snap_in 0 1 2;draw;snap_result;draw;snap_result;", "%s", fake::log.c_str());
+
+    // Never landing: 200 draws, then Python's message with the last wait.
+    fake::reset();
+    fake::snap_waits = 1000;
+    drawn = 1;
+    CHECK(!cvl_snap(&t, fake::view(), &drawn, 0, 1, 2, &out, err.data(), err.size()), "an endless wait snapped");
+    CHECK(std::string(err.data()) == "snap: the answer never landed (cadaclysm_view_snap_result: no snap result)", "%s",
+          err.data());
+    CHECK(fake::snap_waits == 800, "%d waits answered, not 200", 1000 - fake::snap_waits);
+}
+
+// ---- the ABI the table needs: 1.22 (parse_colour 1.5; load_font, show_text, set_text 1.6; set_double_click_frames,
 // focus, navigation 1.8; set_lighting, lighting 1.9; the viewport cameras 1.10; show_points 1.11; set_occluded 1.13;
-// set_finish 1.18) ---
+// set_finish 1.18; set_occluded_style, occluded_style 1.20; show_solid_faces 1.21; the six snap calls 1.22) ---
 
 static void test_abi() {
     std::vector<char> err(CVL_ERROR, 0);
-    CHECK(cvl_check_abi(0x10012u, "lib", err.data(), err.size()), "1.18 refused: %s", err.data());
-    CHECK(cvl_check_abi(0x10013u, "lib", err.data(), err.size()), "1.19 refused: %s", err.data());
-    CHECK(!cvl_check_abi(0x10011u, "lib", err.data(), err.size()), "1.17 accepted");
-    CHECK(std::string(err.data()) == "lib: view ABI 1.17, this SDK needs 1.18 or a later 1.x", "%s", err.data());
-    CHECK(!cvl_check_abi(0x20012u, "lib", err.data(), err.size()), "2.18 accepted");
-    CHECK(std::string(err.data()) == "lib: view ABI 2.18, this SDK needs 1.18 or a later 1.x", "%s", err.data());
+    CHECK(cvl_check_abi(0x10016u, "lib", err.data(), err.size()), "1.22 refused: %s", err.data());
+    CHECK(cvl_check_abi(0x10017u, "lib", err.data(), err.size()), "1.23 refused: %s", err.data());
+    CHECK(!cvl_check_abi(0x10015u, "lib", err.data(), err.size()), "1.21 accepted");
+    CHECK(std::string(err.data()) == "lib: view ABI 1.21, this SDK needs 1.22 or a later 1.x", "%s", err.data());
+    CHECK(!cvl_check_abi(0x20016u, "lib", err.data(), err.size()), "2.22 accepted");
+    CHECK(std::string(err.data()) == "lib: view ABI 2.22, this SDK needs 1.22 or a later 1.x", "%s", err.data());
 }
 
 // ---- a real (stand-in) library through cvl_open --------------------------------------------
@@ -695,7 +784,7 @@ static void test_fake_library(const char* path) {
     CHECK(cvl_open(&t, path, err.data(), err.size()), "%s", err.data());
     CHECK(t.label[0] == 0 && !cvl_is_terminal(&t) && !cvl_is_wgpu(&t), "label '%s'", t.label);
     CHECK(t.show_solid != nullptr && t.parse_colour != nullptr && t.set_text != nullptr && t.standard_in != nullptr &&
-          t.abi_version() == 0x10012u,
+          t.abi_version() == 0x10016u,
           "the table is not bound");
     CHECK(t.set_double_click_frames != nullptr && t.focus != nullptr && t.navigation != nullptr,
           "1.8's calls are not bound");
@@ -709,14 +798,19 @@ static void test_fake_library(const char* path) {
     CHECK(t.show_points != nullptr, "1.11's show_points is not bound");
     CHECK(t.set_occluded != nullptr, "1.13's set_occluded is not bound");
     CHECK(t.set_finish != nullptr, "1.18's set_finish is not bound");
-    // A library older than the table (1.17: no set_finish) is refused before any call is
+    CHECK(t.set_occluded_style != nullptr && t.occluded_style != nullptr, "1.20's occluded style is not bound");
+    CHECK(t.show_solid_faces != nullptr, "1.21's show_solid_faces is not bound");
+    CHECK(t.set_snap != nullptr && t.request_snap_in != nullptr && t.snap_result != nullptr && t.clear_snap != nullptr &&
+              t.set_work_plane != nullptr && t.clear_work_plane != nullptr,
+          "1.22's snapping is not bound");
+    // A library older than the table (1.21: no snapping) is refused before any call is
     // bound, in Python's words.
     static CvlTable old;
-    cvl_setenv("CVL_FAKE_ABI_MINOR", "17");
+    cvl_setenv("CVL_FAKE_ABI_MINOR", "21");
     int opened = cvl_open(&old, path, err.data(), err.size());
     cvl_setenv("CVL_FAKE_ABI_MINOR", nullptr);
-    CHECK(!opened, "a view library of ABI 1.17 was opened");
-    CHECK(std::string(err.data()) == std::string(path) + ": view ABI 1.17, this SDK needs 1.18 or a later 1.x", "%s",
+    CHECK(!opened, "a view library of ABI 1.21 was opened");
+    CHECK(std::string(err.data()) == std::string(path) + ": view ABI 1.21, this SDK needs 1.22 or a later 1.x", "%s",
           err.data());
     CHECK(old.library == nullptr && old.show_solid == nullptr, "a refused library filled the table");
     CHECK(std::strcmp(cvl_error(&t), "the view library failed") == 0, "NULL last_error: %s", cvl_error(&t));
@@ -780,6 +874,24 @@ int main(int argc, char** argv) {
     static_assert(offsetof(CadaclysmViewLod, min_triangles) == 4 && offsetof(CadaclysmViewLod, motion) == 8,
                   "CadaclysmViewLod's fields moved");
     static_assert(CADACLYSM_VIEW_LOD_DETAILED == 0 && CADACLYSM_VIEW_LOD_SMOOTH == 1, "the motion values moved");
+    // CadaclysmViewOccludedStyle as 1.20 reads it: size, dash, gap, dim, has_colour, colour[3], 32 bytes.
+    static_assert(sizeof(CadaclysmViewOccludedStyle) == 32, "CadaclysmViewOccludedStyle is not 32 bytes");
+    static_assert(offsetof(CadaclysmViewOccludedStyle, dim) == 12 && offsetof(CadaclysmViewOccludedStyle, has_colour) == 16 &&
+                      offsetof(CadaclysmViewOccludedStyle, colour) == 20,
+                  "CadaclysmViewOccludedStyle's fields moved");
+    // The snap structs as 1.22 reads and writes them: 16 and 88 bytes, no padding.
+    static_assert(sizeof(CadaclysmViewSnapSettings) == 16 && offsetof(CadaclysmViewSnapSettings, aperture_px) == 8 &&
+                      offsetof(CadaclysmViewSnapSettings, marker) == 12,
+                  "CadaclysmViewSnapSettings's fields moved");
+    static_assert(sizeof(CadaclysmViewSnap) == 88, "CadaclysmViewSnap is not 88 bytes");
+    static_assert(offsetof(CadaclysmViewSnap, point) == 8 && offsetof(CadaclysmViewSnap, item) == 32 &&
+                      offsetof(CadaclysmViewSnap, edge) == 44 && offsetof(CadaclysmViewSnap, tangent) == 48 &&
+                      offsetof(CadaclysmViewSnap, axis) == 60 && offsetof(CadaclysmViewSnap, radius) == 72 &&
+                      offsetof(CadaclysmViewSnap, distance_px) == 80 && offsetof(CadaclysmViewSnap, clicks) == 84,
+                  "CadaclysmViewSnap's fields moved");
+    static_assert(CADACLYSM_VIEW_SNAP_VERTEX == 1 && CADACLYSM_VIEW_SNAP_FACE == 32 && CADACLYSM_VIEW_SNAP_PLANE == 128 &&
+                      CADACLYSM_VIEW_SNAP_ALL == 255,
+                  "the snap kinds moved");
 
     // The standard views, Python's VIEWS table.
     double az = 0, el = 0;
@@ -835,6 +947,7 @@ int main(int argc, char** argv) {
 
     test_draw_object(empty);
     test_pick();
+    test_snap();
     test_search(empty);
     test_png(empty);
     test_abi();

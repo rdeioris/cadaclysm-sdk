@@ -2140,7 +2140,7 @@ func test_a_read_body_is_a_solid_sharing_the_reader_brep():
 	eq(picked, [3, 6])
 	refuses(func(): return CadaclysmSolid.open(two, 5), "has no body 5: it holds 2")
 	# A mesh-only document: no brep to hand across.
-	var mesh := CadaclysmScene.open_bytes("cube(10);".to_utf8_buffer(), "scad", {})
+	var mesh := CadaclysmScene.open_bytes("square(10);".to_utf8_buffer(), "scad", {})
 	var cube: CadaclysmNode = null
 	for n in mesh.nodes:
 		if cube == null and n.brep == null:
@@ -2149,11 +2149,24 @@ func test_a_read_body_is_a_solid_sharing_the_reader_brep():
 	message = refuses(func(): return CadaclysmSolid.from_node(cube))
 	ok(message.begins_with("from_node: node ") and message.contains("has no brep"), message)
 	mesh.close()
-	var scad := tmp("cube.scad")
-	var f := FileAccess.open(scad, FileAccess.WRITE)
-	f.store_string("cube(10);\n")
-	f.close()
-	refuses(func(): return CadaclysmSolid.open(scad), "open: the .scad file draws no B-rep body")
+	# A flat OpenSCAD sheet draws no solid; a cube is one exact solid of volume 1000.
+	var sheet := tmp("sheet.scad")
+	var g := FileAccess.open(sheet, FileAccess.WRITE)
+	g.store_string("square(10);\n")
+	g.close()
+	refuses(func(): return CadaclysmSolid.open(sheet), "open: the .scad file draws no B-rep body")
+	# A cube is a B-rep only where the reader library was built with the kernel
+	# (`cadaclysm-capi`'s `openscad-brep`); in the Reader flavour OpenSCAD is a mesh.
+	var probe := CadaclysmScene.open_bytes("cube(10);".to_utf8_buffer(), "scad", {})
+	var exact: bool = probe.nodes[0].brep != null
+	probe.close()
+	if exact:
+		var scad := tmp("cube.scad")
+		var f := FileAccess.open(scad, FileAccess.WRITE)
+		f.store_string("cube(10);\n")
+		f.close()
+		eq(CadaclysmSolid.open_all(scad).size(), 1)
+		near(CadaclysmSolid.open(scad).mass(1e-7)["volume"], 1000, 1e-6)
 
 func test_push_pull_on_several_faces_at_once():
 	# The box's top and +x side pushed together: 5 taller and 5 longer, each face found
@@ -3664,6 +3677,32 @@ func test_two_end_mills_leave_the_corners_to_the_smaller_one():
 		if op.kind == "pocket" and op.tool == 2:
 			pocketed_with_t2 = true
 	ok(pocketed_with_t2, "a pocket with tool 2")
+
+func test_corner_relief_notches_the_corners_the_small_end_mill_cannot_reach():
+	var block := cam_pocketed_block()
+	var t1 := CadaclysmTool.flat(1, 6.0, 20.0, 800.0, 200.0, 12000.0)
+	var t2 := CadaclysmTool.flat(2, 2.0, 20.0, 800.0, 200.0, 12000.0)
+	var job := CadaclysmJob.create(CadaclysmStock.around(block, 2), 30)
+	var report := job.machine_with_end_mills(block, [t1, t2], [], NAN, NAN, 0.3, NAN, true)
+	if not ok(report != null, "machine_with_end_mills: " + Cadaclysm.last_error()):
+		return
+	eq(report.items.size(), 4)
+	for item in report.items:
+		eq(item.kind, "relief")
+		ok(item.reason.begins_with("corner relieved by T2 (2 mm): a notch 0.293 mm into the walls"), item.reason)
+	near(report.items[0].size, 1.0 - sqrt(0.5), 1e-6, "size")
+
+func test_corner_relief_off_leaves_the_corners_reported_as_corners():
+	var block := cam_pocketed_block()
+	var t1 := CadaclysmTool.flat(1, 6.0, 20.0, 800.0, 200.0, 12000.0)
+	var t2 := CadaclysmTool.flat(2, 2.0, 20.0, 800.0, 200.0, 12000.0)
+	var job := CadaclysmJob.create(CadaclysmStock.around(block, 2), 30)
+	var report := job.machine_with_end_mills(block, [t1, t2], [], NAN, NAN, 0.3, NAN, false)
+	if not ok(report != null, "machine_with_end_mills: " + Cadaclysm.last_error()):
+		return
+	eq(report.items.size(), 4)
+	for item in report.items:
+		eq(item.kind, "corner")
 
 func test_an_empty_end_mill_list_is_refused():
 	var block := cam_pocketed_block()
@@ -6009,6 +6048,33 @@ func test_six_sheets_join_into_a_box_the_kernel_measures_cuts_and_writes():
 	eq(loose.sewn, 1)
 	near(loose.worst_gap, 1e-3, 1e-9)
 
+func test_mirror_join_squares_a_half_roof_to_its_mirror():
+	# Half a roof domed both ways, lofted out from the centre plane y = 0, leaning as it leaves
+	# the plane: mirrored as it is, the seam is a crease; squared first, it is smooth.
+	var sections := []
+	for y in [0.0, 10.0, 20.0, 30.0]:
+		var row := []
+		for i in range(9):
+			var x := 10.0 * i
+			row.append([x, y, 20 * sin(PI * x / 80) - 0.01 * y * y + 0.05 * y + 0.002 * x * y])
+		sections.append(CadaclysmNurbsCurve.through(row))
+	var half := CadaclysmSolid.loft_curves(sections)
+	var plane := [0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 1, 0]
+	var creased = half.mirror_join(plane, 0, 0.01)
+	var r: CadaclysmSymmetryReport = creased[1]
+	eq([creased[0].faces, r.seams, r.squared], [2, 1, 0])
+	near(r.moved, 0, 0)
+	ok(r.gap < 1e-9 and r.angle > deg_to_rad(5) and r.curvature > 1e-4, str(r))
+	var smooth = half.mirror_join(plane, 0.5, 0.01)
+	var s: CadaclysmSymmetryReport = smooth[1]
+	eq([smooth[0].faces, s.seams, s.squared, s.naked], [2, 1, 1, 6])
+	ok(s.moved > 0 and s.gap < 1e-9 and s.angle < 1e-9 and s.curvature < 1e-9, str(s))
+	# Only the first two rows moved: the body is near twice the half.
+	var one: float = half.mass()["area"]
+	near(smooth[0].mass()["area"], 2 * one, 0.01 * one)
+	eq(smooth[0].mirror_join(plane), null)
+	ok(Cadaclysm.last_error().begins_with("mirror_join: the half lies on both sides of the plane"), Cadaclysm.last_error())
+
 func flat_rect(x0: float, y0: float, x1: float, y1: float) -> CadaclysmSolid:
 	var c := [[x0, y0, 0], [x1, y0, 0], [x1, y1, 0], [x0, y1, 0]]
 	return CadaclysmSolid.edge_surface([segment(c[0], c[1]), segment(c[1], c[2]), segment(c[2], c[3]), segment(c[3], c[0])])
@@ -6151,6 +6217,124 @@ func test_continuity_positions_belong_to_their_figures():
 	ok(absf(r.angle - PI / 2) < 1e-9 and r.curvature < 1e-9 and r.samples == 33, str(r))
 	eq(r.curvature_at.size(), 3)
 
+# A roof line traced off a drawing: rising to a header at point 4, then a long gentle arch.
+const ROOF := [[1717, 1110], [1848, 1191], [1979, 1262], [2110, 1330], [2242, 1356], [2504, 1367], [2767, 1369], [3029, 1364],
+	[3160, 1354], [3423, 1304], [3554, 1251], [3686, 1207], [3817, 1165], [3948, 1123], [4079, 1078]]
+
+# The parameter of `curve` nearest `p`, among 400 even arc-length steps.
+func roof_parameter_near(curve: CadaclysmNurbsCurve, p: Array) -> float:
+	var best := INF
+	var t := 0.0
+	for a in curve.divide_by_count(400):
+		var d := pdist(a.raw_point(), p)
+		if d < best:
+			best = d
+			t = a.parameter
+	return t
+
+func test_a_traced_roof_faired_has_no_inflection_past_the_header():
+	var pts := []
+	for xz in ROOF:
+		pts.append([float(xz[0]), 0.0, float(xz[1])])
+	var through := CadaclysmNurbsCurve.through(pts)
+	var t_header := roof_parameter_near(through, pts[4])
+	var wobbles := []
+	for a in through.inflections():
+		if a.parameter > t_header:
+			wobbles.append(a)
+	ok(wobbles.size() >= 3, str(wobbles))
+	for a in wobbles:
+		ok(pdist(through.point(a.parameter), a.raw_point()) < 1e-9 and a.error == 0.0, str(a))
+	var tolerance := 5.25   # two pixels of the drawing
+	var roof := CadaclysmNurbsCurve.fair(pts, 5, tolerance, PackedFloat64Array([4, NAN]))
+	ok(roof.degree == 5 and roof.fit_error != null and roof.fit_error >= 0 and roof.fit_error <= tolerance, str(roof.fit_error))
+	t_header = roof_parameter_near(roof, pts[4])
+	var past := []
+	for a in roof.inflections():
+		if a.parameter > t_header + 1e-6:
+			past.append(a)
+	eq(past.size(), 0, str(past))
+	var k := roof.knot_continuity()
+	ok(k != null and k.angle < 1e-6 and k.curvature < 1e-9, str(k))
+	eq(k.angle_at.size(), 3)
+	eq(k.curvature_at.size(), 3)
+	# Too tight to hold: refused in the library's words, not a curve that turns over.
+	var message := refuses_as(func(): return CadaclysmNurbsCurve.fair(pts, 5, 0.05, PackedFloat64Array([NAN, NAN])), "nurbs_curve_fair: ")
+	ok(message.contains("no curve free of inflections"), message)
+	message = refuses_as(func(): return CadaclysmNurbsCurve.fair(pts, 2, tolerance), "nurbs_curve_fair: ")
+	ok(message.contains("degree 2"), message)
+	refuses_as(func(): return CadaclysmNurbsCurve.fair(pts, 5, tolerance, PackedFloat64Array([4])), "nurbs_curve_fair: no_inflection takes two numbers")
+	# Faired from the wobbly curve itself, its own parameters naming the span.
+	var faired := through.faired(5, 1.5 * tolerance, through.domain)
+	eq(faired.inflections().size(), 0, str(faired.inflections()))
+	ok(faired.fit_error != null and faired.fit_error <= 1.6 * tolerance, str(faired.fit_error))
+
+func test_edge_continuity_reads_a_crease_and_a_fillet_seam():
+	var block := CadaclysmSolid.cuboid(40, 30, 20)
+	var r := block.edge_continuity(0, 16)
+	ok(absf(r.angle - PI / 2) < 1e-9 and r.gap < 1e-9 and r.curvature < 1e-9 and r.samples == 17, str(r))
+	var rounded := block.fillet([0], 4.0)
+	var seams := []
+	for e in rounded.edges:
+		var c := rounded.edge_continuity(e)
+		if c != null and c.angle < 1e-6:   # null: an edge of one face
+			seams.append(c)
+	# The fillet's two tangent seams, its curvature a quarter where the flat faces' is zero.
+	ok(seams.size() == 2, str(seams))
+	for c in seams:
+		near(c.curvature, 0.25, 1e-4)
+	refuses_as(func(): return block.edge_continuity(999), "edge_continuity: ")
+	refuses_as(func(): return block.edge_continuity(-1), "edge_continuity: edge: -1 is not an index")
+
+func test_a_wobbly_loft_faired_turns_no_curvature_over():
+	# Eleven lines across a shallow arch, each lifted or dropped by 0.4 in turn: a loft through
+	# them ripples between every pair.
+	var lines := []
+	for k in 11:
+		var x := 10.0 * k
+		var z := -0.01 * (x - 50.0) * (x - 50.0) + (0.4 if k % 2 == 0 else -0.4)
+		lines.append(segment([x, 0.0, z], [x, 40.0, z]))
+	var loft := CadaclysmSolid.loft_curves(lines, 3)
+	var t := loft.curvature_turns(0, 32)
+	ok(t != null and t.samples == 32, str(t))
+	ok(t.mean_turns.size() > 0 and t.mean_positive + t.mean_negative > 1, str(t))
+	for a in t.mean_turns:
+		var p: PackedFloat64Array = a.raw_point()
+		ok(absf(a.tangent.length() - 1.0) < 1e-6 and p[0] >= 0.0 and p[0] <= 100.0 and p[2] > -26.0 and p[2] < 1.0, str(a))
+	# The lines run along u, the loft's v across them: the end lines kept, held along v.
+	var keep := PackedInt64Array([-1, -1, 0, 0])
+	var faired := loft.faired(1.0, 3, PackedInt64Array(), keep, "v")
+	ok(faired != null and faired.sheet_error != null and faired.sheet_error >= 0.0 and faired.sheet_error <= 1.05, str(faired.sheet_error))
+	var f := faired.curvature_turns()
+	ok(f.mean_turns.size() == 0 and f.mean_positive + f.mean_negative == 1, str(f))
+	var coarse := loft.faired(1.0, 3, PackedInt64Array([6, 8]), keep, "v")
+	ok(coarse.sheet_error <= 1.05 and coarse.curvature_turns().mean_turns.size() == 0, str(coarse.sheet_error))
+	var message := refuses_as(func(): return loft.faired(1.0, 2), "surface_faired: ")
+	ok(message.contains("degree 2"), message)
+	message = refuses_as(func(): return loft.faired(0.01, 3, PackedInt64Array(), keep, "v"), "surface_faired: ")
+	ok(message.contains("no fair free of inflections"), message)
+	refuses_as(func(): return loft.faired(1e-3, 3, PackedInt64Array(), PackedInt64Array([0, 0])), "surface_faired: keep takes 4 levels")
+	refuses_as(func(): return loft.faired(1e-3, 3, PackedInt64Array(), PackedInt64Array(), "w"), "no_inflection is 'u', 'v', 'uv'")
+	refuses_as(func(): return loft.curvature_turns(7), "curvature_turns: ")
+
+func test_highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam():
+	var block := CadaclysmSolid.cuboid(2, 2, 2)
+	var k := block.highlight_kink(0, 16)
+	ok(k != null and k.angle < 1e-9 and k.samples == 17, str(k))
+	eq(k.at.size(), 3)
+	var rounded := block.fillet([0], 0.5)
+	var worst: CadaclysmHighlightKink = null
+	for e in rounded.edges:
+		var h := rounded.highlight_kink(e)
+		if h != null and (worst == null or h.angle > worst.angle):   # null: an edge of one face
+			worst = h
+	# Where the fillet's curvature meets a flat face's, the highlight lines break.
+	ok(worst != null and worst.angle > deg_to_rad(45), str(worst))
+	var d := worst.light_direction
+	near(sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), 1.0, 1e-9)
+	refuses_as(func(): return block.highlight_kink(999), "highlight_kink: ")
+	refuses_as(func(): return block.highlight_kink(-1), "highlight_kink: edge: -1 is not an index")
+
 func pentagon_strips() -> Array:
 	var corners := []
 	for k in 5:
@@ -6271,3 +6455,316 @@ func test_fillet_rounds_a_spline_edge_at_a_constant_and_a_varying_radius():
 	near(area(same), area(constant), 1e-9)
 	var message := refuses_as(func(): return CadaclysmSolid.cuboid(10, 10, 10).fillet([0], 1.0, 1e-6, 2.0), "fillet: ")
 	ok(message.contains("a varying radius rounds only spline edges"), message)
+
+func test_fillet_law_with_stations_at_the_ends_is_the_varying_fillet():
+	var shell := fender_and_door()
+	var crease := []
+	for e in shell.edges:
+		if e.faces.size() == 2:
+			crease.append(e)
+	var varying := shell.fillet(crease, 8.0, 1e-3, 20.0)
+	var lawed := shell.fillet_law(crease, [[0.0, 8.0], [1.0, 20.0]], 1e-3)
+	eq(lawed.faces, 3)
+	near(area(lawed), area(varying), 1e-3)
+	# A swell in the middle takes more than 8 all along and less than 20 all along.
+	var swell := area(shell.fillet_law([crease[0].index], [[0.0, 8.0], [0.5, 20.0], [1.0, 8.0]], 1e-3))
+	ok(swell < area(shell.fillet(crease, 8.0, 1e-3)) and swell > area(shell.fillet(crease, 20.0, 1e-3)), "the swell takes %s" % swell)
+	var none := refuses_as(func(): return shell.fillet_law(crease, [], 1e-3), "fillet: ")
+	ok(none.contains("at least one station"), none)
+	var message := refuses_as(func(): return CadaclysmSolid.cuboid(10, 10, 10).fillet_law([0], [[0.0, 1.0], [1.0, 2.0]]), "fillet: ")
+	ok(message.contains("a radius law rounds only spline edges"), message)
+
+# ---- closest point from a point: the cube's face, edge and vertex feet and the sphere's pinned to
+# their closed forms (literals, not read back through the wrapper; the doubles through raw_point
+# and raw_normal), max_distance on both sides, the projector equal to the one-shot (uv included)
+# after its solid is closed, and the refusals (null, the reason in last_error).
+
+const CP_SQRT_HALF := 0.7071067811865476
+const CP_INV_SQRT3 := 0.5773502691896258
+# query, point, distance, kind, uv (empty off a face), normal
+const CP_CUBE_FEET := [
+	[[20, 0, 0], [5, 0, 0], 15.0, "face", [5, 5], [1, 0, 0]],
+	[[8, 8, 0], [5, 5, 0], 4.242640687119285, "edge", [], [CP_SQRT_HALF, CP_SQRT_HALF, 0]],
+	[[8, 8, 8], [5, 5, 5], 5.196152422706632, "vertex", [], [CP_INV_SQRT3, CP_INV_SQRT3, CP_INV_SQRT3]],
+	[[1, 0, 0], [5, 0, 0], 4.0, "face", [5, 5], [1, 0, 0]],
+	[[0, -7, 2], [0, -5, 2], 2.0, "face", [5, 7], [0, -1, 0]],
+	[[5, 1, 2], [5, 1, 2], 0.0, "face", [6, 7], [1, 0, 0]],
+]
+
+func cp_foot_is(foot, row: Array) -> void:
+	if not ok(foot != null, "no foot for %s: %s" % [str(row[0]), Cadaclysm.last_error()]):
+		return
+	var what := str(foot)
+	ok(foot is CadaclysmPointFoot, what)
+	ok(all_near(foot.raw_point, row[1]) and absf(foot.distance - row[2]) <= 1e-9, what)
+	ok(v3near(foot.point, Vector3(row[1][0], row[1][1], row[1][2]), 1e-5), what)
+	ok(foot.kind == row[3] and foot.refined and all_near(foot.raw_normal, row[5]), what)
+	ok(all_near(foot.uv, row[4]), what)
+	if row[3] == "edge":
+		ok(foot.edge >= 0 and foot.edge < 12, what)
+	else:
+		eq(foot.edge, -1, what)
+
+func test_closest_point_names_a_cubes_face_edge_and_vertex_in_closed_form():
+	var cube := CadaclysmSolid.cuboid(10, 10, 10)
+	for row in CP_CUBE_FEET:
+		cp_foot_is(cube.closest_point(row[0]), row)
+	var p: Array = CP_CUBE_FEET[0][0]
+	ok(cube.closest_point(Vector3(20, 0, 0), INF, 0.0).equals(cube.closest_point(p)), "INF and 0 are no limit and unset")
+	var sphere := CadaclysmSolid.sphere(2)
+	var foot := sphere.closest_point([0, 3, 4])
+	near(foot.distance, 3.0, 1e-9)
+	ok(all_near(foot.raw_point, [0, 1.2, 1.6]) and all_near(foot.raw_normal, [0, 0.6, 0.8]), str(foot))
+	eq(foot.kind, "face")
+	var inside := sphere.closest_point([0, 0, 0.5])
+	near(inside.distance, 1.5, 1e-9)
+	ok(all_near(inside.raw_point, [0, 0, 2]), str(inside))
+
+func test_closest_point_edge_is_the_public_edge_number():
+	var cube := CadaclysmSolid.cuboid(10, 10, 10)
+	var p := [8, 8, 1]
+	var edge: int = cube.closest_point(p).edge
+	var foot = cube.edge_closest_point(edge, p)
+	ok(foot is Dictionary, Cadaclysm.last_error())
+	ok(all_near(foot["raw_point"], [5, 5, 1]), str(foot))
+	ok(v3near(foot["point"], Vector3(5, 5, 1), 1e-5), str(foot))
+	near(foot["distance"], 4.242640687119285, 1e-9)
+	# A straight edge: the arc length to the foot is the chord from the edge's start.
+	var start := cube.edge_point_at_length(edge, 0)
+	var s: float = start.point.distance_to(foot["point"])
+	var at := cube.edge_point_at_length(edge, s)
+	ok(v3near(at.point, foot["point"], 1e-5), "the point at that arc length")
+	near(at.parameter, foot["t"], 1e-5)
+	eq(refuses(func(): return cube.edge_closest_point(99, p), "edge_closest_point: "), "edge_closest_point: edge 99 of 12")
+	eq(cube.edge_closest_point(99, p), null)
+	refuses(func(): return cube.edge_closest_point(-1, p), "edge_closest_point: no edge -1")
+
+func test_closest_point_max_distance_on_both_sides():
+	var cube := CadaclysmSolid.cuboid(10, 10, 10)
+	var far := Vector3(20, 0, 0)
+	eq(cube.closest_point(far, 14.9), null)
+	eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
+	near(cube.closest_point(far, 15.1).distance, 15.0, 1e-9)
+	ok(cube.closest_point(far, INF) != null, "INF is no limit")
+	ok(cube.closest_point([5, 1, 2], 0.0) != null, "0 keeps a point on the body")
+	eq(cube.closest_point([5.5, 1, 2], 0.0), null)
+	eq(refuses(func(): return cube.closest_point(Vector3.ZERO, -1.0), "closest_point: "),
+		"closest_point: the max distance must not be negative")
+	eq(cube.closest_point(Vector3.ZERO, -1.0), null)
+	refused(func(): return cube.closest_point(Vector3.ZERO, NAN, -1.0), "closest_point: ")
+	refused(func(): return cube.closest_point(Vector3.ZERO, NAN, INF), "closest_point: ")
+	refused(func(): return cube.closest_point([NAN, 0, 0]), "closest_point: ")
+	refused(func(): return cube.closest_point([0, 0]), "closest_point: ")
+
+func test_a_projector_answers_as_the_one_shot_and_outlives_its_solid():
+	var cube := CadaclysmSolid.cuboid(10, 10, 10)
+	var want := []
+	for row in CP_CUBE_FEET:
+		want.append(cube.closest_point(row[0]))
+	var projector := cube.projector()
+	ok(projector != null, Cadaclysm.last_error())
+	cube.close()
+	for i in CP_CUBE_FEET.size():
+		var got := projector.closest_point(CP_CUBE_FEET[i][0])
+		ok(got != null and got.equals(want[i]), "%s != %s" % [str(got), str(want[i])])
+		cp_foot_is(got, CP_CUBE_FEET[i])
+	eq(projector.closest_point(CP_CUBE_FEET[0][0], 14.9), null)
+	eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
+	ok(projector.closest_point(CP_CUBE_FEET[0][0], 15.1).equals(want[0]), "within 15.1")
+	eq(refuses(func(): return projector.closest_point(Vector3.ZERO, -1.0), "projector_closest_point: "),
+		"projector_closest_point: the max distance must not be negative")
+	refused(func(): return CadaclysmSolid.sphere(1).projector(-1.0), "projector_new: ")
+	eq(CadaclysmSolid.sphere(1).projector(-1.0), null)
+	eq(projector.closed, false)
+	projector.close()
+	eq(projector.closed, true)
+	eq(refuses(func(): return projector.closest_point(Vector3.ZERO), "projector: closed"), "projector: closed")
+	eq(projector.closest_point(Vector3.ZERO), null)
+	projector.close()   # idempotent
+	eq(projector.closed, true)
+
+func test_face_closest_point_stays_on_its_face():
+	var cube := CadaclysmSolid.cuboid(10, 10, 10)
+	var top := -1
+	for f in cube.faces:
+		if cube.face_ref(f)[6] > 0.5:
+			top = f
+	var foot := cube.face_closest_point(top, [20, 0, 0])
+	ok(all_near(foot.raw_point, [5, 0, 5]), str(foot))
+	near(foot.distance, 15.811388300841896, 1e-9)
+	ok(foot.kind == "edge" and foot.refined, str(foot))
+	var inner := cube.face_closest_point(top, [1, 2, 9])
+	ok(all_near(inner.raw_point, [1, 2, 5]) and all_near(inner.raw_normal, [0, 0, 1]), str(inner))
+	ok(inner.kind == "face" and inner.index == top and inner.edge == -1 and inner.uv.size() == 2, str(inner))
+	eq(refuses(func(): return cube.face_closest_point(99, Vector3.ZERO), "face_closest_point: "),
+		"face_closest_point: face 99 of 6")
+	eq(cube.face_closest_point(99, Vector3.ZERO), null)
+
+func test_a_nurbs_curves_closest_point_and_its_axis():
+	var circle := CadaclysmCircle.create(XY, 2).to_nurbs()
+	var foot := circle.closest_point([0, 5, 0])
+	ok(foot != null, Cadaclysm.last_error())
+	ok(all_near(foot.raw_point, [0, 2, 0]) and foot.unique, str(foot))
+	ok(all_near(circle.point(foot.t), foot.raw_point, 1e-12), "the foot's parameter")
+	var axis := circle.closest_point(Vector3(0, 0, 3))
+	eq(axis.unique, false, str(axis))
+	near(Vector3(axis.raw_point[0], axis.raw_point[1], axis.raw_point[2]).length(), 2.0, 1e-6)
+	refused(func(): return circle.closest_point([INF, 0, 0]), "nurbs_curve_closest_point: ")
+	eq(circle.closest_point([INF, 0, 0]), null)
+
+# ---- closest points from a curve: a point within reach of a line, two skew lines and a line
+# through or past the 2-cube pinned to their closed forms (literals, not read back through the
+# wrapper; the doubles through the raw_ properties), max_distance on both sides, the projector
+# equal to the one-shot, the nearest object naming its item with a curve's and a point's answer,
+# and the refusals (null, the reason in last_error).
+
+const CC_SHIFTS := [[0.0, 0.0, 0.0], [1e4, -1e4, 5e3], [1e6, -1e6, 5e5]]
+
+func cc_plus(s: Array, p: Array) -> Array:
+	return [s[0] + p[0], s[1] + p[1], s[2] + p[2]]
+
+func cc_segment(a: Array, b: Array) -> CadaclysmNurbsCurve:
+	return CadaclysmNurbsCurve.create([a, b], 1)
+
+# 1e-12 (or `base`) relative to the shift's largest coordinate, as the other wrappers' tests take it.
+func cc_scaled(s: Array, base := 1e-12) -> float:
+	return base * (1.0 + maxf(absf(s[0]), maxf(absf(s[1]), absf(s[2]))))
+
+func test_curve_closest_points_a_point_within_reach_of_a_line():
+	for s in CC_SHIFTS:
+		var line := cc_segment(s, cc_plus(s, [10, 0, 0]))
+		var p := cc_plus(s, [3, 4, 0])
+		var foot := line.closest_point(p, 4.1)
+		if not ok(foot != null, Cadaclysm.last_error()):
+			return
+		near(foot.t, 0.3, 1e-12)
+		ok(all_near(foot.raw_point, cc_plus(s, [3, 0, 0]), cc_scaled(s)) and foot.unique, str(foot))
+		eq(line.closest_point(p, 3.9), null)
+		eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
+		var unlimited := line.closest_point(p)
+		for limit in [NAN, INF]:
+			var same := line.closest_point(p, limit)
+			ok(same.t == unlimited.t and same.raw_point == unlimited.raw_point and same.unique == unlimited.unique,
+				"%s is no limit" % str(limit))
+	var line := cc_segment([0, 0, 0], [10, 0, 0])
+	eq(refuses(func(): return line.closest_point([3, 4, 0], -1.0), "nurbs_curve_closest_point_within: "),
+		"nurbs_curve_closest_point_within: the max distance must not be negative")
+	eq(line.closest_point([3, 4, 0], -1.0), null)
+
+func test_curve_closest_points_two_skew_lines_meet_at_their_closed_form():
+	for s in CC_SHIFTS:
+		var a := cc_segment(s, cc_plus(s, [10, 0, 0]))
+		var b := cc_segment(cc_plus(s, [3, -5, 2]), cc_plus(s, [3, 5, 2]))
+		for limit in [2.1, NAN, INF]:
+			var pair := a.closest_points(b, limit)
+			if not ok(pair is CadaclysmCurvePair, "limit %s: %s" % [str(limit), Cadaclysm.last_error()]):
+				return
+			near(pair.distance, 2.0, 1e-9)
+			near(pair.t_a, 0.3, 1e-12)
+			near(pair.t_b, 0.5, 1e-12)
+			ok(all_near(pair.raw_point_a, cc_plus(s, [3, 0, 0]), cc_scaled(s)), str(pair))
+			ok(all_near(pair.raw_point_b, cc_plus(s, [3, 0, 2]), cc_scaled(s)), str(pair))
+		var swapped := b.closest_points(a)
+		near(swapped.t_a, 0.5, 1e-12)
+		near(swapped.t_b, 0.3, 1e-12)
+		ok(all_near(swapped.raw_point_a, cc_plus(s, [3, 0, 2]), cc_scaled(s)), str(swapped))
+		ok(a.closest_points(b).equals(a.closest_points(b, INF)), "the default is no limit")
+		eq(a.closest_points(b, 1.9), null)
+		eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
+		eq(refuses(func(): return a.closest_points(b, -1.0), "nurbs_curve_closest_points: "),
+			"nurbs_curve_closest_points: the max distance must not be negative")
+		eq(a.closest_points(b, -1.0), null)
+
+func test_curve_closest_points_a_line_through_the_cube_crosses_its_first_face():
+	var cube := CadaclysmSolid.cuboid(2, 2, 2)
+	var through := cc_segment([-3, 0.1, 0.2], [3, 0.1, 0.2])
+	var foot := cube.curve_closest_points(through)
+	if not ok(foot is CadaclysmCurveBodyFoot, Cadaclysm.last_error()):
+		return
+	ok(foot.crossing and foot.distance == 0.0, str(foot))
+	near(foot.t, 1.0 / 3.0, 1e-9)
+	ok(all_near(foot.raw_point_on_curve, [-1, 0.1, 0.2]) and all_near(foot.raw_point_on_body, [-1, 0.1, 0.2]), str(foot))
+	ok(v3near(foot.point_on_body, Vector3(-1, 0.1, 0.2), 1e-5), str(foot))
+	ok(foot.kind == "face" and foot.edge == -1 and foot.uv.size() == 2 and all_near(foot.raw_normal, [-1, 0, 0]), str(foot))
+	var projector := cube.projector()
+	ok(projector.curve_closest_points(through).equals(foot), "the projector answers as the one-shot")
+	for bad in [-1.0, INF]:
+		eq(refuses(func(): return cube.curve_closest_points(through, NAN, bad), "curve_closest_points: "),
+			"curve_closest_points: tolerance must be positive and finite")
+	ok(cube.curve_closest_points(through, NAN, 0.0) != null, "0 is an unset tolerance")
+	eq(refuses(func(): return cube.curve_closest_points(through, -1.0), "curve_closest_points: "),
+		"curve_closest_points: the max distance must not be negative")
+	eq(cube.curve_closest_points(through, -1.0), null)
+	eq(refuses(func(): return projector.curve_closest_points(through, -1.0), "projector_curve_closest_points: "),
+		"projector_curve_closest_points: the max distance must not be negative")
+	projector.close()
+	eq(refuses(func(): return projector.curve_closest_points(through), "projector: closed"), "projector: closed")
+
+func test_curve_closest_points_a_line_past_an_edge_and_a_projector_answering_as_the_one_shot():
+	for s in CC_SHIFTS:
+		var tol := cc_scaled(s, 1e-9)
+		var cube := CadaclysmSolid.cuboid(2, 2, 2).translate(s[0], s[1], s[2])
+		var line := cc_segment(cc_plus(s, [2, -0.5, 2]), cc_plus(s, [2.5, 0.5, 2.5]))
+		var projector := cube.projector()
+		var foot := cube.curve_closest_points(line, 1.5)
+		if not ok(foot != null, Cadaclysm.last_error()):
+			return
+		ok(not foot.crossing and foot.kind == "edge" and foot.uv.is_empty(), str(foot))
+		near(foot.distance, sqrt(2.0), tol)
+		near(foot.t, 0.0, 1e-9)
+		ok(all_near(foot.raw_point_on_curve, cc_plus(s, [2, -0.5, 2]), tol), str(foot))
+		ok(all_near(foot.raw_point_on_body, cc_plus(s, [1, -0.5, 1]), tol), str(foot))
+		ok(foot.edge >= 0, str(foot))
+		var at = cube.edge_closest_point(foot.edge, foot.raw_point_on_curve)
+		ok(all_near(at["raw_point"], foot.raw_point_on_body, tol), "the public edge's foot")
+		near(at["distance"], foot.distance, tol)
+		eq(cube.curve_closest_points(line, 1.4), null)
+		eq(projector.curve_closest_points(line, 1.4), null)
+		eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
+		ok(projector.curve_closest_points(line, 1.5).equals(foot), "within 1.5")
+		ok(projector.curve_closest_points(line).equals(cube.curve_closest_points(line)), "no limit")
+		ok(cube.curve_closest_points(line, NAN).equals(cube.curve_closest_points(line, INF)), "NaN and INF")
+
+func test_curve_closest_points_the_nearest_object_names_its_item():
+	var cube := CadaclysmSolid.cuboid(2, 2, 2)
+	var line := cc_segment([2, -0.5, 2], [2.5, 0.5, 2.5])
+	var other := cc_segment([2, -0.5, 2.3], [2, 5, 2.3])   # sqrt(0.045) off `line`, at t 0.3
+	var projector := cube.projector()
+
+	# A curve wins (answer kind 1): its pair.
+	var nearest := line.closest_object([Vector3(0, 0, 10), cube, other, projector, [9, 9, 9]])
+	if not ok(nearest is CadaclysmNearestObject, Cadaclysm.last_error()):
+		return
+	var pair := line.closest_points(other)
+	eq(nearest.which, 2)
+	ok(nearest.answer is CadaclysmCurvePair and nearest.answer.equals(pair), str(nearest))
+	near(nearest.distance, sqrt(0.045), 1e-9)
+	near(nearest.t, 0.3, 1e-9)
+	ok(nearest.distance == pair.distance and nearest.t == pair.t_a, str(nearest))
+	ok(nearest.raw_point_on_curve == pair.raw_point_a and nearest.raw_point_on_item == pair.raw_point_b, str(nearest))
+
+	# A point wins (answer kind 2): no answer of its own.
+	var point := line.closest_object([cube, [2.5, 0.6, 2.5]])
+	eq(point.which, 1)
+	eq(point.answer, null)
+	near(point.distance, 0.1, 1e-9)
+	near(point.t, 1.0, 1e-9)
+	ok(all_near(point.raw_point_on_item, [2.5, 0.6, 2.5], 0.0) and all_near(point.raw_point_on_curve, [2.5, 0.5, 2.5]), str(point))
+
+	# A solid or a projector alone: the body's answer.
+	var solid := line.closest_object([cube])
+	eq(solid.which, 0)
+	ok(solid.answer is CadaclysmCurveBodyFoot and solid.answer.equals(cube.curve_closest_points(line)), str(solid))
+	var prepared := line.closest_object([projector], NAN, NAN)
+	ok(prepared.answer.equals(projector.curve_closest_points(line)), str(prepared))
+	ok(prepared.equals(line.closest_object([projector])), "equals compares every field")
+
+	eq(line.closest_object([cube, other], 0.2), null)
+	eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
+	eq(line.closest_object([cube, other], 0.25).which, 1)
+	eq(line.closest_object([]), null)
+	eq(refuses(func(): return line.closest_object([cube], -1.0), "nurbs_curve_closest_object: "),
+		"nurbs_curve_closest_object: the max distance must not be negative")
+	refused(func(): return line.closest_object([cube, "hello"]), "nurbs_curve_closest_object: item 1: ")
+	refused(func(): return line.closest_object([[NAN, 0, 0]]), "nurbs_curve_closest_object: ")
+	eq(line.closest_object([cube, "hello"]), null)

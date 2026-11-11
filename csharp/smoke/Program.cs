@@ -22,6 +22,10 @@ foreach (var node in scene.Walk())
     triangles += mesh.TriangleCount;
 }
 Console.WriteLine($"triangles={triangles}");
+// cube.scad is a mesh with no brep in the Reader flavour and an exact box where the kernel's
+// builder is linked (`openscad-brep`): the figures below that only a mesh has are pinned for the
+// first, and the other has its own.
+var cubeIsMesh = path.EndsWith("cube.scad") && !scene.Walk().Any(n => { using var brep = n.Brep; return brep is not null; });
 if (path.EndsWith("cube.scad") &&
     (!bounds.Min.SequenceEqual(new float[] { 0, 0, 0 }) || !bounds.Max.SequenceEqual(new float[] { 20, 20, 20 }) || triangles != 12))
     return Fail("the cube did not come back as a 20-unit cube of 12 triangles");
@@ -262,7 +266,7 @@ if (Cadaclysm.Cadaclysm.LodLevels() != 3) return Fail("lod levels is not 3");
 var first = scene.Walk().First(n => n.CanMesh);
 if (first.MeshLod(0)!.TriangleCount != first.Mesh!.TriangleCount) return Fail("LOD 0 is not the mesh");
 if (first.LodError(0) != 0 || first.MeshLod(4) is not null && first.MeshLod(4)!.TriangleCount != 0) return Fail("LOD errors or levels are off");
-if (path.EndsWith("cube.scad") && (first.MeshLod(1)!.TriangleCount != 3 || first.EdgeBeziers.Count != 12 || first.EdgeBeziers.Points.Length != 12 * 12)) return Fail("the cube's LOD 1 or Béziers are off");
+if (cubeIsMesh && (first.MeshLod(1)!.TriangleCount != 3 || first.EdgeBeziers.Count != 12 || first.EdgeBeziers.Points.Length != 12 * 12)) return Fail("the cube's LOD 1 or Béziers are off");
 // f64 twins: mesh64, beziers64 and bounds64 mirror their f32 twins, narrowed exactly, on
 // this small-coordinate cube -- see the far-from-origin note in the task report for what
 // this comparison cannot see.
@@ -311,20 +315,21 @@ Console.WriteLine($"reader f64 twins: mesh64 {mesh64.TriangleCount} triangles, e
         return Fail("a Mesh64 asked for after ForgetMeshes does not read");
 }
 var fit = first.Collision();
-if (fit is null || fit.Error != 0 || fit.Frame.Length != 16 || fit.HullVertexCount != 8) return Fail("the collision fit is off");
-if (first.CollisionHull().VertexCount != 8 || first.CollisionHull().Indices.Length != 36) return Fail("the collision hull is off");
+// The mesh cube is fitted as a hull of 8 vertices; the exact cube is the box it is, with no hull.
+if (fit is null || fit.Error != 0 || fit.Frame.Length != 16 || fit.HullVertexCount != (cubeIsMesh || !path.EndsWith("cube.scad") ? 8u : 0u)) return Fail("the collision fit is off");
+if (fit.HullVertexCount != 0 && (first.CollisionHull().VertexCount != 8 || first.CollisionHull().Indices.Length != 36)) return Fail("the collision hull is off");
 var m = first.Mesh!;
 using (var meshlets = Meshlets.Build(m.Positions, m.Normals, m.Indices, 124, 64))
 {
     if (meshlets.Count < 1) return Fail("no meshlets");
     var one = meshlets.Meshlet(0);
     if (one.Positions.Length != one.VertexCount * 3 || one.Indices.Length != one.TriangleCount * 3 || one.Level != 0) return Fail("meshlet 0 is off");
-    if (path.EndsWith("cube.scad") && (meshlets.Count != 1 || one.TriangleCount != 12 || one.VertexCount != 36)) return Fail("the cube's meshlets are off");
+    if (path.EndsWith("cube.scad") && (meshlets.Count != 1 || one.TriangleCount != 12 || one.VertexCount != (cubeIsMesh ? 36u : 24u))) return Fail("the cube's meshlets are off");
 }
 try { Meshlets.Build(m.Positions, m.Normals, m.Indices, 0, 64); return Fail("a zero budget was accepted"); }
 catch (CadaclysmException) { }
 if (first.TriangleEstimate <= 0 && first.TriangleEstimate != -1) return Fail("triangle estimate is neither a count nor -1");
-if (path.EndsWith("cube.scad"))
+if (cubeIsMesh)
 {
     if (first.TriangleEstimate != 12 || !first.SurfaceEdges.Positions.IsEmpty || first.SurfaceProxyMesh(4) is not null) return Fail("the cube has no surface products");
     if (first.SurfacePick(new double[] { 10, 10, 100 }, new double[] { 10, 10, -100 }) is not null || !first.BoundsPlaced().IsEmpty) return Fail("the cube picks or bounds through surfaces");
@@ -627,6 +632,26 @@ using var outline = rect.WithHole(hole);
         if (job.Operations().Count != 0) return Fail("machine_with: a refused null changed the job");
     }
     Console.WriteLine("machine_with: two end mills leave T2's four corners, z 10 down to z 2; an empty list refused");
+    // R2: the flag off, or left out, is the same four corners.
+    using (var job = new Job(Stock.Around(block, 2), 30))
+    {
+        var off = job.MachineWith(block, new[] { t1, t2 }, cornerRelief: false);
+        if (off.Count != 4 || off.Any(i => i.Kind != "corner"))
+            return Fail($"machine_with: corner_relief off gave\n{off}");
+    }
+    // R1: the flag on relieves them: four items of kind "relief" in place of the corners.
+    using (var job = new Job(Stock.Around(block, 2), 30))
+    {
+        var relieved = job.MachineWith(block, new[] { t1, t2 }, cornerRelief: true);
+        if (relieved.Count != 4 || relieved.Any(i => i.Kind != "relief"))
+            return Fail($"machine_with: corner_relief on did not give four relief items:\n{relieved}");
+        foreach (var item in relieved)
+            if (!item.Reason.StartsWith("corner relieved by T2 (2 mm): a notch 0.293 mm into the walls"))
+                return Fail($"machine_with: {item.Reason}");
+        if (Math.Abs(relieved[0].Size - (1 - Math.Sqrt(0.5))) > 1e-6)
+            return Fail($"machine_with: relief size {relieved[0].Size}, not 1 - sqrt(0.5)");
+    }
+    Console.WriteLine("machine_with: corner_relief true relieves the four corners; false leaves them");
 }
 {
     // The plate of spec 2026-09-28: machined cleanly by one end mill and one drill.
@@ -3217,6 +3242,70 @@ if (!rounded.IsWatertight()) return Fail("the filleted part is not watertight");
 var shape = rounded.Manifold;
 Console.WriteLine($"manifold: {shape}");
 if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted part is not a closed manifold: {shape}");
+// A face's round radius and chamfer distance (test_a_face_tells_its_round_radius_and_chamfer_distance).
+{
+    using var cube10 = Solid.Cuboid(10, 10, 10);
+    var vertical = cube10.Edges.Where(e => e.IsLine && Math.Abs(e.Direction![2]) > 0.99).ToList();
+    using var roundedCube = cube10.Fillet(vertical, 1.5);
+    var radii = Enumerable.Range(0, roundedCube.Faces).Select(roundedCube.FaceRoundRadius).ToArray();
+    if (radii.Count(r => r != 0) != 4 || radii.Any(r => r != 0 && Math.Abs(r - 1.5) > 1e-9))
+        return Fail($"face_round_radius: {string.Join(", ", radii)}");
+    if (Enumerable.Range(0, roundedCube.Faces).Any(f => roundedCube.FaceChamferDistance(f) != 0))
+        return Fail("face_chamfer_distance: a round face reads as a chamfer");
+    using var bevelled = cube10.Chamfer(vertical, 2.0);
+    var distances = Enumerable.Range(0, bevelled.Faces).Select(bevelled.FaceChamferDistance).ToArray();
+    if (distances.Count(d => Math.Abs(d - 2.0) < 1e-9) != 4) return Fail($"face_chamfer_distance: {string.Join(", ", distances)}");
+    if (Enumerable.Range(0, bevelled.Faces).Any(f => bevelled.FaceRoundRadius(f) != 0))
+        return Fail("face_round_radius: a chamfer face reads as a round");
+    try { cube10.FaceRoundRadius(6); return Fail("face_round_radius: face 6 of a cube did not throw"); }
+    catch (BuildException e) when (e.Message.Contains("face_round_radius: face 6 of 6")) { }
+    try { cube10.FaceChamferDistance(6); return Fail("face_chamfer_distance: face 6 of a cube did not throw"); }
+    catch (BuildException e) when (e.Message.Contains("face_chamfer_distance: face 6 of 6")) { }
+}
+// Edges and isocurves as Beziers (test_edges_and_isocurves_come_as_beziers).
+{
+    using var cube2 = Solid.Cuboid(2, 2, 2);
+    var edgeBeziers = cube2.EdgeBeziers();
+    if (edgeBeziers.Length != 12 * 16) return Fail($"edge_beziers: a cube gives {edgeBeziers.Length} numbers, not 12 * 16");
+    for (var k = 3; k < edgeBeziers.Length; k += 4)
+        if (edgeBeziers[k] != 1.0) return Fail("edge_beziers: a line's weights are not one");
+    if (cube2.IsocurveBeziers(4).Length != 0) return Fail("isocurve_beziers: a flat face drew an isocurve");
+    using var cylinder = Solid.Cylinder(1, 3);
+    var rings = cylinder.IsocurveBeziers(3);
+    if (rings.Length == 0 || rings.Length % 16 != 0) return Fail($"isocurve_beziers: a cylinder gives {rings.Length} numbers");
+    if (cylinder.IsocurveBeziers(6).Length <= rings.Length) return Fail("isocurve_beziers: a denser grid drew no more lines");
+    var circleBeziers = cylinder.EdgeBeziers();
+    if (!Enumerable.Range(0, circleBeziers.Length / 4).Any(i => circleBeziers[4 * i + 3] < 0.99))
+        return Fail("edge_beziers: a circle's Beziers are not exact conics");
+    try { cube2.EdgeBeziers(-1); return Fail("edge_beziers: a negative tolerance did not throw"); }
+    catch (BuildException e) when (e.Message.Contains("tolerance must be positive and finite")) { }
+}
+// Several solids as one mesh file (test_mesh_file_writes_several_solids_in_each_format).
+{
+    using var meshA = Solid.Cuboid(2, 2, 2);
+    using var meshUnit = Solid.Cuboid(1, 1, 1);
+    using var meshB = meshUnit.Translate(5, 0, 0);
+    var both = new[] { meshA, meshB };
+    var meshStl = Blacksmith.MeshFile(both, "stl");
+    if (BitConverter.ToUInt32(meshStl, 80) != 24 || meshStl.Length != 84 + 50 * 24) return Fail($"mesh_file: the binary STL is {meshStl.Length} bytes");
+    var stlText = Encoding.UTF8.GetString(Blacksmith.MeshFile(both, "stl-ascii", names: ["plate", "pin"]));
+    if (!stlText.StartsWith("solid plate") || stlText.Split("facet normal").Length - 1 != 24) return Fail("mesh_file: the ASCII STL");
+    var obj = Encoding.UTF8.GetString(Blacksmith.MeshFile(both, "obj", names: ["plate", "pin"]));
+    if (!obj.Contains("o plate") || !obj.Contains("o pin")) return Fail("mesh_file: the OBJ names no objects");
+    var glb = Blacksmith.MeshFile(both, "glb", looks: [[1, 0, 0, 1, 0, 0.5], [0, 0, 1, 0.5, 1, 0.2]]);
+    if (Encoding.ASCII.GetString(glb, 0, 4) != "glTF") return Fail("mesh_file: the GLB has no glTF magic");
+    using (var gltf = System.Text.Json.JsonDocument.Parse(Blacksmith.MeshFile(both, "gltf")))
+    {
+        var nodeNames = gltf.RootElement.GetProperty("nodes").EnumerateArray().Select(n => n.GetProperty("name").GetString()).ToArray();
+        if (!nodeNames.SequenceEqual(["Solid 1", "Solid 2"])) return Fail($"mesh_file: glTF nodes {string.Join(", ", nodeNames)}");
+    }
+    try { Blacksmith.MeshFile([meshA], "step"); return Fail("mesh_file: format step did not throw"); }
+    catch (BuildException e) when (e.Message.Contains("mesh_file: format \"step\" is not one of")) { }
+    try { Blacksmith.MeshFile([], "stl"); return Fail("mesh_file: no solids did not throw"); }
+    catch (BuildException e) when (e.Message.Contains("mesh_file: no solids")) { }
+    try { Blacksmith.MeshFile([meshA], "obj", names: ["a", "b"]); return Fail("mesh_file: two names for one solid did not throw"); }
+    catch (BuildException e) when (e.Message.Contains("2 names for 1 solids")) { }
+}
 // The sheet verbs: a face from a profile, a solid's face alone, faces dropped, a trim, a
 // rounded profile and a path along a curve.
 {
@@ -3255,6 +3344,74 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     using var closedL = Profile.Path((0, 0)).LineTo(10, 0).LineTo(10, 8).EndOpen().CloseLoop();
     using var closedWalls = Solid.ExtrudeOpen(closedL, xy, 2);
     if (closedWalls.Faces != 3) return Fail($"close_loop: a closed L has {closedWalls.Faces} walls, not 3");
+    // Sketch curves as profiles (test_sketch_curves_are_profiles_that_draw_as_beziers): a line one
+    // straight Bezier with its thirds on the chord, a closed polyline a Bezier a side, an arc and a
+    // full circle exact quarter conics on the circle, an ellipse four.
+    {
+        static bool Close(double[] got, double[] want, double tol = 1e-9) =>
+            got.Length == want.Length && got.Zip(want).All(p => Math.Abs(p.First - p.Second) <= tol);
+        using var curveLine = Profile.Polyline([(1, 2), (4, 6)]);
+        if (!Close(curveLine.Beziers(), [1, 2, 0, 1, 2, 10.0 / 3, 0, 1, 3, 14.0 / 3, 0, 1, 4, 6, 0, 1]))
+            return Fail("polyline: a line's Bezier is not the chord's thirds");
+        using var tri = Profile.Polyline([(0, 0), (4, 0), (4, 3)], closed: true);
+        if (tri.Beziers().Length != 3 * 16) return Fail("polyline: a closed triangle is not three Beziers");
+        using var curveCircle = Profile.Arc((1, 2), 3, 0, 0);
+        var ringBeziers = curveCircle.Beziers();
+        if (ringBeziers.Length != 4 * 16) return Fail($"arc: a full circle has {ringBeziers.Length / 16} Beziers, not 4");
+        for (var k = 0; k < ringBeziers.Length; k += 16)
+            if (Math.Abs(Math.Sqrt(Math.Pow(ringBeziers[k] - 1, 2) + Math.Pow(ringBeziers[k + 1] - 2, 2)) - 3) > 1e-9 || Math.Abs(ringBeziers[k + 3] - 1) > 1e-9
+                || Math.Abs(ringBeziers[k + 7] - (Math.Sqrt(0.5) * 2 / 3 + 1.0 / 3)) > 1e-9)
+                return Fail($"arc: a circle's Bezier {k / 16} is not an exact quarter conic");
+        using var curveDisc = Solid.Extrude(curveCircle, xy, 1);
+        using var refDisc = Solid.Extrude(Profile.Circle(3), xy, 1);
+        if (Math.Abs(curveDisc.Mass().Volume - refDisc.Mass().Volume) > 1e-6 * refDisc.Mass().Volume)
+            return Fail("arc: the arc circle extrudes to another volume than Circle");
+        using var quarterArc = Profile.Arc((0, 0), 2, 0, Math.PI / 2);
+        var quarter = quarterArc.Beziers();
+        if (Math.Abs(quarter[12]) > 1e-12 || Math.Abs(quarter[13] - 2) > 1e-12) return Fail("arc: a quarter arc does not end at (0, 2)");
+        using var oval = Profile.Ellipse((0, 0), 3, 1);
+        if (oval.Beziers().Length != 4 * 16) return Fail("ellipse: not four Beziers");
+        using var ovalSolid = Solid.Extrude(oval, xy, 1);
+        if (Math.Abs(ovalSolid.Mass().Volume - Math.PI * 3) > 1e-2 * Math.PI * 3) return Fail("ellipse: extruded volume is not pi * 3");
+        var up = Profile.ArcThrough((0, 0), (2, 2), (4, 0)).Beziers();
+        var down = Profile.ArcThrough((0, 0), (2, -2), (4, 0)).Beziers();
+        if (Math.Abs(Enumerable.Range(0, up.Length / 4).Max(i => up[4 * i + 1]) - 2) > 1e-9
+            || Math.Abs(Enumerable.Range(0, down.Length / 4).Min(i => down[4 * i + 1]) + 2) > 1e-9)
+            return Fail("arc_through: the arc does not pass its middle point");
+        var onFront = curveLine.Beziers(new Frame((0, -5, 0), (1, 0, 0), (0, 0, 1), (0, -1, 0)));
+        if (!Close(onFront[0..3], [1, -5, 2]) || !Close(onFront[12..15], [4, -5, 6])) return Fail("beziers: a frame did not carry the line onto its plane");
+        using var exactCopy = Profile.FromBeziers(ringBeziers, recognise: false);
+        if (!Close(exactCopy.Beziers(), ringBeziers)) return Fail("from_beziers: exactCopy exact, the Beziers did not round-trip");
+        using var again = Solid.Extrude(Profile.FromBeziers(ringBeziers), xy, 1);
+        for (var i = 0; i < again.Faces; i++)
+            if (again.FaceKind(i) != "cylinder" && again.FaceKind(i) != "plane") return Fail($"from_beziers: face {i} is a {again.FaceKind(i)}");
+        try { Profile.ArcThrough((0, 0), (1, 1), (2, 2)); return Fail("arc_through: three points in a line did not throw"); }
+        catch (BuildException e) when (e.Message == "profile_arc_through: the arc's three points are in a line") { }
+        try { Profile.Polyline([(0, 0)]); return Fail("polyline: one point did not throw"); }
+        catch (BuildException e) when (e.Message.StartsWith("profile_polyline: a polyline needs at least two points")) { }
+        try { Profile.FromBeziers(Array.Empty<double>()); return Fail("from_beziers: none did not throw"); }
+        catch (BuildException e) when (e.Message.StartsWith("profile_from_beziers: ")) { }
+
+        // test_open_sketch_curves_close_into_loops: a D, a stray line and a ring on its own.
+        using var dLine = Profile.Polyline([(0, 0), (4, 0)]);
+        using var dArc = Profile.ArcThrough((4, 0), (2, 2), (0, 0));
+        using var stray = Profile.Polyline([(9, 9), (10, 9)]);
+        using var loopRing = Profile.Arc((20, 0), 1, 0, 0);
+        var loops = Profile.Loops([stray, dLine, loopRing, dArc]);
+        if (loops.Count != 2 || !loops[0].SequenceEqual([1, 3]) || !loops[1].SequenceEqual([2])) return Fail($"loops: got {string.Join(";", loops.Select(l => string.Join(",", l)))}");
+        using var spur = Profile.Polyline([(0, 0), (-3, 0)]);
+        if (Profile.Loops([dLine, dArc, spur]).Count != 0) return Fail("loops: a corner of three ends gave a loop");
+        var order = Profile.ChainOrder([dArc, dLine]);
+        if (!order.SequenceEqual([(0, false), (1, false)])) return Fail("chain_order: the D's order is wrong");
+        using var back = Profile.Polyline([(7, 0), (4, 0)]);
+        if (!Profile.ChainOrder([dLine, back]).SequenceEqual([(0, false), (1, true)])) return Fail("chain_order: the turned piece is not flagged");
+        try { Profile.ChainOrder([dLine, stray]); return Fail("chain_order: a piece meeting none did not throw"); }
+        catch (BuildException e) when (e.Message == "chain: piece 1 does not meet the others") { }
+        using var holed2 = Profile.Rect(9, 9).WithHole(Profile.Circle(1));
+        try { Profile.Loops([holed2]); return Fail("loops: a piece with holes did not throw"); }
+        catch (BuildException e) when (e.Message == "profile_loops: piece 0 has holes") { }
+        Console.WriteLine("sketch curves: polyline, arc, arc_through, ellipse, from_beziers, beziers, loops, chain_order ok");
+    }
     // Push-pull: a cube's top raised is one taller box, six faces, not a box and a prism.
     using var cube = Solid.Cuboid(10, 10, 10);
     using var raised = cube.PushPull(cube.SelectFace(Selector.Max(Axis.Z)), 5);
@@ -3765,6 +3922,29 @@ using (var opened = Solid.Open(step))
     if (opened.Faces != rounded.Faces) return Fail($"Solid.Open gave {opened.Faces} faces, not {rounded.Faces}");
     Console.WriteLine($"Solid.Open: {opened.Faces} faces");
 }
+// An OpenSCAD file is one exact solid where the reader library carries the kernel's builder
+// (`cadaclysm-capi`'s `openscad-brep`), a mesh with no solid in the Reader flavour; a flat
+// sheet is a mesh with no solid in both, and refused by name.
+{
+    var scadDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke-scad");
+    System.IO.Directory.CreateDirectory(scadDir);
+    var scadSheet = System.IO.Path.Combine(scadDir, "sheet.scad");
+    System.IO.File.WriteAllText(scadSheet, "square(10);\n");
+    try { Solid.Open(scadSheet).Dispose(); return Fail("a flat OpenSCAD sheet opened as a solid"); }
+    catch (Exception e) when (e.Message.StartsWith("open: the .scad file draws no B-rep body")) { }
+    var scadCube = System.IO.Path.Combine(scadDir, "cube.scad");
+    System.IO.File.WriteAllText(scadCube, "cube(10);\n");
+    bool exact;
+    using (var probe = Cadaclysm.Cadaclysm.Open(scadCube))
+        exact = probe.Walk().Any(n => { using var brep = n.Brep; return brep is not null; });
+    if (exact)
+    {
+        using var cubeSolid = Solid.Open(scadCube);
+        if (Math.Abs(cubeSolid.Mass().Volume - 1000) > 1e-6) return Fail($"Solid.Open(cube.scad) has volume {cubeSolid.Mass().Volume}, not 1000");
+        Console.WriteLine($"Solid.Open: cube.scad is {cubeSolid.Faces} faces of volume 1000");
+    }
+    else Console.WriteLine("Solid.Open: this reader library reads OpenSCAD as a mesh");
+}
 // The same solid as SAT, written by the library itself, read back the same way.
 var sat = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke.sat");
 rounded.Sat(sat);
@@ -3816,7 +3996,7 @@ using (var back = Cadaclysm.Cadaclysm.Open(brepPath))
     if (femMesh.MinAngle <= 0 || femMesh.MinAngle >= 90 || femMesh.LongestEdge <= 0
         || femMesh.WorstTriangle >= femMesh.Triangles.Length / 3)
         return Fail($"fem: the quality figures read {femMesh}");
-    if (path.EndsWith("cube.scad"))
+    if (cubeIsMesh)
     {
         // # Catches FromMesh read off the neighbouring `Watertight` field -- which is true for
         // this body too, so only a body where the two differ separates them (the B-rep below).
@@ -3845,6 +4025,8 @@ using (var back = Cadaclysm.Cadaclysm.Open(brepPath))
     // them through and letting the library decide, would refuse calls this ABI accepts. (Both
     // *are* refused on a B-rep body, which the block below checks, so this is a pass-through
     // check and not a claim that the numbers are unchecked everywhere.)
+    // (A B-rep cube refuses them, as the paragraph says: only a mesh-only body is checked here.)
+    if (femMesh.FromMesh)
     foreach (var (why, mesh) in new (string, global::Cadaclysm.FemMesh)[]
              {
                  ("tolerance 0", first.FemMesh(tolerance: 0)),
@@ -5296,6 +5478,105 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             try { _ = rim.Degree; } catch (ObjectDisposedException e) { gone = e.Message; }
             if (gone != "nurbs_curve: closed (Parameter 'NurbsCurve')" && !gone.StartsWith("nurbs_curve: closed")) return Fail($"nurbs curve: a disposed curve read gave '{gone}'");
         }
+        // 9. test_a_traced_roof_faired_has_no_inflection_past_the_header
+        {
+            var roof2d = new (double X, double Z)[] { (1717, 1110), (1848, 1191), (1979, 1262), (2110, 1330), (2242, 1356), (2504, 1367), (2767, 1369), (3029, 1364),
+                (3160, 1354), (3423, 1304), (3554, 1251), (3686, 1207), (3817, 1165), (3948, 1123), (4079, 1078) };
+            var pts = roof2d.Select(p => (p.X, 0.0, p.Z)).ToArray();
+            double Header(NurbsCurve c) => c.DivideByCount(400).OrderBy(a => D3((a.Point[0], a.Point[1], a.Point[2]), pts[4])).First().Parameter;
+            using var through = NurbsCurve.Through(pts);
+            var tHeader = Header(through);
+            var wobbles = through.Inflections().Where(a => a.Parameter > tHeader).ToList();
+            if (wobbles.Count < 3) return Fail($"fair: the traced roof has {wobbles.Count} inflections past the header");
+            foreach (var a in wobbles)
+                if (D3(through.Point(a.Parameter), (a.Point[0], a.Point[1], a.Point[2])) >= 1e-9 || a.Error != 0.0) return Fail($"fair: an inflection at {a.Parameter} is off its curve");
+            var tolerance = 5.25;   // two pixels of the drawing
+            using var roof = NurbsCurve.Fair(pts, tolerance: tolerance, noInflection: (4, null));
+            if (roof.Degree != 5 || roof.FitError is not { } fe || fe < 0.0 || fe > tolerance) return Fail($"fair: degree {roof.Degree}, fit error {roof.FitError}");
+            tHeader = Header(roof);
+            if (roof.Inflections().Any(a => a.Parameter > tHeader + 1e-6)) return Fail("fair: the faired roof still turns over past the header");
+            var kc = roof.KnotContinuity();
+            if (!(kc.Angle < 1e-6 && kc.Curvature < 1e-9)) return Fail($"fair: knot continuity {kc}");
+            var tight = Refused(() => NurbsCurve.Fair(pts, tolerance: 0.05, noInflection: (null, null)).Dispose());
+            if (!tight.StartsWith("nurbs_curve_fair: ") || !tight.Contains("no curve free of inflections")) return Fail($"fair: too tight a tolerance gave '{tight}'");
+            var d2 = Refused(() => NurbsCurve.Fair(pts, degree: 2, tolerance: tolerance).Dispose());
+            if (!d2.StartsWith("nurbs_curve_fair: ") || !d2.Contains("degree 2")) return Fail($"fair: degree 2 gave '{d2}'");
+            using var faired = through.Faired(tolerance: 1.5 * tolerance, noInflection: through.Domain);
+            if (faired.Inflections().Count != 0 || faired.FitError is not { } ffe || ffe > 1.6 * tolerance) return Fail($"faired: {faired.Inflections().Count} inflections, fit error {faired.FitError}");
+            Console.WriteLine($"fair: roof {wobbles.Count} wobbles -> none past the header, fit error {fe:g4}; faired {ffe:g4}");
+        }
+
+        // 10. test_edge_continuity_reads_a_crease_and_a_fillet_seam
+        {
+            using var block = Solid.Cuboid(40, 30, 20);
+            var r = block.EdgeContinuity(0, samples: 16);
+            if (!(Math.Abs(r.Angle - Math.PI / 2) < 1e-9 && r.Gap < 1e-9 && r.Curvature < 1e-9 && r.Samples == 17)) return Fail($"edge continuity: the box crease read {r}");
+            using var filleted = block.Fillet(new[] { 0 }, 4.0);
+            var seams = new List<Continuity>();
+            foreach (var e in filleted.Edges)
+            {
+                Continuity k;
+                try { k = filleted.EdgeContinuity(e); }
+                catch (BuildException) { continue; }   // an edge of one face
+                if (k.Angle < 1e-6) seams.Add(k);
+            }
+            // The fillet's two tangent seams, its curvature a quarter where the flat faces' is zero.
+            if (seams.Count != 2 || seams.Any(k => Math.Abs(k.Curvature - 0.25) >= 1e-4)) return Fail($"edge continuity: fillet seams {string.Join(", ", seams)}");
+            var far = Refused(() => block.EdgeContinuity(999));
+            if (!far.StartsWith("edge_continuity: ")) return Fail($"edge continuity: edge 999 gave '{far}'");
+        }
+
+        // 11. test_a_wobbly_loft_faired_turns_no_curvature_over
+        {
+            // Eleven lines across a shallow arch, each lifted or dropped by 0.4 in turn: a loft through them ripples.
+            var lines = new List<NurbsCurve>();
+            for (var k = 0; k < 11; k++)
+            {
+                double x = 10.0 * k, z = -0.01 * (x - 50.0) * (x - 50.0) + (k % 2 == 0 ? 0.4 : -0.4);
+                lines.Add(new NurbsCurve(new[] { (x, 0.0, z), (x, 40.0, z) }, 1));
+            }
+            using var loft = Solid.LoftCurves(lines, degree: 3);
+            foreach (var l in lines) l.Dispose();
+            var t = loft.CurvatureTurns(samples: 32);
+            if (t.Samples != 32 || t.MeanTurns.Count == 0 || t.MeanPositive + t.MeanNegative <= 1) return Fail($"curvature turns: the wobbly loft read {t}");
+            foreach (var a in t.MeanTurns)
+                if (Math.Abs(Math.Sqrt(a.Tangent[0] * a.Tangent[0] + a.Tangent[1] * a.Tangent[1] + a.Tangent[2] * a.Tangent[2]) - 1.0) >= 1e-9
+                    || a.Point[0] < 0.0 || a.Point[0] > 100.0 || a.Point[2] <= -26.0 || a.Point[2] >= 1.0) return Fail($"curvature turns: a turn at ({a.Point[0]}, {a.Point[1]}, {a.Point[2]})");
+            // The lines run along u, the loft's v across them: the end lines kept, held along v.
+            using var faired = loft.Faired(keep: (null, null, 0, 0), tolerance: 1.0, noInflection: "v");
+            if (faired.SheetError is not { } se || se < 0.0 || se > 1.05) return Fail($"faired: sheet error {faired.SheetError}");
+            var ft = faired.CurvatureTurns(samples: 32);
+            if (ft.MeanTurns.Count != 0 || ft.MeanPositive + ft.MeanNegative != 1) return Fail($"faired: still turns {ft}");
+            using var coarse = loft.Faired(keep: (null, null, 0, 0), tolerance: 1.0, controls: (6, 8), noInflection: "v");
+            if (coarse.SheetError > 1.05 || coarse.CurvatureTurns().MeanTurns.Count != 0) return Fail($"faired: on a coarse net {coarse.SheetError}");
+            var d2 = Refused(() => loft.Faired(tolerance: 1.0, degree: 2).Dispose());
+            if (!d2.StartsWith("surface_faired: ") || !d2.Contains("degree 2")) return Fail($"faired: degree 2 gave '{d2}'");
+            var tight = Refused(() => loft.Faired(keep: (null, null, 0, 0), tolerance: 0.01, noInflection: "v").Dispose());
+            if (!tight.StartsWith("surface_faired: ") || !tight.Contains("no fair free of inflections")) return Fail($"faired: too tight gave '{tight}'");
+            string badHeld;
+            try { loft.Faired(noInflection: "w").Dispose(); badHeld = "(no exception)"; } catch (ArgumentException e) { badHeld = e.Message; }
+            if (!badHeld.Contains("noInflection")) return Fail($"faired: noInflection 'w' gave '{badHeld}'");
+            var face7 = Refused(() => loft.CurvatureTurns(face: 7));
+            if (!face7.StartsWith("curvature_turns: ")) return Fail($"curvature turns: face 7 gave '{face7}'");
+            Console.WriteLine($"surface faired: loft {t.MeanTurns.Count} mean turns -> none, sheet error {se:g4}");
+        }
+
+        // 12. test_highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam
+        {
+            using var cube = Solid.Cuboid(2, 2, 2);
+            var hk = cube.HighlightKink(0, samples: 16);
+            if (!(hk.Angle < 1e-9 && hk.Samples == 17)) return Fail($"highlight kink: the cube edge read {hk}");
+            using var hkRounded = cube.Fillet(new[] { 0 }, 0.5);
+            var worst = 0.0;
+            foreach (var e in hkRounded.Edges)
+            {
+                try { worst = Math.Max(worst, hkRounded.HighlightKink(e).Angle); }
+                catch (BuildException) { }   // an edge of one face
+            }
+            if (worst <= Math.PI / 4) return Fail($"highlight kink: the fillet seams read at most {worst}");
+            var far = Refused(() => cube.HighlightKink(999));
+            if (!far.StartsWith("highlight_kink: ")) return Fail($"highlight kink: edge 999 gave '{far}'");
+        }
         Console.WriteLine("nurbs curve: reads, edits, joins, tweens, faces, refusals, maps, values and lifetimes all read back");
     }
     // 4b3. sheets from curves: Python's test_surfaces_from_curves_are_sheets .. test_fillet_rounds_a_spline_edge_at_a_constant_and_a_varying_radius
@@ -5565,6 +5846,48 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             if (faces != (1, 0, 4, 1) || window.Faces != 6) return Fail($"recess: the window has faces {faces}, {window.Faces} in all");
         }
 
+        // 6b'. test_mirror_join_squares_a_half_roof_to_its_mirror
+        {
+            // Half a roof domed both ways, lofted out from the centre plane y = 0, leaning as it
+            // leaves the plane: mirrored as it is, the seam is a crease; squared first, it is smooth.
+            NurbsCurve Section(double y) => NurbsCurve.Through(Enumerable.Range(0, 9).Select(i => 10.0 * i)
+                .Select(x => (x, y, 20 * Math.Sin(Math.PI * x / 80) - 0.01 * y * y + 0.05 * y + 0.002 * x * y)));
+            var sections = new[] { 0.0, 10, 20, 30 }.Select(Section).ToList();
+            using var half = Solid.LoftCurves(sections);
+            foreach (var s in sections) s.Dispose();
+            var plane = new Frame((0, 0, 0), (1, 0, 0), (0, 0, -1), (0, 1, 0));
+            var (creased, r) = half.MirrorJoin(plane, tolerance: 0.01);
+            using (creased)
+            {
+                if (creased.Faces != 2 || r.Seams != 1 || r.Squared != 0 || r.Moved != 0) return Fail($"mirror_join as it is: {r}");
+                if (!(r.Gap < 1e-9 && r.Angle > 5 * Math.PI / 180 && r.Curvature > 1e-4)) return Fail($"mirror_join crease: {r}");
+            }
+            var (smooth, r2) = half.MirrorJoin(plane, snap: 0.5, tolerance: 0.01);
+            using var _s = smooth;
+            if (smooth.Faces != 2 || r2.Seams != 1 || r2.Squared != 1 || r2.Naked != 6) return Fail($"mirror_join squared: {r2}");
+            if (!(r2.Moved > 0 && r2.Gap < 1e-9 && r2.Angle < 1e-9 && r2.Curvature < 1e-9)) return Fail($"mirror_join smooth: {r2}");
+            double body = smooth.Mass().Area, one = half.Mass().Area;
+            if (Math.Abs(body - 2 * one) >= 0.01 * one) return Fail($"mirror_join: area {body} against {one}");
+            var (type, msg) = CsThrown(() => smooth.MirrorJoin(plane));
+            if (type != nameof(BuildException) || !msg.StartsWith("mirror_join: the half lies on both sides of the plane")) return Fail($"mirror_join: a whole body gave {type}: {msg}");
+        }
+
+        // 6c. curves on a sheet: a ring on a square offset along it, split along it, parted by a panel gap
+        {
+            using var sq = CsRectSheet((0, 0, 0), (1, 0, 0), (0, 1, 0), 40, 40);
+            using var ringOn = NurbsCurve.Through(Enumerable.Range(0, 48).Select(i => (8 * Math.Cos(2 * Math.PI * i / 48), 8 * Math.Sin(2 * Math.PI * i / 48), 0.0)), 3, true);
+            using var inner = ringOn.OffsetOnSheet(sq, 2.0, 1e-3);
+            var p0 = inner.Point(inner.Domain.Lo);
+            if (inner.FitError is not { } fe || fe > 1e-3 || Math.Abs(Math.Sqrt(p0.X * p0.X + p0.Y * p0.Y) - 6) > 1e-3) return Fail($"offset_on_sheet: {p0}, fit {inner.FitError}");
+            using var halves = sq.SplitAlongCurve(ringOn, 1e-3);
+            if (halves.Faces != 2) return Fail($"split_along_curve: {halves.Faces} faces");
+            var (island, rest) = sq.PanelGap(ringOn, 4.0, -10.0, 1e-3);
+            using var _i = island;
+            using var _r = rest;
+            if (island.Faces != 3 || rest.Faces != 3 || Math.Abs(island.Mass().Area - 156 * Math.PI) > 0.01)
+                return Fail($"panel_gap: {island.Faces}/{rest.Faces} faces, island {island.Mass().Area}");
+        }
+
         // 7. test_continuity_match_and_blend
         {
             using var a0 = CsLine((-1, 0, 0), (0, 0, 0));
@@ -5723,6 +6046,18 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             using var cube = Solid.Cuboid(10, 10, 10);
             var (t, msg) = CsThrown(() => cube.Fillet(new[] { 0 }, 1.0, radiusEnd: 2.0));
             if (t != nameof(BuildException) || !msg.Contains("a varying radius rounds only spline edges")) return Fail($"fillet: a varying radius on a cube gave {t}: {msg}");
+            // A chain of one with two stations at its ends is the varying fillet.
+            var law = new[] { (0.0, 8.0), (1.0, 20.0) };
+            using var lawed = shell.FilletLaw(crease, law, 1e-3);
+            if (lawed.Faces != 3 || Math.Abs(Area(lawed) - Area(varying)) > 1e-3) return Fail($"fillet_law: {lawed.Faces} faces, area {Area(lawed)} against the varying fillet's {Area(varying)}");
+            using var swell = shell.FilletLaw(crease.Select(e => e.Index), new[] { (0.0, 8.0), (0.5, 20.0), (1.0, 8.0) }, 1e-3);
+            using var low = shell.Fillet(crease, 8.0, 1e-3);
+            using var high = shell.Fillet(crease, 20.0, 1e-3);
+            if (!(Area(swell) < Area(low) && Area(swell) > Area(high))) return Fail($"fillet_law: the swell's area {Area(swell)} is not between 8's {Area(low)} and 20's {Area(high)}");
+            (t, msg) = CsThrown(() => shell.FilletLaw(crease, Array.Empty<(double, double)>(), 1e-3));
+            if (t != nameof(BuildException) || !msg.Contains("at least one station")) return Fail($"fillet_law: no stations gave {t}: {msg}");
+            (t, msg) = CsThrown(() => cube.FilletLaw(new[] { 0 }, law));
+            if (t != nameof(BuildException) || !msg.Contains("a radius law rounds only spline edges")) return Fail($"fillet_law: a cube edge gave {t}: {msg}");
             foreach (var c in rowsA.Concat(rowsB)) c.Dispose();
         }
         Console.WriteLine("sheets from curves: lofts, sweeps, patches, trims, joins, fillets, reports and refusals all read back");
@@ -6196,6 +6531,250 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
     }
     Console.WriteLine("measure: oriented box, lengths, containment and closest points all read back");
 }
+// Closest point from a point: Python's test_closest_point_* .. test_a_nurbs_curve_closest_point_*,
+// every figure a closed form written out here (closest-point P3).
+{
+    bool Within(double a, double b, double tol) => Math.Abs(a - b) <= tol;
+    string Refused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    const double S2 = 0.7071067811865476, S3 = 0.5773502691896258;
+    using (var cube = Solid.Cuboid(10, 10, 10))
+    {
+        // 1. the 10-cube centred on the origin: outside a face, past an edge, past a corner, inside, on
+        var face = cube.ClosestPoint(new double[] { 20, 0, 0 });
+        if (face is null || !Within(face.Distance, 15, 1e-9) || !Near(face.Point, new double[] { 5, 0, 0 }, 1e-9)) return Fail($"closest_point: the face foot reads {face}");
+        if (face.Kind != "face" || face.Edge is not null || !face.Refined || face.Uv is null || !Near(face.Normal, new double[] { 1, 0, 0 }, 1e-9))
+            return Fail($"closest_point: the face foot's feature reads {face} normal {string.Join(",", face.Normal)}");
+        var edge = cube.ClosestPoint(new double[] { 8, 8, 0 })!;
+        if (!Within(edge.Distance, 4.242640687119285, 1e-9) || !Near(edge.Point, new double[] { 5, 5, 0 }, 1e-9)) return Fail($"closest_point: the edge foot reads {edge}");
+        if (edge.Kind != "edge" || edge.Edge is null || edge.Uv is not null || !Near(edge.Normal, new[] { S2, S2, 0 }, 1e-9))
+            return Fail($"closest_point: the edge foot's feature reads {edge} normal {string.Join(",", edge.Normal)}");
+        var corner = cube.ClosestPoint(new double[] { 8, 8, 8 })!;
+        if (!Within(corner.Distance, 5.196152422706632, 1e-9) || !Near(corner.Point, new double[] { 5, 5, 5 }, 1e-9)) return Fail($"closest_point: the corner foot reads {corner}");
+        if (corner.Kind != "vertex" || corner.Edge is not null || corner.Uv is not null || !Near(corner.Normal, new[] { S3, S3, S3 }, 1e-9))
+            return Fail($"closest_point: the corner foot's feature reads {corner}");
+        var inside = cube.ClosestPoint(new double[] { 1, 0, 0 })!;
+        if (!Within(inside.Distance, 4, 1e-9) || !Near(inside.Point, new double[] { 5, 0, 0 }, 1e-9)) return Fail($"closest_point: the inside foot reads {inside}");
+        var on = cube.ClosestPoint(new double[] { 5, 1, 2 })!;
+        if (!Within(on.Distance, 0, 1e-9) || !Near(on.Normal, new double[] { 1, 0, 0 }, 1e-9)) return Fail($"closest_point: the on foot reads {on}");
+        // 2. a foot's Edge is the public edge number: that edge answers the same point
+        var p = new double[] { 8, 8, 1 };
+        var foot = cube.ClosestPoint(p)!;
+        var (t, at, dist) = cube.EdgeClosestPoint((int)foot.Edge!.Value, p);
+        if (!Near(at, new double[] { 5, 5, 1 }, 1e-9) || !Within(dist, 4.242640687119285, 1e-9)) return Fail($"edge_closest_point: edge {foot.Edge} reads {string.Join(",", at)} at {dist}");
+        var start = cube.EdgePointAtLength((int)foot.Edge.Value, 0).Point;   // a straight edge: arc length is the chord
+        var along = cube.EdgePointAtLength((int)foot.Edge.Value, Math.Sqrt(start.Zip(at).Sum(z => (z.First - z.Second) * (z.First - z.Second))));
+        if (!Near(along.Point, at, 1e-9) || !Within(along.Parameter, t, 1e-9)) return Fail($"edge_closest_point: t {t} is not the edge's own parameter");
+        // 3. max distance on both sides of the answer
+        if (cube.ClosestPoint(new double[] { 20, 0, 0 }, 14.9) is not null) return Fail("closest_point: 14.9 found a point 15 away");
+        if (cube.ClosestPoint(new double[] { 20, 0, 0 }, 15.1) is not { } within || !Within(within.Distance, 15, 1e-9)) return Fail("closest_point: 15.1 missed a point 15 away");
+        if (cube.ClosestPoint(new double[] { 20, 0, 0 }, double.PositiveInfinity) is null || cube.ClosestPoint(new double[] { 20, 0, 0 }, double.NaN) is null)
+            return Fail("closest_point: +inf or NaN is a limit");
+        if (cube.ClosestPoint(new double[] { 5, 1, 2 }, 0) is null || cube.ClosestPoint(new double[] { 5.5, 1, 2 }, 0) is not null) return Fail("closest_point: max distance 0 misreads");
+        var negative = Refused(() => cube.ClosestPoint(new double[] { 0, 0, 0 }, -1));
+        if (negative != "closest_point: the max distance must not be negative") return Fail($"closest_point: -1 gave '{negative}'");
+        foreach (var tol in new[] { -1.0, double.PositiveInfinity })
+            if (!Refused(() => cube.ClosestPoint(new double[] { 0, 0, 0 }, null, tol)).StartsWith("closest_point: ")) return Fail($"closest_point: tolerance {tol} is not refused");
+        if (!Refused(() => cube.ClosestPoint(new[] { double.NaN, 0, 0 })).StartsWith("closest_point: ")) return Fail("closest_point: a NaN point is not refused");
+        // 4. one face alone, and the refusals of the face and edge calls
+        var top = Enumerable.Range(0, cube.Faces).First(f => cube.FaceRef(f)[6] > 0.5);
+        var fromTop = cube.FaceClosestPoint(top, new double[] { 20, 0, 0 });
+        if (!Near(fromTop.Point, new double[] { 5, 0, 5 }, 1e-9) || !Within(fromTop.Distance, 15.811388300841896, 1e-9) || fromTop.Kind != "edge" || !fromTop.Refined)
+            return Fail($"face_closest_point: past the top face reads {fromTop}");
+        var inner = cube.FaceClosestPoint(top, new double[] { 1, 2, 9 });
+        if (!Near(inner.Point, new double[] { 1, 2, 5 }, 1e-9) || inner.Kind != "face" || inner.Index != top || inner.Edge is not null || inner.Uv is null
+            || !Near(inner.Normal, new double[] { 0, 0, 1 }, 1e-9))
+            return Fail($"face_closest_point: above the top face reads {inner}");
+        var faceGone = Refused(() => cube.FaceClosestPoint(99, new double[] { 0, 0, 0 }));
+        if (faceGone != "face_closest_point: face 99 of 6") return Fail($"face_closest_point: face 99 gave '{faceGone}'");
+        var edgeGone = Refused(() => cube.EdgeClosestPoint(99, new double[] { 0, 0, 0 }));
+        if (edgeGone != "edge_closest_point: edge 99 of 12") return Fail($"edge_closest_point: edge 99 gave '{edgeGone}'");
+    }
+    // 5. a sphere of radius 2, outside and inside
+    using (var sphere = Solid.Sphere(2))
+    {
+        var foot = sphere.ClosestPoint(new double[] { 0, 3, 4 })!;
+        if (!Within(foot.Distance, 3, 1e-9) || !Near(foot.Point, new[] { 0, 1.2, 1.6 }, 1e-9) || !Near(foot.Normal, new[] { 0, 0.6, 0.8 }, 1e-9) || foot.Kind != "face")
+            return Fail($"closest_point: the sphere reads {foot} normal {string.Join(",", foot.Normal)}");
+        var inside = sphere.ClosestPoint(new[] { 0, 0, 0.5 })!;
+        if (!Within(inside.Distance, 1.5, 1e-9) || !Near(inside.Point, new double[] { 0, 0, 2 }, 1e-9)) return Fail($"closest_point: inside the sphere reads {inside}");
+    }
+    // 6. a projector answers as the one-shot, outlives its solid, and refuses after Dispose
+    var points = new[] { new double[] { 20, 0, 0 }, new double[] { 8, 8, 0 }, new double[] { 8, 8, 8 }, new double[] { 1, 0, 0 }, new double[] { 0, -7, 2 } };
+    PointFoot[] expected;
+    Projector projector;
+    {
+        var cube = Solid.Cuboid(10, 10, 10);
+        expected = points.Select(q => cube.ClosestPoint(q)!).ToArray();
+        projector = cube.Projector();
+        cube.Dispose();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+    }
+    using (projector)
+    {
+        for (var i = 0; i < points.Length; i++)
+        {
+            var got = projector.ClosestPoint(points[i])!;
+            var want = expected[i];
+            if (got.Distance != want.Distance || !Near(got.Point, want.Point, 0) || got.Kind != want.Kind || got.Index != want.Index || got.Edge != want.Edge
+                || !Near(got.Normal, want.Normal, 0) || got.Refined != want.Refined || (got.Uv is null) != (want.Uv is null))
+                return Fail($"projector: {string.Join(",", points[i])} reads {got}, the one-shot {want}");
+        }
+        if (projector.ClosestPoint(new double[] { 20, 0, 0 }, 14.9) is not null) return Fail("projector: 14.9 found a point 15 away");
+        if (projector.ClosestPoint(new double[] { 20, 0, 0 }, 15.1)?.Distance != expected[0].Distance) return Fail("projector: 15.1 missed a point 15 away");
+        var negative = Refused(() => projector.ClosestPoint(new double[] { 0, 0, 0 }, -1));
+        if (negative != "projector_closest_point: the max distance must not be negative") return Fail($"projector: -1 gave '{negative}'");
+    }
+    projector.Dispose();
+    try { projector.ClosestPoint(new double[] { 0, 0, 0 }); return Fail("projector: a disposed projector answered"); }
+    catch (ObjectDisposedException) { }
+    using (var ball = Solid.Sphere(1))
+        if (!Refused(() => ball.Projector(-1).Dispose()).StartsWith("projector_new: ")) return Fail("projector: tolerance -1 is not refused");
+    // 7. a NURBS circle: the nearest point, and a point on its axis (not unique)
+    using (var circle = new Circle(new double[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }, 2).ToNurbs())
+    {
+        var foot = circle.ClosestPoint((0, 5, 0));
+        if (!Within(foot.Point.X, 0, 1e-9) || !Within(foot.Point.Y, 2, 1e-9) || !Within(foot.Point.Z, 0, 1e-9) || !foot.Unique) return Fail($"nurbs closest_point: reads {foot}");
+        var on = circle.Point(foot.T);
+        if (!Within(on.X, foot.Point.X, 1e-12) || !Within(on.Y, foot.Point.Y, 1e-12)) return Fail($"nurbs closest_point: t {foot.T} is not the point's parameter");
+        var axis = circle.ClosestPoint((0, 0, 3));
+        if (axis.Unique || !Within(Math.Sqrt(axis.Point.X * axis.Point.X + axis.Point.Y * axis.Point.Y + axis.Point.Z * axis.Point.Z), 2, 1e-9)) return Fail($"nurbs closest_point: the axis reads {axis}");
+        if (!Refused(() => circle.ClosestPoint((double.PositiveInfinity, 0, 0))).StartsWith("nurbs_curve_closest_point: ")) return Fail("nurbs closest_point: an infinite point is not refused");
+    }
+    Console.WriteLine("closest point: cube, sphere, max distance, projector, face, edge and NURBS curve read back");
+}
+// Closest points from a curve: Python's test_a_nurbs_curve_closest_point_within_reach ..
+// test_the_nearest_object_to_a_curve_names_its_item, every figure a closed form written out here
+// (curve closest points P3), at the origin and shifted far out.
+{
+    bool Within(double a, double b, double tol) => Math.Abs(a - b) <= tol;
+    string Refused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    double[] Shift(double[] p, double[] s) => new[] { p[0] + s[0], p[1] + s[1], p[2] + s[2] };
+    (double, double, double) T3(double[] p) => (p[0], p[1], p[2]);
+    NurbsCurve Segment(double[] a, double[] b) => new NurbsCurve(new[] { T3(a), T3(b) }, 1);
+    bool SameUv(double[]? a, double[]? b) => a is null ? b is null : b is not null && Near(a, b, 0);
+    bool SameFoot(CurveBodyFoot? a, CurveBodyFoot? b) =>
+        a is not null && b is not null && a.Distance == b.Distance && a.T == b.T && Near(a.PointOnCurve, b.PointOnCurve, 0)
+        && Near(a.PointOnBody, b.PointOnBody, 0) && a.Kind == b.Kind && a.Index == b.Index && a.Edge == b.Edge && SameUv(a.Uv, b.Uv)
+        && Near(a.Normal, b.Normal, 0) && a.Refined == b.Refined && a.Crossing == b.Crossing;
+    bool SamePair(CurvePair? a, CurvePair? b) =>
+        a is not null && b is not null && a.Distance == b.Distance && a.TA == b.TA && Near(a.PointA, b.PointA, 0) && a.TB == b.TB && Near(a.PointB, b.PointB, 0);
+    var shifts = new[] { new double[] { 0, 0, 0 }, new double[] { 1e4, -1e4, 5e3 }, new double[] { 1e6, -1e6, 5e5 } };
+    foreach (var s in shifts)
+    {
+        var tol = 1e-12 * (1 + s.Max(Math.Abs));
+        // 1. a point 4 off a line at t 0.3: found within 4.1, null within 3.9, no limit as none
+        using (var line = Segment(Shift(new double[] { 0, 0, 0 }, s), Shift(new double[] { 10, 0, 0 }, s)))
+        {
+            var p = T3(Shift(new double[] { 3, 4, 0 }, s));
+            var foot = line.ClosestPoint(p, 4.1);
+            if (foot is null || !Within(foot.T, 0.3, 1e-12) || !Near(new[] { foot.Point.X, foot.Point.Y, foot.Point.Z }, Shift(new double[] { 3, 0, 0 }, s), tol) || !foot.Unique)
+                return Fail($"nurbs closest_point within: reads {foot} at shift {s[0]}");
+            if (line.ClosestPoint(p, 3.9) is not null) return Fail("nurbs closest_point within: 3.9 found a point 4 away");
+            var unlimited = line.ClosestPoint(p);
+            if (line.ClosestPoint(p, null) != unlimited || line.ClosestPoint(p, double.NaN) != unlimited || line.ClosestPoint(p, double.PositiveInfinity) != unlimited)
+                return Fail("nurbs closest_point within: null, NaN or +inf is a limit");
+        }
+        // 2. two skew lines: 2 apart at t_a 0.3, t_b 0.5; the sides swap with the arguments
+        using (var a = Segment(Shift(new double[] { 0, 0, 0 }, s), Shift(new double[] { 10, 0, 0 }, s)))
+        using (var b = Segment(Shift(new double[] { 3, -5, 2 }, s), Shift(new double[] { 3, 5, 2 }, s)))
+        {
+            foreach (var limit in new double?[] { 2.1, null, double.NaN, double.PositiveInfinity })
+            {
+                var pair = a.ClosestPoints(b, limit);
+                if (pair is null || !Within(pair.Distance, 2, 1e-9) || !Within(pair.TA, 0.3, 1e-12) || !Near(pair.PointA, Shift(new double[] { 3, 0, 0 }, s), tol)
+                    || !Within(pair.TB, 0.5, 1e-12) || !Near(pair.PointB, Shift(new double[] { 3, 0, 2 }, s), tol))
+                    return Fail($"closest_points: skew lines read {pair} at limit {limit} shift {s[0]}");
+            }
+            var swapped = b.ClosestPoints(a)!;
+            if (!Within(swapped.TA, 0.5, 1e-12) || !Within(swapped.TB, 0.3, 1e-12) || !Near(swapped.PointA, Shift(new double[] { 3, 0, 2 }, s), tol))
+                return Fail($"closest_points: swapped reads {swapped}");
+            if (a.ClosestPoints(b, 1.9) is not null) return Fail("closest_points: 1.9 found lines 2 apart");
+            var negative = Refused(() => a.ClosestPoints(b, -1));
+            if (negative != "nurbs_curve_closest_points: the max distance must not be negative") return Fail($"closest_points: -1 gave '{negative}'");
+        }
+        // 3. a line whose start lies sqrt(2) off the 2-cube's (1, y, 1) edge: an edge foot; the
+        // limit on both sides; a projector answers as the one-shot, field for field
+        using (var cube = Solid.Cuboid(2, 2, 2).Translate(s[0], s[1], s[2]))
+        using (var line = Segment(Shift(new double[] { 2, -0.5, 2 }, s), Shift(new double[] { 2.5, 0.5, 2.5 }, s)))
+        using (var projector = cube.Projector())
+        {
+            var edgeTol = 1e-9 * (1 + s.Max(Math.Abs));
+            var foot = cube.CurveClosestPoints(line, 1.5);
+            if (foot is null || foot.Crossing || foot.Kind != "edge" || foot.Uv is not null || foot.Edge is null || !Within(foot.Distance, Math.Sqrt(2), edgeTol)
+                || !Within(foot.T, 0, 1e-9) || !Near(foot.PointOnCurve, Shift(new double[] { 2, -0.5, 2 }, s), edgeTol) || !Near(foot.PointOnBody, Shift(new double[] { 1, -0.5, 1 }, s), edgeTol))
+                return Fail($"curve_closest_points: past the edge reads {foot} at shift {s[0]}");
+            var (_, at, dist) = cube.EdgeClosestPoint((int)foot.Edge.Value, foot.PointOnCurve);
+            if (!Near(at, foot.PointOnBody, edgeTol) || !Within(dist, foot.Distance, edgeTol)) return Fail($"curve_closest_points: edge {foot.Edge} is not the public edge");
+            if (cube.CurveClosestPoints(line, 1.4) is not null || projector.CurveClosestPoints(line, 1.4) is not null) return Fail("curve_closest_points: 1.4 found an edge sqrt(2) away");
+            if (!SameFoot(projector.CurveClosestPoints(line, 1.5), foot) || !SameFoot(projector.CurveClosestPoints(line), cube.CurveClosestPoints(line)))
+                return Fail($"projector curve_closest_points: reads {projector.CurveClosestPoints(line)}, the one-shot {foot}");
+            if (!SameFoot(cube.CurveClosestPoints(line, double.NaN), cube.CurveClosestPoints(line, double.PositiveInfinity))) return Fail("curve_closest_points: NaN and +inf differ");
+        }
+    }
+    // 4. a line through the 2-cube crosses its -x face first, at t 1/3, distance 0
+    using (var cube = Solid.Cuboid(2, 2, 2))
+    using (var through = Segment(new double[] { -3, 0.1, 0.2 }, new double[] { 3, 0.1, 0.2 }))
+    using (var projector = cube.Projector())
+    {
+        var foot = cube.CurveClosestPoints(through);
+        if (foot is null || !foot.Crossing || foot.Distance != 0 || !Within(foot.T, 1.0 / 3, 1e-9) || !Near(foot.PointOnCurve, new[] { -1, 0.1, 0.2 }, 1e-9)
+            || !Near(foot.PointOnBody, new[] { -1, 0.1, 0.2 }, 1e-9) || foot.Kind != "face" || foot.Edge is not null || foot.Uv is null || !Near(foot.Normal, new double[] { -1, 0, 0 }, 1e-9))
+            return Fail($"curve_closest_points: the line through the cube reads {foot}");
+        if (!SameFoot(projector.CurveClosestPoints(through), foot)) return Fail($"projector curve_closest_points: through the cube reads {projector.CurveClosestPoints(through)}");
+        foreach (var bad in new[] { -1.0, double.PositiveInfinity })
+        {
+            var refused = Refused(() => cube.CurveClosestPoints(through, null, bad));
+            if (refused != "curve_closest_points: tolerance must be positive and finite") return Fail($"curve_closest_points: tolerance {bad} gave '{refused}'");
+        }
+        if (cube.CurveClosestPoints(through, null, 0) is null) return Fail("curve_closest_points: 0 is not an unset tolerance");
+        var negative = Refused(() => cube.CurveClosestPoints(through, -1));
+        if (negative != "curve_closest_points: the max distance must not be negative") return Fail($"curve_closest_points: -1 gave '{negative}'");
+        negative = Refused(() => projector.CurveClosestPoints(through, -1));
+        if (negative != "projector_curve_closest_points: the max distance must not be negative") return Fail($"projector curve_closest_points: -1 gave '{negative}'");
+    }
+    // 5. the nearest object: a curve wins (answer kind 1), a point wins (2), a solid or a
+    // projector alone (0); the limit, an empty list and the refusals
+    using (var cube = Solid.Cuboid(2, 2, 2))
+    using (var line = Segment(new double[] { 2, -0.5, 2 }, new double[] { 2.5, 0.5, 2.5 }))
+    using (var other = Segment(new double[] { 2, -0.5, 2.3 }, new double[] { 2, 5, 2.3 }))   // sqrt(0.045) off `line`, at t 0.3
+    using (var projector = cube.Projector())
+    {
+        var near = line.ClosestObject(new object[] { (0.0, 0.0, 10.0), cube, other, projector, new double[] { 9, 9, 9 } });
+        var pair = line.ClosestPoints(other);
+        if (near is null || near.Which != 2 || near.Body is not null || !SamePair(near.Pair, pair) || !Within(near.Distance, Math.Sqrt(0.045), 1e-9) || !Within(near.T, 0.3, 1e-9))
+            return Fail($"closest_object: the curve's win reads {near}");
+        if (near.Distance != pair!.Distance || near.T != pair.TA || !Near(near.PointOnCurve, pair.PointA, 0) || !Near(near.PointOnItem, pair.PointB, 0))
+            return Fail($"closest_object: the curve's win is not its pair {pair}");
+        var point = line.ClosestObject(new object[] { cube, new double[] { 2.5, 0.6, 2.5 } });
+        if (point is null || point.Which != 1 || point.Body is not null || point.Pair is not null || !Within(point.Distance, 0.1, 1e-9) || !Within(point.T, 1, 1e-9)
+            || !Near(point.PointOnItem, new[] { 2.5, 0.6, 2.5 }, 0) || !Near(point.PointOnCurve, new[] { 2.5, 0.5, 2.5 }, 1e-9))
+            return Fail($"closest_object: the point's win reads {point}");
+        var solid = line.ClosestObject(new object[] { cube });
+        if (solid is null || solid.Which != 0 || solid.Pair is not null || !SameFoot(solid.Body, cube.CurveClosestPoints(line)) || solid.Body!.Edge is null
+            || !Near(solid.PointOnItem, solid.Body.PointOnBody, 0))
+            return Fail($"closest_object: the solid alone reads {solid}");
+        var prepared = line.ClosestObject(new object[] { projector }, null, null);
+        if (prepared is null || prepared.Which != 0 || !SameFoot(prepared.Body, projector.CurveClosestPoints(line))) return Fail($"closest_object: the projector alone reads {prepared}");
+        if (line.ClosestObject(new object[] { cube, other }, 0.2) is not null) return Fail("closest_object: 0.2 found an item sqrt(0.045) away");
+        if (line.ClosestObject(new object[] { cube, other }, 0.25)?.Which != 1) return Fail("closest_object: 0.25 missed the curve sqrt(0.045) away");
+        if (line.ClosestObject(Array.Empty<object>()) is not null) return Fail("closest_object: an empty list found something");
+        var negative = Refused(() => line.ClosestObject(new object[] { cube }, -1));
+        if (negative != "nurbs_curve_closest_object: the max distance must not be negative") return Fail($"closest_object: -1 gave '{negative}'");
+        var notItem = Refused(() => line.ClosestObject(new object[] { cube, "hello" }));
+        if (!notItem.StartsWith("nurbs_curve_closest_object: item 1: ")) return Fail($"closest_object: a string gave '{notItem}'");
+        if (!Refused(() => line.ClosestObject(new object[] { new[] { double.NaN, 0, 0 } })).StartsWith("nurbs_curve_closest_object: ")) return Fail("closest_object: a NaN point is not refused");
+    }
+    Console.WriteLine("closest points from a curve: max distance, skew lines, edge, crossing, projector and nearest object read back");
+}
 
 // Tolerances: hole2.3dm (a root sample, scripts/link-samples.py) declares an absolute 0.01 and one
 // degree; a boolean given a null tolerance works at the inputs' effective one, declares nothing
@@ -6269,6 +6848,7 @@ static string? DocumentChecks()
     try
     {
         DocumentResults();
+        DocumentEvaluateWith();
         DocumentSaveLoad();
         DocumentUndoRedo();
         DocumentRefusals();
@@ -6343,6 +6923,33 @@ static void DocumentResults()
     Must(solid.Faces == 6 && Approx(solid.Mass().Volume, 1000), "results: the old result changed with the edit");
     Must(Approx(Volume(doc, "x1"), 2000), $"results: x1 at distance 20 reads {Volume(doc, "x1")}");
     Console.WriteLine("document: evaluates, results outlive an edit");
+}
+
+// 1b. evaluate_with: progress naming the node being built.
+// The plate with a 4 x 4 bar `x2` cut through it (`c1`): a node that reports its progress.
+static Document CutPlate()
+{
+    var doc = Plate();
+    DocAdd(doc, "profile.rect", "\"id\": \"r2\", \"w\": 4, \"h\": 4");
+    DocAdd(doc, "solid.extrude", "\"id\": \"x2\", \"profile\": \"r2\", \"frame\": \"xy\", \"distance\": 20");
+    DocAdd(doc, "solid.cut", "\"id\": \"c1\", \"target\": \"x1\", \"tool\": \"x2\", \"tolerance\": 0.01");
+    return doc;
+}
+static void DocumentEvaluateWith()
+{
+    string plain;
+    using (var quiet = CutPlate()) plain = quiet.Evaluate();
+    Must(States(plain).SequenceEqual(new[] { "ok", "ok", "ok", "ok", "ok" }), $"evaluate_with: the cut plate evaluates to {plain}");
+    using var doc = CutPlate();
+    var ticks = new List<(string Node, string Phase)>();
+    doc.EvaluateWith((node, phase, done, total) => ticks.Add((node, phase)), cheapOnly: true);
+    Must(ticks.Count == 0, $"evaluate_with: a cheap-only pass reported {ticks.Count} ticks");
+    Must(doc.EvaluateWith((node, phase, done, total) => ticks.Add((node, phase))) == plain, "evaluate_with: not the plain statuses");
+    Must(ticks.Any(t => t.Node == "c1" && t.Phase != "start"), "evaluate_with: no progress from the cut c1");
+    var nodes = new[] { "r1", "x1", "r2", "x2", "c1" };
+    Must(ticks.All(t => nodes.Contains(t.Node)), "evaluate_with: a tick names no node");
+    using (var silent = CutPlate()) Must(silent.EvaluateWith(null) == plain, "evaluate_with: a silent pass's statuses differ");
+    Console.WriteLine("document: evaluate_with names the node being built");
 }
 
 // 2. Save, load, open, refusals.

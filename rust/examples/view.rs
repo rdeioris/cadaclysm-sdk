@@ -3,11 +3,18 @@
 //!   cargo run --example view                 in a window of its own (cadaclysm_view), until closed
 //!   cargo run --example view -- offscreen    no window: writes view.png
 //!
-//! A window needs a display; `offscreen` needs only a GPU adapter.
+//! A window needs a display; `offscreen` needs only a GPU adapter. Native only: in the
+//! browser a view is made with `View::on_canvas`.
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 use cadaclysm_sdk::blacksmith::Solid;
+#[cfg(not(target_arch = "wasm32"))]
 use cadaclysm_sdk::view::{self, Standard, View, ViewOptions};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> cadaclysm_sdk::Result<()> {
     let offscreen = std::env::args().any(|a| a == "offscreen");
     view::use_wgpu()?;

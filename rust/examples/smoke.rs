@@ -59,6 +59,10 @@ fn run() -> Result<(), String> {
         )?;
         check(scene.links().is_empty() && scene.joints().is_empty(), "the cube has links or joints")?;
     }
+    // cube.scad is a mesh with no brep in the Reader flavour and an exact box where the kernel's
+    // builder is linked (`openscad-brep`, as every shipped desktop library is): the figures below
+    // that only a mesh has are pinned for the first, and the other has its own.
+    let cube_is_mesh = is_cube && scene.walk().all(|n| n.brep().is_none());
 
     // The mechanism facts, from mechanism.stp beside the sample this smoke was given.
     mechanism_checks(&path)?;
@@ -80,7 +84,7 @@ fn run() -> Result<(), String> {
     let first = scene.walk().find(|n| n.can_mesh()).ok_or("no meshable node")?;
     check(first.mesh_lod(0).triangle_count() == first.mesh().triangle_count(), "LOD 0 is not the mesh")?;
     check(first.lod_error(0) == 0.0 && first.mesh_lod(4).is_empty(), "LOD errors or levels are off")?;
-    if path.ends_with("cube.scad") {
+    if cube_is_mesh {
         let beziers = first.edge_beziers();
         check(first.mesh_lod(1).triangle_count() == 3 && beziers.count() == 12 && beziers.points.len() == 48, "the cube's LOD 1 or Béziers are off")?;
         let beziers64 = first.edge_beziers64();
@@ -90,22 +94,26 @@ fn run() -> Result<(), String> {
         )?;
     }
     let fit = first.collision(0).ok_or("no collision body for the first body")?;
-    check(fit.error == 0.0 && fit.hull_vertex_count == 8 && !fit.shape_name().is_empty(), "the collision fit is off")?;
+    // The mesh cube is fitted as a hull of 8 vertices; the exact cube is the box it is, with no hull.
+    let want_hull = if is_cube && !cube_is_mesh { 0 } else { 8 };
+    check(fit.error == 0.0 && fit.hull_vertex_count == want_hull && !fit.shape_name().is_empty(), "the collision fit is off")?;
     let hull = first.collision_hull(0);
-    check(hull.vertex_count() == 8 && hull.index_count() == 36, "the collision hull is off")?;
+    check(want_hull == 0 || (hull.vertex_count() == 8 && hull.index_count() == 36), "the collision hull is off")?;
     let mesh = first.mesh();
     let meshlets = cadaclysm_sdk::Meshlets::build(mesh.positions, mesh.normals, mesh.indices, 124, 64, 0).map_err(e)?;
     check(meshlets.count() >= 1, "no meshlets")?;
     let one = meshlets.meshlet(0);
     check(one.positions.len() == one.vertex_count() && one.indices.len() == one.triangle_count() * 3 && one.level == 0, "meshlet 0 is off")?;
     if path.ends_with("cube.scad") {
-        check(meshlets.count() == 1 && one.triangle_count() == 12 && one.vertex_count() == 36, "the cube's meshlets are off")?;
+        // The mesh cube is 36 vertices; the exact cube's mesh shares its corners per face (24).
+        let vertices = if cube_is_mesh { 36 } else { 24 };
+        check(meshlets.count() == 1 && one.triangle_count() == 12 && one.vertex_count() == vertices, "the cube's meshlets are off")?;
     }
     drop(meshlets);
     check(cadaclysm_sdk::Meshlets::build(mesh.positions, None, mesh.indices, 0, 64, 0).is_err(), "a zero budget was accepted")?;
     let estimate = first.triangle_estimate();
     check(estimate > 0 || estimate == -1, "triangle estimate is neither a count nor -1")?;
-    if path.ends_with("cube.scad") {
+    if cube_is_mesh {
         check(estimate == 12 && first.surface_edges().is_empty() && first.surface_proxy_mesh(4).is_empty(), "the cube has no surface products")?;
         check(first.surface_edge_beziers().is_empty(), "the cube hands exact edges to the surface path")?;
         check(first.surface_pick([10.0, 10.0, 100.0], [10.0, 10.0, -100.0]).is_none() && first.bounds_placed(None).is_empty(), "the cube picks or bounds through surfaces")?;
@@ -209,7 +217,7 @@ fn run() -> Result<(), String> {
     check(yup.realized() == yup.realize_total(), "realize_all stopped short")?;
 
     save_checks(&scene)?;
-    fem_reader(&scene, is_cube)?;
+    fem_reader(&scene, is_cube, &path)?;
     if is_cube {
         fem_census_wiring(&Path::new(&path).with_file_name("open-sheet.scad"))?;
     }
@@ -1853,7 +1861,7 @@ fn fem_census_wiring(sheet: &Path) -> Result<(), String> {
 /// `from_mesh` is true, there are no edges and no vertices, and -- the trap the plan
 /// names -- `fem_mesh_of_mesh` reads no options at all, so a tolerance or a size the
 /// B-rep path refuses still comes back as a mesh.
-fn fem_reader(scene: &Scene, is_cube: bool) -> Result<(), String> {
+fn fem_reader(scene: &Scene, is_cube: bool, path: &str) -> Result<(), String> {
     let e = |err: cadaclysm_sdk::Error| format!("fem: {err}");
     let node = scene.walk().find(|n| n.can_mesh()).ok_or("fem: no meshable node")?;
     let mesh = node.fem_mesh(0.01, 0.0, None).map_err(e)?;
@@ -1872,13 +1880,24 @@ fn fem_reader(scene: &Scene, is_cube: bool) -> Result<(), String> {
         vertices.len(),
         "fem reader",
     )?;
-    // A mesh-only body: one face, every node on it, no topology at all -- and the census
-    // does run over the welded triangles, so an empty one here means "nothing found".
-    check(mesh.from_mesh(), "fem: a node with no brep did not report from_mesh")?;
-    check(
-        mesh.face_count() == 1 && edges.is_empty() && vertices.is_empty() && mesh.node_kind().iter().all(|&k| k == 2),
-        "fem: a from_mesh body has edges, vertices or a node off face 0",
-    )?;
+    // The exact cube (a reader library with the kernel's `openscad-brep`, every shipped desktop
+    // one) is a B-rep body: six faces, twelve edges, eight corners. The mesh cube (the Reader
+    // flavour's) is the mesh-only body the rest of this function is about.
+    let exact = is_cube && node.brep().is_some();
+    if exact {
+        check(
+            !mesh.from_mesh() && mesh.face_count() == 6 && edges.len() == 12 && vertices.len() == 8,
+            &format!("fem: the exact cube has {} faces, {} edges, {} vertices", mesh.face_count(), edges.len(), vertices.len()),
+        )?;
+    } else {
+        // A mesh-only body: one face, every node on it, no topology at all -- and the census
+        // does run over the welded triangles, so an empty one here means "nothing found".
+        check(mesh.from_mesh(), "fem: a node with no brep did not report from_mesh")?;
+        check(
+            mesh.face_count() == 1 && edges.is_empty() && vertices.is_empty() && mesh.node_kind().iter().all(|&k| k == 2),
+            "fem: a from_mesh body has edges, vertices or a node off face 0",
+        )?;
+    }
     check(
         mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty() && mesh.crossings().map_err(e)?.is_empty(),
         "fem: the cube's own mesh is not watertight with both censuses empty and no crossings",
@@ -1948,12 +1967,16 @@ fn fem_reader(scene: &Scene, is_cube: bool) -> Result<(), String> {
     // path reads neither: `fem_mesh_of_mesh` takes no options at all. Catches a wrapper
     // that validated either field itself -- which passes every Python-shaped test and is
     // wrong. The B-rep half of this contract is in `fem_brep`, where each of these *is*
-    // refused, in the library's own words.
+    // refused, in the library's own words. The body is open-sheet.scad, beside the sample:
+    // mesh-only in every flavour, where the cube is an exact box (which reads both fields)
+    // wherever the kernel's builder is linked.
+    let sheet_scene = cadaclysm_sdk::open(Path::new(path).with_file_name("open-sheet.scad")).map_err(e)?;
+    let sheet = sheet_scene.walk().find(|n| n.can_mesh()).ok_or("fem: open-sheet.scad has no meshable node")?;
     for (tolerance, max_size) in [(0.0, 0.0), (-1.0, 0.0), (f64::NAN, 0.0), (0.01, -1.0), (0.01, f64::NAN), (0.01, f64::INFINITY)] {
-        match node.fem_mesh(tolerance, max_size, None) {
+        match sheet.fem_mesh(tolerance, max_size, None) {
             Ok(mesh) => check(
-                !mesh.nodes().is_empty(),
-                &format!("fem: tolerance {tolerance} max_size {max_size} came back as an empty mesh"),
+                mesh.from_mesh() && mesh.nodes().len() == 5,
+                &format!("fem: tolerance {tolerance} max_size {max_size} meshed the open sheet to {} nodes, not 5 mesh-only ones", mesh.nodes().len()),
             )?,
             Err(err) => return Err(format!("fem: tolerance {tolerance} max_size {max_size} was refused on the mesh-only path: {err}")),
         }

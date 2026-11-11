@@ -195,6 +195,44 @@ static Result<void> test_machine_with_two_end_mills_rests_the_corners() {
     return {};
 }
 
+static Result<void> test_machine_with_corner_relief_notches_the_corners() {
+    CADACLYSM_TRY(block, pocketed_block());
+    CADACLYSM_TRY(big, bs::Tool::flat(1, 6, 20, 800, 200, 12000));
+    CADACLYSM_TRY(small, bs::Tool::flat(2, 2, 20, 800, 200, 12000));
+    std::vector<const bs::Tool*> end_mills = {&big, &small};
+
+    // R1: with the flag on, every corner is relieved by the 2 mm end mill.
+    CADACLYSM_TRY(relieved_stock, bs::Stock::around(block, 2));
+    CADACLYSM_TRY(relieved_job, bs::Job::make(relieved_stock, 30));
+    CADACLYSM_TRY(relieved, relieved_job.machine_with(block, end_mills, {}, std::nullopt, std::nullopt, 0.3, std::nullopt, true));
+    check(relieved.items.size() == 4, "the relieved report has " + std::to_string(relieved.items.size()) + " items, not 4");
+    for (const bs::ReportItem& item : relieved.items) {
+        check(item.kind == "relief", "a relieved item's kind is '" + item.kind + "', not 'relief'");
+        check(item.reason.rfind("corner relieved by T2 (2 mm): a notch 0.293 mm into the walls", 0) == 0,
+              "a relieved item's reason is: " + item.reason);
+    }
+    double expected_size = 1.0 - std::sqrt(0.5);
+    check(std::fabs(relieved.items[0].size - expected_size) <= kZTolerance,
+          "a relief's size is " + std::to_string(relieved.items[0].size) + ", not 1 - sqrt(0.5)");
+
+    // R2: with the flag off, or left out, the corners are rested as before.
+    CADACLYSM_TRY(off_stock, bs::Stock::around(block, 2));
+    CADACLYSM_TRY(off_job, bs::Job::make(off_stock, 30));
+    CADACLYSM_TRY(off, off_job.machine_with(block, end_mills, {}, std::nullopt, std::nullopt, 0.3, std::nullopt, false));
+    check(off.items.size() == 4, "the unrelieved report has " + std::to_string(off.items.size()) + " items, not 4");
+    for (const bs::ReportItem& item : off.items) {
+        check(item.kind == "corner", "an unrelieved item's kind is '" + item.kind + "', not 'corner'");
+    }
+    CADACLYSM_TRY(left_stock, bs::Stock::around(block, 2));
+    CADACLYSM_TRY(left_job, bs::Job::make(left_stock, 30));
+    CADACLYSM_TRY(left_out, left_job.machine_with(block, end_mills, {}, std::nullopt, std::nullopt, 0.3));
+    check(left_out.items.size() == 4, "the default report has " + std::to_string(left_out.items.size()) + " items, not 4");
+    for (const bs::ReportItem& item : left_out.items) {
+        check(item.kind == "corner", "a default item's kind is '" + item.kind + "', not 'corner'");
+    }
+    return {};
+}
+
 static Result<void> test_machine_with_refuses_an_empty_list_and_a_null() {
     CADACLYSM_TRY(block, pocketed_block());
     CADACLYSM_TRY(stock, bs::Stock::around(block, 2));
@@ -439,6 +477,7 @@ int main(int argc, char** argv) {
     if (outcome) outcome = test_solid_section_cuts_a_cuboid();
     if (outcome) outcome = test_pocketed_block_reports_four_corners();
     if (outcome) outcome = test_machine_with_two_end_mills_rests_the_corners();
+    if (outcome) outcome = test_machine_with_corner_relief_notches_the_corners();
     if (outcome) outcome = test_machine_with_refuses_an_empty_list_and_a_null();
     if (outcome) outcome = test_the_plate_is_machined_cleanly();
     if (outcome) outcome = test_the_four_verbs_by_hand();

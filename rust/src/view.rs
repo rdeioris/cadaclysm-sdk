@@ -17,6 +17,9 @@ mod target;
 
 pub(crate) mod objects;
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod web_lib;
+
 mod control;
 
 mod png;
@@ -27,17 +30,19 @@ mod text;
 
 pub use colour::{Colour, Rgb, Rgba};
 pub use options::{Camera, Lighting, Navigation, Pick, SurfaceMode, ViewOptions};
-pub use items::{Finish, Item, Occluded, View};
+pub use items::{Finish, Item, Material, Occluded, SolidOptions, View};
 pub use machining::{ColourBy, Machining, MachiningInfo, MachiningOptions, MachiningPart, MachiningProgram, MachiningTool, ToolShape};
 pub use text::{Align, Text, TextMode};
 pub use target::{RawWindow, WindowKind};
-pub use control::{Button, Event, Grid, Image, Input, Layer, Lod, LodMotion, Pointer, Standard, Viewport};
+pub use control::{Button, Event, Grid, Image, Input, Layer, Lod, LodMotion, OccludedStyle, Pointer, Snap, SnapKind, Standard, Viewport, WorkPlane};
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex, MutexGuard};
 
-use libloading::Library as Dylib;
+use crate::loader::Library as Dylib;
 
 use crate::{loader, text, Error, Result};
 
@@ -124,6 +129,7 @@ impl Library {
         Ok(Library { api, name, path, version, _library: library })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn open(path: &Path) -> Result<Library> {
         // SAFETY: loading runs the library's initialisers and every symbol is then read as
         // the header declares it -- the contract of loading a view library at all.
@@ -179,10 +185,13 @@ fn abi_mismatch(major: u32, minor: u32, path: &Path, build_error: Option<&str>) 
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static LOADED: Mutex<Vec<&'static Library>> = Mutex::new(Vec::new());
+#[cfg(not(target_arch = "wasm32"))]
 static CURRENT: Mutex<Option<&'static Library>> = Mutex::new(None);
 
 /// A poisoned lock still holds a consistent list: nothing panics while holding one.
+#[cfg(not(target_arch = "wasm32"))]
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -190,11 +199,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `path` absolute with its links resolved, so one file named two ways (or a relative
 /// path named again after the working directory moved) is one key; as given when it
 /// cannot be resolved.
+#[cfg(not(target_arch = "wasm32"))]
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The viewer at `path`, loading it the first time it is named.
+#[cfg(not(target_arch = "wasm32"))]
 fn loaded(path: &Path) -> Result<&'static Library> {
     let wanted = canonical(path);
     let mut all = lock(&LOADED);
@@ -206,6 +217,7 @@ fn loaded(path: &Path) -> Result<&'static Library> {
     Ok(viewer)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn make_current(viewer: &'static Library) -> &'static Library {
     *lock(&CURRENT) = Some(viewer);
     viewer
@@ -214,17 +226,29 @@ fn make_current(viewer: &'static Library) -> &'static Library {
 /// Draw with the viewer library at `path` from now on. A library already loaded is
 /// reused, not opened again. Returns it.
 pub fn use_library(path: impl AsRef<Path>) -> Result<&'static Library> {
+    #[cfg(target_arch = "wasm32")]
+    return Err(Error::new(format!(
+        "view::use_library: a view library file ({}) isn't available in the browser; the web package's View draws there",
+        path.as_ref().display()
+    )));
+    #[cfg(not(target_arch = "wasm32"))]
     Ok(make_current(loaded(path.as_ref())?))
 }
 
 /// Draw with the terminal library bundled with the SDK from now on, whatever was in use.
 pub fn use_terminal() -> Result<&'static Library> {
+    #[cfg(target_arch = "wasm32")]
+    return Ok(web_lib::library());
+    #[cfg(not(target_arch = "wasm32"))]
     use_library(terminal_library()?)
 }
 
 /// Draw with the wgpu library, `cadaclysm_view`, from now on: windows of its own, a host's
 /// window, offscreen views. Where it is not found, the error names the places searched.
 pub fn use_wgpu() -> Result<&'static Library> {
+    #[cfg(target_arch = "wasm32")]
+    return Ok(web_lib::library());
+    #[cfg(not(target_arch = "wasm32"))]
     use_library(wgpu_library()?)
 }
 
@@ -248,21 +272,27 @@ pub(crate) fn load_font_with(library: &Library, bytes: &[u8]) -> Result<u32> {
 /// or a path); else the bundled terminal library. A failure is not remembered -- the next
 /// call looks again.
 pub fn current() -> Result<&'static Library> {
-    if let Some(library) = *lock(&CURRENT) {
-        return Ok(library);
+    #[cfg(target_arch = "wasm32")]
+    return Ok(web_lib::library());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Some(library) = *lock(&CURRENT) {
+            return Ok(library);
+        }
+        let path = match choose(std::env::var_os("CADACLYSM_VIEW"))? {
+            Choice::Terminal => terminal_library()?,
+            Choice::Wgpu => wgpu_library()?,
+            Choice::Path(path) => path,
+        };
+        let library = loaded(&path)?;
+        // A `use_library` on another thread since the check above wins: the default only
+        // fills an empty slot.
+        Ok(*lock(&CURRENT).get_or_insert(library))
     }
-    let path = match choose(std::env::var_os("CADACLYSM_VIEW"))? {
-        Choice::Terminal => terminal_library()?,
-        Choice::Wgpu => wgpu_library()?,
-        Choice::Path(path) => path,
-    };
-    let library = loaded(&path)?;
-    // A `use_library` on another thread since the check above wins: the default only
-    // fills an empty slot.
-    Ok(*lock(&CURRENT).get_or_insert(library))
 }
 
 /// What `CADACLYSM_VIEW` asks for.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, PartialEq, Eq)]
 enum Choice {
     Terminal,
@@ -272,6 +302,7 @@ enum Choice {
 
 /// `CADACLYSM_VIEW`: unset or empty is the terminal; `terminal` and `wgpu` name the two
 /// libraries; anything else is a file that must exist.
+#[cfg(not(target_arch = "wasm32"))]
 fn choose(named: Option<OsString>) -> Result<Choice> {
     let Some(value) = named.filter(|value| !value.is_empty()) else { return Ok(Choice::Terminal) };
     match value.to_str() {
@@ -333,7 +364,8 @@ pub(crate) fn target_own() -> target::Target {
     target::Target::Own
 }
 
-#[cfg(test)]
+// The library choice and loading are native; on wasm32 the web table is the library.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use std::ffi::OsString;
@@ -363,15 +395,16 @@ mod tests {
     fn a_viewer_reports_its_name_and_version() {
         let v = fake::library();
         assert_eq!(v.name(), "fake 1.0");
-        assert_eq!(v.abi_version(), (1, 18));
+        assert_eq!(v.abi_version(), (1, 22));
         assert_eq!(v.path(), Path::new("fake"));
     }
 
-    /// The nine calls with no return value to report failure on (orbit, pan, look, zoom,
-    /// dolly, set_orthographic, set_background, request_pick, request_pick_in) must still
+    /// The eleven calls with no return value to report failure on (orbit, pan, look, zoom,
+    /// dolly, set_orthographic, set_background, request_pick, request_pick_in, request_snap_in,
+    /// clear_snap) must still
     /// clear a stale `last_error`, as every other successful call does (ruling F16) -- a
     /// host that checks `last_error` after one of them must not see an earlier failure's
-    /// reason. `frame` leaves the stale error each time; it is not one of the nine.
+    /// reason. `frame` leaves the stale error each time; it is not one of the eleven.
     #[test]
     fn every_void_call_clears_a_stale_last_error() {
         let api = fake::api();
@@ -431,6 +464,14 @@ mod tests {
         unsafe { (api.cadaclysm_view_request_pick_in)(view, 0, 1, 2) };
         assert_eq!(last_error(), "", "request_pick_in");
 
+        leave_a_stale_error();
+        unsafe { (api.cadaclysm_view_request_snap_in)(view, 0, 1, 2) };
+        assert_eq!(last_error(), "", "request_snap_in");
+
+        leave_a_stale_error();
+        unsafe { (api.cadaclysm_view_clear_snap)(view) };
+        assert_eq!(last_error(), "", "clear_snap");
+
         unsafe { (api.cadaclysm_view_destroy)(view) };
     }
 
@@ -438,8 +479,8 @@ mod tests {
     fn another_abi_major_is_refused_with_both_versions() {
         fake::abi((2 << 16) | 5);
         let err = Library::from_api(fake::api(), PathBuf::from("v2.dll"), None).expect_err("ABI 2 refused");
-        fake::abi((1 << 16) | 18);
-        assert_eq!(err.message(), "v2.dll: view ABI 2.5, this SDK needs 1.18 or a later 1.x");
+        fake::abi((1 << 16) | 22);
+        assert_eq!(err.message(), "v2.dll: view ABI 2.5, this SDK needs 1.22 or a later 1.x");
     }
 
     #[test]
@@ -448,30 +489,30 @@ mod tests {
         let m = abi_mismatch(1, 5, Path::new("old.dll"), Some(reason));
         assert_eq!(
             m,
-            "old.dll: view ABI 1.5, this SDK needs 1.18 or a later 1.x\n\
+            "old.dll: view ABI 1.5, this SDK needs 1.22 or a later 1.x\n\
              The build gave no libraries of its own: they were not built from R:\\src: cargo build failed"
         );
-        assert_eq!(abi_mismatch(1, 5, Path::new("old.dll"), None), "old.dll: view ABI 1.5, this SDK needs 1.18 or a later 1.x");
+        assert_eq!(abi_mismatch(1, 5, Path::new("old.dll"), None), "old.dll: view ABI 1.5, this SDK needs 1.22 or a later 1.x");
     }
 
     #[test]
-    fn a_minor_version_below_18_is_refused_with_the_abi_message() {
+    fn a_minor_version_below_22_is_refused_with_the_abi_message() {
         fake::abi((1 << 16) | 4);
         let err = Library::from_api(fake::api(), PathBuf::from("v1.4.dll"), None).expect_err("1.4 is too old");
-        fake::abi((1 << 16) | 18);
-        assert_eq!(err.message(), "v1.4.dll: view ABI 1.4, this SDK needs 1.18 or a later 1.x");
-        fake::abi((1 << 16) | 17);
-        let err = Library::from_api(fake::api(), PathBuf::from("v1.17.dll"), None).expect_err("1.17 is too old");
-        fake::abi((1 << 16) | 18);
-        assert_eq!(err.message(), "v1.17.dll: view ABI 1.17, this SDK needs 1.18 or a later 1.x");
+        fake::abi((1 << 16) | 22);
+        assert_eq!(err.message(), "v1.4.dll: view ABI 1.4, this SDK needs 1.22 or a later 1.x");
+        fake::abi((1 << 16) | 21);
+        let err = Library::from_api(fake::api(), PathBuf::from("v1.21.dll"), None).expect_err("1.21 is too old");
+        fake::abi((1 << 16) | 22);
+        assert_eq!(err.message(), "v1.21.dll: view ABI 1.21, this SDK needs 1.22 or a later 1.x");
     }
 
     #[test]
     fn a_later_minor_version_is_accepted() {
-        fake::abi((1 << 16) | 19);
-        let v = Library::from_api(fake::api(), PathBuf::from("v1.19"), None);
-        fake::abi((1 << 16) | 18);
-        assert_eq!(v.expect("1.19 is 1.18 or later").abi_version(), (1, 19));
+        fake::abi((1 << 16) | 23);
+        let v = Library::from_api(fake::api(), PathBuf::from("v1.23"), None);
+        fake::abi((1 << 16) | 22);
+        assert_eq!(v.expect("1.23 is 1.22 or later").abi_version(), (1, 23));
     }
 
     #[test]
@@ -504,7 +545,7 @@ mod tests {
     #[test]
     fn a_viewer_prints_its_name_path_and_version() {
         let text = format!("{:?}", fake::library());
-        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 18) }"#);
+        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 22) }"#);
     }
 
     #[test]

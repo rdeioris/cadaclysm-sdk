@@ -15,6 +15,9 @@ func CheckABIForTest(version uint32, path string) error { return checkABI(versio
 // LodLayoutForTest is CadaclysmViewLod's size and field offsets.
 func LodLayoutForTest() (size, minTriangles, motion uintptr) { return lodLayout() }
 
+// SnapLayoutForTest is CadaclysmViewSnap's size and its fields' offsets, in the header's order.
+func SnapLayoutForTest() [12]uintptr { return snapLayout() }
+
 // The library's pump answers.
 const (
 	OpenForTest   = stateOpen

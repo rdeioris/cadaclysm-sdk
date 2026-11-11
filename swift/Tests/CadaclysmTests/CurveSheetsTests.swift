@@ -192,6 +192,43 @@ final class CurveSheetsTests: XCTestCase {
         XCTAssertEqual(try window.faces, 6)
     }
 
+    func testMirrorJoinSquaresAHalfRoofToItsMirror() throws {
+        // Half a roof domed both ways, lofted out from the centre plane y = 0, leaning as it
+        // leaves the plane: mirrored as it is, the seam is a crease; squared first, it is smooth.
+        func section(_ y: Double) throws -> NurbsCurve {
+            try NurbsCurve.through((0...8).map { i -> SIMD3<Double> in
+                let x = 10.0 * Double(i)
+                return P(x, y, 20 * sin(Double.pi * x / 80) - 0.01 * y * y + 0.05 * y + 0.002 * x * y)
+            })
+        }
+        let half = try Solid.loftCurves([0.0, 10, 20, 30].map(section))
+        let plane = try Frame(P(0, 0, 0), P(1, 0, 0), P(0, 0, -1), P(0, 1, 0))
+        let (creased, r) = try half.mirrorJoin(plane, tolerance: 0.01)
+        XCTAssertTrue(try creased.faces == 2 && r.seams == 1 && r.squared == 0 && r.moved == 0, "\(r)")
+        XCTAssertTrue(r.gap < 1e-9 && r.angle > 5 * Double.pi / 180 && r.curvature > 1e-4, "\(r)")
+        let (smooth, s) = try half.mirrorJoin(plane, snap: 0.5, tolerance: 0.01)
+        XCTAssertTrue(try smooth.faces == 2 && s.seams == 1 && s.squared == 1 && s.naked == 6, "\(s)")
+        XCTAssertTrue(s.moved > 0 && s.gap < 1e-9 && s.angle < 1e-9 && s.curvature < 1e-9, "\(s)")
+        // Only the first two rows moved: the body is near twice the half.
+        let body: Mass = try smooth.mass(), one: Mass = try half.mass()
+        XCTAssertLessThan(abs(body.area - 2 * one.area), 0.01 * one.area)
+        XCTAssertEqual(refusal { _ = try smooth.mirrorJoin(plane) }?.hasPrefix("mirror_join: the half lies on both sides of the plane"), true)
+    }
+
+    func testARingOnASquareOffsetsSplitsAndPartsWithAPanelGap() throws {
+        let sq = try rectSheet(P(0, 0, 0), P(1, 0, 0), P(0, 1, 0), 40, 40)
+        let pts = (0..<48).map { i -> P in let a = 2 * Double.pi * Double(i) / 48; return P(8 * cos(a), 8 * sin(a), 0) }
+        let ring = try NurbsCurve.through(pts, degree: 3, closed: true)
+        let inner = try ring.offsetOnSheet(sq, distance: 2, tolerance: 1e-3)
+        let p0 = try inner.point(inner.domain.lo)
+        XCTAssertLessThanOrEqual(inner.fitError ?? 1, 1e-3)
+        XCTAssertEqual((p0.x * p0.x + p0.y * p0.y).squareRoot(), 6, accuracy: 1e-3)
+        XCTAssertEqual(try sq.splitAlongCurve(ring, tolerance: 1e-3).faces, 2)
+        let (island, rest) = try sq.panelGap(ring, gap: 4, flange: -10, tolerance: 1e-3)
+        XCTAssertEqual(try island.faces, 3)
+        XCTAssertEqual(try rest.faces, 3)
+    }
+
     func testTrimByCurveAndJoinRefuseByName() throws {
         let sheet = try rectSheet(P(0, 0, 0), P(1, 0, 0), P(0, 1, 0), 20, 20)
         let ring = try exactCircle(P(0, 0, 0), 5)
@@ -420,6 +457,75 @@ final class CurveSheetsTests: XCTestCase {
         XCTAssertLessThan(abs(try area(same, 1e-6) - areaConstant), 1e-6 * areaConstant)
         let message = try XCTUnwrap(refusal { _ = try Solid.cuboid(10, 10, 10).fillet([0], 1.0, radiusEnd: 2.0) })
         XCTAssertTrue(message.contains("a varying radius rounds only spline edges"), message)
+    }
+
+    func testFilletLawWithStationsAtTheEndsIsTheVaryingFillet() throws {
+        let shell = try fenderAndDoor()
+        let crease = try shell.edges.filter { $0.faces.count == 2 }
+        let varying = try shell.fillet(crease, 8.0, tolerance: 1e-3, radiusEnd: 20.0)
+        let lawed = try shell.filletLaw(crease, [(0.0, 8.0), (1.0, 20.0)], tolerance: 1e-3)
+        XCTAssertEqual(try lawed.faces, 3)
+        XCTAssertLessThan(abs(try area(lawed, 1e-6) - area(varying, 1e-6)), 1e-3)
+        // A swell in the middle takes more than 8 all along and less than 20 all along.
+        let swell = try area(shell.filletLaw(crease.map { $0.index }, [(0.0, 8.0), (0.5, 20.0), (1.0, 8.0)], tolerance: 1e-3), 1e-6)
+        XCTAssertLessThan(swell, try area(shell.fillet(crease, 8.0, tolerance: 1e-3), 1e-6))
+        XCTAssertGreaterThan(swell, try area(shell.fillet(crease, 20.0, tolerance: 1e-3), 1e-6))
+        let none = try XCTUnwrap(refusal { _ = try shell.filletLaw(crease, [], tolerance: 1e-3) })
+        XCTAssertTrue(none.contains("at least one station"), none)
+        let message = try XCTUnwrap(refusal { _ = try Solid.cuboid(10, 10, 10).filletLaw([0], [(0.0, 1.0), (1.0, 2.0)]) })
+        XCTAssertTrue(message.contains("a radius law rounds only spline edges"), message)
+    }
+
+    func testAWobblyLoftFairedTurnsNoCurvatureOver() throws {
+        // Eleven lines across a shallow arch, each lifted or dropped by 0.4 in turn: a loft
+        // through them ripples between every pair.
+        let lines = try (0..<11).map { k -> NurbsCurve in
+            let x = 10.0 * Double(k)
+            let z = -0.01 * (x - 50) * (x - 50) + (k % 2 == 0 ? 0.4 : -0.4)
+            return try line(P(x, 0, z), P(x, 40, z))
+        }
+        let loft = try Solid.loftCurves(lines, degree: 3)
+        let t = try loft.curvatureTurns(samples: 32)
+        XCTAssertEqual(t.samples, 32, "\(t)")
+        XCTAssertTrue(t.meanTurns.count > 0 && t.meanPositive + t.meanNegative > 1, "\(t)")
+        for a in t.meanTurns {
+            XCTAssertLessThan(abs((a.tangent * a.tangent).sum().squareRoot() - 1), 1e-9, "\(a)")
+            XCTAssertTrue(a.point.x >= 0 && a.point.x <= 100 && a.point.z > -26 && a.point.z < 1, "\(a)")
+        }
+        // The lines run along u, the loft's v across them: the end lines kept, held along v.
+        let faired = try loft.faired(tolerance: 1.0, keep: [nil, nil, 0, 0], noInflection: "v")
+        let e = try XCTUnwrap(faired.sheetError)
+        XCTAssertTrue(e >= 0 && e <= 1.05, "\(e)")
+        let f = try faired.curvatureTurns(samples: 32)
+        XCTAssertTrue(f.meanTurns.isEmpty && f.meanPositive + f.meanNegative == 1, "\(f)")
+        let coarse = try loft.faired(tolerance: 1.0, controls: (6, 8), keep: [nil, nil, 0, 0], noInflection: "v")
+        XCTAssertLessThanOrEqual(try XCTUnwrap(coarse.sheetError), 1.05)
+        XCTAssertTrue(try coarse.curvatureTurns().meanTurns.isEmpty)
+        let low = try XCTUnwrap(refusal { _ = try loft.faired(tolerance: 1.0, degree: 2) })
+        XCTAssertTrue(low.hasPrefix("surface_faired: ") && low.contains("degree 2"), low)
+        let tight = try XCTUnwrap(refusal { _ = try loft.faired(tolerance: 0.01, keep: [nil, nil, 0, 0], noInflection: "v") })
+        XCTAssertTrue(tight.hasPrefix("surface_faired: ") && tight.contains("no fair free of inflections"), tight)
+        XCTAssertEqual(refusal { _ = try loft.faired(keep: [0, 0]) }, "keep takes 4 levels (u0, u1, v0, v1), not 2")
+        XCTAssertEqual(refusal { _ = try loft.faired(noInflection: "w") }, "no_inflection is 'u', 'v', 'uv' or nil, not 'w'")
+        let bad = try XCTUnwrap(refusal { _ = try loft.curvatureTurns(face: 7) })
+        XCTAssertTrue(bad.hasPrefix("curvature_turns: "), bad)
+    }
+
+    func testHighlightKinkRunsStraightAcrossPlanesAndKinksAtAFilletSeam() throws {
+        let block = try Solid.cuboid(2, 2, 2)
+        let k = try block.highlightKink(0, samples: 16)
+        XCTAssertLessThan(k.angle, 1e-9, "\(k)")
+        XCTAssertEqual(k.samples, 17)
+        let rounded = try block.fillet([0], 0.5)
+        var worst = 0.0
+        for e in try rounded.edges {
+            guard let kink = try? rounded.highlightKink(e) else { continue }   // an edge of one face
+            worst = max(worst, kink.angle)
+        }
+        // Where the fillet's curvature meets a flat face's, the highlight lines break.
+        XCTAssertGreaterThan(worst, Double.pi / 4)
+        let bad = try XCTUnwrap(refusal { _ = try block.highlightKink(999) })
+        XCTAssertTrue(bad.hasPrefix("highlight_kink: "), bad)
     }
 
     func testTheWrappersOwnRefusalsSpellTheCallsWords() throws {

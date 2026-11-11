@@ -2494,12 +2494,12 @@ public sealed class Pose
     /// <summary>Draw this pose's scene as Scene.Show does -- by handle -- with every node's posed
     /// transform handed to the view (cadaclysm_view_set_node_transforms). An unposed pose draws
     /// exactly what Scene.Show does.</summary>
-    public void Show(global::Cadaclysm.Viewer.ShowOptions? options = null) =>
-        global::Cadaclysm.Viewer.View.Present(_scene, options, false, _transforms);
+    public void Show(global::Cadaclysm.Views.ShowOptions? options = null) =>
+        global::Cadaclysm.Views.View.Present(_scene, options, false, _transforms);
 
     /// <summary>Pose.Show's orbiting twin; returns what Scene.View returns.</summary>
-    public global::Cadaclysm.Viewer.Camera View(global::Cadaclysm.Viewer.ShowOptions? options = null) =>
-        global::Cadaclysm.Viewer.View.Present(_scene, options, true, _transforms)!;
+    public global::Cadaclysm.Views.Camera View(global::Cadaclysm.Views.ShowOptions? options = null) =>
+        global::Cadaclysm.Views.View.Present(_scene, options, true, _transforms)!;
 
     public override string ToString() => $"<Pose ground={Ground}>";
 }
@@ -3327,12 +3327,12 @@ public sealed class Node : IEquatable<Node>
     }
 
     /// <summary>Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still.
-    /// Choose the library with <see cref="Cadaclysm.Viewer.ViewLibrary"/> before the first view.</summary>
-    public void Show(global::Cadaclysm.Viewer.ShowOptions? options = null) => global::Cadaclysm.Viewer.View.Present(this, options, false);
+    /// Choose the library with <see cref="Cadaclysm.Views.ViewLibrary"/> before the first view.</summary>
+    public void Show(global::Cadaclysm.Views.ShowOptions? options = null) => global::Cadaclysm.Views.View.Present(this, options, false);
 
     /// <summary>Orbit until the window is closed; the camera it was left at and the last pick.</summary>
-    public global::Cadaclysm.Viewer.Camera View(global::Cadaclysm.Viewer.ShowOptions? options = null) =>
-        global::Cadaclysm.Viewer.View.Present(this, options, true)!;
+    public global::Cadaclysm.Views.Camera View(global::Cadaclysm.Views.ShowOptions? options = null) =>
+        global::Cadaclysm.Views.View.Present(this, options, true)!;
 
     public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_node_name(Scene.Handle, Index)) ?? "";
 
@@ -3668,7 +3668,7 @@ public sealed class Node : IEquatable<Node>
     }
 
     /// <summary>Its exact B-rep, for `Cadaclysm.Blacksmith.Solid.FromNode` to operate on, or
-    /// null where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). Shared
+    /// null where it has none (a mesh, a curve, a CSG body, an open OpenSCAD polyhedron, or an OpenSCAD file read without the kernel). Shared
     /// with the scene, not copied; see <see cref="Cadaclysm.Brep"/>.</summary>
     public Brep? Brep
     {
@@ -3930,7 +3930,7 @@ public sealed class Scene : IDisposable
     /// library needs a shown scene open until its item is gone.</remarks>
     public void Close()
     {
-        if (!_handle.IsClosed) global::Cadaclysm.Viewer.View.Release(this);
+        if (!_handle.IsClosed) global::Cadaclysm.Views.View.Release(this);
         _handle.Dispose();
     }
 
@@ -3939,12 +3939,12 @@ public sealed class Scene : IDisposable
     public void Dispose() => Close();
 
     /// <summary>Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still.
-    /// Choose the library with <see cref="Cadaclysm.Viewer.ViewLibrary"/> before the first view.</summary>
-    public void Show(global::Cadaclysm.Viewer.ShowOptions? options = null) => global::Cadaclysm.Viewer.View.Present(this, options, false);
+    /// Choose the library with <see cref="Cadaclysm.Views.ViewLibrary"/> before the first view.</summary>
+    public void Show(global::Cadaclysm.Views.ShowOptions? options = null) => global::Cadaclysm.Views.View.Present(this, options, false);
 
     /// <summary>Orbit until the window is closed; the camera it was left at and the last pick.</summary>
-    public global::Cadaclysm.Viewer.Camera View(global::Cadaclysm.Viewer.ShowOptions? options = null) =>
-        global::Cadaclysm.Viewer.View.Present(this, options, true)!;
+    public global::Cadaclysm.Views.Camera View(global::Cadaclysm.Views.ShowOptions? options = null) =>
+        global::Cadaclysm.Views.View.Present(this, options, true)!;
 
     /// <summary>The version of the library that read it.</summary>
     public string Version => Cadaclysm.Version();

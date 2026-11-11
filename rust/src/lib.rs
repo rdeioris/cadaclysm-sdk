@@ -60,6 +60,8 @@ mod loader;
 pub mod blacksmith;
 pub mod sys;
 pub mod view;
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 
 use sys::Api;
 
@@ -3668,8 +3670,7 @@ impl<'s> Node<'s> {
         Surfaces { faces }
     }
 
-    /// Its exact B-rep, or `None` where it has none (a mesh, a curve, a CSG body, a JT
-    /// or OpenSCAD part). Shared with the scene, not copied; see [`Brep`].
+    /// Its exact B-rep, or `None` where it has none (a mesh, a curve, a CSG body, an open OpenSCAD polyhedron, or an OpenSCAD file read without the kernel). Shared with the scene, not copied; see [`Brep`].
     pub fn brep(&self) -> Option<Brep> {
         let pointer = self.call(self.scene.api.cadaclysm_node_brep);
         NonNull::new(pointer.cast_mut()).map(|pointer| Brep { pointer, api: self.scene.api })

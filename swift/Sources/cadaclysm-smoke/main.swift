@@ -135,7 +135,7 @@ do {
 }
 print("svg: scene and node text, file written, fov=200 refused")
 
-femReader(scene, URL(fileURLWithPath: path).lastPathComponent == "cube.scad")
+femReader(scene, URL(fileURLWithPath: path).lastPathComponent == "cube.scad", path)
 
 // ---- the kernel ------------------------------------------------------------------------
 
@@ -748,8 +748,11 @@ func femArrays(nodes: NativeArray<Double>, triangles: NativeArray<UInt32>, trian
     }
 }
 
-/// The reader over a node with no brep: the scene's own mesh, in the scene's convention.
-func femReader(_ scene: Scene, _ isCube: Bool) {
+/// The reader's FEM mesh of the sample's first body. In the Reader flavour cube.scad has no brep, so
+/// this is the scene's own mesh in the scene's convention; where the reader library carries the
+/// kernel's `openscad-brep` (every shipped desktop library) the cube is an exact box and its topology
+/// is pinned instead. The mesh-only options sweep runs on open-sheet.scad, mesh-only in every flavour.
+func femReader(_ scene: Scene, _ isCube: Bool, _ path: String) {
     guard let node = scene.walk().first(where: { $0.canMesh }) else { fail("fem: no meshable node") }
     let mesh = must("fem_mesh") { try node.femMesh(tolerance: 0.01) }
     let edges = must("fem edges") { try mesh.edges }
@@ -757,11 +760,20 @@ func femReader(_ scene: Scene, _ isCube: Bool) {
     femArrays(nodes: mesh.nodes, triangles: mesh.triangles, triangleFace: mesh.triangleFace,
               nodeKind: mesh.nodeKind, nodeEntity: mesh.nodeEntity, faceCount: mesh.faceCount,
               edges: edges.count, vertices: vertices.count, "fem reader")
-    // A mesh-only body: one face, every node on it, no topology at all -- and the census does
-    // run over the welded triangles, so an empty one here means "nothing found".
-    check(mesh.fromMesh, "fem: a node with no brep did not report fromMesh")
-    check(mesh.faceCount == 1 && edges.isEmpty && vertices.isEmpty && mesh.nodeKind.allSatisfy { $0 == 2 },
-          "fem: a fromMesh body has edges, vertices or a node off face 0")
+    // The exact cube (a reader library with the kernel's `openscad-brep`, every shipped desktop
+    // one) is a B-rep body: six faces, twelve edges, eight corners. The mesh cube (the Reader
+    // flavour's) is the mesh-only body the rest of this function is about.
+    let exact = isCube && node.brep != nil
+    if exact {
+        check(!mesh.fromMesh && mesh.faceCount == 6 && edges.count == 12 && vertices.count == 8,
+              "fem: the exact cube has \(mesh.faceCount) faces, \(edges.count) edges, \(vertices.count) vertices")
+    } else {
+        // A mesh-only body: one face, every node on it, no topology at all -- and the census
+        // does run over the welded triangles, so an empty one here means "nothing found".
+        check(mesh.fromMesh, "fem: a node with no brep did not report fromMesh")
+        check(mesh.faceCount == 1 && edges.isEmpty && vertices.isEmpty && mesh.nodeKind.allSatisfy { $0 == 2 },
+              "fem: a fromMesh body has edges, vertices or a node off face 0")
+    }
     check(mesh.watertight && must("fem census") { try mesh.openEdges }.isEmpty && must("fem census") { try mesh.foldedEdges }.isEmpty,
           "fem: the cube's own mesh is not watertight with both censuses empty")
     check(mesh.minAngle > 0 && mesh.minAngle <= 60 && Int(mesh.worstTriangle) < mesh.triangles.count / 3 && mesh.longestEdge > 0,
@@ -831,11 +843,18 @@ func femReader(_ scene: Scene, _ isCube: Bool) {
     // **Neither `tolerance` nor `maxSize` is checked by this wrapper**, and the mesh-only path
     // reads neither: `fem_mesh_of_mesh` takes no options at all. Catches a wrapper that
     // validated either field itself -- which passes every Python-shaped test and is wrong. The
-    // B-rep half of the contract is in `femBrep`, where each of these *is* refused.
+    // B-rep half of the contract is in `femBrep`, where each of these *is* refused. The body is
+    // open-sheet.scad, beside the sample: mesh-only in every flavour, where the cube is an exact
+    // box (which reads both fields) wherever the kernel's builder is linked.
+    let sheetPath = URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent("open-sheet.scad").path
+    let sheetScene = must("open open-sheet.scad") { try Cadaclysm.open(sheetPath) }
+    defer { sheetScene.close() }
+    guard let sheet = sheetScene.walk().first(where: { $0.canMesh }) else { fail("fem: open-sheet.scad has no meshable node") }
     for (tolerance, maxSize) in [(0.0, 0.0), (-1.0, 0.0), (Double.nan, 0.0), (0.01, -1.0), (0.01, Double.nan), (0.01, Double.infinity)] {
         do {
-            let any = try node.femMesh(tolerance: tolerance, maxSize: maxSize)
-            check(any.nodes.count > 0, "fem: tolerance \(tolerance) maxSize \(maxSize) came back as an empty mesh")
+            let any = try sheet.femMesh(tolerance: tolerance, maxSize: maxSize)
+            check(any.fromMesh && any.nodes.count == 5 * 3,
+                  "fem: tolerance \(tolerance) maxSize \(maxSize) meshed the open sheet to \(any.nodes.count / 3) nodes, not 5 mesh-only ones")
             any.free()
         } catch {
             fail("fem: tolerance \(tolerance) maxSize \(maxSize) was refused on the mesh-only path: \(error)")

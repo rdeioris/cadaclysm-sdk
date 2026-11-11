@@ -3021,7 +3021,7 @@ public struct Node: Hashable, CustomStringConvertible {
     }
 
     /// Its exact B-rep, for the kernel's `Solid.fromNode` -- or nil where it has none (a mesh,
-    /// a curve, a CSG body, a JT or OpenSCAD part). Shared with the scene, not copied.
+    /// a curve, a CSG body, an open OpenSCAD polyhedron, or an OpenSCAD file read without the kernel). Shared with the scene, not copied.
     public var brep: Brep? {
         guard let handle = cadaclysm_node_brep(live(), raw) else { return nil }
         return Brep(handle: handle)

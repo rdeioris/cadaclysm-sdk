@@ -1,6 +1,6 @@
 [package]
 name = "cadaclysm-sdk"
-version = "0.13.1"
+version = "0.14.0"
 edition = "2021"
 rust-version = "1.70"
 description = "Read CAD files (STEP, IGES, IFC, Rhino 3dm, ACIS SAT, OCCT BREP, OpenSCAD) and build exact B-rep solids, over the prebuilt cadaclysm libraries loaded at run time."
@@ -15,7 +15,7 @@ keywords = ["cad", "step", "ifc", "brep", "mesh"]
 categories = ["api-bindings", "graphics", "science"]
 # What a crate needs and nothing else: the smoke and tree examples ride along as
 # documentation, the repository's own tests stay behind.
-include = ["src/**/*.rs", "examples/*.rs", "build.rs", "README.md", "Cargo.toml"]
+include = ["src/**/*.rs", "js/*.js", "examples/*.rs", "build.rs", "README.md", "Cargo.toml"]
 
 [lib]
 name = "cadaclysm_sdk"
@@ -31,13 +31,35 @@ download = []
 raw-window-handle = ["dep:raw-window-handle"]
 
 [dependencies]
-# The one dependency always built: the library is opened when the program runs, the way
-# Python's ctypes and Node's koffi open it, so nothing here links against it and
-# nothing needs a C toolchain or an import library to build. (build.rs only
-# downloads; it compiles and links nothing.)
-libloading = "0.8"
 # Optional, for the feature above; no C toolchain either.
 raw-window-handle = { version = "0.6", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The one dependency always built off the web: the library is opened when the program
+# runs, the way Python's ctypes and Node's koffi open it, so nothing here links against it
+# and nothing needs a C toolchain or an import library to build. (build.rs only
+# downloads; it compiles and links nothing.)
+libloading = "0.8"
+
+# In the browser (wasm32) the kernel is the web package's, called through its exports
+# (src/web): nothing is downloaded or loaded from a file.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.100"
+js-sys = "0.3.77"
+wasm-bindgen-futures = "0.4.50"
+# The canvas, worker and URL types View::on_canvas and the worker helper take.
+web-sys = { version = "0.3.77", features = [
+    "console",
+    "DedicatedWorkerGlobalScope",
+    "EventTarget",
+    "HtmlCanvasElement",
+    "OffscreenCanvas",
+    "Url",
+    "Worker",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.50"
 
 # Standalone on purpose. This crate must build with nothing of cadaclysm but the
 # shared library it loads, exactly as it does for a customer who has only the SDK

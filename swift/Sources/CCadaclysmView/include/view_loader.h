@@ -77,14 +77,14 @@ extern "C" {
 #define CVL_PATH 4096
 #define CVL_ERROR 8192
 #define CVL_NO_NODE 0xFFFFFFFFu
-#define CVL_ABI_MINOR 18u
+#define CVL_ABI_MINOR 22u
 #define CVL_PI 3.14159265358979323846
 #define CVL_RADIANS_PER_PIXEL 0.01 /* cadaclysm_view::view::ORBIT_PER_PIXEL */
 #define CVL_ZOOM_PER_STEP 0.9      /* cadaclysm_view::view::ZOOM_PER_STEP */
 
-/* name, return type, parameters: 86 calls of cadaclysm_view.h 1.18 -- every one but 1.14's analysis calls
- * and 1.12's texture targets, which no linked wrapper uses yet -- in the header's order (a binding test
- * counts them against the header). */
+/* name, return type, parameters: 95 calls of cadaclysm_view.h 1.22 -- every one but 1.14's analysis calls,
+ * 1.16's layers, 1.19's KMS pair and 1.12's texture targets, which no linked wrapper uses yet -- in the
+ * header's order (a binding test counts them against the header). */
 #define CVL_CALLS(X) \
     X(abi_version, uint32_t, (void))                                                               \
     X(last_error, const char *, (void))                                                            \
@@ -113,6 +113,8 @@ extern "C" {
     X(set_background, void, (CadaclysmView *, const float *))                                      \
     X(set_lighting, bool, (CadaclysmView *, uint32_t))                                             \
     X(lighting, uint32_t, (const CadaclysmView *))                                                 \
+    X(set_occluded_style, bool, (CadaclysmView *, const CadaclysmViewOccludedStyle *))             \
+    X(occluded_style, bool, (const CadaclysmView *, CadaclysmViewOccludedStyle *))                 \
     X(set_lod, bool, (CadaclysmView *, const CadaclysmViewLod *))                                  \
     X(wake_ms, uint32_t, (const CadaclysmView *))                                                  \
     X(set_node_visible, bool, (CadaclysmView *, uint32_t, uint32_t, bool))                         \
@@ -156,6 +158,8 @@ extern "C" {
     X(timeline_playing, bool, (const CadaclysmView *))                                           \
     X(timeline_status, size_t, (const CadaclysmView *, char *, size_t))                          \
     X(show_solid, uint32_t, (CadaclysmView *, const CadaclysmBlacksmithSolid *, double, const float *)) \
+    X(show_solid_faces, uint32_t, (CadaclysmView *, const CadaclysmBlacksmithSolid *, double, const float *, uint32_t, float, \
+                                   const uint32_t *, uint32_t))                                    \
     X(load_font, uint32_t, (const uint8_t *, size_t))                                              \
     X(show_text, uint32_t, (CadaclysmView *, const CadaclysmViewText *))                           \
     X(set_text, bool, (CadaclysmView *, uint32_t, const char *))                                  \
@@ -171,7 +175,13 @@ extern "C" {
     X(look_in, void, (CadaclysmView *, uint32_t, float, float))                                   \
     X(dolly_in, void, (CadaclysmView *, uint32_t, float))                                         \
     X(frame_in, bool, (CadaclysmView *, uint32_t, uint32_t))                                      \
-    X(standard_in, bool, (CadaclysmView *, uint32_t, uint32_t))
+    X(standard_in, bool, (CadaclysmView *, uint32_t, uint32_t))                                   \
+    X(set_snap, bool, (CadaclysmView *, const CadaclysmViewSnapSettings *))                       \
+    X(request_snap_in, void, (CadaclysmView *, uint32_t, uint32_t, uint32_t))                     \
+    X(snap_result, bool, (CadaclysmView *, CadaclysmViewSnap *))                                  \
+    X(clear_snap, void, (CadaclysmView *))                                                        \
+    X(set_work_plane, bool, (CadaclysmView *, const double *, const double *, const double *, double)) \
+    X(clear_work_plane, bool, (CadaclysmView *))
 
 typedef struct CvlTable {
     void *library;
@@ -508,7 +518,7 @@ CVL_API int cvl_find(const char *stem, const char *variable, const char *what, c
                     file, searched, variable);
 }
 
-/* A library's cadaclysm_view_abi_version() answer against the table's: 1.x, x >= 18
+/* A library's cadaclysm_view_abi_version() answer against the table's: 1.x, x >= 22
  * (CVL_ABI_MINOR). 1, or 0 and the refusal (Python's words) in `err`. */
 CVL_API int cvl_check_abi(uint32_t version, const char *path, char *err, size_t n) {
     uint32_t major = version >> 16, minor = version & 0xFFFFu;
@@ -651,6 +661,42 @@ CVL_API int cvl_pick(const CvlTable *t, CadaclysmView *v, int *drawn, uint32_t v
         cvl_sleep_ms(10);
     }
     return cvl_fail(err, n, "pick: the answer never landed (%s)", waiting[0] ? waiting : "no error reported");
+}
+
+/* Python's View.snap, as cvl_pick: a view never drawn (`*drawn` 0) is drawn first, then the snap
+ * is asked and frames are drawn, 10 ms apart, until it lands (at most 200). 1 with `out`
+ * (`out->kind` 0: nothing to snap to, or snapping off); 0 with the library's own message (or
+ * cvl_error's fallback) for any failure but "no snap result", or "snap: the answer never landed
+ * (...)". */
+CVL_API int cvl_snap(const CvlTable *t, CadaclysmView *v, int *drawn, uint32_t viewport, uint32_t x, uint32_t y,
+                     CadaclysmViewSnap *out, char *err, size_t n) {
+    char waiting[1024];
+    const char *said;
+    size_t len;
+    int i;
+    memset(out, 0, sizeof *out);
+    out->size = (uint32_t)sizeof *out;
+    if (!*drawn) {
+        if (!t->draw(v)) return cvl_fail(err, n, "%s", cvl_error(t));
+        *drawn = 1;
+    }
+    t->request_snap_in(v, viewport, x, y);
+    said = t->last_error();
+    if (said && said[0]) return cvl_fail(err, n, "%s", said);
+    waiting[0] = 0;
+    for (i = 0; i < 200; ++i) {
+        if (!t->draw(v)) return cvl_fail(err, n, "%s", cvl_error(t));
+        if (t->snap_result(v, out)) return 1;
+        said = t->last_error();
+        if (!said) said = "";
+        /* The suffix is read off the whole message, not the copy kept for the last line. */
+        len = strlen(said);
+        if (len && (len < 14 || strcmp(said + len - 14, "no snap result") != 0))
+            return cvl_fail(err, n, "%s", said);
+        cvl_copy(waiting, sizeof waiting, said);
+        cvl_sleep_ms(10);
+    }
+    return cvl_fail(err, n, "snap: the answer never landed (%s)", waiting[0] ? waiting : "no error reported");
 }
 
 /* ---- the camera ----------------------------------------------------------------------- */
