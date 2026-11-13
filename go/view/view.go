@@ -130,6 +130,8 @@ static bool cv_frame(const CvlTable *t, CadaclysmView *v, uint32_t item) { retur
 static bool cv_standard(const CvlTable *t, CadaclysmView *v, uint32_t w) { return t->standard(v, w); }
 static void cv_set_orthographic(const CvlTable *t, CadaclysmView *v, bool on) { t->set_orthographic(v, on); }
 static bool cv_set_layer(const CvlTable *t, CadaclysmView *v, uint32_t l, bool on) { return t->set_layer(v, l, on); }
+static bool cv_set_item_layer(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t l) { return t->set_item_layer(v, i, l); }
+static bool cv_set_user_layer(const CvlTable *t, CadaclysmView *v, uint32_t l, bool on) { return t->set_user_layer(v, l, on); }
 static void cv_set_background(const CvlTable *t, CadaclysmView *v, const float *rgb) { t->set_background(v, rgb); }
 static bool cv_set_lighting(const CvlTable *t, CadaclysmView *v, uint32_t l) { return t->set_lighting(v, l); }
 static uint32_t cv_lighting(const CvlTable *t, CadaclysmView *v) { return t->lighting(v); }
@@ -168,9 +170,16 @@ static bool cv_timeline_playing(const CvlTable *t, CadaclysmView *v) { return t-
 static size_t cv_timeline_status(const CvlTable *t, CadaclysmView *v, char *s, size_t n) { return t->timeline_status(v, s, n); }
 static uint32_t cv_show_curves(const CvlTable *t, CadaclysmView *v, const float *b, uint32_t n, const float *rgb) { return t->show_curves(v, b, n, rgb); }
 static uint32_t cv_show_image(const CvlTable *t, CadaclysmView *v, const CadaclysmViewImage *i) { return t->show_image(v, i); }
+static uint32_t cv_show_overlay(const CvlTable *t, CadaclysmView *v, const CadaclysmViewOverlay *o) { return t->show_overlay(v, o); }
+static uint32_t cv_show_overlay_image(const CvlTable *t, CadaclysmView *v, const CadaclysmViewOverlayImage *o) { return t->show_overlay_image(v, o); }
+static bool cv_move_overlay(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t a, float x, float y) { return t->move_overlay(v, i, a, x, y); }
+static bool cv_stats(const CvlTable *t, CadaclysmView *v, CadaclysmViewStats *o) { return t->stats(v, o); }
 static bool cv_set_colour(const CvlTable *t, CadaclysmView *v, uint32_t i, const float *rgb) { return t->set_colour(v, i, rgb); }
 static bool cv_set_xray(const CvlTable *t, CadaclysmView *v, uint32_t i, bool on) { return t->set_xray(v, i, on); }
 static bool cv_set_occluded(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t m) { return t->set_occluded(v, i, m); }
+static bool cv_set_item_line_colour(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t l, const float *rgb) { return t->set_item_line_colour(v, i, l, rgb); }
+static bool cv_set_line_colour(const CvlTable *t, CadaclysmView *v, uint32_t l, const float *rgb, uint32_t p) { return t->set_line_colour(v, l, rgb, p); }
+static bool cv_line_colour(const CvlTable *t, CadaclysmView *v, uint32_t l, float *rgb, uint32_t *p) { return t->line_colour(v, l, rgb, p); }
 static bool cv_set_finish(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t f) { return t->set_finish(v, i, f); }
 static bool cv_set_face_colours(const CvlTable *t, CadaclysmView *v, uint32_t i, const uint32_t *f, const float *c, uint32_t n) { return t->set_face_colours(v, i, f, c, n); }
 static bool cv_set_placement(const CvlTable *t, CadaclysmView *v, uint32_t i, const double *m) { return t->set_placement(v, i, m); }
@@ -434,7 +443,7 @@ func find(stem, variable, what string, dirs []string) (string, error) {
 }
 
 // checkABI is cvl_check_abi, which every open runs on the library's answer first: nil for
-// 1.22 or a later 1.x, else the refusal naming `path`.
+// 1.24 or a later 1.x, else the refusal naming `path`.
 func checkABI(version uint32, path string) error {
 	cp := C.CString(path)
 	defer C.free(unsafe.Pointer(cp))
@@ -543,12 +552,14 @@ type Item struct {
 // Pick is what is under a pixel: Item 0 for nothing. Clicks is 2 for a double click's
 // pick, else 1; Point is where the ray met the model, in the coordinates the items were
 // shown in, when HasPoint -- false (and Point zero) where the library read no depth (no
-// hit, a machining stock, the terminal library). Every field is a value, so two picks
-// compare with ==.
+// hit, a machining stock, the terminal library). Overlay (1.24): the item is an overlay --
+// it was over the pixel, so nothing of the scene beneath it was picked (Face is a text
+// overlay's line, else 0). Every field is a value, so two picks compare with ==.
 type Pick struct {
 	Item, Node, Face, Clicks uint32
 	HasPoint                 bool
 	Point                    [3]float32
+	Overlay                  bool
 }
 
 // pickOf is a library's pick answer as a Pick.
@@ -558,6 +569,7 @@ func pickOf(p *C.CadaclysmViewPick) Pick {
 		out.HasPoint = true
 		out.Point = [3]float32{float32(p.point[0]), float32(p.point[1]), float32(p.point[2])}
 	}
+	out.Overlay = p.overlay != 0
 	return out
 }
 
@@ -1182,6 +1194,17 @@ type MachiningPart struct {
 // MachiningOptions: a nil field is the library's own default.
 type MachiningOptions struct{ Cell, Tolerance, Skin, RapidRate *float64 }
 
+// Stats is what a view has drawn (View.Stats, view ABI 1.25): the frames drawn so far -- each
+// frame drawn to the window, and each Image rendered; a pump or draw that owes nothing adds
+// none -- and the last frame's CPU time, GPU time (-1: not measurable), triangles and draw calls.
+type Stats struct {
+	FramesDrawn uint64
+	LastFrameMs float32
+	LastGpuMs   float32 // -1: unknown (no timestamps on the device, the terminal)
+	Triangles   uint64
+	DrawCalls   uint32
+}
+
 // MachiningInfo is a machining's facts: its Moves, the Move done (as of the last draw), the
 // heights' grid (Nx, Ny, Cell, Min) and the job's CycleTime in seconds.
 type MachiningInfo struct {
@@ -1428,6 +1451,293 @@ func (v *View) ShowImage(corners [12]float32, rgba []byte, width, height uint32,
 	}
 	raw.width, raw.height, raw.opacity = C.uint32_t(width), C.uint32_t(height), C.float(opacity)
 	return v.add("cadaclysm_view_show_image", func() C.uint32_t { return C.cv_show_image(v.lib.t, v.handle, &raw) }, nil)
+}
+
+// ---- overlays (1.24): a HUD over the whole window ------------------------------------
+
+// Anchor is where an overlay hangs in the window (view ABI 1.24): a corner, the middle of an
+// edge, or the centre -- the CADACLYSM_VIEW_ALIGN_* codes. An overlay's offset is measured
+// inward from it: x away from the left edge for the left column and from the right edge for
+// the right one (rightward for the middle column); y down from the top edge for the top row
+// and up from the bottom edge for the bottom one (upward for the middle row). So
+// (AnchorTopRight, 10, 10) is 10 pixels in from the right and from the top.
+type Anchor uint32
+
+const (
+	AnchorTopLeft     Anchor = C.CADACLYSM_VIEW_ALIGN_TOP_LEFT
+	AnchorTop         Anchor = C.CADACLYSM_VIEW_ALIGN_TOP
+	AnchorTopRight    Anchor = C.CADACLYSM_VIEW_ALIGN_TOP_RIGHT
+	AnchorLeft        Anchor = C.CADACLYSM_VIEW_ALIGN_LEFT
+	AnchorCentre      Anchor = C.CADACLYSM_VIEW_ALIGN_CENTRE
+	AnchorRight       Anchor = C.CADACLYSM_VIEW_ALIGN_RIGHT
+	AnchorBottomLeft  Anchor = C.CADACLYSM_VIEW_ALIGN_BOTTOM_LEFT
+	AnchorBottom      Anchor = C.CADACLYSM_VIEW_ALIGN_BOTTOM
+	AnchorBottomRight Anchor = C.CADACLYSM_VIEW_ALIGN_BOTTOM_RIGHT
+)
+
+// Profile is a 2D outline ShowOverlay draws: a *blacksmith.Profile. ProfileBeziers is its
+// Beziers in its own xy (16 numbers a curve, its holes included), Colour its own colour.
+type Profile interface {
+	ProfileBeziers() ([]float64, error)
+	Colour() ([3]float64, bool, error)
+}
+
+// OverlayStyle is how ShowOverlay draws a shape. Fill: where set, its colour (a Colour), or
+// "none" for no fill; nil, the profile's own colour (Profile.Coloured), else white -- unless
+// a Stroke is set, when an uncoloured profile is not filled. Stroke: only where set,
+// StrokeWidth pixels wide (0: 1); an open profile, never filled, draws only with one. Order:
+// lower draws first, equal orders in show order (shapes, text and images share it). A nil
+// *OverlayStyle is every default.
+type OverlayStyle struct {
+	Fill        Colour
+	Stroke      Colour
+	StrokeWidth float32
+	Order       int32
+}
+
+// OverlayImageOptions is how ShowOverlayImage draws: DrawWidth x DrawHeight pixels (0: the
+// image's own size), at Opacity (above 0, at most 1; 0: 1), in Order. A nil
+// *OverlayImageOptions is every default.
+type OverlayImageOptions struct {
+	DrawWidth, DrawHeight float32
+	Opacity               float32
+	Order                 int32
+}
+
+// Overlay is an overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor
+// of the window, drawn over everything, untouched by the camera. Every Item method works on
+// it too (Remove, UserLayer, and SetText on text).
+type Overlay struct {
+	*Item
+	anchor Anchor
+}
+
+// Anchor is the anchor it hangs from now.
+func (o *Overlay) Anchor() Anchor { return o.anchor }
+
+// MoveTo moves it to x, y pixels inward from its anchor (cadaclysm_view_move_overlay):
+// cheap, for a HUD element that moves every frame.
+func (o *Overlay) MoveTo(x, y float32) error { return o.MoveToAnchor(o.anchor, x, y) }
+
+// MoveToAnchor hangs it from anchor instead, x, y pixels inward from it.
+func (o *Overlay) MoveToAnchor(anchor Anchor, x, y float32) error {
+	err := o.ok("cadaclysm_view_move_overlay", func(v *View) C.bool {
+		return C.cv_move_overlay(v.lib.t, v.handle, C.uint32_t(o.id), C.uint32_t(anchor), C.float(x), C.float(y))
+	})
+	if err == nil {
+		o.anchor = anchor
+	}
+	return err
+}
+
+// ShowOverlay shows a 2D shape over the window: shape in pixels (one profile unit a pixel,
+// y up), its origin hung x, y pixels inward from anchor -- a closed profile filled (holes
+// cut, even-odd), stroked where style says. Drawn after everything else, never moved by the
+// camera, kept in place as the window resizes; a click on it picks it (Pick.Overlay) and
+// nothing beneath.
+func (v *View) ShowOverlay(shape Profile, anchor Anchor, x, y float32, style *OverlayStyle) (*Overlay, error) {
+	return v.ShowOverlayProfiles([]Profile{shape}, anchor, x, y, style)
+}
+
+// ShowOverlayProfiles shows several profiles as one overlay -- a crosshair's two strokes, a
+// frame's two loops: their fills together by the even-odd rule. The fill falls back on the
+// first coloured profile's colour.
+func (v *View) ShowOverlayProfiles(shapes []Profile, anchor Anchor, x, y float32, style *OverlayStyle) (*Overlay, error) {
+	if len(shapes) == 0 {
+		return nil, refused("show_overlay: at least one profile")
+	}
+	var beziers []float32
+	var own *[4]C.float
+	for _, p := range shapes {
+		if p == nil || reflect.ValueOf(p).Kind() == reflect.Pointer && reflect.ValueOf(p).IsNil() {
+			return nil, refused("show_overlay: a profile, not nil")
+		}
+		b, err := p.ProfileBeziers()
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range b {
+			beziers = append(beziers, float32(f))
+		}
+		if own == nil {
+			rgb, has, err := p.Colour()
+			if err != nil {
+				return nil, err
+			}
+			if has {
+				own = &[4]C.float{C.float(rgb[0]), C.float(rgb[1]), C.float(rgb[2]), 1}
+			}
+		}
+	}
+	return v.showOverlayCurves(beziers, own, anchor, x, y, style)
+}
+
+// ShowOverlayCurves shows rational cubic Beziers, sixteen floats each (x, y, z, w per
+// control point, z not read: a profile's Beziers), in pixels, as one overlay: loops split
+// where a curve does not start where the last ended, closed where one ends where it started.
+func (v *View) ShowOverlayCurves(beziers []float32, anchor Anchor, x, y float32, style *OverlayStyle) (*Overlay, error) {
+	return v.showOverlayCurves(beziers, nil, anchor, x, y, style)
+}
+
+func (v *View) showOverlayCurves(beziers []float32, own *[4]C.float, anchor Anchor, x, y float32, style *OverlayStyle) (*Overlay, error) {
+	if len(beziers) == 0 || len(beziers)%16 != 0 {
+		return nil, refused(fmt.Sprintf("show_overlay: 16 numbers a curve, at least one, not %d", len(beziers)))
+	}
+	n, err := count(len(beziers)/16, "show_overlay")
+	if err != nil {
+		return nil, err
+	}
+	if style == nil {
+		style = &OverlayStyle{}
+	}
+	if err := v.refusal("cadaclysm_view_show_overlay"); err != nil {
+		return nil, err
+	}
+	stroke, err := v.lib.paint(style.Stroke)
+	if err != nil {
+		return nil, err
+	}
+	var fill *[4]C.float
+	if text, isText := style.Fill.(string); isText && strings.EqualFold(strings.TrimSpace(text), "none") {
+		fill = nil
+	} else if style.Fill != nil {
+		if fill, err = v.lib.paint(style.Fill); err != nil {
+			return nil, err
+		}
+	}
+	if fill == nil && style.Fill == nil {
+		if own != nil {
+			fill = own
+		} else if stroke == nil {
+			fill = &[4]C.float{1, 1, 1, 1}
+		}
+	}
+	var pin runtime.Pinner
+	defer pin.Unpin()
+	pin.Pin(&beziers[0])
+	raw := C.CadaclysmViewOverlay{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	raw.anchor = C.uint32_t(anchor)
+	raw.beziers = (*C.float)(unsafe.Pointer(&beziers[0]))
+	raw.curve_count = n
+	raw.order = C.int32_t(style.Order)
+	raw.offset[0], raw.offset[1] = C.float(x), C.float(y)
+	if fill != nil {
+		raw.has_fill = 1
+		raw.fill_rgba = *fill
+	}
+	if stroke != nil {
+		raw.has_stroke = 1
+		raw.stroke_rgba = *stroke
+	}
+	raw.stroke_width = 1
+	if style.StrokeWidth != 0 {
+		raw.stroke_width = C.float(style.StrokeWidth)
+	}
+	item, err := v.add("cadaclysm_view_show_overlay", func() C.uint32_t { return C.cv_show_overlay(v.lib.t, v.handle, &raw) }, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Overlay{Item: item, anchor: anchor}, nil
+}
+
+// ShowOverlayText shows text over the window: its box hangs from anchor by the same point
+// (its top-right corner for AnchorTopRight), x, y pixels inward -- the box's padding
+// included where it has one. o as ShowText's, in pixels; its Mode, Align, Offset, OnTop,
+// Right and Up are not read. SetText changes it cheaply (a frame counter).
+func (v *View) ShowOverlayText(text string, anchor Anchor, x, y float32, o *TextOptions, order int32) (*Overlay, error) {
+	if o == nil {
+		o = &TextOptions{}
+	}
+	shown, err := textOf(text)
+	if err != nil {
+		return nil, err
+	}
+	defer C.free(unsafe.Pointer(shown))
+	colour := o.Colour
+	if colour == nil {
+		colour = "white"
+	}
+	rgb, err := v.paintFor("cadaclysm_view_show_text", colour, true)
+	if err != nil {
+		return nil, err
+	}
+	box, err := v.lib.paint(o.Box)
+	if err != nil {
+		return nil, err
+	}
+	raw := C.CadaclysmViewText{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	raw.text = shown
+	raw.mode = C.CADACLYSM_VIEW_TEXT_SCREEN
+	rgb3 := (*[4]C.float)(unsafe.Pointer(rgb))
+	for k := 0; k < 3; k++ {
+		raw.rgb[k] = rgb3[k]
+	}
+	raw.height = 12
+	if o.Size != 0 {
+		raw.height = C.float(o.Size)
+	}
+	raw.align = C.uint32_t(anchor)
+	raw.offset[0], raw.offset[1] = C.float(x), C.float(y)
+	if box != nil {
+		raw.box_rgba = *box
+	}
+	raw.box_padding = 4
+	if o.Padding != nil {
+		raw.box_padding = C.float(*o.Padding)
+	}
+	raw.on_top = 1
+	raw.font = C.uint32_t(o.Font)
+	raw.order = C.int32_t(order)
+	item, err := v.add("cadaclysm_view_show_text", func() C.uint32_t { return C.cv_show_text(v.lib.t, v.handle, &raw) }, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Overlay{Item: item, anchor: anchor}, nil
+}
+
+// ShowOverlayImage shows an image over the window: rgba (width x height x 4 bytes, rows from
+// the top, straight alpha), its box hanging from anchor by the same point, x, y pixels
+// inward, drawn as o says (nil: its own size, opaque, order 0).
+func (v *View) ShowOverlayImage(rgba []byte, width, height uint32, anchor Anchor, x, y float32, o *OverlayImageOptions) (*Overlay, error) {
+	if o == nil {
+		o = &OverlayImageOptions{}
+	}
+	need, err := pixelBytes(width, height, "show_overlay_image")
+	if err != nil {
+		return nil, err
+	}
+	if uint64(len(rgba)) != need {
+		return nil, refused(fmt.Sprintf("show_overlay_image: %d x %d pixels need %d bytes (w * h * 4), not %d", width, height, need, len(rgba)))
+	}
+	opacity := o.Opacity
+	if opacity == 0 {
+		opacity = 1
+	}
+	if !(opacity > 0) {
+		return nil, refused(fmt.Sprintf("show_overlay_image: opacity %v: more than 0, at most 1 (0 is 1)", o.Opacity))
+	}
+	var pin runtime.Pinner
+	defer pin.Unpin()
+	raw := C.CadaclysmViewOverlayImage{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	raw.anchor = C.uint32_t(anchor)
+	raw.rgba = &standInU8[0]
+	if len(rgba) > 0 {
+		pin.Pin(&rgba[0])
+		raw.rgba = (*C.uint8_t)(unsafe.Pointer(&rgba[0]))
+	}
+	raw.width, raw.height = C.uint32_t(width), C.uint32_t(height)
+	raw.offset[0], raw.offset[1] = C.float(x), C.float(y)
+	raw.extent[0], raw.extent[1] = C.float(o.DrawWidth), C.float(o.DrawHeight)
+	raw.opacity = C.float(opacity)
+	raw.order = C.int32_t(o.Order)
+	item, err := v.add("cadaclysm_view_show_overlay_image", func() C.uint32_t { return C.cv_show_overlay_image(v.lib.t, v.handle, &raw) }, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Overlay{Item: item, anchor: anchor}, nil
 }
 
 // ---- text ----------------------------------------------------------------------------
@@ -1803,11 +2113,46 @@ func (i *Item) Finish(finish string) error {
 	})
 }
 
+// UserLayer puts the item on user layer `layer`, 0..31 (every item starts on 0): it draws
+// while the layer is on (View.UserLayer) and in the viewports whose LayerMask has its bit. A
+// layer past 31 is refused.
+func (i *Item) UserLayer(layer uint32) error {
+	return i.ok("cadaclysm_view_set_item_layer", func(v *View) C.bool {
+		return C.cv_set_item_layer(v.lib.t, v.handle, C.uint32_t(i.id), C.uint32_t(layer))
+	})
+}
+
 // NodeVisible shows or hides a scene node (the reader's index) and its subtree.
 func (i *Item) NodeVisible(node uint32, on bool) error {
 	return i.ok("cadaclysm_view_set_node_visible", func(v *View) C.bool {
 		return C.cv_set_node_visible(v.lib.t, v.handle, C.uint32_t(i.id), C.uint32_t(node), C.bool(on))
 	})
+}
+
+// lineColour draws the item's lines on `layer` (CADACLYSM_VIEW_LAYER_EDGES, _CURVES or
+// _ISOCURVES) in rgb; nil takes the view's colour again.
+func (i *Item) lineColour(layer C.uint32_t, rgb Colour) error {
+	p, err := i.view.paintFor("cadaclysm_view_set_item_line_colour", rgb, false)
+	if err != nil {
+		return err
+	}
+	return i.ok("cadaclysm_view_set_item_line_colour", func(v *View) C.bool {
+		return C.cv_set_item_line_colour(v.lib.t, v.handle, C.uint32_t(i.id), layer, p)
+	})
+}
+
+// SetEdgeColour draws the item's edges in rgb (a Colour), over the view's SetEdgeColour, the
+// item's colour and a solid's own edge paint; nil takes the view's colour again.
+func (i *Item) SetEdgeColour(rgb Colour) error { return i.lineColour(C.CADACLYSM_VIEW_LAYER_EDGES, rgb) }
+
+// SetCurveColour draws the item's curves in rgb, over the view's SetCurveColour and the item's
+// colour; nil takes the view's colour again.
+func (i *Item) SetCurveColour(rgb Colour) error { return i.lineColour(C.CADACLYSM_VIEW_LAYER_CURVES, rgb) }
+
+// SetIsocurveColour draws the item's isocurves in rgb, over the view's SetIsocurveColour and the
+// item's colour; nil takes the view's colour again.
+func (i *Item) SetIsocurveColour(rgb Colour) error {
+	return i.lineColour(C.CADACLYSM_VIEW_LAYER_ISOCURVES, rgb)
 }
 
 // NodeColour colours a node's subtree: a Colour (the alpha is not drawn); nil: the node's
@@ -1955,6 +2300,64 @@ func (v *View) Lighting() (string, error) {
 	return "headlight", nil
 }
 
+// LineColour is the colour every edge, curve or isocurve draws in, as Python's LineColour:
+// Colour (0..1 RGB), or each part's own colour where FromPart.
+type LineColour struct {
+	Colour   [3]float32
+	FromPart bool
+}
+
+func (v *View) setLineColour(layer C.uint32_t, rgb Colour, fromPart bool) error {
+	c, err := v.paintFor("cadaclysm_view_set_line_colour", rgb, true)
+	if err != nil {
+		return err
+	}
+	p := C.uint32_t(0)
+	if fromPart {
+		p = 1
+	}
+	return v.ok("cadaclysm_view_set_line_colour", func() C.bool { return C.cv_set_line_colour(v.lib.t, v.handle, layer, c, p) })
+}
+
+func (v *View) lineColour(layer C.uint32_t) (LineColour, error) {
+	var rgb [3]C.float
+	var p C.uint32_t
+	if err := v.ok("cadaclysm_view_line_colour", func() C.bool { return C.cv_line_colour(v.lib.t, v.handle, layer, &rgb[0], &p) }); err != nil {
+		return LineColour{}, err
+	}
+	return LineColour{Colour: [3]float32{float32(rgb[0]), float32(rgb[1]), float32(rgb[2])}, FromPart: p != 0}, nil
+}
+
+// SetEdgeColour sets the colour every edge draws in: rgb (a Colour; not nil), or with fromPart
+// each part's own colour, brightened so an edge reads over its faces. An item's
+// SetEdgeColour draws over it.
+func (v *View) SetEdgeColour(rgb Colour, fromPart bool) error {
+	return v.setLineColour(C.CADACLYSM_VIEW_LAYER_EDGES, rgb, fromPart)
+}
+
+// EdgeColour reports the edges' colour in use.
+func (v *View) EdgeColour() (LineColour, error) { return v.lineColour(C.CADACLYSM_VIEW_LAYER_EDGES) }
+
+// SetCurveColour sets the colour every curve (a curves or lines item's) draws in: rgb, or with
+// fromPart each part's own colour -- the default.
+func (v *View) SetCurveColour(rgb Colour, fromPart bool) error {
+	return v.setLineColour(C.CADACLYSM_VIEW_LAYER_CURVES, rgb, fromPart)
+}
+
+// CurveColour reports the curves' colour in use.
+func (v *View) CurveColour() (LineColour, error) { return v.lineColour(C.CADACLYSM_VIEW_LAYER_CURVES) }
+
+// SetIsocurveColour sets the colour every isocurve draws in: rgb, or with fromPart each part's
+// own colour.
+func (v *View) SetIsocurveColour(rgb Colour, fromPart bool) error {
+	return v.setLineColour(C.CADACLYSM_VIEW_LAYER_ISOCURVES, rgb, fromPart)
+}
+
+// IsocurveColour reports the isocurves' colour in use.
+func (v *View) IsocurveColour() (LineColour, error) {
+	return v.lineColour(C.CADACLYSM_VIEW_LAYER_ISOCURVES)
+}
+
 // OccludedStyle is how every "dashed" item's hidden lines and points look, as Python's
 // OccludedStyle: a dash and a gap in points, the share of coverage kept (above 0, at most
 // 1), and optionally one colour (0..1 RGB). Its zero value is the default: the library reads
@@ -2087,13 +2490,24 @@ func (v *View) Layer(layer uint32, on bool) error {
 	})
 }
 
+// UserLayer switches user layer `layer`, 0..31, on or off in every viewport (all start on);
+// see Item.UserLayer. A layer past 31 is refused.
+func (v *View) UserLayer(layer uint32, on bool) error {
+	return v.ok("cadaclysm_view_set_user_layer", func() C.bool {
+		return C.cv_set_user_layer(v.lib.t, v.handle, C.uint32_t(layer), C.bool(on))
+	})
+}
+
 // Viewport is one pane: its rectangle (x, y, width, height in physical pixels from the top
-// left), its camera's column-major view and projection, the eye, and a CADACLYSM_VIEW_GRID_* grid.
+// left), its camera's column-major view and projection, the eye, a CADACLYSM_VIEW_GRID_* grid,
+// and the user layers it draws (LayerMask: bit n for layer n, see Item.UserLayer; 0, the zero
+// value, draws every layer).
 type Viewport struct {
 	Rect             [4]uint32
 	View, Projection [16]float32
 	Eye              [3]float32
 	Grid             uint32
+	LayerMask        uint32
 }
 
 // Viewports draws panes of their own cameras; nil or empty: the one camera again.
@@ -2115,7 +2529,7 @@ func (v *View) Viewports(list []Viewport) error {
 			raw[i].eye[k] = C.float(p.Eye[k])
 		}
 		raw[i].grid = C.uint32_t(p.Grid)
-		raw[i].layer_mask = 0xFFFFFFFF // every user layer
+		raw[i].layer_mask = C.uint32_t(p.LayerMask)
 	}
 	var first *C.CadaclysmViewViewport // NULL, 0 for none, as Python's
 	if len(raw) > 0 {
@@ -2451,6 +2865,19 @@ func (v *View) Resize(width, height uint32) error {
 	return v.ok("cadaclysm_view_resize", func() C.bool {
 		return C.cv_resize(v.lib.t, v.handle, C.uint32_t(width), C.uint32_t(height))
 	})
+}
+
+// Stats is what the view has drawn (cadaclysm_view_stats, 1.25): an FPS counter read from it
+// stays right while the scene is still.
+func (v *View) Stats() (Stats, error) {
+	out := (*C.CadaclysmViewStats)(C.calloc(1, C.size_t(unsafe.Sizeof(C.CadaclysmViewStats{}))))
+	defer C.free(unsafe.Pointer(out))
+	out.size = C.uint32_t(unsafe.Sizeof(*out))
+	if err := v.ok("cadaclysm_view_stats", func() C.bool { return C.cv_stats(v.lib.t, v.handle, out) }); err != nil {
+		return Stats{}, err
+	}
+	return Stats{FramesDrawn: uint64(out.frames_drawn), LastFrameMs: float32(out.last_frame_ms), LastGpuMs: float32(out.last_gpu_ms),
+		Triangles: uint64(out.triangles), DrawCalls: uint32(out.draw_calls)}, nil
 }
 
 // NeedsDraw is whether the view owes a frame.

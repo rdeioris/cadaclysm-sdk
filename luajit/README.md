@@ -2,7 +2,7 @@
 
 Open CAD files and build exact solids from Lua, through LuaJIT's FFI: in
 [LÖVE](https://github.com/love2d/love/releases) (Love2D), [LÖVR](https://github.com/bjornbytes/lovr/releases)
-or a plain `luajit`. Nothing is compiled; the two libraries are loaded as they are.
+or a plain `luajit`. Nothing is compiled; the library is loaded as it is.
 The same object model as the Python module, name for name.
 
 | File | What it is |

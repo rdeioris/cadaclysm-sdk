@@ -1,8 +1,8 @@
 # cadaclysm for Node.js
 
-The two cadaclysm C ABIs -- the CAD readers (`cadaclysm_capi`) and the
-blacksmith B-rep builder (`cadaclysm_blacksmith`) -- as JavaScript objects,
-over the shipped shared libraries. No compiled addon: the one dependency,
+The two cadaclysm C ABIs -- the CAD readers (`cadaclysm_*`) and the
+blacksmith B-rep builder (`cadaclysm_blacksmith_*`) -- as JavaScript objects,
+over the shipped library, `cadaclysm`, in any of its flavours. No compiled addon: the one dependency,
 [`koffi`](https://koffi.dev), loads the same `.dll` / `.so` / `.dylib` every
 other language uses. Node 18.18 or later (`Symbol.dispose`, and the `using`
 declarations that call it, need it).
@@ -39,7 +39,7 @@ any directory above (the repository layout). Anywhere else, point them at the
 libraries:
 
 ```bash
-CADACLYSM_LIBRARY=/path/to/cadaclysm_capi.dll CADACLYSM_BLACKSMITH_LIBRARY=/path/to/cadaclysm_blacksmith.dll node my-script.js
+CADACLYSM_LIBRARY=/path/to/cadaclysm.dll node my-script.js
 ```
 
 Each variable takes the library itself or the directory holding it.
@@ -180,7 +180,7 @@ Three things worth knowing:
   binding hands out no views at all -- so what you hold survives the free and
   needs no `slice()`. Each ask copies again, so hold the array rather than
   calling `nodes()` inside a loop.
-* **The two libraries differ on purpose.** The reader's `placement` is sixteen
+* **The reader and the kernel differ on purpose.** The reader's `placement` is sixteen
   column-major numbers, the kernel's a `Frame` or twelve; the reader prints the
   unlicensed notice when the mesh is built and the kernel when the `.msh` is
   written; and the kernel's `.msh` text is an owned string this wrapper

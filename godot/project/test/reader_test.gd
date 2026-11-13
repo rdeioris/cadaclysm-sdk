@@ -14,7 +14,7 @@ func test_version_and_licence_text():
 	ok(RegEx.create_from_string("^\\d{4}-\\d\\d-\\d\\d$").search(Cadaclysm.build_date()) != null, Cadaclysm.build_date())
 	ok(Cadaclysm.license_info() != "")
 	ok(Cadaclysm.license_notice_count() >= 0)
-	ok(Cadaclysm.library_path().contains("cadaclysm_capi"), Cadaclysm.library_path())
+	ok(RegEx.create_from_string("cadaclysm[a-z_]*\\.(dll|so|dylib)$").search(Cadaclysm.library_path()) != null, Cadaclysm.library_path())
 
 func test_mesh_formats_include_stl_and_glb():
 	var names := {}

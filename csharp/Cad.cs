@@ -781,7 +781,11 @@ internal sealed class FemMeshHandle : CadaclysmHandle
 
 /// <summary>Resolves `cadaclysm_capi` for every P/Invoke in <see cref="Native"/>, and hands
 /// `cadaclysm_blacksmith` to <see cref="Kernel"/> for every one in `Blacksmith.cs`'s
-/// `BlacksmithNative`.</summary>
+/// `BlacksmithNative`. Both names are the binding's own: each resolves to one library of any
+/// flavour -- the single library's (`cadaclysm`, `cadaclysm_kernel_reader`,
+/// `cadaclysm_kernel`, `cadaclysm_reader`) first, then the separate library of earlier
+/// releases. Where the two halves find the same file the runtime hands back one handle.
+/// </summary>
 internal static class Loader
 {
     private static readonly object Gate = new();
@@ -810,62 +814,95 @@ internal static class Loader
             NativeLibrary.SetDllImportResolver(typeof(Loader).Assembly, (name, assembly, path) =>
                 name == "cadaclysm_blacksmith" ? Kernel?.Invoke() ?? IntPtr.Zero
                 : name == "cadaclysm_view" ? View?.Invoke() ?? IntPtr.Zero
-                : name.StartsWith("cadaclysm_", StringComparison.Ordinal) ? Resolve(name)
+                : name == "cadaclysm_capi" ? Reader()
                 : IntPtr.Zero);
         }
     }
 
-    /// <summary>The two libraries resolved through here, and the file names each goes by.
-    /// </summary>
-    private static readonly string[] Libraries = { "cadaclysm_capi", "cadaclysm_blacksmith" };
+    /// <summary>The libraries that carry the node API, in the order they are looked for: the
+    /// single library's flavours that hold it, then the separate library of earlier releases.
+    /// As `cadaclysm-capi-rt`'s `READER_STEMS`.</summary>
+    internal static readonly string[] ReaderStems = { "cadaclysm", "cadaclysm_kernel_reader", "cadaclysm_reader", "cadaclysm_capi" };
 
-    private static string[] FilesOf(string libraryName) =>
-        new[] { $"{libraryName}.dll", $"lib{libraryName}.dylib", $"lib{libraryName}.so" };
+    /// <summary>The libraries that carry the kernel, likewise (`KERNEL_STEMS`).</summary>
+    internal static readonly string[] KernelStems = { "cadaclysm", "cadaclysm_kernel_reader", "cadaclysm_kernel", "cadaclysm_blacksmith" };
+
+    /// <summary>Every library either half knows.</summary>
+    private static readonly string[] AllStems = ReaderStems.Union(KernelStems).ToArray();
+
+    private static string[] FilesOf(IEnumerable<string> stems) =>
+        stems.SelectMany(s => new[] { $"{s}.dll", $"lib{s}.dylib", $"lib{s}.so" }).ToArray();
+
+    private static IntPtr _reader;
+
+    /// <summary>The flavour of the reader library loaded, or null for the separate
+    /// `cadaclysm_capi` of earlier releases (or before it is loaded).</summary>
+    internal static LibraryFlavour? ReaderFlavour;
+
+    /// <summary>The reader library, loaded on first use and held. A flavour without the node
+    /// API is refused here, naming the libraries to load instead, and each later call is
+    /// refused the same way; nothing found leaves it to the runtime's own error.</summary>
+    internal static IntPtr Reader()
+    {
+        lock (Gate)
+        {
+            if (_reader != IntPtr.Zero) return _reader;
+            var (handle, path) = FindReader();
+            if (handle == IntPtr.Zero) return IntPtr.Zero;
+            var flavour = LibraryFlavour.Of(handle);
+            flavour?.Refuse(path, "nodes", "node API", "cadaclysm, cadaclysm_kernel_reader or cadaclysm_reader",
+                message => new CadaclysmException(message));
+            ReaderFlavour = flavour;
+            return _reader = handle;
+        }
+    }
 
     /// <summary>Finds and loads the reader library: `CADACLYSM_LIBRARY` as a directory or the
     /// file itself, then beside this assembly, then `lib/` and `target/{release,debug}` in
-    /// every ancestor, then the platform default search. The kernel has its own rule, in
-    /// `Blacksmith.cs` (see <see cref="Kernel"/>).</summary>
+    /// every ancestor, then the platform default search; each place asked for every name in
+    /// <see cref="ReaderStems"/> in turn. The kernel has its own rule, in `Blacksmith.cs` (see
+    /// <see cref="Kernel"/>).</summary>
     /// <remarks>The library sits in the Rust build directory, not beside this assembly by
     /// default, so this points the loader at it rather than making the caller arrange PATH.
     /// A deployment that ships the library alongside the executable works untouched, since
     /// that is tried before falling through to the OS's own search.</remarks>
-    public static IntPtr Resolve(string libraryName)
+    private static (IntPtr Handle, string Path) FindReader()
     {
-        var files = FilesOf(libraryName);
+        var files = FilesOf(ReaderStems);
         var candidates = new List<string>();
-        foreach (var variable in new[] { "CADACLYSM_LIBRARY" })
+        const string variable = "CADACLYSM_LIBRARY";
+        var env = Environment.GetEnvironmentVariable(variable);
+        if (!string.IsNullOrEmpty(env))
         {
-            var env = Environment.GetEnvironmentVariable(variable);
-            if (string.IsNullOrEmpty(env)) continue;
             if (Directory.Exists(env))
             {
                 // A directory is taken as the place the library is, as Python takes it: one
-                // holding neither library is the same mistake as a path to nothing, not a
-                // hint to go on searching and load some other copy. One holding only the
-                // other library is simply not for this one (see the file case below).
+                // holding no cadaclysm library is the same mistake as a path to nothing, not a
+                // hint to go on searching and load some other copy. One holding only a library
+                // without the node API (the separate kernel, the kernel flavour) is simply not
+                // for this one (see the file case below).
                 var inside = files.Select(f => Path.Combine(env, f)).Where(File.Exists).ToArray();
-                if (inside.Length == 0
-                    && !Libraries.Any(l => FilesOf(l).Any(f => File.Exists(Path.Combine(env, f)))))
+                if (inside.Length == 0 && !FilesOf(AllStems).Any(f => File.Exists(Path.Combine(env, f))))
                     throw new CadaclysmException($"{variable}={env} names nothing that exists");
                 candidates.AddRange(inside);
-                continue;
             }
-            // A variable that names nothing usable is a mistake to report, as Python's loader
-            // reports it, not a hint to fall through to the search and load something else.
-            if (!File.Exists(env)) throw new CadaclysmException($"{variable}={env} names nothing that exists");
-            var basename = Path.GetFileName(env);
-            if (files.Contains(basename, StringComparer.OrdinalIgnoreCase))
+            else
             {
-                candidates.Add(env);
-                continue;
+                // A variable that names nothing usable is a mistake to report, as Python's
+                // loader reports it, not a hint to fall through to the search and load
+                // something else.
+                if (!File.Exists(env)) throw new CadaclysmException($"{variable}={env} names nothing that exists");
+                var basename = Path.GetFileName(env);
+                // Any flavour of the single library is taken -- the kernel flavour too, to be
+                // refused by name when it loads. The separate kernel library is not for this
+                // one (it would load, then fail at the first entry point), so the search goes
+                // on; a file naming no cadaclysm library is a mistake.
+                if (FilesOf(ReaderStems.Append("cadaclysm_kernel")).Contains(basename, StringComparer.OrdinalIgnoreCase))
+                    candidates.Add(env);
+                else if (!FilesOf(AllStems).Contains(basename, StringComparer.OrdinalIgnoreCase))
+                    throw new CadaclysmException(
+                        $"{variable}={env} names no cadaclysm library ({string.Join(", ", AllStems)})");
             }
-            // A file names one library, and two are resolved through here. One naming the
-            // other library is simply not for this one (it would load, then fail at the first
-            // entry point), so the search goes on; one naming neither is a mistake.
-            if (!Libraries.Any(l => FilesOf(l).Contains(basename, StringComparer.OrdinalIgnoreCase)))
-                throw new CadaclysmException(
-                    $"{variable}={env} names neither cadaclysm_capi nor cadaclysm_blacksmith");
         }
         // Beside this assembly first, as Python looks beside its own file: a deployment that
         // ships the library alongside the executable. Then walking up from it: an SDK
@@ -884,8 +921,11 @@ internal static class Loader
         }
         foreach (var candidate in candidates)
             if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out var handle))
-                return handle;
-        return NativeLibrary.TryLoad(libraryName, out var fallback) ? fallback : IntPtr.Zero;
+                return (handle, candidate);
+        foreach (var stem in ReaderStems)
+            if (NativeLibrary.TryLoad(stem, out var fallback))
+                return (fallback, stem);
+        return (IntPtr.Zero, "");
     }
 
     /// <summary>Where the `Cadaclysm` NuGet package's libraries land, searched right after
@@ -909,6 +949,64 @@ internal static class Loader
                 if (trimmed != here && trimmed != runtime && !dirs.Contains(trimmed)) dirs.Add(trimmed);
             }
         return dirs;
+    }
+}
+
+/// <summary>A flavour of the single library: its name and features, as `cadaclysm_flavour()`
+/// and `cadaclysm_features()` answer. A separate library of earlier releases exports neither,
+/// and has none.</summary>
+internal sealed class LibraryFlavour
+{
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate IntPtr TextCall();
+
+    private readonly IntPtr _library;
+
+    private LibraryFlavour(IntPtr library, string name, string features)
+    {
+        _library = library;
+        Name = name;
+        Features = features;
+    }
+
+    /// <summary>`"full"`, `"kernel-reader"`, `"kernel"` or `"reader"`.</summary>
+    public string Name { get; }
+
+    /// <summary>The features it was built with, comma-separated (`"nodes,kernel,bim"`).</summary>
+    public string Features { get; }
+
+    /// <summary>The flavour of the library <paramref name="library"/>, or null for a separate
+    /// library of earlier releases.</summary>
+    public static LibraryFlavour? Of(IntPtr library)
+    {
+        if (!NativeLibrary.TryGetExport(library, "cadaclysm_flavour", out var flavour)
+            || !NativeLibrary.TryGetExport(library, "cadaclysm_features", out var features))
+            return null;
+        static string Read(IntPtr call) =>
+            Marshal.PtrToStringUTF8(Marshal.GetDelegateForFunctionPointer<TextCall>(call)()) ?? "";
+        return new LibraryFlavour(library, Read(flavour), Read(features));
+    }
+
+    public bool Has(string feature) => Features.Split(',').Contains(feature);
+
+    /// <summary>Throws the refusal for a half this flavour does not have:
+    /// `the '<flavour>' flavour has no <what>; load <instead>`.</summary>
+    public void Refuse(string path, string feature, string what, string instead, Func<string, Exception> error)
+    {
+        if (!Has(feature)) throw error($"{path}: the '{Name}' flavour has no {what}; load {instead}");
+    }
+
+    /// <summary>Null where the library exports <paramref name="entryPoint"/>; else the refusal
+    /// naming it: `<call>: not in this library's flavour ('<flavour>', features <features>);
+    /// the full flavour has it`, the call named as the other errors name it.</summary>
+    public string? Missing(string entryPoint)
+    {
+        if (NativeLibrary.TryGetExport(_library, entryPoint, out _)) return null;
+        var call = entryPoint.StartsWith("cadaclysm_blacksmith_", StringComparison.Ordinal) ? entryPoint["cadaclysm_blacksmith_".Length..]
+            : entryPoint.StartsWith("cadaclysm_", StringComparison.Ordinal) ? entryPoint["cadaclysm_".Length..]
+            : entryPoint;
+        var features = Features.Length == 0 ? "none" : Features;
+        return $"{call}: not in this library's flavour ('{Name}', features {features}); the full flavour has it";
     }
 }
 
@@ -4387,6 +4485,24 @@ public static class Cadaclysm
     /// <summary>The version of the library actually loaded, which is the one worth reporting.
     /// </summary>
     public static string Version() => Marshal.PtrToStringUTF8(Native.cadaclysm_version()) ?? "";
+
+    /// <summary>Which library this is: `"full"`, `"kernel-reader"` or `"reader"` for a flavour of
+    /// the single library, `"reader"` for the separate `cadaclysm_capi` of earlier releases.
+    /// Loads the library if nothing has yet.</summary>
+    public static string Flavour()
+    {
+        _ = Version();
+        return Loader.ReaderFlavour?.Name ?? "reader";
+    }
+
+    /// <summary>The features the library was built with, comma-separated
+    /// (`"nodes,kernel,bim"`), or `""` for the separate `cadaclysm_capi` of earlier releases.
+    /// </summary>
+    public static string Features()
+    {
+        _ = Version();
+        return Loader.ReaderFlavour?.Features ?? "";
+    }
 
     /// <summary>When the loaded library was built, YYYY-MM-DD.</summary>
     public static string BuildDate() => Marshal.PtrToStringUTF8(Native.cadaclysm_build_date()) ?? "";

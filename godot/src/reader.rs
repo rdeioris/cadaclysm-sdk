@@ -459,6 +459,7 @@ pub(crate) fn svg_options(options: &VarDictionary) -> Option<sdk::SvgOptions> {
             "isocurves",
             "polylines",
             "silhouettes",
+            "hidden",
         ];
     known.sort_unstable();
     for key in options.keys_array().iter_shared() {
@@ -538,6 +539,17 @@ pub(crate) fn svg_options(options: &VarDictionary) -> Option<sdk::SvgOptions> {
     opts.curves = flag("curves", false);
     opts.isocurves = flag("isocurves", false);
     opts.polylines = flag("polylines", false);
+    // `hidden`: "" (or left out) draws every line; "removed" only what is seen, the solids
+    // hiding one another; "dashed" adds the hidden lines, dashed. Kernel drawings only: the
+    // reader's refuse it.
+    if let Some(hidden) = options.get("hidden") {
+        opts.hidden = match hidden.to_string().as_str() {
+            "" => sdk::SvgHidden::All,
+            "removed" => sdk::SvgHidden::Removed,
+            "dashed" => sdk::SvgHidden::Dashed,
+            other => return fail(format!("hidden must be \"\", \"removed\" or \"dashed\", not {other:?}")),
+        };
+    }
     // On by default, as the library is: a sphere's and a torus's only curves are their
     // seams, which are not edges of the body and are never drawn, so without the
     // outline those two draw a blank page.

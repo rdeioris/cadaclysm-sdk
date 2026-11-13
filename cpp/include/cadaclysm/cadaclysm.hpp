@@ -10,6 +10,9 @@
 #define CADACLYSM_HPP
 
 #include <cadaclysm.h>
+#ifndef CADACLYSM_SEPARATE
+#include <cadaclysm_flavour.h>
+#endif
 
 #include "result.hpp"
 
@@ -244,6 +247,26 @@ inline std::string version() { return detail::text(::cadaclysm_version()); }
 
 // When the loaded library was built, YYYY-MM-DD.
 inline std::string build_date() { return detail::text(::cadaclysm_build_date()); }
+
+// Which flavour of the library is linked: "full" or "reader" (CADACLYSM_FLAVOUR), and
+// "reader" for the separate cadaclysm_capi of earlier releases.
+inline std::string flavour() {
+#ifdef CADACLYSM_SEPARATE
+    return "reader";
+#else
+    return detail::text(::cadaclysm_flavour());
+#endif
+}
+
+// The linked library's features, comma-separated ("nodes" for the reader flavour);
+// empty for the separate cadaclysm_capi.
+inline std::string features() {
+#ifdef CADACLYSM_SEPARATE
+    return {};
+#else
+    return detail::text(::cadaclysm_features());
+#endif
+}
 
 // Load a license: the certificate text, or the path of a file holding it.
 inline Result<void> license(const std::string& text_or_path) {

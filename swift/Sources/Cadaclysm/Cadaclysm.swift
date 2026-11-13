@@ -183,6 +183,28 @@ public enum ValueKind: Int, Sendable {
 /// The version of the library actually linked, which is the one worth reporting.
 public func version() -> String { borrowed(cadaclysm_version()) }
 
+/// Which library the build linked (CADACLYSM_FLAVOUR, see Package.swift): `"full"` or
+/// `"reader"` for a flavour of the single library, `"reader"` for the separate
+/// `cadaclysm_capi` of earlier releases.
+public func flavour() -> String {
+#if CADACLYSM_SEPARATE
+    return "reader"
+#else
+    return borrowed(cadaclysm_flavour())
+#endif
+}
+
+/// The features the linked library was built with, comma-separated
+/// (`"nodes,kernel,write-breps,write-meshes,bim,parts"` for full, `"nodes,write-meshes"` for the reader), or `""` for
+/// the separate `cadaclysm_capi` of earlier releases.
+public func features() -> String {
+#if CADACLYSM_SEPARATE
+    return ""
+#else
+    return borrowed(cadaclysm_features())
+#endif
+}
+
 /// When the linked library was built, `YYYY-MM-DD`; a paid licence covers every build dated on
 /// or before its expiry.
 public func buildDate() -> String { borrowed(cadaclysm_build_date()) }

@@ -52,7 +52,11 @@ ABI_MAJOR = 1
 # 1.20: `cadaclysm_view_set_occluded_style` and `_occluded_style` (hidden lines' dash, gap, dim, colour).
 # 1.21: `cadaclysm_view_show_solid_faces` (a solid in a material and an opacity, all or some of its faces).
 # 1.22: snapping -- `cadaclysm_view_set_snap`, `_request_snap_in`, `_snap_result`, `_clear_snap`, `_set_work_plane`, `_clear_work_plane`.
-ABI_MINOR = 22
+# 1.23: `cadaclysm_view_set_line_colour`, `_line_colour`, `_set_item_line_colour` (edge, curve and isocurve colours).
+# 1.24: overlays -- `cadaclysm_view_show_overlay`, `_show_overlay_image`, `_move_overlay`, screen text
+#       (`CADACLYSM_VIEW_TEXT_SCREEN`, `CadaclysmViewText.order`) and the pick's `overlay` flag.
+# 1.25: `cadaclysm_view_stats` (frames drawn, the last frame's CPU and GPU time, triangles, draw calls).
+ABI_MINOR = 25
 
 #: A colour: text -- "#rgb", "#rrggbb" (the "#" optional) or one of the 148 CSS colour names,
 #: any case, read by the view library's own `cadaclysm_view_parse_colour`, so the forms are
@@ -88,6 +92,7 @@ _LAYERS = {"surfaces": 0, "edges": 1, "curves": 2, "isocurves": 3, "grid": 4, "t
 _ALIGN = {"top-left": 0, "top": 1, "top-right": 2, "left": 3, "centre": 4, "center": 4, "right": 5,
           "bottom-left": 6, "bottom": 7, "bottom-right": 8}
 _TEXT_MODES = {"label": 0, "world": 1}
+_TEXT_SCREEN = 2  # CADACLYSM_VIEW_TEXT_SCREEN (1.24): an overlay's text
 _GRIDS = {"none": 0, "top": 1, "front": 2, "right": 3}
 _EVENTS = {"pointer_down": 1, "pointer_move": 2, "pointer_up": 3, "pointer_cancel": 4, "wheel": 5, "key": 6}
 _POINTERS = {"mouse": 0, "touch": 1, "pen": 2}
@@ -139,18 +144,21 @@ class _Camera(ctypes.Structure):
 
 class Pick(TypedDict):
     """What a pick answers: the item hit, its node and face, `clicks` (2 for a double click,
-    else 1) and `point` -- where the ray met the model, or None where no depth was read."""
+    else 1) and `point` -- where the ray met the model, or None where no depth was read --
+    and `overlay` (1.24): True where the item is an overlay, over the pixel, so nothing of the
+    scene beneath it was picked (`face` a text overlay's line, else 0)."""
     item: int
     node: int
     face: int
     clicks: int
     point: Optional[Tuple[float, float, float]]
+    overlay: bool
 
 
 class _Pick(ctypes.Structure):
-    #: CadaclysmViewPick, cadaclysm_view.h 1.8 (1.0 had the first four fields).
+    #: CadaclysmViewPick, cadaclysm_view.h 1.24 (1.0 had the first four fields, 1.8 clicks and the point).
     _fields_ = [("size", c_uint32), ("item", c_uint32), ("node", c_uint32), ("face", c_uint32),
-                ("clicks", c_uint32), ("has_point", c_uint32), ("point", c_float * 3)]
+                ("clicks", c_uint32), ("has_point", c_uint32), ("point", c_float * 3), ("overlay", c_uint32)]
 
 
 class Snap(TypedDict):
@@ -213,11 +221,35 @@ class OccludedStyle:
     colour: Optional[Any] = None
 
 
+@dataclasses.dataclass(frozen=True)
+class LineColour:
+    """The colour every edge, curve or isocurve draws in (`View.edge_colour`, `curve_colour`,
+    `isocurve_colour`): `colour` (3 numbers in 0..1) and whether each part's own colour is
+    drawn instead (`from_part`)."""
+    colour: Tuple[float, float, float]
+    from_part: bool
+
+
 class _Text(ctypes.Structure):
     #: CadaclysmViewText, cadaclysm_view.h 1.6.
     _fields_ = [("size", c_uint32), ("text", c_char_p), ("mode", c_uint32), ("at", c_float * 3), ("right", c_float * 3),
                 ("up", c_float * 3), ("height", c_float), ("rgb", c_float * 3), ("align", c_uint32), ("offset", c_float * 2),
-                ("box_rgba", c_float * 4), ("box_padding", c_float), ("on_top", c_uint32), ("font", c_uint32)]
+                ("box_rgba", c_float * 4), ("box_padding", c_float), ("on_top", c_uint32), ("font", c_uint32),
+                ("order", ctypes.c_int32)]
+
+
+class _Overlay(ctypes.Structure):
+    #: CadaclysmViewOverlay, cadaclysm_view.h 1.24.
+    _fields_ = [("size", c_uint32), ("anchor", c_uint32), ("beziers", POINTER(c_float)), ("curve_count", c_uint32),
+                ("order", ctypes.c_int32), ("offset", c_float * 2), ("has_fill", c_uint32), ("fill_rgba", c_float * 4),
+                ("has_stroke", c_uint32), ("stroke_rgba", c_float * 4), ("stroke_width", c_float)]
+
+
+class _OverlayImage(ctypes.Structure):
+    #: CadaclysmViewOverlayImage, cadaclysm_view.h 1.24.
+    _fields_ = [("size", c_uint32), ("anchor", c_uint32), ("rgba", POINTER(ctypes.c_uint8)), ("width", c_uint32),
+                ("height", c_uint32), ("offset", c_float * 2), ("extent", c_float * 2), ("opacity", c_float),
+                ("order", ctypes.c_int32)]
 
 
 class _Program(ctypes.Structure):
@@ -241,6 +273,13 @@ class _MachiningInfo(ctypes.Structure):
     #: CadaclysmViewMachiningInfo, cadaclysm_view.h 1.7.
     _fields_ = [("size", c_uint32), ("moves", c_uint32), ("move", c_uint32), ("nx", c_uint32), ("ny", c_uint32),
                 ("cell", c_float), ("min", c_float * 2), ("cycle_time", c_double)]
+
+
+class _Stats(ctypes.Structure):
+    #: CadaclysmViewStats, cadaclysm_view.h 1.25: 40 bytes, padded explicitly.
+    _fields_ = [("size", c_uint32), ("pad0", c_uint32), ("frames_drawn", ctypes.c_uint64),
+                ("last_frame_ms", c_float), ("last_gpu_ms", c_float), ("triangles", ctypes.c_uint64),
+                ("draw_calls", c_uint32), ("pad1", c_uint32)]
 
 
 class _KmsInfo(ctypes.Structure):
@@ -319,6 +358,9 @@ _SIGNATURES = {
     "cadaclysm_view_set_xray": (c_bool, [V, c_uint32, c_bool]),
     "cadaclysm_view_set_occluded": (c_bool, [V, c_uint32, c_uint32]),
     "cadaclysm_view_set_item_layer": (c_bool, [V, c_uint32, c_uint32]),
+    "cadaclysm_view_set_item_line_colour": (c_bool, [V, c_uint32, c_uint32, POINTER(c_float)]),
+    "cadaclysm_view_set_line_colour": (c_bool, [V, c_uint32, POINTER(c_float), c_uint32]),
+    "cadaclysm_view_line_colour": (c_bool, [V, c_uint32, POINTER(c_float), POINTER(c_uint32)]),
     "cadaclysm_view_set_user_layer": (c_bool, [V, c_uint32, c_bool]),
     "cadaclysm_view_set_finish": (c_bool, [V, c_uint32, c_uint32]),
     "cadaclysm_view_set_face_colours": (c_bool, [V, c_uint32, POINTER(c_uint32), F, c_uint32]),
@@ -331,6 +373,10 @@ _SIGNATURES = {
     "cadaclysm_view_load_font": (c_uint32, [POINTER(ctypes.c_uint8), ctypes.c_size_t]),
     "cadaclysm_view_show_text": (c_uint32, [V, POINTER(_Text)]),
     "cadaclysm_view_set_text": (c_bool, [V, c_uint32, c_char_p]),
+    "cadaclysm_view_show_overlay": (c_uint32, [V, POINTER(_Overlay)]),
+    "cadaclysm_view_show_overlay_image": (c_uint32, [V, POINTER(_OverlayImage)]),
+    "cadaclysm_view_move_overlay": (c_bool, [V, c_uint32, c_uint32, c_float, c_float]),
+    "cadaclysm_view_stats": (c_bool, [V, POINTER(_Stats)]),
     "cadaclysm_view_show_machining": (c_uint32, [V, POINTER(_Machining)]),
     "cadaclysm_view_machining_seek": (c_bool, [V, c_uint32, c_uint32]),
     "cadaclysm_view_machining_colour_by": (c_bool, [V, c_uint32, c_uint32]),
@@ -695,7 +741,21 @@ def _pick_dict(pick: _Pick) -> "Pick":
     items were shown in, or None where the library read no depth (no hit to place, a
     machining stock, the terminal library)."""
     return {"item": pick.item, "node": pick.node, "face": pick.face, "clicks": pick.clicks,
-            "point": tuple(pick.point) if pick.has_point else None}
+            "point": tuple(pick.point) if pick.has_point else None, "overlay": bool(pick.overlay)}
+
+
+def _anchor(anchor: str) -> int:
+    """An overlay's anchor by name -- "top-left", "top", "top-right", "left", "centre",
+    "right", "bottom-left", "bottom", "bottom-right" ("_" for "-" and "center" taken too) --
+    as its `CADACLYSM_VIEW_ALIGN_*` code."""
+    key = anchor.replace("_", "-") if isinstance(anchor, str) else anchor
+    if key not in _ALIGN:
+        raise ValueError(f"anchor {anchor!r}: one of {', '.join(k for k in _ALIGN if k != 'center')}")
+    return _ALIGN[key]
+
+
+def _anchor_name(code: int) -> str:
+    return next(name for name, c in _ALIGN.items() if c == code)
 
 
 def _snap_dict(snap: _Snap) -> "Snap":
@@ -1320,6 +1380,34 @@ class Item:
         self.view._ok("cadaclysm_view_frame_node", self.id, _node_index(node))
 
 
+class Overlay(Item):
+    """An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the
+    window, drawn over everything, untouched by the camera. `remove` and (text) `set_text` work
+    as on any item."""
+
+    __slots__ = ("_anchor",)
+
+    def __init__(self, view: View, item_id: int, anchor: int, keeps: Any = None):
+        super().__init__(view, item_id, keeps)
+        self._anchor = anchor
+
+    def __repr__(self) -> str:
+        return f"<Overlay {self.id} {self.anchor}>"
+
+    @property
+    def anchor(self) -> str:
+        """The anchor it hangs from now ("top-left", ..., "bottom-right")."""
+        return _anchor_name(self._anchor)
+
+    def move_to(self, x: float, y: float, anchor: Optional[str] = None) -> None:
+        """Moved to `x`, `y` pixels inward from its anchor -- or from `anchor` instead, which it
+        then hangs from (`cadaclysm_view_move_overlay`): cheap, for a HUD element that moves
+        every frame."""
+        code = self._anchor if anchor is None else _anchor(anchor)
+        self.view._ok("cadaclysm_view_move_overlay", self.id, code, float(x), float(y))
+        self._anchor = code
+
+
 class Machining(Item):
     """A CAM job shown in a `View` (`View.show_machining`): the stock is this item; the view's
     timeline plays it (`View.play`). `remove()` takes the job and its track away."""
@@ -1528,6 +1616,109 @@ class View:
         t.on_top = 1 if on_top else 0
         t.font = int(font)
         return self._item(self._ok("cadaclysm_view_show_text", ctypes.byref(t)), keeps=encoded)
+
+    # -- overlays (1.24): a HUD over the whole window --
+    def _overlay(self, item_id: int, anchor: int, keeps: Any = None) -> Overlay:
+        item = Overlay(self, item_id, anchor, keeps)
+        self._items[item_id] = item
+        return item
+
+    def show_overlay(self, shape: Any, anchor: str, x: float = 0.0, y: float = 0.0, *,
+                     fill: Optional[Colour] = None, stroke: Optional[Colour] = None,
+                     stroke_width: float = 1.0, order: int = 0) -> Overlay:
+        """A 2D shape over the window, in pixels (one profile unit a pixel, y up), its origin hung
+        `x`, `y` pixels inward from `anchor` ("top-left", "top", "top-right", "left", "centre",
+        "right", "bottom-left", "bottom", "bottom-right": x away from the left edge for the left
+        column and from the right edge for the right one, y down from the top for the top row and
+        up from the bottom for the bottom one). `shape` is a blacksmith `Profile`, a list of them
+        (one overlay, filled together by the even-odd rule), or rational cubic Beziers ((n, 4, 4)
+        or sixteen numbers each, a profile's `beziers()`). The fill: `fill` where given ("none"
+        for no fill), else the profile's own colour, else white -- unless a `stroke` is given,
+        when an uncoloured profile is not filled; the stroke only where `stroke` is given,
+        `stroke_width` pixels wide. Lower `order` draws first (shapes, text and images share it).
+        Drawn after everything else, never moved by the camera; a click on it picks it
+        (`Pick["overlay"]`) and nothing beneath."""
+        import numpy as np
+        if hasattr(shape, "beziers") and callable(shape.beziers):
+            profiles = [shape]
+        elif isinstance(shape, (list, tuple)) and shape and all(hasattr(p, "beziers") and callable(p.beziers) for p in shape):
+            profiles = list(shape)
+        else:
+            profiles = None
+        own = None
+        if profiles is not None:
+            b = np.ascontiguousarray([v for p in profiles for v in p.beziers()], dtype=np.float32)
+            own = next((p.colour for p in profiles if getattr(p, "colour", None) is not None), None)
+        else:
+            b = np.ascontiguousarray(shape, dtype=np.float32).reshape(-1)
+        if b.size == 0 or b.size % 16:
+            raise ValueError(f"show_overlay: 16 numbers a curve, at least one, not {b.size}")
+        stroke_rgba = None if stroke is None else _rgba(stroke, self._lib)
+        if isinstance(fill, str) and fill.strip().lower() == "none":
+            fill_rgba = None
+        elif fill is not None:
+            fill_rgba = _rgba(fill, self._lib)
+        elif own is not None:
+            fill_rgba = _f32(list(own)[:3] + [1.0], 4)
+        else:
+            fill_rgba = None if stroke_rgba is not None else _f32((1.0, 1.0, 1.0, 1.0), 4)
+        code = _anchor(anchor)
+        o = _Overlay()
+        o.size, o.anchor = ctypes.sizeof(_Overlay), code
+        o.beziers, o.curve_count = b.ctypes.data_as(POINTER(c_float)), b.size // 16
+        o.order = int(order)
+        o.offset[:] = (float(x), float(y))
+        if fill_rgba is not None:
+            o.has_fill, o.fill_rgba = 1, fill_rgba
+        if stroke_rgba is not None:
+            o.has_stroke, o.stroke_rgba = 1, stroke_rgba
+        o.stroke_width = float(stroke_width)
+        return self._overlay(self._ok("cadaclysm_view_show_overlay", ctypes.byref(o)), code,
+                             keeps=shape if profiles is not None else None)
+
+    def show_overlay_text(self, text: str, anchor: str, x: float = 0.0, y: float = 0.0, *, size: float = 12.0,
+                          colour: Colour = "white", box: Optional[Colour] = None, padding: float = 4.0,
+                          font: int = 0, order: int = 0) -> Overlay:
+        """Text over the window: its box hangs from `anchor` by the same point (its top-right
+        corner for "top-right"), `x`, `y` pixels inward -- the box's padding included where it
+        has one. `size`, `colour`, `box`, `padding` and `font` as `show_text`'s, in pixels;
+        `set_text` changes it cheaply (a frame counter)."""
+        code = _anchor(anchor)
+        t = _Text()
+        t.size = ctypes.sizeof(_Text)
+        encoded = _text_bytes(text)
+        t.text, t.mode, t.height = encoded, _TEXT_SCREEN, float(size)
+        t.rgb[:] = _colour(colour, self._lib)[:3]
+        t.align = code
+        t.offset[:] = (float(x), float(y))
+        if box is not None:
+            t.box_rgba[:] = _rgba(box, self._lib)
+        t.box_padding, t.on_top, t.font, t.order = float(padding), 1, int(font), int(order)
+        return self._overlay(self._ok("cadaclysm_view_show_text", ctypes.byref(t)), code, keeps=encoded)
+
+    def show_overlay_image(self, rgba: Any, width: int, height: int, anchor: str, x: float = 0.0, y: float = 0.0, *,
+                           draw_width: float = 0.0, draw_height: float = 0.0, opacity: float = 1.0,
+                           order: int = 0) -> Overlay:
+        """An image over the window: `rgba` (`width` x `height` x 4 bytes -- bytes or an (h, w, 4)
+        uint8 array -- rows top first, straight alpha), its box hanging from `anchor` by the same
+        point, `x`, `y` pixels inward, drawn `draw_width` x `draw_height` pixels (0: its own size)
+        at `opacity` (more than 0, at most 1)."""
+        import numpy as np
+        pixels = np.ascontiguousarray(np.frombuffer(rgba, dtype=np.uint8) if isinstance(rgba, (bytes, bytearray))
+                                      else rgba, dtype=np.uint8)
+        w, h = int(width), int(height)
+        if pixels.size != w * h * 4:
+            raise ValueError(f"show_overlay_image: {w} x {h} pixels need {w * h * 4} bytes (w * h * 4), not {pixels.size}")
+        if not opacity > 0:
+            raise ValueError(f"show_overlay_image: opacity {opacity}: more than 0, at most 1 (0 would be the library's 1)")
+        code = _anchor(anchor)
+        image = _OverlayImage()
+        image.size, image.anchor = ctypes.sizeof(_OverlayImage), code
+        image.rgba, image.width, image.height = pixels.ctypes.data_as(POINTER(ctypes.c_uint8)), w, h
+        image.offset[:] = (float(x), float(y))
+        image.extent[:] = (float(draw_width), float(draw_height))
+        image.opacity, image.order = float(opacity), int(order)
+        return self._overlay(self._ok("cadaclysm_view_show_overlay_image", ctypes.byref(image)), code)
 
     def show(self, obj: Any, rgb: Optional[Colour] = None) -> Item:
         """A `Solid`, `Scene` or `Node` by handle, a `Profile` as lines, an (n, 3) array as a
@@ -1992,6 +2183,18 @@ class View:
     def resize(self, width: int, height: int) -> None:
         self._ok("cadaclysm_view_resize", int(width), int(height))
 
+    def stats(self) -> Dict[str, Any]:
+        """What the view has drawn, for an FPS counter that stays right while the scene is still:
+        `frames_drawn` (every frame drawn to the window, and every `image()` rendered; a pump
+        or draw that owes nothing adds none), and the last frame's `last_frame_ms` (CPU),
+        `last_gpu_ms` (the GPU's clock, -1 where it cannot be measured), `triangles` and
+        `draw_calls`."""
+        s = _Stats()
+        s.size = ctypes.sizeof(_Stats)
+        self._ok("cadaclysm_view_stats", ctypes.byref(s))
+        return {"frames_drawn": s.frames_drawn, "last_frame_ms": s.last_frame_ms, "last_gpu_ms": s.last_gpu_ms,
+                "triangles": s.triangles, "draw_calls": s.draw_calls}
+
     def kms_info(self) -> Dict[str, Any]:
         """How this view draws onto a Linux display through KMS (`kind="kms"`, or a window of its
         own at a console): `path` -- "gbm" (the display's buffers, drawn into by a second device,
@@ -2104,6 +2307,61 @@ class View:
         rgb = _f32(_colour(value.colour, self._lib), 3) if has else (c_float * 3)()
         s = _OccludedStyle(ctypes.sizeof(_OccludedStyle), float(value.dash), float(value.gap), float(value.dim), int(has), rgb)
         self._ok("cadaclysm_view_set_occluded_style", ctypes.byref(s))
+
+    def _set_line_colour(self, layer: str, rgb: Colour, from_part: bool) -> None:
+        self._ok("cadaclysm_view_set_line_colour", _LAYERS[layer], _f32(_colour(rgb, self._lib), 3), int(bool(from_part)))
+
+    def _line_colour(self, layer: str) -> LineColour:
+        rgb, from_part = (c_float * 3)(), c_uint32()
+        self._ok("cadaclysm_view_line_colour", _LAYERS[layer], rgb, ctypes.byref(from_part))
+        return LineColour(tuple(rgb), bool(from_part.value))
+
+    def _set_item_line_colour(self, item: Any, layer: str, rgb: Optional[Colour]) -> None:
+        rgb_ = None if rgb is None else _f32(_colour(rgb, self._lib), 3)
+        self._ok("cadaclysm_view_set_item_line_colour", int(getattr(item, "id", item)), _LAYERS[layer], rgb_)
+
+    def set_edge_colour(self, rgb: Colour, from_part: bool = False) -> None:
+        """The colour every edge draws in: `rgb` (text, or 3 numbers in 0..1), or with
+        `from_part` each part's own colour, brightened so an edge reads over its faces (`rgb` kept
+        for when it is turned off). An item's `set_item_edge_colour` draws over it."""
+        self._set_line_colour("edges", rgb, from_part)
+
+    def edge_colour(self) -> LineColour:
+        """The edges' colour in use (`set_edge_colour`)."""
+        return self._line_colour("edges")
+
+    def set_item_edge_colour(self, item: Any, rgb: Optional[Colour]) -> None:
+        """Draws item `item`'s (an `Item` or its id) edges in `rgb` (text, or 3 numbers in 0..1),
+        over `set_edge_colour`, the item's colour and a solid's own edge paint; None takes the
+        view's colour again."""
+        self._set_item_line_colour(item, "edges", rgb)
+
+    def set_curve_colour(self, rgb: Colour, from_part: bool = False) -> None:
+        """The colour every curve (a curves or lines item's) draws in: `rgb`, or with `from_part`
+        each part's own colour -- the default."""
+        self._set_line_colour("curves", rgb, from_part)
+
+    def curve_colour(self) -> LineColour:
+        """The curves' colour in use (`set_curve_colour`)."""
+        return self._line_colour("curves")
+
+    def set_item_curve_colour(self, item: Any, rgb: Optional[Colour]) -> None:
+        """Draws item `item`'s curves in `rgb`, over `set_curve_colour` and the item's colour;
+        None takes the view's colour again."""
+        self._set_item_line_colour(item, "curves", rgb)
+
+    def set_isocurve_colour(self, rgb: Colour, from_part: bool = False) -> None:
+        """The colour every isocurve draws in: `rgb`, or with `from_part` each part's own colour."""
+        self._set_line_colour("isocurves", rgb, from_part)
+
+    def isocurve_colour(self) -> LineColour:
+        """The isocurves' colour in use (`set_isocurve_colour`)."""
+        return self._line_colour("isocurves")
+
+    def set_item_isocurve_colour(self, item: Any, rgb: Optional[Colour]) -> None:
+        """Draws item `item`'s isocurves in `rgb`, over `set_isocurve_colour` and the item's
+        colour; None takes the view's colour again."""
+        self._set_item_line_colour(item, "isocurves", rgb)
 
     def layer(self, name: str, on: bool = True) -> None:
         if name not in _LAYERS:

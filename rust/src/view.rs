@@ -28,13 +28,16 @@ mod colour;
 
 mod text;
 
+mod overlay;
+
 pub use colour::{Colour, Rgb, Rgba};
 pub use options::{Camera, Lighting, Navigation, Pick, SurfaceMode, ViewOptions};
 pub use items::{Finish, Item, Material, Occluded, SolidOptions, View};
 pub use machining::{ColourBy, Machining, MachiningInfo, MachiningOptions, MachiningPart, MachiningProgram, MachiningTool, ToolShape};
 pub use text::{Align, Text, TextMode};
+pub use overlay::{Anchor, Overlay, OverlayStyle};
 pub use target::{RawWindow, WindowKind};
-pub use control::{Button, Event, Grid, Image, Input, Layer, Lod, LodMotion, OccludedStyle, Pointer, Snap, SnapKind, Standard, Viewport, WorkPlane};
+pub use control::{Button, Event, Grid, Image, Input, Layer, LineColour, Lod, LodMotion, OccludedStyle, Pointer, Snap, SnapKind, Standard, Stats, Viewport, WorkPlane};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::ffi::OsString;
@@ -145,7 +148,7 @@ impl Library {
         let version = unsafe { abi_version() };
         check_abi_version(version, path)?;
         drop(abi_version);
-        let api = unsafe { sys::Api::bind(&library, path) }.map_err(|_| {
+        let api = unsafe { sys::Api::bind(&library, path, None) }.map_err(|_| {
             let missing = sys::ENTRY_POINTS
                 .iter()
                 .find(|name| unsafe { library.get::<*const ()>(format!("{name}\0").as_bytes()) }.is_err())
@@ -325,14 +328,14 @@ fn choose(named: Option<OsString>) -> Result<Choice> {
 /// libraries get -- beside the executable, where the build downloaded, a `lib/` or a
 /// `target/release`/`target/debug` above the executable or the working directory.
 pub fn terminal_library() -> Result<PathBuf> {
-    loader::find(&loader::file_name("cadaclysm_terminal"), TERMINAL_VARIABLE)
+    loader::find(&[loader::file_name("cadaclysm_terminal")], &[TERMINAL_VARIABLE])
         .map_err(|message| no_library(message, "terminal", TERMINAL_VARIABLE))
 }
 
 /// Where the wgpu library, `cadaclysm_view`, is, without loading it: `CADACLYSM_VIEW_LIBRARY`
 /// (the library or its directory) when set; else the same search as [`terminal_library`].
 pub fn wgpu_library() -> Result<PathBuf> {
-    loader::find(&loader::file_name("cadaclysm_view"), WGPU_VARIABLE)
+    loader::find(&[loader::file_name("cadaclysm_view")], &[WGPU_VARIABLE])
         .map_err(|message| no_library(message, "wgpu", WGPU_VARIABLE))
 }
 
@@ -395,7 +398,7 @@ mod tests {
     fn a_viewer_reports_its_name_and_version() {
         let v = fake::library();
         assert_eq!(v.name(), "fake 1.0");
-        assert_eq!(v.abi_version(), (1, 22));
+        assert_eq!(v.abi_version(), (1, 25));
         assert_eq!(v.path(), Path::new("fake"));
     }
 
@@ -479,8 +482,8 @@ mod tests {
     fn another_abi_major_is_refused_with_both_versions() {
         fake::abi((2 << 16) | 5);
         let err = Library::from_api(fake::api(), PathBuf::from("v2.dll"), None).expect_err("ABI 2 refused");
-        fake::abi((1 << 16) | 22);
-        assert_eq!(err.message(), "v2.dll: view ABI 2.5, this SDK needs 1.22 or a later 1.x");
+        fake::abi((1 << 16) | 25);
+        assert_eq!(err.message(), "v2.dll: view ABI 2.5, this SDK needs 1.25 or a later 1.x");
     }
 
     #[test]
@@ -489,30 +492,30 @@ mod tests {
         let m = abi_mismatch(1, 5, Path::new("old.dll"), Some(reason));
         assert_eq!(
             m,
-            "old.dll: view ABI 1.5, this SDK needs 1.22 or a later 1.x\n\
+            "old.dll: view ABI 1.5, this SDK needs 1.25 or a later 1.x\n\
              The build gave no libraries of its own: they were not built from R:\\src: cargo build failed"
         );
-        assert_eq!(abi_mismatch(1, 5, Path::new("old.dll"), None), "old.dll: view ABI 1.5, this SDK needs 1.22 or a later 1.x");
+        assert_eq!(abi_mismatch(1, 5, Path::new("old.dll"), None), "old.dll: view ABI 1.5, this SDK needs 1.25 or a later 1.x");
     }
 
     #[test]
-    fn a_minor_version_below_22_is_refused_with_the_abi_message() {
+    fn a_minor_version_below_25_is_refused_with_the_abi_message() {
         fake::abi((1 << 16) | 4);
         let err = Library::from_api(fake::api(), PathBuf::from("v1.4.dll"), None).expect_err("1.4 is too old");
-        fake::abi((1 << 16) | 22);
-        assert_eq!(err.message(), "v1.4.dll: view ABI 1.4, this SDK needs 1.22 or a later 1.x");
-        fake::abi((1 << 16) | 21);
-        let err = Library::from_api(fake::api(), PathBuf::from("v1.21.dll"), None).expect_err("1.21 is too old");
-        fake::abi((1 << 16) | 22);
-        assert_eq!(err.message(), "v1.21.dll: view ABI 1.21, this SDK needs 1.22 or a later 1.x");
+        fake::abi((1 << 16) | 25);
+        assert_eq!(err.message(), "v1.4.dll: view ABI 1.4, this SDK needs 1.25 or a later 1.x");
+        fake::abi((1 << 16) | 24);
+        let err = Library::from_api(fake::api(), PathBuf::from("v1.24.dll"), None).expect_err("1.24 is too old");
+        fake::abi((1 << 16) | 25);
+        assert_eq!(err.message(), "v1.24.dll: view ABI 1.24, this SDK needs 1.25 or a later 1.x");
     }
 
     #[test]
     fn a_later_minor_version_is_accepted() {
-        fake::abi((1 << 16) | 23);
-        let v = Library::from_api(fake::api(), PathBuf::from("v1.23"), None);
-        fake::abi((1 << 16) | 22);
-        assert_eq!(v.expect("1.23 is 1.22 or later").abi_version(), (1, 23));
+        fake::abi((1 << 16) | 26);
+        let v = Library::from_api(fake::api(), PathBuf::from("v1.26"), None);
+        fake::abi((1 << 16) | 25);
+        assert_eq!(v.expect("1.26 is 1.25 or later").abi_version(), (1, 26));
     }
 
     #[test]
@@ -545,7 +548,7 @@ mod tests {
     #[test]
     fn a_viewer_prints_its_name_path_and_version() {
         let text = format!("{:?}", fake::library());
-        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 22) }"#);
+        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 25) }"#);
     }
 
     #[test]

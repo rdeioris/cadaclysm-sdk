@@ -855,6 +855,168 @@ using var outline = rect.WithHole(hole);
             return Fail($"intersect: an overlap ring leaves the shared band: {shared.Overlaps[0]}");
     Console.WriteLine($"intersect: {found} ({ellipses} ellipses); {shared.Overlaps[0]}");
 }
+// Self-intersections: a thin rectangle swept open along a path that comes back across its own
+// start (a line to (10, 0, 0), a 270-degree turn about (10, 3, 0), a line down to (7, -5, 0))
+// crosses itself at (7, 0) in lines between two walls, never along its own edges; a cube crosses
+// nothing; a negative tolerance is refused in the kernel's words.
+{
+    const double tol = 1e-3;
+    using var back = SweepPath.At((0, 0, 0)).LineTo((10, 0, 0)).Arc((10, 3, 0), (0, 0, 1), 1.5 * Math.PI).LineTo((7, -5, 0));
+    using var slab = Profile.Rect(0.2, 5);
+    using var tube = Solid.SweepOpen(slab, new double[] { 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 }, back);
+    var crossed = tube.SelfIntersections(tol);
+    if (crossed.Chains.Count == 0) return Fail("self_intersections: the tube passes through itself at (7, 0)");
+    foreach (var c in crossed.Chains)
+    {
+        if (c.FaceA == c.FaceB || c.FaceA >= tube.Faces || c.FaceB >= tube.Faces) return Fail($"self_intersections: a chain reads {c}");
+        if (c.Curve is null || c.Curve.Kind != "line") return Fail($"self_intersections: two planar walls cross in a line: {c}");
+        if (c.Points.Any(p => Math.Abs(p[0] - 7) > 0.1 + tol || Math.Abs(p[1]) > 0.1 + tol || Math.Abs(p[2]) > 2.5 + tol))
+            return Fail($"self_intersections: a chain off the crossing: {c}");
+    }
+    using var cube = Solid.Cuboid(4, 6, 8);
+    var clean = cube.SelfIntersections(tol);
+    if (clean.Chains.Count != 0 || clean.Overlaps.Count != 0) return Fail($"self_intersections: a cube reads {clean}");
+    try { tube.SelfIntersections(-1.0); return Fail("self_intersections: a negative tolerance was accepted"); }
+    catch (BuildException e) when (e.Message.Contains("self_intersect: tolerance must be positive and finite")) { }
+    Console.WriteLine($"self_intersections: {crossed}");
+}
+// Check: Python's test_check_finds_a_tube_through_itself_its_free_edges_for_a_cut_and_nothing_wrong_with_two_cubes.
+// Two cubes, or a cube and a sphere to join, are clean; the tube above alone is only its
+// crossing (an open sheet is no fault alone); as a cut its free edges are `open`, and as a
+// trim's tool the same; a 0.01-thick plate has short edges at 0.05; refusals in the kernel's words.
+{
+    const double tol = 1e-3;
+    using var back = SweepPath.At((0, 0, 0)).LineTo((10, 0, 0)).Arc((10, 3, 0), (0, 0, 1), 1.5 * Math.PI).LineTo((7, -5, 0));
+    using var slab = Profile.Rect(0.2, 5);
+    using var tube = Solid.SweepOpen(slab, new double[] { 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 }, back);
+    using var cube = Solid.Cuboid(1, 1, 1);
+    using var ball = Solid.Sphere(2);
+    if (cube.Check().Count != 0) return Fail($"check: a cube reads {string.Join(", ", cube.Check())}");
+    if (cube.Check(ball, "join", tol).Count != 0) return Fail("check: a cube and a sphere to join read a finding");
+    var alone = tube.Check(tolerance: tol);
+    if (alone.Count == 0) return Fail("check: the tube passes through itself");
+    foreach (var f in alone)
+        if (f.Kind != "self_intersection" || f.Argument != 0 || f.Index is null || f.Other is null || f.Index == f.Other || !(f.Size > 0.1))
+            return Fail($"check: the tube alone reads {f}");
+    var asCut = tube.Check(cube, "cut", tol);
+    var openEdges = asCut.Where(f => f.Kind == "open").ToList();
+    if (openEdges.Count == 0 || openEdges.Any(f => f.Argument != 0 || f.Other is null || !(f.Size > 0)))
+        return Fail($"check: the tube as a cut reads {string.Join(", ", asCut)}");
+    if (asCut.Any(f => f.Argument != 0)) return Fail("check: the cube is fine as a cut's tool");
+    if (!cube.Check(tube, "trim", tol).Any(f => f.Kind == "open" && f.Argument == 1)) return Fail("check: a trim's tool must be closed");
+    using var thin = Solid.Cuboid(4, 4, 0.01);
+    var small = thin.Check(tolerance: 0.05);
+    if (!small.Any(f => f.Kind == "short_edge" && f.Index is not null && f.Other is null && f.Size < 0.05))
+        return Fail($"check: a thin plate reads {string.Join(", ", small)}");
+    try { cube.Check(cube, "union"); return Fail("check: an unknown operation was accepted"); }
+    catch (BuildException e) when (e.Message == "check: unknown operation \"union\" (join, cut, common, split_sheet, trim, merge or intersect)") { }
+    try { cube.Check(tolerance: -1.0); return Fail("check: a negative tolerance was accepted"); }
+    catch (BuildException e) when (e.Message == "check: tolerance must be positive and finite") { }
+    Console.WriteLine($"check: {alone.Count} self-crossings, {openEdges.Count} open edges as a cut, {small.Count} on a thin plate");
+}
+// Mechanical drawings: Python's test_a_cube_on_its_diagonal_shows_nine_lines_and_hides_three ..
+// test_a_page_writes_r2000_dxf_that_reads_back_as_its_profiles. A 10-cube seen along its
+// diagonal shows nine edges (90 long) and hides three (30), meeting at the far corner; in
+// perspective and as a 12-triangle mesh the same; a plate with a through hole outlines as one
+// profile with one hole; the SVG's hidden lines removed or dashed; a page of a view, a profile,
+// a hatch and a text writes R2000 DXF, and the rectangle alone reads back where it was put.
+{
+    using var cube = Solid.Cuboid(10, 10, 10);
+    using var view = Blacksmith.Hlr(new[] { cube }, new HlrOptions { Direction = (-1, -1, -1) });
+    var seen = view.Visible();
+    var hidden = view.Hidden();
+    if (seen.Count != 9 || hidden.Count != 3) return Fail($"hlr: the diagonal cube shows {seen.Count} and hides {hidden.Count}, not 9 and 3");
+    if (view.Lines.Any(l => l.Kind != HlrKind.Sharp || l.Source != HlrSource.Edge || l.Index2 is not null || l.Solid != 0))
+        return Fail("hlr: every line of a cube is a sharp edge of solid 0");
+    if (Math.Abs(seen.Sum(l => l.Length3d) - 90) > 1e-6 || Math.Abs(hidden.Sum(l => l.Length3d) - 30) > 1e-6)
+        return Fail($"hlr: lengths {seen.Sum(l => l.Length3d)} seen, {hidden.Sum(l => l.Length3d)} hidden, not 90 and 30");
+    foreach (var line in view.Lines)
+    {
+        if (line.Beziers2d.Count < 1 || line.Beziers2d.Count != line.Beziers3d.Count) return Fail("hlr: a line's Béziers come in matching pairs");
+        for (var k = 2; k < line.Beziers2d.Points.Length; k += 3)
+            if (line.Beziers2d.Points[k] != 0) return Fail("hlr: a view-plane Bézier lies at z 0");
+        if (line.Beziers3d.Weights.Any(w => !(w > 0))) return Fail("hlr: weights are positive");
+    }
+    foreach (var line in hidden)
+    {
+        var p = line.Beziers3d.Points;
+        bool Far(int at) => Math.Abs(p[at] + 5) < 1e-9 && Math.Abs(p[at + 1] + 5) < 1e-9 && Math.Abs(p[at + 2] + 5) < 1e-9;
+        if (!Far(0) && !Far(p.Length - 3)) return Fail("hlr: a hidden edge of the diagonal cube ends at the far corner");
+    }
+    if (view.Report.Unsettled != 0) return Fail($"hlr: {view.Report.Unsettled} pieces unsettled");
+    if (Math.Abs(view.Tolerance - Blacksmith.EffectiveTolerance(cube)) > 1e-15) return Fail($"hlr: tolerance {view.Tolerance}");
+
+    using var perspective = Blacksmith.Hlr(new[] { cube }, new HlrOptions { Eye = (30, 25, 20) });
+    if (perspective.Visible().Count != 9 || perspective.Hidden().Count != 3) return Fail("hlr: the cube in perspective shows 9 and hides 3");
+    using var mesh = new TriangleMesh(
+        new double[][] { new double[] { -5, -5, -5 }, new double[] { 5, -5, -5 }, new double[] { 5, 5, -5 }, new double[] { -5, 5, -5 },
+                         new double[] { -5, -5, 5 }, new double[] { 5, -5, 5 }, new double[] { 5, 5, 5 }, new double[] { -5, 5, 5 } },
+        new uint[][] { new uint[] { 0, 2, 1 }, new uint[] { 0, 3, 2 }, new uint[] { 4, 5, 6 }, new uint[] { 4, 6, 7 },
+                       new uint[] { 0, 1, 5 }, new uint[] { 0, 5, 4 }, new uint[] { 3, 7, 6 }, new uint[] { 3, 6, 2 },
+                       new uint[] { 0, 4, 7 }, new uint[] { 0, 7, 3 }, new uint[] { 1, 2, 6 }, new uint[] { 1, 6, 5 } });
+    using var meshView = Blacksmith.HlrMesh(new[] { mesh }, new HlrOptions { Direction = (-1, -1, -1) });
+    if (meshView.Visible().Count != 9 || meshView.Hidden().Count != 3) return Fail("hlr_mesh: the cube mesh shows 9 and hides 3");
+    if (meshView.Lines.Any(l => l.Source != HlrSource.MeshEdge || l.Index2 is null)) return Fail("hlr_mesh: every line is a mesh edge of two vertices");
+
+    try { Blacksmith.Hlr(new[] { cube }, new HlrOptions { Direction = (0, 0, -1) }); return Fail("hlr: up along the view was accepted"); }
+    catch (BuildException e) when (e.Message.StartsWith("hlr: up is along the view")) { }
+    try { Blacksmith.Hlr(Array.Empty<Solid>()); return Fail("hlr: no solids was accepted"); }
+    catch (BuildException e) when (e.Message.StartsWith("hlr: no solids")) { }
+    try { Blacksmith.Hlr(new[] { cube }, new HlrOptions { Tolerance = -1 }); return Fail("hlr: a negative tolerance was accepted"); }
+    catch (BuildException e) when (e.Message.StartsWith("hlr: tolerance must be 0 or more")) { }
+
+    using var slab = Solid.Cuboid(40, 30, 5);
+    using var bore = Solid.Cylinder(5, 20);
+    using var through = bore.Translate(0, 0, -10);
+    using var hlrPlate = slab.Cut(through, null);
+    var hlrOutline = Blacksmith.ProjectedOutline(new[] { hlrPlate }, new HlrOptions { Direction = (0, 0, -1), Up = (0, 1, 0) });
+    if (hlrOutline.Count != 1) return Fail($"projected_outline: the plate is {hlrOutline.Count} profiles, not 1");
+    var flat = hlrOutline[0].Beziers();
+    var maxX = 0.0;
+    for (var k = 0; k < flat.Length; k += 4) maxX = Math.Max(maxX, Math.Abs(flat[k] / flat[k + 3]));
+    if (Math.Abs(maxX - 20) > 1e-6 || flat.Length / 16 <= 4) return Fail($"projected_outline: max |x| {maxX}, {flat.Length / 16} Béziers");
+    foreach (var p in hlrOutline) p.Dispose();
+
+    var el = Math.Atan(1 / Math.Sqrt(2)) * 180 / Math.PI;
+    var removed = Blacksmith.WriteSvgText(new[] { cube }, new Cadaclysm.Blacksmith.SvgOptions { Azimuth = 45, Elevation = el, Hidden = SvgHidden.Removed });
+    if (!removed.Contains("<g id=\"solid-0\"") || removed.Contains("solid-0-hidden")) return Fail("svg: hidden removed draws solid-0 alone");
+    var dashed = Blacksmith.WriteSvgText(new[] { cube }, new Cadaclysm.Blacksmith.SvgOptions { Azimuth = 45, Elevation = el, Hidden = SvgHidden.Dashed });
+    var group = dashed.Substring(dashed.IndexOf("<g id=\"solid-0-hidden\"", StringComparison.Ordinal));
+    group = group.Substring(0, group.IndexOf("</g>", StringComparison.Ordinal));
+    if (!group.Contains("stroke-dasharray") || group.Count(c => c == 'M') != 3) return Fail("svg: hidden dashed adds three dashed lines");
+
+    using var hlrRect = Profile.Rect(40, 20);
+    using var page = new Page(PageUnits.Millimetres);
+    page.AddView(view, (50, 50), 2);
+    if (page.EntityCount != 12) return Fail($"page: the view is {page.EntityCount} entities, not 12");
+    page.AddProfile(hlrRect, (150, 50), "parts").AddHatch(hlrRect, "ANSI31", at: (150, 50)).AddText("PLATE", (150, 30), 3.5, halign: "center");
+    if (page.EntityCount != 15) return Fail($"page: {page.EntityCount} entities, not 15");
+    var dxf = page.Dxf();
+    if (!dxf.StartsWith("  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n", StringComparison.Ordinal)) return Fail("page: the DXF is not R2000");
+    if (dxf != page.Dxf()) return Fail("page: the same page writes the same DXF");
+    foreach (var layer in new[] { "visible", "hidden", "parts", "hatch", "text" })
+        if (!dxf.Contains($"\n  8\n{layer}\n")) return Fail($"page: no layer {layer}");
+    var pageSvg = page.Svg();
+    if (!pageSvg.Contains("<svg") || !pageSvg.Contains("PLATE")) return Fail("page: the SVG holds the text");
+
+    using var alone = new Page().AddProfile(hlrRect, (150, 50));
+    var back = Blacksmith.DxfProfiles(alone.Dxf());
+    if (back.Count != 1) return Fail($"dxf_profiles: {back.Count} profiles, not 1");
+    var b = back[0].Beziers();
+    double minX = double.MaxValue, minY = double.MaxValue, maxBX = double.MinValue, maxBY = double.MinValue;
+    for (var k = 0; k < b.Length; k += 4)
+    {
+        minX = Math.Min(minX, b[k]); minY = Math.Min(minY, b[k + 1]); maxBX = Math.Max(maxBX, b[k]); maxBY = Math.Max(maxBY, b[k + 1]);
+    }
+    if (Math.Abs(minX - 130) > 1e-6 || Math.Abs(minY - 40) > 1e-6 || Math.Abs(maxBX - 170) > 1e-6 || Math.Abs(maxBY - 60) > 1e-6)
+        return Fail($"dxf_profiles: bounds ({minX}, {minY})-({maxBX}, {maxBY})");
+    back[0].Dispose();
+    try { Blacksmith.DxfProfiles("not a DXF file"); return Fail("dxf_profiles: not DXF was accepted"); }
+    catch (BuildException e) when (e.Message.StartsWith("dxf_profiles: line ")) { }
+    try { page.AddHatch(hlrRect, "BRICK"); return Fail("page_add_hatch: BRICK was accepted"); }
+    catch (BuildException e) when (e.Message.StartsWith("page_add_hatch: pattern")) { }
+    Console.WriteLine($"hlr: {seen.Count} seen, {hidden.Count} hidden; page {page.EntityCount} entities, {dxf.Length} DXF bytes");
+}
 // Transforms: Python's test_a_transform_is_sixteen_numbers_row_major_and_composes_right_to_left
 // .. test_a_profile_turns_scales_mirrors_and_maps (transforms plan A4). A frame goes as the 12
 // numbers Frame converts to; the skew one below is passed raw, since Frame refuses it first.
@@ -5872,6 +6034,74 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             if (type != nameof(BuildException) || !msg.StartsWith("mirror_join: the half lies on both sides of the plane")) return Fail($"mirror_join: a whole body gave {type}: {msg}");
         }
 
+        // 6b''. holes, ribs and webs, patterns
+        {
+            static bool HrNear(double got, double want, double rel) => Math.Abs(got - want) <= rel * Math.Abs(want);
+            using var blk = Solid.Cuboid(40, 30, 20).Translate(20, 15, 10);
+            var (drilled, hr) = blk.Hole((10, 15, 20), 4);
+            using (drilled)
+            {
+                if (!HrNear(drilled.Mass().Volume, 24000 - 80 * Math.PI, 1e-6) || drilled.Faces != 7) return Fail($"hole: volume {drilled.Mass().Volume}, {drilled.Faces} faces");
+                if (hr.Holes != 1 || hr.FacesAdded != 1 || hr.Bottoms.Count != 1 || Math.Abs(hr.Bottoms[0] - 20) > 1e-9) return Fail($"hole: {hr}");
+            }
+            using (var bit = blk.HoleTool((10, 15, 20), 4))
+                if (!(bit.Mass().Volume > 80 * Math.PI)) return Fail($"hole_tool: volume {bit.Mass().Volume}");
+
+            using var hrPlate = Solid.Cuboid(100, 60, 10).Translate(50, 30, 5);
+            using var hrPin = Solid.Cylinder(3, 30).Translate(10, 10, -10);
+            var grid = Pattern.Rectangular((1, 0, 0), 4, 20, (0, 1, 0), 3, 20);
+            if (grid.Count != 12) return Fail($"pattern_rectangular: {grid.Count} placements");
+            var (holed, pr) = hrPlate.PatternFeature(hrPin, FeatureOp.Cut, grid);
+            using (holed)
+            {
+                if (!HrNear(holed.Mass().Volume, 60000 - 1080 * Math.PI, 1e-6)) return Fail($"pattern_feature: volume {holed.Mass().Volume}");
+                if (pr.Instances != 12 || pr.Booleans != 1 || pr.Missed != 0) return Fail($"pattern_feature: {pr}");
+            }
+
+            var row = Pattern.Rectangular((1, 0, 0), 3, 10);
+            if (row.Count != 3 || !row[0].Rows.SequenceEqual(new double[] { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 })
+                || !row[1].Rows.SequenceEqual(new double[] { 1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }))
+                return Fail($"pattern_rectangular row: {string.Join(" | ", row.Select(t => string.Join(",", t.Rows)))}");
+            var (pair, pr2) = blk.Pattern(Pattern.Rectangular((1, 0, 0), 2, 8).Take(2));
+            using (pair)
+                if (pr2.Instances != 2 || pr2.Booleans != 1 || !HrNear(pair.Mass().Volume, 28800, 1e-6)) return Fail($"pattern: {pr2}, volume {pair.Mass().Volume}");
+            var ring = Pattern.Circular((0, 0, 0), (0, 0, 1), 6);
+            if (ring.Count != 6 || Math.Abs(ring[1].Rows[0] - 0.5) > 1e-12) return Fail($"pattern_circular: {ring.Count}, {ring[1]}");
+            using (var line = NurbsCurve.Through(new[] { (0.0, 0.0, 0.0), (30.0, 0.0, 0.0) }, 1))
+            {
+                var along = Pattern.Along(line, 4);
+                if (along.Count != 4 || Math.Abs(along[3].Rows[3] - 30) > 1e-9) return Fail($"pattern_along: {along.Count}, {along[^1]}");
+            }
+
+            // an L bracket's rib, along the diagonal in the plane y = 15
+            using var foot = Solid.Cuboid(40, 30, 5).Translate(20, 15, 2.5);
+            using var upright = Solid.Cuboid(5, 30, 40).Translate(2.5, 15, 20);
+            using var l = foot.Join(upright);
+            using var diag = NurbsCurve.Through(new[] { (30.0, 15.0, 5.0), (5.0, 15.0, 30.0) }, 1);
+            var ribPlane = new Frame((0, 15, 0), (1, 0, 0), (0, 0, 1), (0, -1, 0));
+            using (var ribbed = l.Rib(diag, ribPlane, 4))
+                if (!HrNear(ribbed.Mass().Volume, 11250 + 1250, 1e-6)) return Fail($"rib: volume {ribbed.Mass().Volume}");
+            using (var slab = l.RibTool(diag, ribPlane, 4, RibSide.Front))
+                if (!HrNear(slab.Mass().Volume, 1250, 1e-6)) return Fail($"rib_tool: volume {slab.Mass().Volume}");
+
+            // a tray's web across its floor, from the rim plane down
+            using var shell = Solid.Cuboid(60, 40, 20).Translate(30, 20, 10);
+            using var pocket = Solid.Cuboid(56, 36, 18).Translate(30, 20, 11);
+            using var tray = shell.Cut(pocket);
+            using var across = NurbsCurve.Through(new[] { (10.0, 20.0, 10.0), (50.0, 20.0, 10.0) }, 1);
+            var webPlane = new Frame((0, 0, 10), (1, 0, 0), (0, -1, 0), (0, 0, -1));
+            using (var webbed = tray.Web(new[] { across }, webPlane, 3))
+                if (!HrNear(webbed.Mass().Volume - tray.Mass().Volume, 56 * 3 * 8, 1e-6)) return Fail($"web: added {webbed.Mass().Volume - tray.Mass().Volume}");
+            using (var walls = tray.WebTool(across, webPlane, 3, depth: 6))
+                if (!(walls.Mass().Volume > 0)) return Fail($"web_tool: volume {walls.Mass().Volume}");
+
+            var (t1, m1) = CsThrown(() => blk.Hole((10, 15, 20), 0));
+            if (t1 != nameof(BuildException) || !m1.StartsWith("hole: diameter 0 is not positive and finite")) return Fail($"hole refusal: {t1}: {m1}");
+            var (t2, m2) = CsThrown(() => Pattern.Rectangular((1, 0, 0), 0, 10));
+            if (t2 != nameof(BuildException) || !m2.StartsWith("pattern_rectangular: count1 is 0")) return Fail($"pattern_rectangular refusal: {t2}: {m2}");
+            Console.WriteLine("blacksmith holes, ribs and webs, patterns: ok");
+        }
+
         // 6c. curves on a sheet: a ring on a square offset along it, split along it, parted by a panel gap
         {
             using var sq = CsRectSheet((0, 0, 0), (1, 0, 0), (0, 1, 0), 40, 40);
@@ -6774,6 +7004,148 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
         if (!Refused(() => line.ClosestObject(new object[] { new[] { double.NaN, 0, 0 } })).StartsWith("nurbs_curve_closest_object: ")) return Fail("closest_object: a NaN point is not refused");
     }
     Console.WriteLine("closest points from a curve: max distance, skew lines, edge, crossing, projector and nearest object read back");
+}
+// Closest points against a triangle mesh: Python's test_a_triangle_mesh_names_its_face_edge_and_vertex_feet_in_closed_form
+// .. test_the_nearest_object_to_a_curve_takes_a_triangle_mesh, every figure a closed form written out
+// here (mesh closest points P3), at the origin and shifted far out.
+{
+    bool Within(double a, double b, double tol) => Math.Abs(a - b) <= tol;
+    string Refused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    double[] Shift(double[] p, double[] s) => new[] { p[0] + s[0], p[1] + s[1], p[2] + s[2] };
+    (double, double, double) T3(double[] p) => (p[0], p[1], p[2]);
+    NurbsCurve Segment(double[] a, double[] b) => new NurbsCurve(new[] { T3(a), T3(b) }, 1);
+    double[][] Moved(double[][] points, double[] s) => points.Select(p => Shift(p, s)).ToArray();
+    bool SameMeshPoint(MeshPoint? a, MeshPoint? b) =>
+        a is not null && b is not null && Near(a.Point, b.Point, 0) && a.Distance == b.Distance && a.Triangle == b.Triangle
+        && Near(a.Barycentric, b.Barycentric, 0) && a.Kind == b.Kind && a.Vertices.SequenceEqual(b.Vertices);
+    bool SameMeshFoot(CurveMeshFoot? a, CurveMeshFoot? b) =>
+        a is not null && b is not null && a.Distance == b.Distance && a.T == b.T && Near(a.PointOnCurve, b.PointOnCurve, 0)
+        && Near(a.PointOnMesh, b.PointOnMesh, 0) && a.Triangle == b.Triangle && Near(a.Barycentric, b.Barycentric, 0) && a.Kind == b.Kind
+        && a.Vertices.SequenceEqual(b.Vertices) && a.Crossing == b.Crossing;
+    var square = new[] { new double[] { 0, 0, 0 }, new double[] { 1, 0, 0 }, new double[] { 1, 1, 0 }, new double[] { 0, 1, 0 } };
+    var squareTriangles = new[] { new uint[] { 0, 1, 2 }, new uint[] { 0, 2, 3 } };   // sharing the diagonal 0-2
+    var tetra = new[] { new double[] { 0, 0, 0 }, new double[] { 1, 0, 0 }, new double[] { 0, 1, 0 }, new double[] { 0, 0, 1 } };
+    var tetraTriangles = new[] { new uint[] { 0, 2, 1 }, new uint[] { 0, 1, 3 }, new uint[] { 0, 3, 2 }, new uint[] { 1, 2, 3 } };   // 0 the z = 0 floor
+    var shifts = new[] { new double[] { 0, 0, 0 }, new double[] { 1e4, -1e4, 5e3 }, new double[] { 1e6, -1e6, 5e5 } };
+    foreach (var s in shifts)
+    {
+        var tol = 1e-12 * (1 + s.Max(Math.Abs));
+        // 1. above a face, above the shared diagonal (the lower triangle), beyond an outer edge
+        // and beyond a shared corner: kind, vertices and barycentric in closed form
+        using (var mesh = new TriangleMesh(Moved(square, s), squareTriangles))
+        {
+            if (mesh.VertexCount != 4 || mesh.TriangleCount != 2) return Fail($"triangle mesh: counts {mesh.VertexCount}, {mesh.TriangleCount}");
+            var (lo, hi) = mesh.Bounds;
+            if (!Near(lo, s, 0) || !Near(hi, Shift(new double[] { 1, 1, 0 }, s), 0)) return Fail($"triangle mesh: bounds at shift {s[0]}");
+            var face = mesh.ClosestPoint(Shift(new double[] { 0.75, 0.25, 2 }, s));
+            if (face is null || !Near(face.Point, Shift(new double[] { 0.75, 0.25, 0 }, s), tol) || !Within(face.Distance, 2, 1e-9) || face.Triangle != 0
+                || face.Kind != "face" || face.Vertices.Length != 0 || !Near(face.Barycentric, new[] { 0.25, 0.5, 0.25 }, 1e-9))
+                return Fail($"triangle mesh closest_point: the face foot reads {face} at shift {s[0]}");
+            var diagonal = mesh.ClosestPoint(Shift(new double[] { 0.5, 0.5, 1 }, s));
+            if (diagonal is null || diagonal.Triangle != 0 || diagonal.Kind != "edge" || !diagonal.Vertices.SequenceEqual(new uint[] { 0, 2 })
+                || !Near(diagonal.Barycentric, new[] { 0.5, 0, 0.5 }, 1e-9) || !Within(diagonal.Distance, 1, 1e-9))
+                return Fail($"triangle mesh closest_point: the shared edge reads {diagonal} at shift {s[0]}");
+            var outer = mesh.ClosestPoint(Shift(new double[] { 0.5, -1, 0 }, s));
+            if (outer is null || outer.Triangle != 0 || outer.Kind != "edge" || !outer.Vertices.SequenceEqual(new uint[] { 0, 1 })
+                || !Near(outer.Barycentric, new[] { 0.5, 0.5, 0 }, 1e-9))
+                return Fail($"triangle mesh closest_point: the outer edge reads {outer} at shift {s[0]}");
+            var corner = mesh.ClosestPoint(Shift(new double[] { 2, 2, 0 }, s));
+            if (corner is null || corner.Triangle != 0 || corner.Kind != "vertex" || !corner.Vertices.SequenceEqual(new uint[] { 2 })
+                || !Near(corner.Point, Shift(new double[] { 1, 1, 0 }, s), tol) || !Within(corner.Distance, Math.Sqrt(2), 1e-9) || !Near(corner.Barycentric, new double[] { 0, 0, 1 }, 1e-9))
+                return Fail($"triangle mesh closest_point: the corner reads {corner} at shift {s[0]}");
+            // 2. the limit on both sides; null, NaN and +inf are none
+            var p = Shift(new double[] { 0.75, 0.25, 2 }, s);
+            if (!SameMeshPoint(mesh.ClosestPoint(p, 2.1), face)) return Fail("triangle mesh closest_point: 2.1 missed a point 2 away");
+            if (mesh.ClosestPoint(p, 1.9) is not null) return Fail("triangle mesh closest_point: 1.9 found a point 2 away");
+            if (!SameMeshPoint(mesh.ClosestPoint(p, null), face) || !SameMeshPoint(mesh.ClosestPoint(p, double.NaN), face)
+                || !SameMeshPoint(mesh.ClosestPoint(p, double.PositiveInfinity), face))
+                return Fail("triangle mesh closest_point: null, NaN or +inf is a limit");
+        }
+        // 3. a line up the z axis enters the tetrahedron through its floor (triangle 0) at t 1/3;
+        // a line beside it answers its nearest vertex; the limit on both sides
+        using (var mesh = new TriangleMesh(Moved(tetra, s), tetraTriangles))
+        using (var line = Segment(Shift(new double[] { 0.2, 0.2, -1 }, s), Shift(new double[] { 0.2, 0.2, 2 }, s)))
+        using (var beside = Segment(Shift(new double[] { 2, 0, 0 }, s), Shift(new double[] { 3, 0, 0 }, s)))
+        {
+            var ltol = 1e-9 * (1 + s.Max(Math.Abs));
+            var foot = mesh.CurveClosestPoints(line);
+            if (foot is null || !foot.Crossing || foot.Distance != 0 || !Within(foot.T, 1.0 / 3, 1e-9) || !Near(foot.PointOnCurve, Shift(new[] { 0.2, 0.2, 0 }, s), ltol)
+                || !Near(foot.PointOnMesh, Shift(new[] { 0.2, 0.2, 0 }, s), ltol) || foot.Triangle != 0 || foot.Kind != "face" || foot.Vertices.Length != 0
+                || !Near(foot.Barycentric, new[] { 0.6, 0.2, 0.2 }, 1e-9))
+                return Fail($"triangle mesh curve_closest_points: through the tetrahedron reads {foot} at shift {s[0]}");
+            var near = mesh.CurveClosestPoints(beside, 1.1);
+            if (near is null || near.Crossing || !Within(near.Distance, 1, ltol) || !Within(near.T, 0, 1e-9) || !Near(near.PointOnMesh, Shift(new double[] { 1, 0, 0 }, s), ltol)
+                || near.Triangle != 0 || near.Kind != "vertex" || !near.Vertices.SequenceEqual(new uint[] { 1 }))
+                return Fail($"triangle mesh curve_closest_points: beside reads {near} at shift {s[0]}");
+            if (mesh.CurveClosestPoints(beside, 0.9) is not null) return Fail("triangle mesh curve_closest_points: 0.9 found a vertex 1 away");
+            if (!SameMeshFoot(mesh.CurveClosestPoints(beside), near) || !SameMeshFoot(mesh.CurveClosestPoints(beside, double.NaN), near)
+                || !SameMeshFoot(mesh.CurveClosestPoints(beside, double.PositiveInfinity), near))
+                return Fail("triangle mesh curve_closest_points: null, NaN or +inf is a limit");
+        }
+    }
+    // 4. a point on the mesh is within 0; the refusals, exactly
+    using (var mesh = new TriangleMesh(square, squareTriangles))
+    using (var flat = new TriangleMesh(square.SelectMany(p => p).ToArray(), squareTriangles.SelectMany(t => t).ToArray()))
+    using (var beside = Segment(new double[] { 2, 0, 0 }, new double[] { 3, 0, 0 }))
+    {
+        if (mesh.ClosestPoint(new[] { 0.5, 0.5, 0 }, 0) is null) return Fail("triangle mesh closest_point: a point on the mesh is not within 0");
+        if (!SameMeshPoint(flat.ClosestPoint(new[] { 0.5, 0.5, 1.0 }), mesh.ClosestPoint(new[] { 0.5, 0.5, 1.0 }))) return Fail("triangle mesh: the flat arrays build another mesh");
+        var badIndex = Refused(() => new TriangleMesh(square, new[] { new uint[] { 0, 1, 4 } }));
+        if (badIndex != "triangle_mesh_new: triangle 0 names vertex 4, past the vertex count") return Fail($"triangle mesh: a bad index gave '{badIndex}'");
+        var negative = Refused(() => mesh.ClosestPoint(new[] { 0.5, 0.5, 1.0 }, -1));
+        if (negative != "triangle_mesh_closest_point: the max distance must not be negative") return Fail($"triangle mesh closest_point: -1 gave '{negative}'");
+        negative = Refused(() => mesh.CurveClosestPoints(beside, -1));
+        if (negative != "triangle_mesh_curve_closest_points: the max distance must not be negative") return Fail($"triangle mesh curve_closest_points: -1 gave '{negative}'");
+        mesh.Dispose();
+        try { mesh.ClosestPoint(new[] { 0.5, 0.5, 1.0 }); return Fail("triangle mesh: a disposed mesh answered"); }
+        catch (ObjectDisposedException) { }
+    }
+    // 5. a solid's own mesh: its measuring tessellation, answering on after the solid is gone
+    TriangleMesh cubeMesh;
+    using (var cube = Solid.Cuboid(2, 2, 2))
+    {
+        cubeMesh = cube.TriangleMesh();
+        if (cubeMesh.TriangleCount < 12 || cubeMesh.VertexCount < 8) return Fail($"solid triangle_mesh: {cubeMesh.TriangleCount} triangles");
+        var (lo, hi) = cubeMesh.Bounds;
+        if (!Near(lo, new double[] { -1, -1, -1 }, 1e-9) || !Near(hi, new double[] { 1, 1, 1 }, 1e-9)) return Fail("solid triangle_mesh: not the 2-cube's box");
+        using (var unset = cube.TriangleMesh(0)) if (unset.TriangleCount != cubeMesh.TriangleCount) return Fail("solid triangle_mesh: 0 is not an unset tolerance");
+        foreach (var bad in new[] { -1.0, double.PositiveInfinity })
+        {
+            var refused = Refused(() => cube.TriangleMesh(bad));
+            if (refused != "solid_triangle_mesh: tolerance must be positive and finite") return Fail($"solid triangle_mesh: tolerance {bad} gave '{refused}'");
+        }
+    }
+    using (cubeMesh)
+    {
+        var foot = cubeMesh.ClosestPoint(new[] { 5, 0.1, 0.2 });
+        if (foot is null || !Within(foot.Distance, 4, 1e-9) || !Near(foot.Point, new[] { 1, 0.1, 0.2 }, 1e-9)) return Fail($"solid triangle_mesh: after the solid reads {foot}");
+    }
+    // 6. the nearest object: a mesh answers its own CurveMeshFoot (answer kind 3); items after
+    // a mesh are counted right; a tie goes to the earlier item
+    using (var mesh = new TriangleMesh(tetra, tetraTriangles))
+    using (var line = Segment(new double[] { 0.2, 0.2, -1 }, new double[] { 0.2, 0.2, 2 }))
+    using (var beside = Segment(new double[] { 2, 0, 0 }, new double[] { 3, 0, 0 }))
+    using (var shortLine = Segment(new double[] { -2, 0, 0 }, new double[] { -1, 0, 0 }))   // 1 from vertex 0 and from the point (0, 0, 0) alike
+    {
+        var near = line.ClosestObject(new object[] { (9.0, 9.0, 9.0), mesh });
+        var own = mesh.CurveClosestPoints(line);
+        if (near is null || near.Which != 1 || near.Body is not null || near.Pair is not null || !SameMeshFoot(near.Mesh, own))
+            return Fail($"closest_object: the mesh's win reads {near}");
+        if (near.Distance != own!.Distance || near.T != own.T || !Near(near.PointOnCurve, own.PointOnCurve, 0) || !Near(near.PointOnItem, own.PointOnMesh, 0))
+            return Fail("closest_object: the mesh's win is not its own answer");
+        var after = beside.ClosestObject(new object[] { mesh, (2.5, 0.5, 0.0) });
+        if (after is null || after.Which != 1 || after.Mesh is not null || !Within(after.Distance, 0.5, 1e-9)) return Fail($"closest_object: the point after a mesh reads {after}");
+        var tie = shortLine.ClosestObject(new object[] { mesh, (0.0, 0.0, 0.0) });
+        if (tie is null || tie.Which != 0 || tie.Distance != 1 || !tie.Mesh!.Vertices.SequenceEqual(new uint[] { 0 })) return Fail($"closest_object: the tie reads {tie}");
+        var second = shortLine.ClosestObject(new object[] { (0.0, 0.0, 0.0), mesh });
+        if (second is null || second.Which != 0 || second.Mesh is not null) return Fail($"closest_object: the tie the other way reads {second}");
+        if (beside.ClosestObject(new object[] { mesh }, 0.9) is not null) return Fail("closest_object: 0.9 found a mesh 1 away");
+    }
+    Console.WriteLine("closest points against a triangle mesh: face, edge, vertex, crossing, max distance, solid's mesh and nearest object read back");
 }
 
 // Tolerances: hole2.3dm (a root sample, scripts/link-samples.py) declares an absolute 0.01 and one

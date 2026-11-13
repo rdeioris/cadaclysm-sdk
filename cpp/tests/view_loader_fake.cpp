@@ -1,5 +1,5 @@
 // A stand-in view library for view_loader_test: every call of cadaclysm_view.h, exported
-// by the loader's own CVL_CALLS list, answering zero -- but for abi_version (1.22; 1.<n> while
+// by the loader's own CVL_CALLS list, answering zero -- but for abi_version (1.25; 1.<n> while
 // CVL_FAKE_ABI_MINOR is n, for the loader's refusal of an older library) and name, which
 // answers NULL (a library that names nothing must not crash cvl_open).
 #include <cadaclysm/view_loader.h>
@@ -21,7 +21,7 @@ uint32_t answer<uint32_t>(const char* call) {
     char minor[32];
     if (cvl_getenv("CVL_FAKE_ABI_MINOR", minor, sizeof minor))
         return (1u << 16) | static_cast<uint32_t>(std::strtoul(minor, nullptr, 10));
-    return (1u << 16) | 22u;
+    return (1u << 16) | 25u;
 }
 }  // namespace
 

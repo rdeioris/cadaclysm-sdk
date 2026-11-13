@@ -1,9 +1,15 @@
 //! Opening a cadaclysm library at run time: finding the file, binding its entry points
 //! once per process. Shared by the reader ([`crate::sys`]) and the kernel
-//! ([`crate::blacksmith::sys`]), each with its own library, its own environment
-//! variable and its own function table.
+//! ([`crate::blacksmith::sys`]), each with its own names to look for, its own
+//! environment variables and its own function table.
+//!
+//! One library of any flavour serves both: the single library's flavours (`cadaclysm`,
+//! `cadaclysm_kernel_reader`, `cadaclysm_kernel`, `cadaclysm_reader`) are looked for
+//! first, then the separate library of earlier releases. A flavour binds what it has;
+//! an entry point it leaves out is refused by name where the crate would call it
+//! ([`Flavour`]), and a flavour without a half at all is refused when that half loads.
 
-use std::ffi::OsString;
+use std::ffi::{c_char, CStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -14,8 +20,12 @@ pub(crate) use self::no_library::Library;
 
 /// Declares a function table: one field per entry point, bound by name when the
 /// library loads, plus the list of names it binds. Every entry point is bound up
-/// front, so a library older than this crate is refused at load with the name it
-/// lacks, rather than at some later call.
+/// front, so a separate library older than this crate is refused at load with the
+/// name it lacks, rather than at some later call. A flavour of the single library
+/// binds what it has: an entry point it leaves out is listed in the table's
+/// [`Flavour`], refused by name ([`Flavour::check`]) where the crate calls it, and
+/// bound to a stand-in that stops the process saying so should anything call it
+/// unchecked -- never to an address that is not a function.
 ///
 /// The kernel's table is declared `web; Api, ENTRY_POINTS; ...`: on wasm32 it is also
 /// filled from the web package (`Api::from_shim`, the generated adapters in
@@ -28,7 +38,8 @@ macro_rules! entry_points {
         impl $api {
             /// The table over the web package: each entry the shim's adapter of that name.
             pub(crate) fn from_shim() -> $api {
-                $api { $($name: $crate::web::shim::$name,)* }
+                // The web package is one build of the whole kernel: no flavour leaves anything out.
+                $api { $($name: $crate::web::shim::$name,)* flavour: None }
             }
         }
     };
@@ -38,6 +49,9 @@ macro_rules! entry_points {
         #[allow(non_snake_case)]
         pub struct $api {
             $(pub $name: unsafe extern "C" fn($($ty),*) $(-> $ret)?,)*
+            /// Which flavour of the single library this is, and what it leaves out;
+            /// `None` for a separate library of an earlier release.
+            pub(crate) flavour: Option<$crate::loader::Flavour>,
         }
 
         /// The names the table binds, in declaration order.
@@ -49,17 +63,109 @@ macro_rules! entry_points {
             /// symbol is read as the signature declared here, and nothing can check
             /// that it is one.
             #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-            pub(crate) unsafe fn bind(library: &$crate::loader::Library, path: &::std::path::Path) -> Result<$api, String> {
+            pub(crate) unsafe fn bind(
+                library: &$crate::loader::Library,
+                path: &::std::path::Path,
+                flavour: Option<(String, String)>,
+            ) -> Result<$api, String> {
+                let mut missing: Vec<&'static str> = Vec::new();
+                let flavoured = flavour.is_some();
                 Ok($api {
-                    $($name: *library
-                        .get::<unsafe extern "C" fn($($ty),*) $(-> $ret)?>(
-                            concat!(stringify!($name), "\0").as_bytes(),
-                        )
-                        .map_err(|_| $crate::loader::stale(path, stringify!($name), $names.len()))?,)*
+                    $($name: match library.get::<unsafe extern "C" fn($($ty),*) $(-> $ret)?>(
+                        concat!(stringify!($name), "\0").as_bytes(),
+                    ) {
+                        Ok(symbol) => *symbol,
+                        Err(_) if flavoured => {
+                            missing.push(stringify!($name));
+                            #[allow(non_snake_case)]
+                            unsafe extern "C" fn $name($(_: $ty),*) $(-> $ret)? {
+                                $crate::loader::reached_missing(stringify!($name))
+                            }
+                            $name
+                        }
+                        Err(_) => return Err($crate::loader::stale(path, stringify!($name), $names.len())),
+                    },)*
+                    flavour: flavour.map(|(name, features)| $crate::loader::Flavour { name, features, missing }),
                 })
+            }
+
+            /// Which flavour of the single library this is, and what it leaves out; `None`
+            /// for a separate library of an earlier release.
+            pub fn flavour(&self) -> Option<&$crate::loader::Flavour> {
+                self.flavour.as_ref()
+            }
+
+            /// `Ok` where entry point `name` is bound; the flavour's refusal, naming it,
+            /// where this flavour leaves it out. Every call the flavours can leave out goes
+            /// through this first.
+            #[allow(dead_code)] // the view's table and the reader's have none to check
+            pub(crate) fn require(&self, name: &str) -> Result<(), String> {
+                match &self.flavour {
+                    Some(flavour) => flavour.check(name),
+                    None => Ok(()),
+                }
             }
         }
     };
+}
+
+/// A flavour of the single library: its name and features, as `cadaclysm_flavour()` and
+/// `cadaclysm_features()` answer, and the entry points of this crate's table it leaves out.
+#[derive(Debug, Clone)]
+pub struct Flavour {
+    /// `"full"`, `"kernel-reader"`, `"kernel"` or `"reader"`.
+    pub name: String,
+    /// The features it was built with, comma-separated (`"nodes,kernel,bim"`).
+    pub features: String,
+    /// The table's entry points this flavour does not export.
+    pub missing: Vec<&'static str>,
+}
+
+impl Flavour {
+    /// Whether the features name `feature`.
+    pub fn has(&self, feature: &str) -> bool {
+        self.features.split(',').any(|f| f == feature)
+    }
+
+    /// `Ok`, or the refusal for entry point `name` where this flavour leaves it out:
+    /// `<call>: not in this library's flavour ('<flavour>', features <features>); the
+    /// full flavour has it`, the call named as the other errors name it.
+    pub fn check(&self, name: &str) -> Result<(), String> {
+        if !self.missing.contains(&name) {
+            return Ok(());
+        }
+        let call = name.strip_prefix("cadaclysm_blacksmith_").or_else(|| name.strip_prefix("cadaclysm_")).unwrap_or(name);
+        let features = if self.features.is_empty() { "none" } else { &self.features };
+        Err(format!("{call}: not in this library's flavour ('{}', features {features}); the full flavour has it", self.name))
+    }
+}
+
+/// The stand-in a flavour's missing entry point is bound to: reached only by a call that
+/// skipped [`Flavour::check`], which is a bug in this crate, so it says which and stops.
+pub(crate) fn reached_missing(name: &str) -> ! {
+    eprintln!("cadaclysm-sdk: {name} called, but this library's flavour does not have it; the full flavour has it");
+    std::process::abort()
+}
+
+/// `(flavour, features)` for one of the single library's flavours, or `None` for a separate
+/// library of an earlier release, which exports neither call.
+///
+/// # Safety
+/// `library` must be a cadaclysm library: both symbols are read as `const char *(void)`.
+unsafe fn flavour_of(library: &Library) -> Option<(String, String)> {
+    type Text = unsafe extern "C" fn() -> *const c_char;
+    let flavour = library.get::<Text>(b"cadaclysm_flavour\0").ok()?;
+    let features = library.get::<Text>(b"cadaclysm_features\0").ok()?;
+    let read = |raw: *const c_char| if raw.is_null() { String::new() } else { CStr::from_ptr(raw).to_string_lossy().into_owned() };
+    Some((read(flavour()), read(features())))
+}
+
+/// What one half of the crate needs of a library: the feature that carries it, its name in
+/// a refusal, and the libraries to load instead.
+pub(crate) struct Half {
+    pub(crate) feature: &'static str,
+    pub(crate) what: &'static str,
+    pub(crate) instead: &'static str,
 }
 
 pub(crate) use entry_points;
@@ -109,24 +215,39 @@ pub(crate) fn file_name(stem: &str) -> String {
     }
 }
 
-/// Where the library named `name` is, without loading it -- or, where nothing was
-/// found, a message naming every place that was looked in.
+/// Where the library is, without loading it -- or, where nothing was found, a message
+/// naming every place that was looked in. `names` are the files to look for, in order.
 ///
-/// `env` first (the library itself or its directory); then beside the running
-/// executable; then where the build downloaded it (the `download` feature); then a
-/// `lib/` directory in any ancestor of the executable or of the working directory (the
-/// SDK's layout); then a `target/release` or `target/debug` in any of those ancestors
-/// (the repository's layout). No other variable is read and the system's own search is
+/// `envs` first, in order: each the library itself or its directory (the first of
+/// `names` it holds). A later variable is a fallback that was another library's before
+/// the single library -- `CADACLYSM_LIBRARY` for the kernel -- so where it names the
+/// separate reader library, or a directory holding none of `names`, it is not for this
+/// one and the search goes on. Then beside the running executable; then where the build
+/// downloaded it (the `download` feature); then a `lib/` directory in any ancestor of the
+/// executable or of the working directory (the SDK's layout); then a `target/release` or
+/// `target/debug` in any of those ancestors (the repository's layout). Each place is
+/// asked for every name in turn. No other variable is read and the system's own search is
 /// not consulted, so a stray copy elsewhere on `PATH` is never picked up by accident.
-pub(crate) fn find(name: &str, env: &str) -> Result<PathBuf, String> {
-    if let Some(value) = std::env::var_os(env).filter(|v| !v.is_empty()) {
+pub(crate) fn find(names: &[String], envs: &[&str]) -> Result<PathBuf, String> {
+    for (at, env) in envs.iter().enumerate() {
+        let Some(value) = std::env::var_os(env).filter(|v| !v.is_empty()) else { continue };
         let given = PathBuf::from(&value);
-        let candidate = if given.is_dir() { given.join(name) } else { given };
-        return if candidate.is_file() {
-            Ok(candidate)
-        } else {
-            Err(format!("{env}={} names nothing that exists", display(&value)))
-        };
+        let fallback = at > 0;
+        if given.is_dir() {
+            if let Some(found) = names.iter().map(|name| given.join(name)).find(|c| c.is_file()) {
+                return Ok(found);
+            }
+            if fallback {
+                break;
+            }
+        } else if given.is_file() {
+            let separate_reader = given.file_name().is_some_and(|n| n == file_name("cadaclysm_capi").as_str());
+            if !(fallback && separate_reader) {
+                return Ok(given);
+            }
+            break;
+        }
+        return Err(format!("{env}={} names nothing that exists", display(&value)));
     }
 
     let mut starts = Vec::new();
@@ -136,23 +257,24 @@ pub(crate) fn find(name: &str, env: &str) -> Result<PathBuf, String> {
     if let Ok(dir) = std::env::current_dir() {
         starts.push(dir);
     }
-    let mut searched: Vec<PathBuf> = starts.iter().take(1).map(|dir| dir.join(name)).collect();
+    let mut places: Vec<PathBuf> = starts.iter().take(1).cloned().collect();
     // What the build downloaded (the `download` feature): this crate's own release.
     if let Some(bundled) = option_env!("CADACLYSM_SDK_BUNDLED") {
-        searched.push(Path::new(bundled).join(name));
+        places.push(PathBuf::from(bundled));
     }
     for start in &starts {
-        searched.extend(start.ancestors().map(|dir| dir.join("lib").join(name)));
+        places.extend(start.ancestors().map(|dir| dir.join("lib")));
     }
     for start in &starts {
         for dir in start.ancestors() {
-            searched.extend(["release", "debug"].map(|profile| dir.join("target").join(profile).join(name)));
+            places.extend(["release", "debug"].map(|profile| dir.join("target").join(profile)));
         }
     }
+    let searched: Vec<PathBuf> = places.iter().flat_map(|place| names.iter().map(move |name| place.join(name))).collect();
     if let Some(found) = searched.iter().find(|candidate| candidate.is_file()) {
         return Ok(found.clone());
     }
-    let mut message = format!("{name} not found. Looked in:\n");
+    let mut message = format!("none of {} found. Looked in:\n", names.join(", "));
     for candidate in &searched {
         message.push_str(&format!("    {}\n", candidate.display()));
     }
@@ -160,7 +282,7 @@ pub(crate) fn find(name: &str, env: &str) -> Result<PathBuf, String> {
         message.push_str(&build_note(reason));
         message.push('\n');
     }
-    message.push_str(&format!("Point {env} at it, or load it with its path first."));
+    message.push_str(&format!("Point {} at it, or load it with its path first.", envs.join(" or ")));
     Err(message)
 }
 
@@ -178,9 +300,10 @@ struct Loaded<A> {
 
 /// One library, loaded at most once per process.
 pub(crate) struct Loader<A: 'static> {
-    stem: &'static str,
-    env: &'static str,
-    bind: unsafe fn(&Library, &Path) -> Result<A, String>,
+    stems: &'static [&'static str],
+    envs: &'static [&'static str],
+    half: Half,
+    bind: unsafe fn(&Library, &Path, Option<(String, String)>) -> Result<A, String>,
     // The table's entry points: the first finds the file a copy already in the process
     // was loaded from.
     names: &'static [&'static str],
@@ -193,20 +316,23 @@ pub(crate) struct Loader<A: 'static> {
 
 impl<A: 'static> Loader<A> {
     pub(crate) const fn new(
-        stem: &'static str,
-        env: &'static str,
-        bind: unsafe fn(&Library, &Path) -> Result<A, String>,
+        stems: &'static [&'static str],
+        envs: &'static [&'static str],
+        half: Half,
+        bind: unsafe fn(&Library, &Path, Option<(String, String)>) -> Result<A, String>,
         names: &'static [&'static str],
     ) -> Loader<A> {
-        Loader { stem, env, bind, names, loaded: OnceLock::new(), loading: Mutex::new(()) }
+        Loader { stems, envs, half, bind, names, loaded: OnceLock::new(), loading: Mutex::new(()) }
     }
 
-    pub(crate) fn file_name(&self) -> String {
-        file_name(self.stem)
+    /// The file names looked for, in order: the flavours that hold this half, then the
+    /// separate library of earlier releases.
+    pub(crate) fn file_names(&self) -> Vec<String> {
+        self.stems.iter().map(|stem| file_name(stem)).collect()
     }
 
     pub(crate) fn find(&self) -> Result<PathBuf, String> {
-        find(&self.file_name(), self.env)
+        find(&self.file_names(), self.envs)
     }
 
     /// Load the library at `path` and bind every entry point, once. Without a `path`, a
@@ -230,7 +356,7 @@ impl<A: 'static> Loader<A> {
     #[cfg_attr(target_arch = "wasm32", allow(unreachable_code, unused_variables))]
     fn load_with(&'static self, path: Option<&Path>, loaded_only: bool) -> Result<&'static A, String> {
         #[cfg(target_arch = "wasm32")]
-        return Err(no_library::refusal(&self.file_name()));
+        return Err(no_library::refusal(&self.file_names().join(", ")));
         if let Some(loaded) = self.loaded.get() {
             return self.check_bound(loaded, path, loaded_only);
         }
@@ -254,7 +380,20 @@ impl<A: 'static> Loader<A> {
                     (Library::new(&path).map_err(|e| format!("{}: {e}", path.display()))?, path)
                 }
             };
-            let api = (self.bind)(&library, &path)?;
+            // A flavour without this half at all is refused here, by name, before anything
+            // is bound.
+            let flavour = flavour_of(&library);
+            if let Some((name, features)) = &flavour {
+                if !features.split(',').any(|f| f == self.half.feature) {
+                    return Err(format!(
+                        "{}: the '{name}' flavour has no {}; load {}",
+                        path.display(),
+                        self.half.what,
+                        self.half.instead
+                    ));
+                }
+            }
+            let api = (self.bind)(&library, &path, flavour)?;
             Loaded { api, path, _library: library }
         };
         Ok(&self.loaded.get_or_init(|| loaded).api)
@@ -280,15 +419,17 @@ impl<A: 'static> Loader<A> {
     }
 
     fn none_held(&self) -> String {
-        format!("no {} is loaded in this process", self.file_name())
+        format!("none of {} is loaded in this process", self.file_names().join(", "))
     }
 
-    /// The library of this file name the process already holds, with the file it was
-    /// loaded from (its bare name where the system cannot say). Loads nothing.
+    /// The first library of these file names the process already holds, with the file it
+    /// was loaded from (its bare name where the system cannot say). Loads nothing.
     fn in_process(&self) -> Option<(Library, PathBuf)> {
-        let name = self.file_name();
-        let (library, path) = held(&name, self.names.first().copied().unwrap_or_default())?;
-        Some((library, path.unwrap_or_else(|| PathBuf::from(&name))))
+        let probe = self.names.first().copied().unwrap_or_default();
+        self.file_names().into_iter().find_map(|name| {
+            let (library, path) = held(&name, probe)?;
+            Some((library, path.unwrap_or_else(|| PathBuf::from(&name))))
+        })
     }
 
     /// The path the library was loaded from, or `None` before anything loaded it.

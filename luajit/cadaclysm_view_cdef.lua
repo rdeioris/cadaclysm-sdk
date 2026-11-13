@@ -3,7 +3,7 @@ return [[
 
 static const uint32_t CADACLYSM_VIEW_ABI_MAJOR = 1;
 
-static const uint32_t CADACLYSM_VIEW_ABI_MINOR = 22;
+static const uint32_t CADACLYSM_VIEW_ABI_MINOR = 25;
 
 static const uint32_t CADACLYSM_VIEW_WINDOW_WIN32 = 1;
 
@@ -116,6 +116,8 @@ static const uint32_t CADACLYSM_VIEW_LAYER_TEXT = 5;
 static const uint32_t CADACLYSM_VIEW_TEXT_LABEL = 0;
 
 static const uint32_t CADACLYSM_VIEW_TEXT_WORLD = 1;
+
+static const uint32_t CADACLYSM_VIEW_TEXT_SCREEN = 2;
 
 static const uint32_t CADACLYSM_VIEW_OCCLUDED_OFF = 0;
 
@@ -302,6 +304,8 @@ typedef struct CadaclysmViewPick {
   uint32_t has_point;
 
   float point[3];
+
+  uint32_t overlay;
 } CadaclysmViewPick;
 
 typedef struct CadaclysmViewAnalysis {
@@ -516,6 +520,8 @@ typedef struct CadaclysmViewText {
   uint32_t on_top;
 
   uint32_t font;
+
+  int32_t order;
 } CadaclysmViewText;
 
 typedef struct CadaclysmViewViewportCamera {
@@ -708,6 +714,67 @@ typedef struct CadaclysmViewSnap {
   uint32_t clicks;
 } CadaclysmViewSnap;
 
+typedef struct CadaclysmViewOverlay {
+
+  uint32_t size;
+
+  uint32_t anchor;
+
+  const float *beziers;
+  uint32_t curve_count;
+
+  int32_t order;
+
+  float offset[2];
+
+  uint32_t has_fill;
+
+  float fill_rgba[4];
+
+  uint32_t has_stroke;
+  float stroke_rgba[4];
+
+  float stroke_width;
+} CadaclysmViewOverlay;
+
+typedef struct CadaclysmViewOverlayImage {
+
+  uint32_t size;
+
+  uint32_t anchor;
+
+  const uint8_t *rgba;
+  uint32_t width;
+  uint32_t height;
+
+  float offset[2];
+
+  float extent[2];
+
+  float opacity;
+
+  int32_t order;
+} CadaclysmViewOverlayImage;
+
+typedef struct CadaclysmViewStats {
+
+  uint32_t size;
+
+  uint32_t pad0;
+
+  uint64_t frames_drawn;
+
+  float last_frame_ms;
+
+  float last_gpu_ms;
+
+  uint64_t triangles;
+
+  uint32_t draw_calls;
+
+  uint32_t pad1;
+} CadaclysmViewStats;
+
 uint32_t cadaclysm_view_abi_version(void);
 
 const char *cadaclysm_view_last_error(void);
@@ -779,6 +846,16 @@ bool cadaclysm_view_set_occluded_style(struct CadaclysmView *view,
 
 bool cadaclysm_view_occluded_style(const struct CadaclysmView *view,
                                    struct CadaclysmViewOccludedStyle *out);
+
+bool cadaclysm_view_set_line_colour(struct CadaclysmView *view,
+                                    uint32_t layer,
+                                    const float *rgb,
+                                    uint32_t from_part);
+
+bool cadaclysm_view_line_colour(const struct CadaclysmView *view,
+                                uint32_t layer,
+                                float *out_rgb,
+                                uint32_t *out_from_part);
 
 bool cadaclysm_view_set_lod(struct CadaclysmView *view, const struct CadaclysmViewLod *lod);
 
@@ -854,6 +931,11 @@ bool cadaclysm_view_set_colour(struct CadaclysmView *view, uint32_t item, const 
 bool cadaclysm_view_set_xray(struct CadaclysmView *view, uint32_t item, bool on);
 
 bool cadaclysm_view_set_occluded(struct CadaclysmView *view, uint32_t item, uint32_t mode);
+
+bool cadaclysm_view_set_item_line_colour(struct CadaclysmView *view,
+                                         uint32_t item,
+                                         uint32_t layer,
+                                         const float *rgb);
 
 bool cadaclysm_view_set_finish(struct CadaclysmView *view, uint32_t item, uint32_t finish);
 
@@ -998,4 +1080,18 @@ bool cadaclysm_view_set_work_plane(struct CadaclysmView *view,
                                    double step);
 
 bool cadaclysm_view_clear_work_plane(struct CadaclysmView *view);
+
+uint32_t cadaclysm_view_show_overlay(struct CadaclysmView *view,
+                                     const struct CadaclysmViewOverlay *shape);
+
+uint32_t cadaclysm_view_show_overlay_image(struct CadaclysmView *view,
+                                           const struct CadaclysmViewOverlayImage *image);
+
+bool cadaclysm_view_move_overlay(struct CadaclysmView *view,
+                                 uint32_t item,
+                                 uint32_t anchor,
+                                 float x,
+                                 float y);
+
+bool cadaclysm_view_stats(struct CadaclysmView *view, struct CadaclysmViewStats *out);
 ]]

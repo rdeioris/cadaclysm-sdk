@@ -130,10 +130,17 @@ M.ValueKind = ValueKind
 
 -- ---- the library -----------------------------------------------------------------
 
-local function library_name()
-  if ffi.os == "Windows" then return "cadaclysm_capi.dll" end
-  if ffi.os == "OSX" then return "libcadaclysm_capi.dylib" end
-  return "libcadaclysm_capi.so"
+-- The libraries that carry the node API, in the order they are looked for: the single
+-- library's flavours that hold it, then the separate library of earlier releases. As
+-- `cadaclysm-capi-rt`'s `READER_STEMS`.
+local function library_names()
+  local out = {}
+  for _, stem in ipairs({ "cadaclysm", "cadaclysm_kernel_reader", "cadaclysm_reader", "cadaclysm_capi" }) do
+    if ffi.os == "Windows" then out[#out + 1] = stem .. ".dll"
+    elseif ffi.os == "OSX" then out[#out + 1] = "lib" .. stem .. ".dylib"
+    else out[#out + 1] = "lib" .. stem .. ".so" end
+  end
+  return out
 end
 
 local function exists(path)
@@ -172,36 +179,43 @@ end
 --- Where the shared library is: `CADACLYSM_LIBRARY` first (the library or its
 --- directory), then beside this file, beside a fused LÖVE game's executable, then
 --- a `lib/` (the SDK layout) or `target/release` / `target/debug` (the repository's)
---- in any ancestor of this file.
+--- in any ancestor of this file. Each place is asked for every name in turn: one
+--- library of any flavour that holds the node API, else the separate `cadaclysm_capi`.
 function M.library_path()
-  local name = library_name()
+  local names = library_names()
   local override = os.getenv("CADACLYSM_LIBRARY")
   if override then
     override = override:gsub("\\", "/")
-    if exists(override .. "/" .. name) then return override .. "/" .. name end
+    for _, name in ipairs(names) do
+      if exists(override .. "/" .. name) then return override .. "/" .. name end
+    end
     if exists(override) then return override end
     fail("CADACLYSM_LIBRARY=" .. override .. " names nothing that exists", 2)
   end
-  local searched = {}
+  local places = {}
   local here = module_dir()
-  if here then searched[#searched + 1] = here .. "/" .. name end
+  if here then places[#places + 1] = here end
   if love and love.filesystem and love.filesystem.getSourceBaseDirectory then
-    searched[#searched + 1] = love.filesystem.getSourceBaseDirectory():gsub("\\", "/") .. "/" .. name
+    places[#places + 1] = love.filesystem.getSourceBaseDirectory():gsub("\\", "/")
   end
   local dirs, dir = {}, here
   while dir and dir ~= "" do
     dirs[#dirs + 1] = dir
     dir = parent_of(dir)
   end
-  for _, d in ipairs(dirs) do searched[#searched + 1] = d .. "/lib/" .. name end
+  for _, d in ipairs(dirs) do places[#places + 1] = d .. "/lib" end
   for _, d in ipairs(dirs) do
-    searched[#searched + 1] = d .. "/target/release/" .. name
-    searched[#searched + 1] = d .. "/target/debug/" .. name
+    places[#places + 1] = d .. "/target/release"
+    places[#places + 1] = d .. "/target/debug"
+  end
+  local searched = {}
+  for _, place in ipairs(places) do
+    for _, name in ipairs(names) do searched[#searched + 1] = place .. "/" .. name end
   end
   for _, candidate in ipairs(searched) do
     if exists(candidate) then return candidate end
   end
-  fail(name .. " not found. Looked in:\n    " .. table.concat(searched, "\n    ")
+  fail("none of " .. table.concat(names, ", ") .. " found. Looked in:\n    " .. table.concat(searched, "\n    ")
     .. "\nBuild it with `cargo build --release -p cadaclysm-capi`, run fetch.py in an"
     .. " SDK checkout, or point CADACLYSM_LIBRARY at it.", 2)
 end
@@ -267,16 +281,60 @@ local ENTRY_POINTS = {
 
 local C
 
-local function bind(path)
+-- In a block of its own: only `bind` (and `M.flavour`, `M.features`) leave it.
+local bind
+do
+-- `{ flavour, features }` of the loaded library; see `M.flavour`.
+local flavoured
+
+bind = function(path)
   local loaded = ffi.load(path)
+  -- A flavour of the single library answers `cadaclysm_flavour`; the separate library
+  -- of an earlier release does not, and keeps the strict check below.
+  pcall(ffi.cdef, "const char *cadaclysm_flavour(void); const char *cadaclysm_features(void);")
+  if not pcall(function() return loaded.cadaclysm_flavour end) then
+    for _, name in ipairs(ENTRY_POINTS) do
+      if not pcall(function() return loaded[name] end) then
+        fail(path .. " has no " .. name .. ": the library is older than this copy of"
+          .. " cadaclysm.lua. Rebuild it with `cargo build --release -p cadaclysm-capi`.", 3)
+      end
+    end
+    flavoured = { "reader", "" }
+    C = loaded
+    return C
+  end
+  local flavour, features = ffi.string(loaded.cadaclysm_flavour()), ffi.string(loaded.cadaclysm_features())
+  if not ("," .. features .. ","):find(",nodes,", 1, true) then
+    fail(path .. ": the '" .. flavour .. "' flavour has no node API; load cadaclysm, cadaclysm_kernel_reader or cadaclysm_reader", 3)
+  end
+  -- Binds what it has: a name it leaves out becomes a function that raises naming the
+  -- flavour, when called. The library itself where nothing is missing (the full flavour).
+  local missing = {}
   for _, name in ipairs(ENTRY_POINTS) do
     if not pcall(function() return loaded[name] end) then
-      fail(path .. " has no " .. name .. ": the library is older than this copy of"
-        .. " cadaclysm.lua. Rebuild it with `cargo build --release -p cadaclysm-capi`.", 3)
+      local message = (name:gsub("^cadaclysm_", "")) .. ": not in this library's flavour ('" .. flavour
+        .. "', features " .. (features == "" and "none" or features) .. "); the full flavour has it"
+      missing[name] = function() fail(message, 2) end
     end
   end
-  C = loaded
+  flavoured = { flavour, features }
+  C = next(missing) and setmetatable(missing, { __index = function(_, name) return loaded[name] end }) or loaded
   return C
+end
+
+--- Which library this is: `"full"`, `"kernel-reader"` or `"reader"` for a flavour
+--- of the single library, `"reader"` for the separate `cadaclysm_capi` of earlier releases.
+function M.flavour()
+  if not C then bind(M.library_path()) end
+  return flavoured[1]
+end
+
+--- The features the library was built with, comma-separated, or `""` for the separate
+--- `cadaclysm_capi` of earlier releases.
+function M.features()
+  if not C then bind(M.library_path()) end
+  return flavoured[2]
+end
 end
 
 local function lib()

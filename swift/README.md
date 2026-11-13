@@ -1,7 +1,7 @@
 # cadaclysm for Swift
 
-The two cadaclysm C ABIs -- the CAD readers (`cadaclysm_capi`) and the blacksmith B-rep
-kernel (`cadaclysm_blacksmith`) -- as a Swift package with two modules, `Cadaclysm` and
+The two cadaclysm C ABIs -- the CAD readers (`cadaclysm_*`) and the blacksmith B-rep
+kernel (`cadaclysm_blacksmith_*`), one library, `cadaclysm` -- as a Swift package with two modules, `Cadaclysm` and
 `Blacksmith` (and a third, `CadaclysmView`, for drawing), class for class with the Python,
 C#, Go, Java and Node.js wrappers. The C headers are imported as Clang modules exactly as
 published: no generated bindings and no hand-copied structs. Swift 5.9 or later, on macOS
@@ -51,7 +51,7 @@ The `CadaclysmView` product draws through a view library opened at run time -- t
 by default, the GPU window after `ViewLibrary.useWgpu()`, any other with
 `ViewLibrary.use(path)` or `CADACLYSM_VIEW`. `Cadaclysm` and `Blacksmith` depend on it, so a
 package that imports either already links it; add the product when you use `View` yourself.
-A missing library throws "no view library: ...", and the view library must speak ABI 1.22.
+A missing library throws "no view library: ...", and the view library must speak ABI 1.25.
 
 ```swift
 import Blacksmith
@@ -111,7 +111,8 @@ library:
 1. `CADACLYSM_LIB_DIR`, when it is set (and then nothing else);
 2. `../lib` beside this package -- an SDK checkout after `python fetch.py`;
 3. `target/release` of the cadaclysm repository -- after
-   `cargo build --release -p cadaclysm-capi -p cadaclysm-blacksmith-capi`.
+   `cargo build --release -p cadaclysm-lib-full` (`CADACLYSM_FLAVOUR=reader`:
+   `-p cadaclysm-lib-reader`; `separate`: `-p cadaclysm-capi -p cadaclysm-blacksmith-capi`).
 
 On macOS and Linux that directory is written into the executables' rpath, so they run
 without `DYLD_LIBRARY_PATH` or `LD_LIBRARY_PATH`. On Windows it has to be on `PATH` when a
@@ -150,10 +151,11 @@ kernel), carrying the library's own reason. A property read on a closed scene tr
 
 ## The license
 
-No license is needed to try it: without one the libraries run in full, with a notice on
-stderr for every file opened or written. Put `cadaclysm.lic` where the libraries look --
+No license is needed to try it: without one the library runs in full, with a notice on
+stderr for every file opened or written. Put `cadaclysm.lic` where the library looks --
 `CADACLYSM_LICENSE`, beside the executable or in the working directory -- or load it from
-code, once per library:
+code. Either call covers the whole library; the two separate libraries of earlier
+releases need both:
 
 ```swift
 try Cadaclysm.license("cadaclysm.lic")

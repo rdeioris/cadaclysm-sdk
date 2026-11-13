@@ -1,7 +1,8 @@
 //! cadaclysm for Godot 4: a GDExtension over the prebuilt cadaclysm libraries.
 //!
 //! Every class here is a thin layer over the `cadaclysm-sdk` crate, which opens the
-//! reader (`cadaclysm_capi`) and the kernel (`cadaclysm_blacksmith`) at run time. The
+//! cadaclysm library (its full flavour, `cadaclysm`) at run time, the reader and the kernel
+//! both. The
 //! object model is the Python wrapper's -- `CadaclysmScene`, `CadaclysmNode`, `CadaclysmPlacement`,
 //! `CadaclysmSolid`, `CadaclysmProfile`... -- with Godot's own types where Godot has one: a
 //! `Transform3D` for a transform, an `AABB` for bounds, a `Color` for a colour and an
@@ -77,31 +78,24 @@ pub(crate) fn last_error() -> String {
 
 /// Load the reader and the kernel from beside this extension, where the addon keeps
 /// them (`addons/cadaclysm/bin/<platform>/`) and where an exported game has them (next to the
-/// executable, copied there by the `.gdextension` file's `[dependencies]`).
+/// executable, copied there by the `.gdextension` file's `[dependencies]`). Each half takes
+/// the first of the SDK's names for it found there (`sys::LIBRARY_STEMS`,
+/// `blacksmith::sys::LIBRARY_STEMS`): one library of any flavour, else the separate two.
 ///
 /// Only where the file is there and the environment does not name another: otherwise
 /// the SDK's own search runs on first use (`CADACLYSM_LIBRARY`, beside the executable,
 /// `lib/` or `target/` in an ancestor), and its error names everywhere it looked.
 fn find_libraries() {
     let Some(dir) = own_dir() else { return };
-    let pairs = [
-        ("CADACLYSM_LIBRARY", "cadaclysm_capi"),
-        ("CADACLYSM_BLACKSMITH_LIBRARY", "cadaclysm_blacksmith"),
-    ];
-    for (env, stem) in pairs {
-        if std::env::var_os(env).is_some_and(|v| !v.is_empty()) {
-            continue;
+    let named = |env: &str| std::env::var_os(env).is_some_and(|v| !v.is_empty());
+    let beside = |stems: &[&str]| stems.iter().map(|stem| dir.join(library_file(stem))).find(|path| path.is_file());
+    if !named("CADACLYSM_LIBRARY") {
+        if let Some(Err(error)) = beside(cadaclysm_sdk::sys::LIBRARY_STEMS).map(|path| cadaclysm_sdk::load(&path)) {
+            godot_error!("cadaclysm: {error}");
         }
-        let path = dir.join(library_file(stem));
-        if !path.is_file() {
-            continue;
-        }
-        let loaded = if stem == "cadaclysm_capi" {
-            cadaclysm_sdk::load(&path)
-        } else {
-            cadaclysm_sdk::blacksmith::load(&path)
-        };
-        if let Err(error) = loaded {
+    }
+    if !named("CADACLYSM_BLACKSMITH_LIBRARY") && !named("CADACLYSM_LIBRARY") {
+        if let Some(Err(error)) = beside(cadaclysm_sdk::blacksmith::sys::LIBRARY_STEMS).map(|path| cadaclysm_sdk::blacksmith::load(&path)) {
             godot_error!("cadaclysm: {error}");
         }
     }

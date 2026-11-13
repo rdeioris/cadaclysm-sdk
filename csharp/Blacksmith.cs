@@ -262,6 +262,21 @@ public sealed class SvgOptions
     /// blank page. A line set in its own right -- set it with <see cref="Edges"/> false for the
     /// outline alone, or clear it for the lines alone.</summary>
     public bool Silhouettes { get; set; } = true;
+
+    /// <summary>Hidden-line removal: <see cref="SvgHidden.None"/> (the default) draws every
+    /// line; <see cref="SvgHidden.Removed"/> draws only what is seen, the solids hiding one
+    /// another; <see cref="SvgHidden.Dashed"/> adds the hidden lines, dashed, in a
+    /// `solid-&lt;i&gt;-hidden` group.</summary>
+    public SvgHidden Hidden { get; set; } = SvgHidden.None;
+}
+
+/// <summary><see cref="SvgOptions.Hidden"/>: whether the drawing removes hidden lines
+/// (`CADACLYSM_BLACKSMITH_SVG_HIDDEN_REMOVED`, 32) or dashes them (`_HIDDEN_DASHED`, 64).</summary>
+public enum SvgHidden
+{
+    None = 0,
+    Removed = 32,
+    Dashed = 64,
 }
 
 // ---- the structs the ABI returns by value ----------------------------------------------
@@ -728,6 +743,172 @@ public sealed record SymmetryReport(int Seams, int Squared, double Moved, double
         new((int)raw[0], (int)raw[1], raw[2], raw[3], raw[4], raw[5], (int)raw[6]);
 }
 
+/// <summary>What <see cref="Solid.Pattern"/> or <see cref="Solid.PatternFeature"/> did: the
+/// <see cref="Instances"/> placed (after the skips), the <see cref="Booleans"/> run (copies apart
+/// from each other share one), and the copies of a feature's tool <see cref="Missed"/> -- sharing
+/// no volume with the body, dropped for a cut and kept as a body of their own for a join.</summary>
+public sealed record PatternReport(int Instances, int Booleans, int Missed)
+{
+    internal static PatternReport Of(double[] raw) => new((int)raw[0], (int)raw[1], (int)raw[2]);
+}
+
+/// <summary>What <see cref="Solid.Hole"/> did: the <see cref="Holes"/> drilled (one a point),
+/// per hole the <see cref="Bottoms"/> -- the distance along the axis from the point to where the
+/// bore ends, the drill point excluded (`depth` for a blind hole; for the others the deepest
+/// point of the material it passes, rim included) -- and <see cref="FacesAdded"/>, the result's
+/// faces on no surface of the body.</summary>
+public sealed record HoleReport(int Holes, IReadOnlyList<double> Bottoms, int FacesAdded)
+{
+    internal static HoleReport Of(double[] raw, double[] bottoms) => new((int)raw[0], bottoms, (int)raw[1]);
+
+    public override string ToString() => $"HoleReport {{ Holes = {Holes}, Bottoms = [{string.Join(", ", Bottoms)}], FacesAdded = {FacesAdded} }}";
+}
+
+/// <summary>How far <see cref="Solid.Hole"/> drills: the C constants
+/// `CADACLYSM_BLACKSMITH_HOLE_THROUGH` .. `_TO_NEXT`, in their order.</summary>
+public enum HoleExtent : uint
+{
+    /// <summary>Through everything ahead of the point.</summary>
+    Through = 0,
+    /// <summary>`depth` of full bore, then a drill point of `tipAngle`.</summary>
+    Blind = 1,
+    /// <summary>Until the axis first meets face `face`, the bore ending on it.</summary>
+    ToFace = 2,
+    /// <summary>Until the bore first leaves the material.</summary>
+    ToNext = 3,
+}
+
+/// <summary>A hole's head: the C constants `CADACLYSM_BLACKSMITH_HOLE_SIMPLE`,
+/// `_COUNTERBORE`, `_COUNTERSINK`.</summary>
+public enum HoleHead : uint
+{
+    /// <summary>None: the bore alone.</summary>
+    Simple = 0,
+    /// <summary>A wider bore `headDiameter` across and `headDepth` deep.</summary>
+    Counterbore = 1,
+    /// <summary>A cone `headDiameter` across at the point, included angle `headAngle`.</summary>
+    Countersink = 2,
+}
+
+/// <summary>How <see cref="Solid.PatternFeature"/> applies its tool: the C constants
+/// `CADACLYSM_BLACKSMITH_FEATURE_CUT`, `_JOIN`.</summary>
+public enum FeatureOp : uint
+{
+    /// <summary>Cut the tool from the body.</summary>
+    Cut = 0,
+    /// <summary>Join the tool to the body.</summary>
+    Join = 1,
+}
+
+/// <summary>Which side of its plane a <see cref="Solid.Rib"/> is thickened: the C constants
+/// `CADACLYSM_BLACKSMITH_RIB_BOTH`, `_FRONT`, `_BACK`.</summary>
+public enum RibSide : uint
+{
+    /// <summary>Half the thickness each side of the plane.</summary>
+    Both = 0,
+    /// <summary>The thickness on the plane's +z side.</summary>
+    Front = 1,
+    /// <summary>The thickness on the plane's -z side.</summary>
+    Back = 2,
+}
+
+/// <summary>Which side of its curve a <see cref="Solid.Web"/> is offset: the C constants
+/// `CADACLYSM_BLACKSMITH_WEB_BOTH`, `_LEFT`, `_RIGHT`.</summary>
+public enum WebSide : uint
+{
+    /// <summary>Half the thickness each side of the curve.</summary>
+    Both = 0,
+    /// <summary>The thickness left of the curve's run, the plane's normal up.</summary>
+    Left = 1,
+    /// <summary>The thickness right of the curve's run.</summary>
+    Right = 2,
+}
+
+/// <summary>How <see cref="Pattern.Along"/> turns its copies: the C constants
+/// `CADACLYSM_BLACKSMITH_ORIENT_FIXED`, `_PATH`.</summary>
+public enum PatternOrient : uint
+{
+    /// <summary>Copies translated only.</summary>
+    Fixed = 0,
+    /// <summary>Copies also turned by the curve's rotation-minimising frame from the first
+    /// instance's.</summary>
+    Path = 1,
+}
+
+/// <summary>Placements for <see cref="Solid.Pattern"/> and <see cref="Solid.PatternFeature"/>:
+/// lists of rigid <see cref="Transform"/>s, instance 0 the identity (the original). `skip` leaves
+/// instances out by index (Fusion's suppressed instances), 0 included. Angles are radians. Each
+/// throws <see cref="BuildException"/> with the library's reason when refused.</summary>
+public static class Pattern
+{
+    private static List<Transform> Placements(string what, Func<double[]?, uint> call)
+    {
+        var n = call(null);
+        if (n == 0) throw Blacksmith.Failure(what);
+        var raw = new double[16 * n];
+        if (call(raw) != n) throw Blacksmith.Failure(what);
+        var list = new List<Transform>((int)n);
+        for (var i = 0; i < n; i++) list.Add(new Transform(raw.AsSpan(16 * i, 16).ToArray()));
+        return list;
+    }
+
+    private static uint[] Skips(IEnumerable<int>? skip) =>
+        (skip ?? Array.Empty<int>()).Select(i => i >= 0 ? (uint)i : throw new ArgumentException($"skip: instance index {i} is negative")).ToArray();
+
+    private static double[] Xyz((double X, double Y, double Z) p) => new[] { p.X, p.Y, p.Z };
+
+    private static uint Count(int count) => count >= 0 ? (uint)count : throw new ArgumentException($"count {count} is negative");
+
+    /// <summary><paramref name="count1"/> instances <paramref name="spacing1"/> apart along
+    /// <paramref name="direction1"/>, times <paramref name="count2"/> <paramref name="spacing2"/>
+    /// apart along <paramref name="direction2"/> (null: one row); row-major, direction 1 fastest.
+    /// <paramref name="symmetric"/> puts the count on each side of the original along each
+    /// direction (`2 count - 1`, at offsets `0, +s, -s, +2s, ...`).</summary>
+    public static List<Transform> Rectangular((double X, double Y, double Z) direction1, int count1, double spacing1,
+                                              (double X, double Y, double Z)? direction2 = null, int count2 = 1, double spacing2 = 0.0,
+                                              bool symmetric = false, IEnumerable<int>? skip = null)
+    {
+        var s = Skips(skip);
+        var d1 = Xyz(direction1);
+        var d2 = direction2 is { } d ? Xyz(d) : null;
+        uint c1 = Count(count1), c2 = Count(count2);
+        return Placements("pattern_rectangular", output => BlacksmithNative.cadaclysm_blacksmith_pattern_rectangular(
+            d1, c1, spacing1, d2, c2, spacing2, symmetric, s, (uint)s.Length, output));
+    }
+
+    /// <summary><paramref name="count"/> instances about the line through
+    /// <paramref name="axisPoint"/> along <paramref name="axisDirection"/>: a full turn
+    /// (<paramref name="angle"/> 2 pi) spaces them evenly, less spreads them over the angle with
+    /// both ends occupied. <paramref name="symmetric"/> spreads the count over the angle on each
+    /// side (not with a full turn). Radians, right-handed about the direction.</summary>
+    public static List<Transform> Circular((double X, double Y, double Z) axisPoint, (double X, double Y, double Z) axisDirection, int count,
+                                           double angle = 2 * Math.PI, bool symmetric = false, IEnumerable<int>? skip = null)
+    {
+        var s = Skips(skip);
+        var axis = new[] { axisPoint.X, axisPoint.Y, axisPoint.Z, axisDirection.X, axisDirection.Y, axisDirection.Z };
+        var c = Count(count);
+        return Placements("pattern_circular", output => BlacksmithNative.cadaclysm_blacksmith_pattern_circular(
+            axis, c, angle, symmetric, s, (uint)s.Length, output));
+    }
+
+    /// <summary><paramref name="count"/> instances along <paramref name="curve"/> by arc length
+    /// from its start, <paramref name="spacing"/> apart, or spread over its whole length with both
+    /// ends occupied (<paramref name="spacing"/> null). <paramref name="orient"/>
+    /// <see cref="PatternOrient.Fixed"/> translates each copy; <see cref="PatternOrient.Path"/>
+    /// also turns it by the curve's rotation-minimising frame from the first instance's.</summary>
+    public static List<Transform> Along(NurbsCurve curve, int count, double? spacing = null, PatternOrient orient = PatternOrient.Fixed,
+                                        IEnumerable<int>? skip = null)
+    {
+        ArgumentNullException.ThrowIfNull(curve);
+        var s = Skips(skip);
+        var c = Count(count);
+        var list = Placements("pattern_along", output => BlacksmithNative.cadaclysm_blacksmith_pattern_along(
+            curve.Handle, c, spacing ?? double.NaN, (uint)orient, s, (uint)s.Length, output));
+        GC.KeepAlive(curve);
+        return list;
+    }
+}
+
 /// <summary>One side of the hole <see cref="Solid.NSidedPatch"/> fills: a sheet's side
 /// (<see cref="OfSide"/>), or a <see cref="NurbsCurve"/> met at G0 (<see cref="OfCurve"/>, or the
 /// implicit conversion).</summary>
@@ -967,12 +1148,361 @@ public sealed class CurveBodyFoot
         $"CurveBodyFoot(distance={Distance:G10}, t={T:G10}, {Kind}#{Index}, crossing={Crossing})";
 }
 
+// ---- Mechanical drawings: hidden lines, pages, DXF ---------------------------------------
+
+/// <summary>How a hidden-line view sees the solids (<see cref="Blacksmith.Hlr(IEnumerable{Solid}, HlrOptions?)"/>,
+/// <see cref="Blacksmith.HlrMesh"/>, <see cref="Blacksmith.ProjectedOutline"/>): along
+/// <see cref="Direction"/> (parallel; default (0, 1, 0), the front, from the eye toward the
+/// model), or, with <see cref="Eye"/> set, in perspective from it toward <see cref="Target"/>.
+/// The rest default as `cadaclysm_blacksmith_hlr_options_init` defaults them.</summary>
+public sealed class HlrOptions
+{
+    /// <summary>Parallel: the view direction, from the eye toward the model. Null: (0, 1, 0).
+    /// Giving it with <see cref="Eye"/> is refused.</summary>
+    public (double X, double Y, double Z)? Direction { get; set; }
+
+    /// <summary>The page's up: any vector not along the view. Default (0, 0, 1).</summary>
+    public (double X, double Y, double Z) Up { get; set; } = (0, 0, 1);
+
+    /// <summary>Perspective: where the eye stands. Null: a parallel view.</summary>
+    public (double X, double Y, double Z)? Eye { get; set; }
+
+    /// <summary>Perspective: what the eye looks at. Default the origin.</summary>
+    public (double X, double Y, double Z) Target { get; set; } = (0, 0, 0);
+
+    /// <summary>Model units: how far a line may stray from the true curve. Null (or 0): the
+    /// solids' effective tolerance.</summary>
+    public double? Tolerance { get; set; }
+
+    /// <summary>Isocurves per direction on each face; 0 (the default) draws none.</summary>
+    public uint Iso { get; set; }
+
+    /// <summary>Radians: faces within this of tangent across an edge make it smooth. Null: one
+    /// degree.</summary>
+    public double? SmoothAngle { get; set; }
+
+    /// <summary>Radians, meshes only: an edge whose triangles turn by more than this is drawn.
+    /// Null: thirty degrees.</summary>
+    public double? FeatureAngle { get; set; }
+
+    internal unsafe RawBlacksmithHlrOptions Raw()
+    {
+        var raw = new RawBlacksmithHlrOptions();
+        BlacksmithNative.cadaclysm_blacksmith_hlr_options_init(ref raw);
+        if (Eye is { } eye)
+        {
+            if (Direction is not null) throw new BuildException("hlr: give a direction (parallel) or an eye (perspective), not both");
+            raw.Projection = 1;
+            raw.Eye[0] = eye.X; raw.Eye[1] = eye.Y; raw.Eye[2] = eye.Z;
+            raw.Target[0] = Target.X; raw.Target[1] = Target.Y; raw.Target[2] = Target.Z;
+        }
+        else if (Direction is { } d)
+        {
+            raw.Direction[0] = d.X; raw.Direction[1] = d.Y; raw.Direction[2] = d.Z;
+        }
+        raw.Up[0] = Up.X; raw.Up[1] = Up.Y; raw.Up[2] = Up.Z;
+        raw.Tolerance = Blacksmith.Tol(Tolerance);
+        raw.Iso = Iso;
+        if (SmoothAngle is { } smooth) raw.SmoothAngle = smooth;
+        if (FeatureAngle is { } feature) raw.FeatureAngle = feature;
+        return raw;
+    }
+}
+
+/// <summary><see cref="HlrLine.Kind"/>, as `CADACLYSM_BLACKSMITH_HLR_SHARP` .. `_BOUNDARY` number
+/// them.</summary>
+public enum HlrKind
+{
+    /// <summary>An edge between faces meeting at an angle.</summary>
+    Sharp = 0,
+    /// <summary>An edge between faces meeting within the smooth angle of tangent.</summary>
+    Smooth = 1,
+    /// <summary>Where a surface turns away from the eye (a silhouette).</summary>
+    Outline = 2,
+    /// <summary>An isocurve.</summary>
+    Iso = 3,
+    /// <summary>An edge only one face bounds.</summary>
+    Boundary = 4,
+}
+
+/// <summary><see cref="HlrLine.Source"/>'s kind, as `CADACLYSM_BLACKSMITH_HLR_SOURCE_*` number them.</summary>
+public enum HlrSource
+{
+    /// <summary>An edge: <see cref="HlrLine.Index"/> is its id.</summary>
+    Edge = 0,
+    /// <summary>A face (an outline or isocurve): <see cref="HlrLine.Index"/> is its index.</summary>
+    Face = 1,
+    /// <summary>A mesh edge: <see cref="HlrLine.Index"/> and <see cref="HlrLine.Index2"/> are its
+    /// two vertices.</summary>
+    MeshEdge = 2,
+}
+
+/// <summary>One line of a hidden-line view: its <c>Kind</c>, whether it is <c>Visible</c>, the
+/// index of the <c>Solid</c> (or mesh) it belongs to, what it is a span of (<c>Source</c>,
+/// <c>Index</c>, and <c>Index2</c> for a mesh edge's second vertex, else null), and its curve as
+/// rational cubic Béziers on the view plane (<c>Beziers2d</c>, z 0) and in space
+/// (<c>Beziers3d</c>), Bézier for Bézier the same span; its lengths on the view plane and in
+/// space. Plain data, copied out of the view.</summary>
+public sealed record HlrLine(HlrKind Kind, bool Visible, uint Solid, HlrSource Source, uint Index, uint? Index2,
+    BeziersData64 Beziers2d, BeziersData64 Beziers3d, double Length2d, double Length3d);
+
+/// <summary>What a view's hidden-line removal did (<see cref="Hlr.Report"/>): the curves it
+/// considered, the pieces it classified and how, the solids it could not place.</summary>
+public sealed record HlrReport(uint Candidates, uint Segments, uint Crossings, uint Pieces, uint Degenerate, uint Rays,
+    uint MeshHits, uint Rejected, uint Grazes, uint Unsettled, uint MeshOnly, uint FallbackEdges, uint FailedSolids,
+    double CandidateLength, double DegenerateLength);
+
+/// <summary>A hidden-line view of solids or meshes (<see cref="Blacksmith.Hlr(IEnumerable{Solid}, HlrOptions?)"/>,
+/// <see cref="Blacksmith.HlrMesh"/>): its <see cref="Lines"/>, what the removal did (<see
+/// cref="Report"/>) and the <see cref="Tolerance"/> it worked at. Placed on a drawing with <see
+/// cref="Page.AddView"/>. Immutable; owns a library handle -- dispose it, or let the runtime.</summary>
+public sealed class Hlr : IDisposable
+{
+    private readonly HlrHandle _handle;
+
+    internal Hlr(HlrHandle handle)
+    {
+        _handle = handle;
+        var n = BlacksmithNative.cadaclysm_blacksmith_hlr_line_count(handle);
+        var lines = new List<HlrLine>((int)n);
+        for (uint i = 0; i < n; i++)
+        {
+            if (!BlacksmithNative.cadaclysm_blacksmith_hlr_line(handle, i, out var raw)) throw Blacksmith.Failure("hlr_line");
+            var b2 = new double[16 * raw.BezierCount];
+            var b3 = new double[16 * raw.BezierCount];
+            if (!BlacksmithNative.cadaclysm_blacksmith_hlr_line_beziers2d(handle, i, b2)) throw Blacksmith.Failure("hlr_line_beziers2d");
+            if (!BlacksmithNative.cadaclysm_blacksmith_hlr_line_beziers3d(handle, i, b3)) throw Blacksmith.Failure("hlr_line_beziers3d");
+            var source = (HlrSource)raw.SourceKind;
+            lines.Add(new HlrLine((HlrKind)raw.Kind, raw.Visible != 0, raw.Solid, source, raw.Source,
+                source == HlrSource.MeshEdge ? raw.Source2 : null, Split(b2), Split(b3), raw.Length2d, raw.Length3d));
+        }
+        if (!BlacksmithNative.cadaclysm_blacksmith_hlr_report(handle, out var r)) throw Blacksmith.Failure("hlr_report");
+        Lines = lines;
+        Report = new HlrReport(r.Candidates, r.Segments, r.Crossings, r.Pieces, r.Degenerate, r.Rays, r.MeshHits, r.Rejected,
+            r.Grazes, r.Unsettled, r.MeshOnly, r.FallbackEdges, r.FailedSolids, r.CandidateLength, r.DegenerateLength);
+        Tolerance = r.Tolerance;
+    }
+
+    /// <summary>Sixteen doubles a Bézier (`x y z w` per control point) as <see cref="BeziersData64"/>.</summary>
+    private static BeziersData64 Split(double[] flat)
+    {
+        var n = flat.Length / 16;
+        var points = new double[n * 12];
+        var weights = new double[n * 4];
+        for (var i = 0; i < n; i++)
+        {
+            for (var k = 0; k < 4; k++)
+            {
+                Array.Copy(flat, i * 16 + k * 4, points, i * 12 + k * 3, 3);
+                weights[i * 4 + k] = flat[i * 16 + k * 4 + 3];
+            }
+        }
+        return new BeziersData64(points, weights);
+    }
+
+    /// <summary>Every line, seen and hidden.</summary>
+    public IReadOnlyList<HlrLine> Lines { get; }
+
+    /// <summary>What the removal did.</summary>
+    public HlrReport Report { get; }
+
+    /// <summary>The tolerance it worked at, model units (null / 0 resolved).</summary>
+    public double Tolerance { get; }
+
+    /// <summary>The lines seen.</summary>
+    public IReadOnlyList<HlrLine> Visible() => Lines.Where(l => l.Visible).ToList();
+
+    /// <summary>The lines hidden.</summary>
+    public IReadOnlyList<HlrLine> Hidden() => Lines.Where(l => !l.Visible).ToList();
+
+    public void Dispose() => _handle.Dispose();
+
+    public override string ToString() => $"Hlr({Lines.Count} lines, {Lines.Count(l => l.Visible)} seen)";
+
+    internal HlrHandle Handle => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Hlr));
+}
+
+/// <summary><see cref="Page"/>'s units: the DXF `$INSUNITS` codes `cadaclysm_blacksmith_page_new`
+/// takes.</summary>
+public enum PageUnits : uint
+{
+    Unitless = 0,
+    Inches = 1,
+    Feet = 2,
+    Millimetres = 4,
+    Centimetres = 5,
+    Metres = 6,
+}
+
+/// <summary>A flat drawing page: hidden-line views, profiles, hatches and text placed on it,
+/// written as SVG (<see cref="Svg"/>) or DXF R2000 (<see cref="Dxf"/>). Layers are made on first
+/// use: a view's own -- `visible`, `outline`, `smooth`, `iso`, `hidden` (dashed) -- and any other
+/// name continuous, colour 7. Mutable: each `Add*` changes the page (and returns it, to chain).
+/// Owns a library handle -- dispose it, or let the runtime.</summary>
+public sealed class Page : IDisposable
+{
+    private readonly PageHandle _handle;
+
+    /// <summary>An empty page in <paramref name="units"/> (default millimetres).</summary>
+    public Page(PageUnits units = PageUnits.Millimetres)
+    {
+        _handle = Blacksmith.Checked(BlacksmithNative.cadaclysm_blacksmith_page_new((uint)units), "page_new");
+    }
+
+    /// <summary>How many entities the page holds.</summary>
+    public uint EntityCount => BlacksmithNative.cadaclysm_blacksmith_page_entity_count(Handle);
+
+    /// <summary><paramref name="view"/>'s lines on the page, a view point `p` landing at
+    /// <paramref name="at"/> + <paramref name="scale"/> * `p`: each line as the entities that
+    /// draw it best (lines, arcs, circles, elliptical arcs, splines).</summary>
+    public Page AddView(Hlr view, (double X, double Y) at = default, double scale = 1.0)
+    {
+        if (!BlacksmithNative.cadaclysm_blacksmith_page_add_view(Handle, view.Handle, at.X, at.Y, scale)) throw Blacksmith.Failure("page_add_view");
+        return this;
+    }
+
+    /// <summary><paramref name="profile"/>'s outline and holes on <paramref name="layer"/> (null:
+    /// `0`), moved by <paramref name="at"/>.</summary>
+    public Page AddProfile(Profile profile, (double X, double Y) at = default, string? layer = null)
+    {
+        if (!BlacksmithNative.cadaclysm_blacksmith_page_add_profile(Handle, profile.Handle, layer, at.X, at.Y)) throw Blacksmith.Failure("page_add_profile");
+        return this;
+    }
+
+    /// <summary><paramref name="profile"/> hatched (its holes left out) on <paramref name="layer"/>
+    /// (null: `hatch`), moved by <paramref name="at"/>: <paramref name="pattern"/> `SOLID`,
+    /// `ANSI31`, `ANSI37` or `ANSI32`/`STEEL`, turned <paramref name="angle"/> radians, its
+    /// spacing times <paramref name="scale"/>.</summary>
+    public Page AddHatch(Profile profile, string pattern = "ANSI31", double angle = 0.0, double scale = 1.0,
+        (double X, double Y) at = default, string? layer = null)
+    {
+        if (!BlacksmithNative.cadaclysm_blacksmith_page_add_hatch(Handle, profile.Handle, layer, pattern, angle, scale, at.X, at.Y))
+            throw Blacksmith.Failure("page_add_hatch");
+        return this;
+    }
+
+    /// <summary>One line of <paramref name="text"/> on <paramref name="layer"/> (null: `text`) at
+    /// <paramref name="at"/>, <paramref name="height"/> tall, turned <paramref name="angle"/>
+    /// radians; <paramref name="halign"/> `left`/`center`/`right`, <paramref name="valign"/>
+    /// `baseline`/`bottom`/`middle`/`top`.</summary>
+    public Page AddText(string text, (double X, double Y) at, double height, double angle = 0.0, string halign = "left",
+        string valign = "baseline", string? layer = null)
+    {
+        if (!BlacksmithNative.cadaclysm_blacksmith_page_add_text(Handle, text, layer, at.X, at.Y, height, angle, halign, valign))
+            throw Blacksmith.Failure("page_add_text");
+        return this;
+    }
+
+    /// <summary>The page as an SVG document, one group per layer.</summary>
+    public string Svg() => Blacksmith.OwnedText(BlacksmithNative.cadaclysm_blacksmith_page_svg_text(Handle), "page_svg_text");
+
+    /// <summary>The page as DXF R2000 (`AC1015`) text: the same text for the same page.</summary>
+    public string Dxf() => Blacksmith.OwnedText(BlacksmithNative.cadaclysm_blacksmith_page_dxf_text(Handle), "page_dxf_text");
+
+    public void Dispose() => _handle.Dispose();
+
+    public override string ToString() => _handle.IsClosed ? "Page(disposed)" : $"Page({EntityCount} entities)";
+
+    internal PageHandle Handle => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Page));
+}
+
+/// <summary>The nearest point of a <see cref="TriangleMesh"/> to a query point
+/// (<see cref="TriangleMesh.ClosestPoint"/>). Exact: no tolerance, no `Refined` figure.</summary>
+public sealed class MeshPoint
+{
+    /// <summary>The point on the mesh.</summary>
+    public double[] Point { get; }
+    /// <summary>From the query point to <see cref="Point"/>.</summary>
+    public double Distance { get; }
+    /// <summary>The lowest-numbered triangle holding the point: on an edge or a vertex several
+    /// triangles share, the lower triangle answers.</summary>
+    public uint Triangle { get; }
+    /// <summary>The point's three weights on <see cref="Triangle"/>'s corners, in index order,
+    /// summing to 1.</summary>
+    public double[] Barycentric { get; }
+    /// <summary>What the point lies on: "face" (inside <see cref="Triangle"/>), "edge" or "vertex".</summary>
+    public string Kind { get; }
+    /// <summary>What <see cref="Kind"/> names: an edge's two vertex indices ascending, a vertex's
+    /// one, none for a face.</summary>
+    public uint[] Vertices { get; }
+
+    internal unsafe MeshPoint(RawBlacksmithMeshPoint raw)
+    {
+        Point = new[] { raw.Point[0], raw.Point[1], raw.Point[2] };
+        Distance = raw.Distance;
+        Triangle = raw.Triangle;
+        Barycentric = new[] { raw.Barycentric[0], raw.Barycentric[1], raw.Barycentric[2] };
+        Kind = raw.Kind switch
+        {
+            0 => "face",
+            1 => "edge",
+            2 => "vertex",
+            _ => throw new BuildException($"triangle mesh: the library answered kind {raw.Kind}, not 0, 1 or 2"),
+        };
+        // UINT32_MAX marks an unused slot: a face has none, a vertex one, an edge two.
+        var vertices = new List<uint>(2);
+        for (var i = 0; i < 2; i++)
+            if (raw.Vertices[i] != uint.MaxValue) vertices.Add(raw.Vertices[i]);
+        Vertices = vertices.ToArray();
+    }
+
+    public override string ToString() => $"MeshPoint(distance={Distance:G10}, triangle={Triangle}, {Kind} [{string.Join(", ", Vertices)}])";
+}
+
+/// <summary>The nearest points of a curve and a <see cref="TriangleMesh"/>
+/// (<see cref="TriangleMesh.CurveClosestPoints"/>, and a <see cref="NearestObject"/>'s answer for
+/// a mesh): <see cref="PointOnCurve"/> at the curve's parameter <see cref="T"/>, and
+/// <see cref="PointOnMesh"/>, <see cref="Distance"/> apart. Exact. The mesh's side is named as
+/// <see cref="MeshPoint"/> names it, flat.</summary>
+public sealed class CurveMeshFoot
+{
+    /// <summary>From <see cref="PointOnCurve"/> to <see cref="PointOnMesh"/>.</summary>
+    public double Distance { get; }
+    /// <summary>The curve's parameter at <see cref="PointOnCurve"/>.</summary>
+    public double T { get; }
+    /// <summary>The nearest point on the curve.</summary>
+    public double[] PointOnCurve { get; }
+    /// <summary>The nearest point on the mesh.</summary>
+    public double[] PointOnMesh { get; }
+    /// <summary>The lowest-numbered triangle holding <see cref="PointOnMesh"/>.</summary>
+    public uint Triangle { get; }
+    /// <summary><see cref="PointOnMesh"/>'s three weights on <see cref="Triangle"/>'s corners, in
+    /// index order, summing to 1.</summary>
+    public double[] Barycentric { get; }
+    /// <summary>What <see cref="PointOnMesh"/> lies on: "face", "edge" or "vertex".</summary>
+    public string Kind { get; }
+    /// <summary>What <see cref="Kind"/> names: an edge's two vertex indices ascending, a vertex's
+    /// one, none for a face.</summary>
+    public uint[] Vertices { get; }
+    /// <summary>True where the curve passes through a triangle: <see cref="Distance"/> is then
+    /// exactly 0, at the earliest crossing in <see cref="T"/>. A curve that touches without
+    /// passing through is distance 0 and false.</summary>
+    public bool Crossing { get; }
+
+    internal unsafe CurveMeshFoot(RawBlacksmithCurveMeshFoot raw)
+    {
+        var mesh = new MeshPoint(raw.Mesh);
+        Distance = raw.Distance;
+        T = raw.T;
+        PointOnCurve = new[] { raw.PointOnCurve[0], raw.PointOnCurve[1], raw.PointOnCurve[2] };
+        PointOnMesh = mesh.Point;
+        Triangle = mesh.Triangle;
+        Barycentric = mesh.Barycentric;
+        Kind = mesh.Kind;
+        Vertices = mesh.Vertices;
+        Crossing = raw.Crossing != 0;
+    }
+
+    public override string ToString() =>
+        $"CurveMeshFoot(distance={Distance:G10}, t={T:G10}, triangle={Triangle}, {Kind} [{string.Join(", ", Vertices)}], crossing={Crossing})";
+}
+
 /// <summary>The nearest of a list of things to a curve (<see cref="NurbsCurve.ClosestObject"/>):
 /// <see cref="Which"/> the item's index in the list, <see cref="Distance"/> from
 /// <see cref="PointOnCurve"/> (at the curve's parameter <see cref="T"/>) to
 /// <see cref="PointOnItem"/>. The item's own answer is <see cref="Body"/> for a solid or a
-/// projector, <see cref="Pair"/> (side `a` the curve asked) for a curve, and neither for a
-/// point.</summary>
+/// projector, <see cref="Pair"/> (side `a` the curve asked) for a curve, <see cref="Mesh"/> for a
+/// <see cref="TriangleMesh"/>, and none of them for a point.</summary>
 public sealed class NearestObject
 {
     /// <summary>The item's index in the list asked.</summary>
@@ -985,11 +1515,13 @@ public sealed class NearestObject
     public double[] PointOnCurve { get; }
     /// <summary>The nearest point of the item.</summary>
     public double[] PointOnItem { get; }
-    /// <summary>A solid's or a projector's answer; null for a curve or a point.</summary>
+    /// <summary>A solid's or a projector's answer; null for a curve, a mesh or a point.</summary>
     public CurveBodyFoot? Body { get; }
-    /// <summary>A curve's answer, side `a` the curve asked; null for a solid, a projector or a
-    /// point.</summary>
+    /// <summary>A curve's answer, side `a` the curve asked; null for a solid, a projector, a mesh
+    /// or a point.</summary>
     public CurvePair? Pair { get; }
+    /// <summary>A <see cref="TriangleMesh"/>'s answer; null for any other item.</summary>
+    public CurveMeshFoot? Mesh { get; }
 
     internal unsafe NearestObject(RawBlacksmithNearestObject raw)
     {
@@ -998,9 +1530,11 @@ public sealed class NearestObject
         T = raw.T;
         PointOnCurve = new[] { raw.PointOnCurve[0], raw.PointOnCurve[1], raw.PointOnCurve[2] };
         PointOnItem = new[] { raw.PointOnItem[0], raw.PointOnItem[1], raw.PointOnItem[2] };
-        // Only the member AnswerKind names is read: the other is zero bytes (a null `kind`).
+        // Only the member AnswerKind names is read: the others are zero bytes (a null `kind`, a
+        // mesh's `Vertices` 0 rather than UINT32_MAX).
         Body = raw.AnswerKind == 0 ? new CurveBodyFoot(raw.Body) : null;
         Pair = raw.AnswerKind == 1 ? new CurvePair(raw.Pair) : null;
+        Mesh = raw.AnswerKind == 3 ? new CurveMeshFoot(raw.Mesh) : null;
     }
 
     public override string ToString() => $"NearestObject(which={Which}, distance={Distance:G10}, t={T:G10})";
@@ -1151,9 +1685,35 @@ internal unsafe struct RawBlacksmithCurveBodyFoot
     public int Crossing;
 }
 
-/// <summary>`CadaclysmBlacksmithNearestObject`, 288 bytes. Only the member `AnswerKind` names
-/// is filled (0 `Body`, 1 `Pair`, 2 neither); every byte of the other is zero, its `kind` a
-/// null pointer, so it is never read.</summary>
+/// <summary>`CadaclysmBlacksmithMeshPoint`, 72 bytes: the nearest point of a triangle mesh,
+/// `Kind` 0 face, 1 edge, 2 vertex, an unused `Vertices` slot `UINT32_MAX`. Declared after
+/// <see cref="RawBlacksmithMesh"/>, whose name is a prefix of this one's.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RawBlacksmithMeshPoint
+{
+    public fixed double Point[3];
+    public double Distance;
+    public uint Triangle;
+    public uint Kind;
+    public fixed double Barycentric[3];
+    public fixed uint Vertices[2];
+}
+
+/// <summary>`CadaclysmBlacksmithCurveMeshFoot`, 120 bytes: the curve's side, then the mesh's
+/// as a <see cref="RawBlacksmithMeshPoint"/>; four bytes of padding after `Crossing`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RawBlacksmithCurveMeshFoot
+{
+    public double Distance;
+    public double T;
+    public fixed double PointOnCurve[3];
+    public RawBlacksmithMeshPoint Mesh;
+    public int Crossing;
+}
+
+/// <summary>`CadaclysmBlacksmithNearestObject`, 408 bytes. Only the member `AnswerKind` names
+/// is filled (0 `Body`, 1 `Pair`, 2 neither, 3 `Mesh`); every byte of the others is zero, a
+/// `kind` a null pointer, so it is never read. C writes the whole struct, `Mesh` included.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct RawBlacksmithNearestObject
 {
@@ -1165,6 +1725,7 @@ internal unsafe struct RawBlacksmithNearestObject
     public fixed double PointOnItem[3];
     public RawBlacksmithCurveBodyFoot Body;
     public RawBlacksmithCurvePair Pair;
+    public RawBlacksmithCurveMeshFoot Mesh;
 }
 
 /// <summary>`CadaclysmBlacksmithChain`: one branch of one face pair's crossing, borrowed from
@@ -1180,6 +1741,77 @@ internal struct RawBlacksmithChain
     [MarshalAs(UnmanagedType.I1)] public bool Closed;
     [MarshalAs(UnmanagedType.I1)] public bool Tangent;
     [MarshalAs(UnmanagedType.I1)] public bool HasCurve;
+}
+
+/// <summary>`CadaclysmBlacksmithFinding`: one thing wrong with one argument, copied out of a
+/// check result. <c>Kind</c> is a static string owned by the library: copied, never freed. Four
+/// bytes of padding after <c>Other</c>, which sequential layout reproduces.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithFinding
+{
+    public IntPtr Kind;
+    public uint Argument;
+    public uint Index;
+    public uint Other;
+    public double Size;
+}
+
+/// <summary>`CadaclysmBlacksmithHlrOptions`. Field order and `Size` are the contract, as <see
+/// cref="RawBlacksmithSvgOptions"/>'s: `cadaclysm_blacksmith_hlr_options_init` fills the whole
+/// struct. The four vectors are inline arrays of three doubles.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RawBlacksmithHlrOptions
+{
+    public uint Size;
+    public uint Projection;
+    public fixed double Direction[3];
+    public fixed double Up[3];
+    public fixed double Eye[3];
+    public fixed double Target[3];
+    public double Tolerance;
+    public double SmoothAngle;
+    public double FeatureAngle;
+    public uint Iso;
+    public uint Reserved;
+}
+
+/// <summary>`CadaclysmBlacksmithHlrLine`: one line of a hidden-line view.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithHlrLine
+{
+    public uint Kind;
+    public uint Visible;
+    public uint Solid;
+    public uint SourceKind;
+    public uint Source;
+    public uint Source2;
+    public uint BezierCount;
+    public uint Reserved;
+    public double Length2d;
+    public double Length3d;
+}
+
+/// <summary>`CadaclysmBlacksmithHlrReport`: what a view's hidden-line removal did.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithHlrReport
+{
+    public uint Candidates;
+    public uint Segments;
+    public uint Crossings;
+    public uint Pieces;
+    public uint Degenerate;
+    public uint Rays;
+    public uint MeshHits;
+    public uint Rejected;
+    public uint Grazes;
+    public uint Unsettled;
+    public uint MeshOnly;
+    public uint FallbackEdges;
+    public uint FailedSolids;
+    public uint Reserved;
+    public double CandidateLength;
+    public double DegenerateLength;
+    public double Tolerance;
 }
 
 /// <summary>`CadaclysmBlacksmithOverlap`: a coincident face pair's shared region, borrowed
@@ -1610,6 +2242,48 @@ internal sealed class ProjectorHandle : CadaclysmHandle
     }
 }
 
+/// <summary>`CadaclysmBlacksmithTriangleMesh *`.</summary>
+internal sealed class TriangleMeshHandle : CadaclysmHandle
+{
+    public TriangleMeshHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_triangle_mesh_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmBlacksmithHlr *`.</summary>
+internal sealed class HlrHandle : CadaclysmHandle
+{
+    public HlrHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_hlr_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmBlacksmithPage *`.</summary>
+internal sealed class PageHandle : CadaclysmHandle
+{
+    public PageHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_page_free(handle);
+        return true;
+    }
+}
+
 /// <summary>`CadaclysmBlacksmithRTree *`.</summary>
 internal sealed class RTreeHandle : CadaclysmHandle
 {
@@ -2000,56 +2674,110 @@ internal sealed class DocumentHandle : CadaclysmHandle
 
 /// <summary>Finds and loads the kernel library by `cadaclysm_blacksmith.py`'s own rule,
 /// `library_path()`: `CADACLYSM_BLACKSMITH_LIBRARY` (the library, or a directory holding it)
-/// and nothing else if it is set; else beside this assembly; else `lib/` in any ancestor (the
-/// SDK layout); else `target/release` or `target/debug` in any ancestor (this repository's).
-/// Nothing found is a <see cref="BuildException"/> naming every place looked, as Python's
+/// and nothing else if it is set (it is the separate kernel library's); else
+/// `CADACLYSM_LIBRARY` (one library of any flavour), unless it names the separate reader
+/// library or a directory with no kernel in it; else beside this assembly; else `lib/` in any
+/// ancestor (the SDK layout); else `target/release` or `target/debug` in any ancestor (this
+/// repository's). Each place is asked for every name in `Loader.KernelStems` in turn. Nothing
+/// found is a <see cref="BuildException"/> naming every place looked, as Python's
 /// `BuildError` does -- never the operating system's own search, which would load whatever
 /// copy happens to be on the path.</summary>
 internal static class BlacksmithLoader
 {
-    private static string LibraryName =>
-        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cadaclysm_blacksmith.dll"
-        : RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? "libcadaclysm_blacksmith.dylib"
-        : "libcadaclysm_blacksmith.so";
+    private static readonly object Gate = new();
+    private static IntPtr _library;
 
-    public static IntPtr Load() => NativeLibrary.Load(LibraryPath());
+    /// <summary>The flavour of the kernel library loaded, or null for the separate
+    /// `cadaclysm_blacksmith` of earlier releases (or before it is loaded).</summary>
+    internal static LibraryFlavour? Flavour;
+
+    private static string FileName(string stem) =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? $"{stem}.dll"
+        : RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? $"lib{stem}.dylib"
+        : $"lib{stem}.so";
+
+    /// <summary>The kernel library, loaded on first use and held. A flavour without the kernel
+    /// is refused here, naming the libraries to load instead.</summary>
+    public static IntPtr Load()
+    {
+        lock (Gate)
+        {
+            if (_library != IntPtr.Zero) return _library;
+            var path = LibraryPath();
+            var library = NativeLibrary.Load(path);
+            var flavour = LibraryFlavour.Of(library);
+            flavour?.Refuse(path, "kernel", "kernel", "cadaclysm, cadaclysm_kernel_reader or cadaclysm_kernel",
+                message => new BuildException(message));
+            Flavour = flavour;
+            return _library = library;
+        }
+    }
+
+    /// <summary>Before a call a flavour can leave out (the writers, the building documents):
+    /// throws the flavour's refusal naming it where the loaded flavour does not export it.
+    /// </summary>
+    internal static void Require(string entryPoint)
+    {
+        Load();
+        if (Flavour?.Missing(entryPoint) is { } refusal) throw new BuildException(refusal);
+    }
 
     private static string LibraryPath()
     {
-        var name = LibraryName;
+        var names = Loader.KernelStems.Select(FileName).ToArray();
         var over = Environment.GetEnvironmentVariable("CADACLYSM_BLACKSMITH_LIBRARY");
         if (!string.IsNullOrEmpty(over))
         {
             // A directory or the library itself, since both are things to point at.
-            var candidate = Directory.Exists(over) ? System.IO.Path.Combine(over, name) : over;
+            var candidate = Directory.Exists(over)
+                ? names.Select(n => System.IO.Path.Combine(over, n)).FirstOrDefault(File.Exists) ?? over
+                : over;
             if (File.Exists(candidate)) return candidate;
             throw new BuildException($"CADACLYSM_BLACKSMITH_LIBRARY={over} names nothing that exists");
+        }
+        var shared = Environment.GetEnvironmentVariable("CADACLYSM_LIBRARY");
+        if (!string.IsNullOrEmpty(shared))
+        {
+            // The reader's variable before the single library: one naming the separate reader
+            // library, or a directory with none of the kernel's names, is not for this one.
+            if (Directory.Exists(shared))
+            {
+                var inside = names.Select(n => System.IO.Path.Combine(shared, n)).FirstOrDefault(File.Exists);
+                if (inside is not null) return inside;
+            }
+            else if (File.Exists(shared))
+            {
+                if (!string.Equals(System.IO.Path.GetFileName(shared), FileName("cadaclysm_capi"), StringComparison.OrdinalIgnoreCase))
+                    return shared;
+            }
+            else throw new BuildException($"CADACLYSM_LIBRARY={shared} names nothing that exists");
         }
 
         var here = System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
         var ancestors = new List<string>();
         for (var dir = here; !string.IsNullOrEmpty(dir); dir = System.IO.Path.GetDirectoryName(dir))
             ancestors.Add(dir);
-        var searched = new List<string>();
-        if (!string.IsNullOrEmpty(here)) searched.Add(System.IO.Path.Combine(here, name));
+        var places = new List<string>();
+        if (!string.IsNullOrEmpty(here)) places.Add(here);
         // The NuGet package's runtimes/{rid}/native/.
-        searched.AddRange(Loader.PackageDirectories(here).Select(d => System.IO.Path.Combine(d, name)));
+        places.AddRange(Loader.PackageDirectories(here));
         // Walking up from this assembly: an SDK checkout keeps the library in `lib/` beside
         // the wrappers; the repository this example ships in keeps it in `target/release`
         // (or `target/debug`, a fallback for a machine that only built that).
-        searched.AddRange(ancestors.Select(a => System.IO.Path.Combine(a, "lib", name)));
+        places.AddRange(ancestors.Select(a => System.IO.Path.Combine(a, "lib")));
         foreach (var a in ancestors)
         {
-            searched.Add(System.IO.Path.Combine(a, "target", "release", name));
-            searched.Add(System.IO.Path.Combine(a, "target", "debug", name));
+            places.Add(System.IO.Path.Combine(a, "target", "release"));
+            places.Add(System.IO.Path.Combine(a, "target", "debug"));
         }
+        var searched = places.SelectMany(p => names.Select(n => System.IO.Path.Combine(p, n))).ToList();
         foreach (var candidate in searched)
             if (File.Exists(candidate)) return candidate;
         throw new BuildException(
-            $"{name} not found. Looked in:\n"
+            $"none of {string.Join(", ", names)} found. Looked in:\n"
             + string.Concat(searched.Select(c => $"    {c}\n"))
             + "Build it with:\n    cargo build --release -p cadaclysm-blacksmith-capi\n"
-            + "or run fetch.py in an SDK checkout, or point CADACLYSM_BLACKSMITH_LIBRARY at it.");
+            + "or run fetch.py in an SDK checkout, or point CADACLYSM_LIBRARY at it.");
     }
 }
 
@@ -2549,6 +3277,17 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern NurbsCurveHandle cadaclysm_blacksmith_nurbs_curve_offset_on_sheet(NurbsCurveHandle curve, SolidHandle solid, double distance, double tolerance, out double errorOut);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_recess(SolidHandle sheet, NurbsCurveHandle outline, double depth, double draft, double fillet, [MarshalAs(UnmanagedType.I1)] bool pane, double tolerance, [Out] uint[] facesOut);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_mirror_join(SolidHandle half, double[] plane, double snap, double tolerance, [Out] double[] reportOut);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_pattern_rectangular(double[] direction1, uint count1, double spacing1, double[]? direction2, uint count2, double spacing2, [MarshalAs(UnmanagedType.I1)] bool symmetric, uint[] skip, uint skipCount, [Out] double[]? output);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_pattern_circular(double[] axis, uint count, double angle, [MarshalAs(UnmanagedType.I1)] bool symmetric, uint[] skip, uint skipCount, [Out] double[]? output);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_pattern_along(NurbsCurveHandle curve, uint count, double spacing, uint orient, uint[] skip, uint skipCount, [Out] double[]? output);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_pattern(SolidHandle solid, double[] transforms, uint count, double tolerance, [Out] double[] reportOut);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_pattern_feature(SolidHandle solid, SolidHandle tool, uint op, double[] transforms, uint count, double tolerance, [Out] double[] reportOut);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_hole(SolidHandle solid, double[] points, uint count, double diameter, double[]? direction, uint extent, double depth, double tipAngle, uint face, uint head, double headDiameter, double headDepth, double headAngle, double tolerance, [Out] double[] reportOut, [Out] double[] bottomsOut);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_hole_tool(SolidHandle solid, double[] points, uint count, double diameter, double[]? direction, uint extent, double depth, double tipAngle, uint face, uint head, double headDiameter, double headDepth, double headAngle, double tolerance);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_rib(SolidHandle solid, NurbsCurveHandle curve, double[] plane, double thickness, uint side, double[]? toward, double tolerance);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_rib_tool(SolidHandle solid, NurbsCurveHandle curve, double[] plane, double thickness, uint side, double[]? toward, double tolerance);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_web(SolidHandle solid, IntPtr[] curves, uint count, double[] plane, double thickness, uint side, double depth, [MarshalAs(UnmanagedType.I1)] bool bothWays, double tolerance);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_web_tool(SolidHandle solid, IntPtr[] curves, uint count, double[] plane, double thickness, uint side, double depth, [MarshalAs(UnmanagedType.I1)] bool bothWays, double tolerance);
     [DllImport(Lib)] internal static extern RTreeHandle cadaclysm_blacksmith_rtree_new();
     [DllImport(Lib)] internal static extern RTreeHandle cadaclysm_blacksmith_rtree_from_boxes(uint[] ids, double[] boxes, uint n);
     [DllImport(Lib)] internal static extern RTreeHandle cadaclysm_blacksmith_rtree_from_points(double[] xyz, uint n);
@@ -2623,7 +3362,53 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern int cadaclysm_blacksmith_projector_curve_closest_points(ProjectorHandle projector, NurbsCurveHandle curve, double maxDistance, out RawBlacksmithCurveBodyFoot outFoot);
     [DllImport(Lib)] internal static extern int cadaclysm_blacksmith_nurbs_curve_closest_object(NurbsCurveHandle curve, byte[] kinds, uint count,
         IntPtr[] solids, uint nSolids, IntPtr[] curves, uint nCurves, double[] points, uint nPoints, IntPtr[] projectors, uint nProjectors,
-        double maxDistance, double tolerance, out RawBlacksmithNearestObject outNearest);
+        IntPtr[]? meshes, uint nMeshes, double maxDistance, double tolerance, out RawBlacksmithNearestObject outNearest);
+    [DllImport(Lib)] internal static extern TriangleMeshHandle cadaclysm_blacksmith_triangle_mesh_new(double[] positions, uint vertexCount, uint[] indices, uint triangleCount);
+    [DllImport(Lib)] internal static extern TriangleMeshHandle cadaclysm_blacksmith_solid_triangle_mesh(SolidHandle solid, double tolerance);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_triangle_mesh_free(IntPtr mesh);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_triangle_mesh_vertex_count(TriangleMeshHandle mesh);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_triangle_mesh_triangle_count(TriangleMeshHandle mesh);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_triangle_mesh_bounds(TriangleMeshHandle mesh, [Out] double[] outBounds);
+    [DllImport(Lib)] internal static extern int cadaclysm_blacksmith_triangle_mesh_closest_point(TriangleMeshHandle mesh, double[] p, double maxDistance, out RawBlacksmithMeshPoint outPoint);
+    [DllImport(Lib)] internal static extern int cadaclysm_blacksmith_triangle_mesh_curve_closest_points(TriangleMeshHandle mesh, NurbsCurveHandle curve, double maxDistance, out RawBlacksmithCurveMeshFoot outFoot);
+
+    // Mechanical drawings: hidden lines, the projected outline, pages and DXF profiles. The
+    // solids and meshes go as raw pointers, as `svg_text`'s do; the callers keep their owners alive.
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_hlr_options_init(ref RawBlacksmithHlrOptions options);
+    [DllImport(Lib)] internal static extern HlrHandle cadaclysm_blacksmith_hlr(IntPtr[] solids, nuint count, ref RawBlacksmithHlrOptions options);
+    [DllImport(Lib)] internal static extern HlrHandle cadaclysm_blacksmith_hlr_mesh(IntPtr[] meshes, nuint count, ref RawBlacksmithHlrOptions options);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_hlr_line_count(HlrHandle hlr);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_hlr_line(HlrHandle hlr, uint i, out RawBlacksmithHlrLine outLine);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_hlr_line_beziers2d(HlrHandle hlr, uint i, [Out] double[] outBeziers);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_hlr_line_beziers3d(HlrHandle hlr, uint i, [Out] double[] outBeziers);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_hlr_report(HlrHandle hlr, out RawBlacksmithHlrReport outReport);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_hlr_free(IntPtr hlr);
+    [DllImport(Lib)] internal static extern ProfileListHandle cadaclysm_blacksmith_projected_outline(IntPtr[] solids, nuint count, ref RawBlacksmithHlrOptions options);
+    [DllImport(Lib)] internal static extern PageHandle cadaclysm_blacksmith_page_new(uint units);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_page_add_view(PageHandle page, HlrHandle hlr, double x, double y, double scale);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_page_add_profile(PageHandle page, ProfileHandle profile,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? layer, double x, double y);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_page_add_hatch(PageHandle page, ProfileHandle profile,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? layer, [MarshalAs(UnmanagedType.LPUTF8Str)] string pattern,
+        double angle, double scale, double x, double y);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_page_add_text(PageHandle page, [MarshalAs(UnmanagedType.LPUTF8Str)] string text,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? layer, double x, double y, double height, double angle,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? halign, [MarshalAs(UnmanagedType.LPUTF8Str)] string? valign);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_page_entity_count(PageHandle page);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_page_svg_text(PageHandle page);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_page_dxf_text(PageHandle page);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_page_free(IntPtr page);
+    [DllImport(Lib)] internal static extern ProfileListHandle cadaclysm_blacksmith_dxf_profiles(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string text, double tolerance);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_face_ref(SolidHandle solid, uint face, [Out] double[] outRef);
     [DllImport(Lib)] internal static extern int cadaclysm_blacksmith_find_face(SolidHandle solid, double[] faceRef, int hint, double tolerance);
@@ -2699,7 +3484,15 @@ internal static class BlacksmithNative
     internal static extern bool cadaclysm_blacksmith_edge_curve(SolidHandle solid, uint i, out RawBlacksmithCurve outCurve);
     [DllImport(Lib)] internal static extern IntersectionHandle cadaclysm_blacksmith_intersect(SolidHandle a, SolidHandle b,
         double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern IntersectionHandle cadaclysm_blacksmith_self_intersect(SolidHandle solid,
+        double tolerance, IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_intersection_free(IntPtr intersection);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_check(SolidHandle a, IntPtr b,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? operation, double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_check_free(IntPtr check);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_check_count(IntPtr check);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_check_finding(IntPtr check, uint i, out RawBlacksmithFinding outFinding);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_intersection_chain_count(IntersectionHandle intersection);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_intersection_chain(IntersectionHandle intersection, uint i, out RawBlacksmithChain outChain);
@@ -3311,6 +4104,24 @@ public static class Blacksmith
     /// </summary>
     public static string Version() => Text(BlacksmithNative.cadaclysm_blacksmith_version());
 
+    /// <summary>Which library this is: `"full"`, `"kernel-reader"` or `"kernel"` for a flavour of
+    /// the single library, `"kernel"` for the separate `cadaclysm_blacksmith` of earlier
+    /// releases. Loads the library if nothing has yet.</summary>
+    public static string Flavour()
+    {
+        BlacksmithLoader.Load();
+        return BlacksmithLoader.Flavour?.Name ?? "kernel";
+    }
+
+    /// <summary>The features the library was built with, comma-separated
+    /// (`"nodes,kernel,bim"`), or `""` for the separate `cadaclysm_blacksmith` of earlier
+    /// releases.</summary>
+    public static string Features()
+    {
+        BlacksmithLoader.Load();
+        return BlacksmithLoader.Flavour?.Features ?? "";
+    }
+
     /// <summary>When the loaded library was built, YYYY-MM-DD.</summary>
     public static string BuildDate() => Text(BlacksmithNative.cadaclysm_blacksmith_build_date());
 
@@ -3402,6 +4213,7 @@ public static class Blacksmith
         // returned -- `GC.KeepAlive` is that fence.
         var owners = solids.ToArray();
         var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        BlacksmithLoader.Require("cadaclysm_blacksmith_step");
         var raw = BlacksmithNative.cadaclysm_blacksmith_step(handles, (nuint)handles.Length, SchemaText(schema), unitCode);
         GC.KeepAlive(owners);
         if (raw == IntPtr.Zero) throw Failure("step");
@@ -3428,6 +4240,7 @@ public static class Blacksmith
             throw new BuildException($"unit must be one of {string.Join(", ", Units.Keys.OrderBy(k => k, StringComparer.Ordinal))}");
         var owners = solids.ToArray();
         var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        BlacksmithLoader.Require("cadaclysm_blacksmith_sat_text");
         var raw = BlacksmithNative.cadaclysm_blacksmith_sat_text(handles, (nuint)handles.Length, unitCode);
         GC.KeepAlive(owners);
         if (raw == IntPtr.Zero) throw Failure("sat_text");
@@ -3449,6 +4262,7 @@ public static class Blacksmith
             throw new BuildException($"unit must be one of {string.Join(", ", Units.Keys.OrderBy(k => k, StringComparer.Ordinal))}");
         var owners = solids.ToArray();
         var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        BlacksmithLoader.Require("cadaclysm_blacksmith_sat");
         var ok = BlacksmithNative.cadaclysm_blacksmith_sat(handles, (nuint)handles.Length, path, unitCode);
         GC.KeepAlive(owners);
         if (!ok) throw Failure("sat");
@@ -3467,6 +4281,7 @@ public static class Blacksmith
         var unitCode = UnitCode(unit);
         var owners = solids.ToArray();
         var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        BlacksmithLoader.Require("cadaclysm_blacksmith_3dm_bytes");
         var raw = BlacksmithNative.cadaclysm_blacksmith_3dm_bytes(handles, (nuint)handles.Length, unitCode, out var len);
         GC.KeepAlive(owners);
         return Taken3dm(raw, len, "3dm_bytes");
@@ -3479,6 +4294,7 @@ public static class Blacksmith
         var unitCode = UnitCode(unit);
         var owners = solids.ToArray();
         var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        BlacksmithLoader.Require("cadaclysm_blacksmith_3dm");
         var ok = BlacksmithNative.cadaclysm_blacksmith_3dm(handles, (nuint)handles.Length, path, unitCode);
         GC.KeepAlive(owners);
         if (!ok) throw Failure("3dm");
@@ -3530,6 +4346,7 @@ public static class Blacksmith
         var flat = looks?.SelectMany(l => l).ToArray();
         if (flat is not null && flat.Length != 6 * owners.Length)
             throw new BuildException($"mesh_file: {flat.Length} look values for {owners.Length} solids -- 6 a solid");
+        BlacksmithLoader.Require("cadaclysm_blacksmith_mesh_file");
         var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
         var native = nameList?.Select(Marshal.StringToCoTaskMemUTF8).ToArray();
         try
@@ -3563,6 +4380,7 @@ public static class Blacksmith
     {
         var owners = solids.ToArray();
         var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        BlacksmithLoader.Require("cadaclysm_blacksmith_brep_text");
         var raw = BlacksmithNative.cadaclysm_blacksmith_brep_text(handles, (nuint)handles.Length);
         GC.KeepAlive(owners);
         if (raw == IntPtr.Zero) throw Failure("brep_text");
@@ -3581,6 +4399,7 @@ public static class Blacksmith
     {
         var owners = solids.ToArray();
         var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        BlacksmithLoader.Require("cadaclysm_blacksmith_brep");
         var ok = BlacksmithNative.cadaclysm_blacksmith_brep(handles, (nuint)handles.Length, path);
         GC.KeepAlive(owners);
         if (!ok) throw Failure("brep");
@@ -3644,6 +4463,64 @@ public static class Blacksmith
         if (!ok) throw Failure("svg");
     }
 
+    // ---- mechanical drawings: hidden lines, the projected outline, pages, DXF profiles ----
+
+    /// <summary>Hidden-line removal of <paramref name="solids"/>, each where it stands, every
+    /// solid hiding the others: what a drawing of them shows, and what it shows only dashed. Seen
+    /// as <paramref name="options"/> says (default: the front, looking along +Y, Z up, parallel).
+    /// Each line is a span of an edge's own curve or a silhouette, exact as rational cubic
+    /// Béziers. View coordinates are the camera's (x right, y up), the origin on the sight line
+    /// through the solids' box centre. Throws <see cref="BuildException"/> for no solids and
+    /// refused words, in the library's own words (`hlr: up is along the view ...`).</summary>
+    public static Hlr Hlr(IEnumerable<Solid> solids, HlrOptions? options = null)
+    {
+        var owners = solids.ToArray();
+        var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        var raw = (options ?? new HlrOptions()).Raw();
+        var h = BlacksmithNative.cadaclysm_blacksmith_hlr(handles, (nuint)handles.Length, ref raw);
+        GC.KeepAlive(owners);
+        return new Hlr(Checked(h, "hlr"));
+    }
+
+    /// <summary><see cref="Hlr(IEnumerable{Solid}, HlrOptions?)"/> of triangle meshes, each a
+    /// solid of flat triangles: its lines are the edges whose triangles turn by more than
+    /// <see cref="HlrOptions.FeatureAngle"/>, the edges of one triangle and the outlines; the
+    /// triangles hide exactly. Each line's source is <see cref="HlrSource.MeshEdge"/>.</summary>
+    public static Hlr HlrMesh(IEnumerable<TriangleMesh> meshes, HlrOptions? options = null)
+    {
+        var owners = meshes.ToArray();
+        var handles = owners.Select(m => m.Handle.DangerousGetHandle()).ToArray();
+        var raw = (options ?? new HlrOptions()).Raw();
+        var h = BlacksmithNative.cadaclysm_blacksmith_hlr_mesh(handles, (nuint)handles.Length, ref raw);
+        GC.KeepAlive(owners);
+        return new Hlr(Checked(h, "hlr_mesh"));
+    }
+
+    /// <summary>The boundary of the union of the solids' projections, as closed profiles in view
+    /// coordinates (as <see cref="Hlr(IEnumerable{Solid}, HlrOptions?)"/>'s): each outer loop
+    /// counter-clockwise with its holes clockwise inside it -- a through hole seen along its axis
+    /// is a hole.</summary>
+    public static IReadOnlyList<Profile> ProjectedOutline(IEnumerable<Solid> solids, HlrOptions? options = null)
+    {
+        var owners = solids.ToArray();
+        var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        var raw = (options ?? new HlrOptions()).Raw();
+        var list = BlacksmithNative.cadaclysm_blacksmith_projected_outline(handles, (nuint)handles.Length, ref raw);
+        GC.KeepAlive(owners);
+        return Profile.ProfileList(list, "projected_outline");
+    }
+
+    /// <summary>A DXF file's closed loops as profiles: its lines, arcs, circles, ellipses,
+    /// polylines and splines (blocks inserted) chained end to end within
+    /// <paramref name="tolerance"/> (null or 0: the effective tolerance over the drawing's
+    /// extents) into closed loops, holes nested in the loops around them. Throws <see
+    /// cref="BuildException"/> for text that is not DXF, naming the line it stopped at.</summary>
+    public static IReadOnlyList<Profile> DxfProfiles(string text, double? tolerance = null)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        return Profile.ProfileList(BlacksmithNative.cadaclysm_blacksmith_dxf_profiles(text, Tol(tolerance)), "dxf_profiles");
+    }
+
     /// <summary>The curves where <paramref name="solid"/>'s surfaces turn away from the camera
     /// <paramref name="options"/> describes, as cubic Béziers -- <see cref="Solid.SilhouetteBeziers"/>.
     /// The library hands back one owned block of 16 doubles a curve; this unpacks it into the two
@@ -3702,7 +4579,7 @@ public static class Blacksmith
         raw.Stroke = o.Stroke.Packed("svg: stroke");
         raw.Background = o.Background is { } background ? background.Packed("svg: background") : 0xFFFFFFFFu; // CADACLYSM_BLACKSMITH_SVG_TRANSPARENT
         raw.Flags = (o.Edges ? 1u : 0u) | (o.Curves ? 2u : 0u) | (o.Isocurves ? 4u : 0u) | (o.Polylines ? 8u : 0u)
-            | (o.Silhouettes ? 16u : 0u);
+            | (o.Silhouettes ? 16u : 0u) | (uint)o.Hidden;
         return raw;
     }
 
@@ -5859,8 +6736,9 @@ public sealed class NurbsCurve : IDisposable
     /// <summary>The item of <paramref name="items"/> nearest to this curve, as a
     /// <see cref="NearestObject"/> -- <c>Which</c> its index -- or null where none lies within
     /// <paramref name="maxDistance"/> (null, NaN or +inf: no limit) or the list is empty. Each
-    /// item is a <see cref="Solid"/>, a <see cref="NurbsCurve"/>, a <see cref="Projector"/> or a
-    /// point (a <c>double[3]</c> or a <c>(double, double, double)</c>). Items are asked in order,
+    /// item is a <see cref="Solid"/>, a <see cref="NurbsCurve"/>, a <see cref="Projector"/>, a
+    /// <see cref="TriangleMesh"/> (answered exactly) or a point (a <c>double[3]</c> or a
+    /// <c>(double, double, double)</c>). Items are asked in order,
     /// each with the best distance so far as its limit; equal distances go to the earlier item.
     /// <paramref name="tolerance"/> (null, 0 or NaN: each solid's effective tolerance) sizes each
     /// solid's search; a projector keeps its own, and its lock is held for the whole curve
@@ -5874,6 +6752,7 @@ public sealed class NurbsCurve : IDisposable
         var curves = new List<NurbsCurve>();
         var points = new List<double>();
         var projectors = new List<Projector>();
+        var meshes = new List<TriangleMesh>();
         var i = 0;
         foreach (var item in items)
         {
@@ -5882,10 +6761,11 @@ public sealed class NurbsCurve : IDisposable
                 case Solid s: kinds.Add(0); solids.Add(s); break;
                 case NurbsCurve c: kinds.Add(1); curves.Add(c); break;
                 case Projector pr: kinds.Add(3); projectors.Add(pr); break;
+                case TriangleMesh m: kinds.Add(4); meshes.Add(m); break;
                 case double[] { Length: 3 } xyz: kinds.Add(2); points.AddRange(xyz); break;
                 case ValueTuple<double, double, double> t: kinds.Add(2); points.Add(t.Item1); points.Add(t.Item2); points.Add(t.Item3); break;
                 default:
-                    throw new BuildException($"{what}: item {i}: not a Solid, a NurbsCurve, a Projector or a point of 3 numbers, got {item?.ToString() ?? "null"}");
+                    throw new BuildException($"{what}: item {i}: not a Solid, a NurbsCurve, a Projector, a TriangleMesh or a point of 3 numbers, got {item?.ToString() ?? "null"}");
             }
             i++;
         }
@@ -5894,12 +6774,15 @@ public sealed class NurbsCurve : IDisposable
         var solidHandles = solids.Select(s => s.Handle.DangerousGetHandle()).ToArray();
         var curveHandles = curves.Select(c => c.Handle.DangerousGetHandle()).ToArray();
         var projectorHandles = projectors.Select(p => p.Handle.DangerousGetHandle()).ToArray();
+        var meshHandles = meshes.Select(m => m.Handle.DangerousGetHandle()).ToArray();
         var found = BlacksmithNative.cadaclysm_blacksmith_nurbs_curve_closest_object(Handle, kinds.ToArray(), (uint)kinds.Count,
             solidHandles, (uint)solidHandles.Length, curveHandles, (uint)curveHandles.Length, points.ToArray(), (uint)(points.Count / 3),
-            projectorHandles, (uint)projectorHandles.Length, maxDistance ?? double.NaN, Blacksmith.Tol(tolerance), out var raw);
+            projectorHandles, (uint)projectorHandles.Length, meshHandles, (uint)meshHandles.Length, maxDistance ?? double.NaN,
+            Blacksmith.Tol(tolerance), out var raw);
         GC.KeepAlive(solids);
         GC.KeepAlive(curves);
         GC.KeepAlive(projectors);
+        GC.KeepAlive(meshes);
         if (found < 0) throw Blacksmith.Failure(what);
         return found == 0 ? null : new NearestObject(raw);
     }
@@ -6305,6 +7188,76 @@ public sealed class Solid : IDisposable
         using var found = Blacksmith.Checked(
             BlacksmithNative.cadaclysm_blacksmith_intersect(Handle, other.Handle, Blacksmith.Tol(tolerance), IntPtr.Zero, IntPtr.Zero), "intersect");
         return Intersection.Read(found);
+    }
+
+    /// <summary>Where this solid passes through itself, at `tolerance`, as an
+    /// <see cref="Intersection"/> -- <see cref="Intersect"/>'s result with this solid on both
+    /// sides, so each <see cref="Chain"/> and <see cref="Overlap"/> names two faces of this
+    /// solid. Never along its own topology: faces meeting at their shared edges and vertices
+    /// are not a crossing, so a clean solid is an empty result, never an error. A chain whose
+    /// two faces are one face is that face folding through itself, and has no
+    /// <see cref="Chain.Curve"/>. The solid is not changed; it may be an open sheet.
+    ///
+    /// The solid is meshed once and crossed against itself, the exact face-pair engine
+    /// refining each crossing of two faces, so the mesh route's known limit holds: a crossing
+    /// narrower than `tolerance` -- two faces passing within it without their meshes crossing
+    /// -- can be missed.
+    ///
+    /// Throws <see cref="BuildException"/> for a `tolerance` not positive and finite, a solid
+    /// with no faces, or one that meshes to nothing.</summary>
+    public Intersection SelfIntersections(double? tolerance = 0.05)
+    {
+        using var found = Blacksmith.Checked(
+            BlacksmithNative.cadaclysm_blacksmith_self_intersect(Handle, Blacksmith.Tol(tolerance), IntPtr.Zero, IntPtr.Zero), "self_intersect");
+        return Intersection.Read(found);
+    }
+
+    /// <summary>What is wrong with this solid (and `other`, if given) as the arguments of
+    /// `operation`, at `tolerance`, as a list of <see cref="Finding"/> -- OCCT's
+    /// `BRepAlgoAPI_Check`, gathered from what the kernel already measures. An empty list is a
+    /// valid pair; nothing is changed.
+    ///
+    /// Each argument is checked alone whatever the operation: no faces (`no_faces`), features
+    /// smaller than `tolerance` as <see cref="Health"/> finds them (`short_edge`,
+    /// `collapsed_edge`, `sliver_face`, `tiny_face`, `tiny_body`, `small_hole`), shared edges
+    /// whose sides part (`loose_edge`), and where it passes through itself as
+    /// <see cref="SelfIntersections"/> finds it (`self_intersection`, `self_overlap`, or
+    /// `unmeshable` where it could not be meshed to look). `operation` -- "join", "cut",
+    /// "common", "split_sheet", "trim", "merge" or "intersect" -- adds what that verb refuses
+    /// each argument for: a boolean wants both closed (`open`, one finding per free edge) and
+    /// holding no region wall (`region_wall`, a merge's body); a split or trim only its tool
+    /// (`other`) closed; a merge closed manifolds (`non_manifold`) of planes, cylinders, cones,
+    /// spheres and tori (`face_kind`, per face). Without `other`, this solid is held to what the
+    /// operation asks of its first argument. A free edge is no fault without an operation that
+    /// asks for a closed solid: an open sheet is a fine body.
+    ///
+    /// Not checked: an edge's curve leaving its face's surface, a surface only C0 inside a face,
+    /// sub-shapes a boolean would merge.
+    ///
+    /// Throws <see cref="BuildException"/> for an unknown operation or a `tolerance` not
+    /// positive and finite.</summary>
+    public IReadOnlyList<Finding> Check(Solid? other = null, string? operation = null, double? tolerance = 0.05)
+    {
+        var b = other is null ? IntPtr.Zero : other.Handle.DangerousGetHandle();
+        var check = BlacksmithNative.cadaclysm_blacksmith_check(Handle, b, operation, Blacksmith.Tol(tolerance), IntPtr.Zero, IntPtr.Zero);
+        GC.KeepAlive(other);
+        if (check == IntPtr.Zero) throw Blacksmith.Failure("check");
+        try
+        {
+            var n = BlacksmithNative.cadaclysm_blacksmith_check_count(check);
+            var found = new List<Finding>((int)n);
+            for (uint i = 0; i < n; i++)
+            {
+                if (!BlacksmithNative.cadaclysm_blacksmith_check_finding(check, i, out var raw)) throw Blacksmith.Failure("check_finding");
+                found.Add(new Finding(Blacksmith.Text(raw.Kind), raw.Argument, raw.Index == uint.MaxValue ? null : raw.Index,
+                                      raw.Other == uint.MaxValue ? null : raw.Other, raw.Size));
+            }
+            return found;
+        }
+        finally
+        {
+            BlacksmithNative.cadaclysm_blacksmith_check_free(check);
+        }
     }
 
     /// <summary>This solid cut by the plane `Z = z`: its closed outlines there, in XY, nested
@@ -6742,6 +7695,16 @@ public sealed class Solid : IDisposable
     /// accepted.</summary>
     public Projector Projector(double? tolerance = null) =>
         new(BlacksmithNative.cadaclysm_blacksmith_projector_new(Handle, Blacksmith.Tol(tolerance)));
+
+    /// <summary>This solid's **measuring** tessellation as a <see cref="Blacksmith.TriangleMesh"/>:
+    /// the mesh the measuring queries search, within a third of <paramref name="tolerance"/> of the
+    /// surface -- finer than the display mesh <see cref="Mesh"/> gives at the same tolerance.
+    /// Answers against it are exact for the mesh, not for the body. <paramref name="tolerance"/>
+    /// -- absolute, in model units; null (or 0, or NaN) is unset, the solid's effective
+    /// tolerance. The mesh is a copy: it answers on after this solid is disposed. A negative or
+    /// infinite tolerance, or a body that meshes to nothing, throws.</summary>
+    public TriangleMesh TriangleMesh(double? tolerance = null) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_solid_triangle_mesh(Handle, Blacksmith.Tol(tolerance)), "solid_triangle_mesh");
 
     /// <summary>The nearest points of <paramref name="curve"/> and this solid's boundary, as a
     /// <see cref="CurveBodyFoot"/> -- <c>Crossing</c> true, distance 0, where the curve passes
@@ -7947,6 +8910,197 @@ public sealed class Solid : IDisposable
         return (new Solid(Blacksmith.Checked(h, "mirror_join")), SymmetryReport.Of(report));
     }
 
+    private static (double[] Flat, uint Count) TransformsFlat(IEnumerable<Transform> transforms)
+    {
+        ArgumentNullException.ThrowIfNull(transforms);
+        var flat = transforms.SelectMany(t => (t ?? throw new ArgumentNullException(nameof(transforms), "a transform is null")).Rows).ToArray();
+        return (flat.Length > 0 ? flat : new double[16], (uint)(flat.Length / 16));
+    }
+
+    /// <summary>This body and its copies at <paramref name="transforms"/> (rigid
+    /// <see cref="Transform"/>s, typically from <see cref="global::Cadaclysm.Blacksmith.Pattern"/>;
+    /// instance 0 the identity keeps the original) as one body -- a pattern of bodies -- and a
+    /// <see cref="PatternReport"/>. Copies apart from each other are put together with no boolean
+    /// at all; copies that overlap are joined, one boolean a group. Throws
+    /// <see cref="BuildException"/> for no transforms or one that is not rigid.</summary>
+    public (Solid Solid, PatternReport Report) Pattern(IEnumerable<Transform> transforms, double? tolerance = null)
+    {
+        var (flat, n) = TransformsFlat(transforms);
+        var report = new double[3];
+        var h = BlacksmithNative.cadaclysm_blacksmith_pattern(Handle, flat, n, Blacksmith.Tol(tolerance), report);
+        return (new Solid(Blacksmith.Checked(h, "pattern")), PatternReport.Of(report));
+    }
+
+    /// <summary><paramref name="tool"/> (any closed solid, typically a `...Tool` method's result)
+    /// placed at each of <paramref name="transforms"/> and applied to this body by
+    /// <paramref name="op"/> -- a pattern of features (Fusion's compute type *identical*) -- and a
+    /// <see cref="PatternReport"/>. Copies apart from each other go into one multi-lump tool and
+    /// one boolean; overlapping copies fall into a few groups. A copy that shares no volume with
+    /// the body is missed: dropped for a cut, kept as a body of its own for a join. Throws
+    /// <see cref="BuildException"/> for no transforms, one not rigid, or a tool that is not
+    /// closed.</summary>
+    public (Solid Solid, PatternReport Report) PatternFeature(Solid tool, FeatureOp op, IEnumerable<Transform> transforms, double? tolerance = null)
+    {
+        ArgumentNullException.ThrowIfNull(tool);
+        var (flat, n) = TransformsFlat(transforms);
+        var report = new double[3];
+        var h = BlacksmithNative.cadaclysm_blacksmith_pattern_feature(Handle, tool.Handle, (uint)op, flat, n, Blacksmith.Tol(tolerance), report);
+        GC.KeepAlive(tool);
+        return (new Solid(Blacksmith.Checked(h, "pattern_feature")), PatternReport.Of(report));
+    }
+
+    private static double[] HolePoints(IEnumerable<(double X, double Y, double Z)> points)
+    {
+        ArgumentNullException.ThrowIfNull(points);
+        var flat = points.SelectMany(p => new[] { p.X, p.Y, p.Z }).ToArray();
+        return flat.Length > 0 ? flat : new double[3];
+    }
+
+    /// <summary>This body drilled at <paramref name="points"/> (one hole each, all one spec, one
+    /// cut) -- the bore an exact cylinder of <paramref name="diameter"/>, a counterbore an exact
+    /// cylinder, a countersink and a drill point exact cones -- and a <see cref="HoleReport"/>.
+    /// <paramref name="direction"/> is the drilling direction, into the material, shared by every
+    /// point; null drills each point along the inward normal of the face it lies on (on an edge,
+    /// the lowest-numbered face's). <paramref name="extent"/>: <see cref="HoleExtent.Through"/>
+    /// everything ahead of the point; <see cref="HoleExtent.Blind"/>, <paramref name="depth"/> of
+    /// full bore then a drill point of included angle <paramref name="tipAngle"/> (0 or pi: a flat
+    /// bottom); <see cref="HoleExtent.ToFace"/>, until the axis first meets face
+    /// <paramref name="face"/>, the bore ending on it; <see cref="HoleExtent.ToNext"/>, until the
+    /// bore first leaves the material. <paramref name="head"/>: <see cref="HoleHead.Simple"/>, or
+    /// <see cref="HoleHead.Counterbore"/> (<paramref name="headDiameter"/> across,
+    /// <paramref name="headDepth"/> deep) or <see cref="HoleHead.Countersink"/>
+    /// (<paramref name="headDiameter"/> across at the point, included angle
+    /// <paramref name="headAngle"/>), measured from the point. Angles in radians. Throws
+    /// <see cref="BuildException"/> for a diameter not positive, a depth or face its extent does
+    /// not take, a head not wider than the bore, an angle out of range, a point not on a face
+    /// with no direction, a hole that removes nothing, or a face the axis never meets.</summary>
+    public (Solid Solid, HoleReport Report) Hole(IEnumerable<(double X, double Y, double Z)> points, double diameter,
+                                                 (double X, double Y, double Z)? direction = null, HoleExtent extent = HoleExtent.Through,
+                                                 double? depth = null, double tipAngle = 118 * Math.PI / 180, int? face = null,
+                                                 HoleHead head = HoleHead.Simple, double headDiameter = 0.0, double headDepth = 0.0,
+                                                 double headAngle = 90 * Math.PI / 180, double? tolerance = null)
+    {
+        var list = (points ?? throw new ArgumentNullException(nameof(points))).ToList();
+        var flat = HolePoints(list);
+        var report = new double[2];
+        var bottoms = new double[Math.Max(list.Count, 1)];
+        var h = BlacksmithNative.cadaclysm_blacksmith_hole(Handle, flat, (uint)list.Count, diameter, Vec3(direction), (uint)extent,
+            depth ?? double.NaN, tipAngle, face is { } f ? Index(f) : Blacksmith.None, (uint)head, headDiameter, headDepth, headAngle,
+            Blacksmith.Tol(tolerance), report, bottoms);
+        return (new Solid(Blacksmith.Checked(h, "hole")), HoleReport.Of(report, bottoms[..list.Count]));
+    }
+
+    /// <summary><see cref="Hole(IEnumerable{ValueTuple{double, double, double}}, double, ValueTuple{double, double, double}?, HoleExtent, double?, double, int?, HoleHead, double, double, double, double?)"/>
+    /// at one point.</summary>
+    public (Solid Solid, HoleReport Report) Hole((double X, double Y, double Z) point, double diameter,
+                                                 (double X, double Y, double Z)? direction = null, HoleExtent extent = HoleExtent.Through,
+                                                 double? depth = null, double tipAngle = 118 * Math.PI / 180, int? face = null,
+                                                 HoleHead head = HoleHead.Simple, double headDiameter = 0.0, double headDepth = 0.0,
+                                                 double headAngle = 90 * Math.PI / 180, double? tolerance = null) =>
+        Hole(new[] { point }, diameter, direction, extent, depth, tipAngle, face, head, headDiameter, headDepth, headAngle, tolerance);
+
+    /// <summary>The tool <see cref="Hole(IEnumerable{ValueTuple{double, double, double}}, double, ValueTuple{double, double, double}?, HoleExtent, double?, double, int?, HoleHead, double, double, double, double?)"/>
+    /// cuts with, from the same arguments: a closed solid, one lump a point -- for
+    /// <see cref="PatternFeature"/> or a boolean of your own. Refused as `Hole` is, but for a hole
+    /// that removes nothing.</summary>
+    public Solid HoleTool(IEnumerable<(double X, double Y, double Z)> points, double diameter,
+                          (double X, double Y, double Z)? direction = null, HoleExtent extent = HoleExtent.Through,
+                          double? depth = null, double tipAngle = 118 * Math.PI / 180, int? face = null,
+                          HoleHead head = HoleHead.Simple, double headDiameter = 0.0, double headDepth = 0.0,
+                          double headAngle = 90 * Math.PI / 180, double? tolerance = null)
+    {
+        var list = (points ?? throw new ArgumentNullException(nameof(points))).ToList();
+        var h = BlacksmithNative.cadaclysm_blacksmith_hole_tool(Handle, HolePoints(list), (uint)list.Count, diameter, Vec3(direction),
+            (uint)extent, depth ?? double.NaN, tipAngle, face is { } f ? Index(f) : Blacksmith.None, (uint)head, headDiameter, headDepth,
+            headAngle, Blacksmith.Tol(tolerance));
+        return new Solid(Blacksmith.Checked(h, "hole_tool"));
+    }
+
+    /// <summary><see cref="HoleTool(IEnumerable{ValueTuple{double, double, double}}, double, ValueTuple{double, double, double}?, HoleExtent, double?, double, int?, HoleHead, double, double, double, double?)"/>
+    /// at one point.</summary>
+    public Solid HoleTool((double X, double Y, double Z) point, double diameter,
+                          (double X, double Y, double Z)? direction = null, HoleExtent extent = HoleExtent.Through,
+                          double? depth = null, double tipAngle = 118 * Math.PI / 180, int? face = null,
+                          HoleHead head = HoleHead.Simple, double headDiameter = 0.0, double headDepth = 0.0,
+                          double headAngle = 90 * Math.PI / 180, double? tolerance = null) =>
+        HoleTool(new[] { point }, diameter, direction, extent, depth, tipAngle, face, head, headDiameter, headDepth, headAngle, tolerance);
+
+    /// <summary>This body with a rib along <paramref name="curve"/>, an open curve lying in
+    /// <paramref name="plane"/> (a frame): the region of the plane between the curve and the body
+    /// on the <paramref name="toward"/> side (a direction in the plane; null: toward the body's
+    /// nearest point), the curve's ends carried on along their tangents to the body, thickened
+    /// <paramref name="thickness"/> along the plane's normal -- <paramref name="side"/>
+    /// <see cref="RibSide.Both"/> (half each side), <see cref="RibSide.Front"/> (+z) or
+    /// <see cref="RibSide.Back"/> (-z) -- and joined. Throws <see cref="BuildException"/> for a
+    /// curve closed or not in the plane, a thickness not positive, a slab that meets nothing, or a
+    /// region not closed by the body.</summary>
+    public Solid Rib(NurbsCurve curve, double[] plane, double thickness, RibSide side = RibSide.Both,
+                     (double X, double Y, double Z)? toward = null, double? tolerance = null)
+    {
+        ArgumentNullException.ThrowIfNull(curve);
+        var h = BlacksmithNative.cadaclysm_blacksmith_rib(Handle, curve.Handle, Blacksmith.Frame(plane), thickness, (uint)side, Vec3(toward),
+            Blacksmith.Tol(tolerance));
+        GC.KeepAlive(curve);
+        return new Solid(Blacksmith.Checked(h, "rib"));
+    }
+
+    /// <summary>The slab <see cref="Rib"/> joins, alone, from the same arguments.</summary>
+    public Solid RibTool(NurbsCurve curve, double[] plane, double thickness, RibSide side = RibSide.Both,
+                         (double X, double Y, double Z)? toward = null, double? tolerance = null)
+    {
+        ArgumentNullException.ThrowIfNull(curve);
+        var h = BlacksmithNative.cadaclysm_blacksmith_rib_tool(Handle, curve.Handle, Blacksmith.Frame(plane), thickness, (uint)side,
+            Vec3(toward), Blacksmith.Tol(tolerance));
+        GC.KeepAlive(curve);
+        return new Solid(Blacksmith.Checked(h, "rib_tool"));
+    }
+
+    /// <summary>This body with a web along each of <paramref name="curves"/> (open curves in
+    /// <paramref name="plane"/>): each offset in the plane to <paramref name="thickness"/> --
+    /// <paramref name="side"/> <see cref="WebSide.Both"/>, <see cref="WebSide.Left"/> or
+    /// <see cref="WebSide.Right"/> of the curve's run, the plane's normal up -- its ends carried
+    /// along their tangents to the body, its walls run along the plane's normal until they meet
+    /// the body (<paramref name="depth"/> null) or for <paramref name="depth"/>, one way (the
+    /// normal's) or both when <paramref name="bothWays"/>. All the webs are one tool and one join;
+    /// crossing curves make a network. Throws <see cref="BuildException"/> for no curves, one
+    /// closed or not in the plane, a thickness not positive, or walls that meet nothing or are not
+    /// closed by the body.</summary>
+    public Solid Web(IEnumerable<NurbsCurve> curves, double[] plane, double thickness, WebSide side = WebSide.Both,
+                     double? depth = null, bool bothWays = false, double? tolerance = null)
+    {
+        var owners = CurveList(curves);
+        var raw = CurveHandles(owners);
+        var h = BlacksmithNative.cadaclysm_blacksmith_web(Handle, raw.Length > 0 ? raw : new IntPtr[1], (uint)raw.Length, Blacksmith.Frame(plane),
+            thickness, (uint)side, depth ?? double.NaN, bothWays, Blacksmith.Tol(tolerance));
+        GC.KeepAlive(owners);
+        return new Solid(Blacksmith.Checked(h, "web"));
+    }
+
+    /// <summary><see cref="Web(IEnumerable{NurbsCurve}, double[], double, WebSide, double?, bool, double?)"/>
+    /// along one curve.</summary>
+    public Solid Web(NurbsCurve curve, double[] plane, double thickness, WebSide side = WebSide.Both,
+                     double? depth = null, bool bothWays = false, double? tolerance = null) =>
+        Web(new[] { curve }, plane, thickness, side, depth, bothWays, tolerance);
+
+    /// <summary>The walls <see cref="Web(IEnumerable{NurbsCurve}, double[], double, WebSide, double?, bool, double?)"/>
+    /// joins, alone, from the same arguments.</summary>
+    public Solid WebTool(IEnumerable<NurbsCurve> curves, double[] plane, double thickness, WebSide side = WebSide.Both,
+                         double? depth = null, bool bothWays = false, double? tolerance = null)
+    {
+        var owners = CurveList(curves);
+        var raw = CurveHandles(owners);
+        var h = BlacksmithNative.cadaclysm_blacksmith_web_tool(Handle, raw.Length > 0 ? raw : new IntPtr[1], (uint)raw.Length,
+            Blacksmith.Frame(plane), thickness, (uint)side, depth ?? double.NaN, bothWays, Blacksmith.Tol(tolerance));
+        GC.KeepAlive(owners);
+        return new Solid(Blacksmith.Checked(h, "web_tool"));
+    }
+
+    /// <summary><see cref="WebTool(IEnumerable{NurbsCurve}, double[], double, WebSide, double?, bool, double?)"/>
+    /// along one curve.</summary>
+    public Solid WebTool(NurbsCurve curve, double[] plane, double thickness, WebSide side = WebSide.Both,
+                         double? depth = null, bool bothWays = false, double? tolerance = null) =>
+        WebTool(new[] { curve }, plane, thickness, side, depth, bothWays, tolerance);
+
     /// <summary>Face `face` pushed out by `distance` along its outward normal (pulled in,
     /// negative) as a face extrude does it: the prism over it joined on (cut
     /// out), and the flush faces merged -- a box's top raised is one taller box of six faces.
@@ -8651,6 +9805,7 @@ public sealed class Assembly : IDisposable
     public string StepText(string? schema = null, string unit = "mm")
     {
         var unitCode = Blacksmith.UnitCode(unit);
+        BlacksmithLoader.Require("cadaclysm_blacksmith_assembly_step");
         var raw = BlacksmithNative.cadaclysm_blacksmith_assembly_step(Handle, Blacksmith.SchemaText(schema), unitCode);
         if (raw == IntPtr.Zero) throw Blacksmith.Failure("assembly_step");
         try
@@ -8678,6 +9833,7 @@ public sealed class Assembly : IDisposable
     public byte[] Rhino3dmBytes(string unit = "mm")
     {
         var unitCode = Blacksmith.UnitCode(unit);
+        BlacksmithLoader.Require("cadaclysm_blacksmith_assembly_3dm_bytes");
         var raw = BlacksmithNative.cadaclysm_blacksmith_assembly_3dm_bytes(Handle, unitCode, out var len);
         return Blacksmith.Taken3dm(raw, len, "assembly_3dm_bytes");
     }
@@ -8687,6 +9843,7 @@ public sealed class Assembly : IDisposable
     public void Write3dm(string path, string unit = "mm")
     {
         var unitCode = Blacksmith.UnitCode(unit);
+        BlacksmithLoader.Require("cadaclysm_blacksmith_assembly_3dm");
         if (!BlacksmithNative.cadaclysm_blacksmith_assembly_3dm(Handle, path, unitCode))
             throw Blacksmith.Failure("assembly_3dm");
         Blacksmith.Warn3dm();
@@ -9705,6 +10862,110 @@ public sealed class Projector : IDisposable
 
     /// <summary>The handle, refusing a disposed projector at the call site.</summary>
     internal ProjectorHandle Handle => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Projector));
+}
+
+/// <summary>A triangle mesh and its search tree, built once and immutable: nearest points
+/// (<see cref="ClosestPoint"/>) and nearest points to a curve (<see cref="CurveClosestPoints"/>)
+/// are answered exactly against it -- no tolerance, no `Refined` figure. The vertices and the
+/// triangles (three vertex indices each, any winding) are copied; a zero-area triangle is
+/// accepted and answers as its longest edge. <see cref="Solid.TriangleMesh"/> gives a solid's
+/// own. No triangles, an index past the vertex count, or a coordinate that is not finite
+/// throws. Nothing in it changes after it is built, so calls from several threads at once are
+/// safe and do not take turns. <see cref="Dispose"/> frees it; so does the garbage collector. A
+/// call after <see cref="Dispose"/> throws <see cref="ObjectDisposedException"/>.</summary>
+public sealed class TriangleMesh : IDisposable
+{
+    private readonly TriangleMeshHandle _handle;
+
+    /// <summary>The mesh of <paramref name="positions"/> (three numbers a vertex, flat) and
+    /// <paramref name="indices"/> (three vertex indices a triangle, flat).</summary>
+    public TriangleMesh(double[] positions, uint[] indices)
+    {
+        const string what = "triangle_mesh_new";
+        ArgumentNullException.ThrowIfNull(positions);
+        ArgumentNullException.ThrowIfNull(indices);
+        if (positions.Length % 3 != 0) throw new BuildException($"{what}: {positions.Length} numbers are not three a vertex");
+        if (indices.Length % 3 != 0) throw new BuildException($"{what}: {indices.Length} indices are not three a triangle");
+        _handle = Blacksmith.Checked(BlacksmithNative.cadaclysm_blacksmith_triangle_mesh_new(positions, (uint)(positions.Length / 3),
+            indices, (uint)(indices.Length / 3)), what);
+    }
+
+    /// <summary>The mesh of <paramref name="positions"/> (one <c>double[3]</c> a vertex) and
+    /// <paramref name="triangles"/> (one <c>uint[3]</c> a triangle).</summary>
+    public TriangleMesh(double[][] positions, uint[][] triangles)
+        : this(Flat(positions, "vertex"), Flat(triangles, "triangle"))
+    {
+    }
+
+    internal TriangleMesh(TriangleMeshHandle handle, string what)
+    {
+        _handle = Blacksmith.Checked(handle, what);
+    }
+
+    private static T[] Flat<T>(T[][] rows, string name)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        var flat = new List<T>(rows.Length * 3);
+        for (var i = 0; i < rows.Length; i++)
+        {
+            if (rows[i] is not { Length: 3 } row) throw new BuildException($"triangle_mesh_new: {name} {i} is not 3 numbers");
+            flat.AddRange(row);
+        }
+        return flat.ToArray();
+    }
+
+    public void Dispose() => _handle.Dispose();
+
+    /// <summary>How many vertices the mesh holds.</summary>
+    public uint VertexCount => BlacksmithNative.cadaclysm_blacksmith_triangle_mesh_vertex_count(Handle);
+
+    /// <summary>How many triangles the mesh holds.</summary>
+    public uint TriangleCount => BlacksmithNative.cadaclysm_blacksmith_triangle_mesh_triangle_count(Handle);
+
+    /// <summary>The box of every vertex.</summary>
+    public (double[] Min, double[] Max) Bounds
+    {
+        get
+        {
+            var o = new double[6];
+            if (!BlacksmithNative.cadaclysm_blacksmith_triangle_mesh_bounds(Handle, o)) throw Blacksmith.Failure("triangle_mesh_bounds");
+            return (new[] { o[0], o[1], o[2] }, new[] { o[3], o[4], o[5] });
+        }
+    }
+
+    /// <summary>The nearest point of the mesh to <paramref name="p"/>, as a <see cref="MeshPoint"/>
+    /// -- exact, the lower triangle where several share the point -- or null where it lies beyond
+    /// <paramref name="maxDistance"/> (null, NaN or +inf: no limit; a point on the mesh is within
+    /// 0). A point not finite or a negative limit throws.</summary>
+    public MeshPoint? ClosestPoint(double[] p, double? maxDistance = null)
+    {
+        const string what = "triangle_mesh_closest_point";
+        var found = BlacksmithNative.cadaclysm_blacksmith_triangle_mesh_closest_point(Handle, Blacksmith.Point(p, what),
+            maxDistance ?? double.NaN, out var raw);
+        if (found < 0) throw Blacksmith.Failure(what);
+        return found == 0 ? null : new MeshPoint(raw);
+    }
+
+    /// <summary>The nearest points of <paramref name="curve"/> and the mesh, as a
+    /// <see cref="CurveMeshFoot"/> -- exact; <c>Crossing</c> true and distance 0 at the earliest
+    /// crossing in <c>T</c>; among equal distances the lower triangle, then the lower <c>T</c> --
+    /// or null where the mesh lies farther than <paramref name="maxDistance"/> (null, NaN or +inf:
+    /// no limit). A mesh has no inside: a curve within a closed mesh answers its distance to the
+    /// triangles. A curve that is not valid or a negative limit throws.</summary>
+    public CurveMeshFoot? CurveClosestPoints(NurbsCurve curve, double? maxDistance = null)
+    {
+        ArgumentNullException.ThrowIfNull(curve);
+        var found = BlacksmithNative.cadaclysm_blacksmith_triangle_mesh_curve_closest_points(Handle, curve.Handle,
+            maxDistance ?? double.NaN, out var raw);
+        if (found < 0) throw Blacksmith.Failure("triangle_mesh_curve_closest_points");
+        return found == 0 ? null : new CurveMeshFoot(raw);
+    }
+
+    public override string ToString() =>
+        _handle.IsClosed ? "TriangleMesh(disposed)" : $"TriangleMesh({VertexCount} vertices, {TriangleCount} triangles)";
+
+    /// <summary>The handle, refusing a disposed mesh at the call site.</summary>
+    internal TriangleMeshHandle Handle => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(TriangleMesh));
 }
 
 // ---- The R-tree -------------------------------------------------------------------------
@@ -13016,6 +14277,17 @@ public sealed class Job : IDisposable
     }
 }
 
+/// <summary>One thing wrong with one argument (<see cref="Solid.Check"/>): <c>Kind</c> names it,
+/// <c>Argument</c> is 0 for the solid checked and 1 for <c>other</c>, and <c>Index</c>,
+/// <c>Other</c> and <c>Size</c> are what the kind gives (null, null and 0 where it gives none):
+/// "open" -- the edge (null for a trim naming none), its face, its length; "face_kind" -- the
+/// face; "short_edge" -- the edge, its length; "collapsed_edge" -- the trim; "sliver_face" -- the
+/// face, its width; "tiny_face" -- the face, its area; "tiny_body" -- its diagonal; "small_hole"
+/// -- the loop, its area or width; "loose_edge" -- the edge, how far its sides part;
+/// "self_intersection" -- the two faces (one face twice for a fold), the crossing's length;
+/// "self_overlap" -- the two faces.</summary>
+public sealed record Finding(string Kind, uint Argument, uint? Index, uint? Other, double Size);
+
 /// <summary>One free edge, as plain data (<see cref="HealthReport.FreeEdges"/>): a side only one
 /// face bounds -- its <c>Trim</c> (the face's side), the <c>Edge</c> it lies on (null for a side
 /// with no edge), the <c>Face</c> and free <c>Wire</c> it is on, its nearest <c>Partner</c>
@@ -13188,18 +14460,30 @@ public sealed class Document : IDisposable
 
     /// <summary>An empty building document: the blacksmith kinds and the `bim.*` ones, holding a
     /// hidden `bim.project` node whose random guid seeds every IFC GlobalId it exports.</summary>
-    public static Document NewBim(string units = "mm") => new(BlacksmithNative.cadaclysm_bim_document_new(units), "bim_document_new");
+    public static Document NewBim(string units = "mm")
+    {
+        BlacksmithLoader.Require("cadaclysm_bim_document_new");
+        return new(BlacksmithNative.cadaclysm_bim_document_new(units), "bim_document_new");
+    }
 
     /// <summary>A building document <see cref="Save"/> wrote as <paramref name="text"/>, opened
     /// with the `bim.*` kinds.</summary>
-    public static Document LoadBim(string text) => new(BlacksmithNative.cadaclysm_bim_document_load(text), "bim_document_load");
+    public static Document LoadBim(string text)
+    {
+        BlacksmithLoader.Require("cadaclysm_bim_document_load");
+        return new(BlacksmithNative.cadaclysm_bim_document_load(text), "bim_document_load");
+    }
 
     /// <summary>The building document saved in the file <paramref name="path"/>.</summary>
     public static Document OpenBim(string path) => LoadBim(File.ReadAllText(path, Encoding.UTF8));
 
     /// <summary>Every node kind a building document knows, the blacksmith's and the `bim.*`
     /// ones, as the JSON text <see cref="Kinds"/> gives. Needs no document.</summary>
-    public static string BimKinds() => Blacksmith.OwnedText(BlacksmithNative.cadaclysm_bim_kinds(), "bim_kinds");
+    public static string BimKinds()
+    {
+        BlacksmithLoader.Require("cadaclysm_bim_kinds");
+        return Blacksmith.OwnedText(BlacksmithNative.cadaclysm_bim_kinds(), "bim_kinds");
+    }
 
     /// <summary>The handle, refusing a disposed document at the call site.</summary>
     internal DocumentHandle Live => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Document), "document: closed");
@@ -13224,8 +14508,11 @@ public sealed class Document : IDisposable
     /// "timestamp": unix seconds (default now), "name": the IfcProject's}`. A refused export
     /// throws with C's text verbatim: `bim_document_export_ifc: {"refusals": [{"node", "reason"}]}`,
     /// every reason at once, `node` null for one on the whole document.</summary>
-    public string ExportIfc(string? options = null) =>
-        Blacksmith.OwnedText(BlacksmithNative.cadaclysm_bim_document_export_ifc(Live, options), "bim_document_export_ifc");
+    public string ExportIfc(string? options = null)
+    {
+        BlacksmithLoader.Require("cadaclysm_bim_document_export_ifc");
+        return Blacksmith.OwnedText(BlacksmithNative.cadaclysm_bim_document_export_ifc(Live, options), "bim_document_export_ifc");
+    }
 
     // -- editing
 

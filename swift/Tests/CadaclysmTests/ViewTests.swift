@@ -3,7 +3,7 @@
 // by its item), image() inside its silhouette, pick, save, a real pose and the rest pose, a
 // nested node and a root drawing less than their scene, Scene.close() releasing its items,
 // another thread's calls refused, colour text drawing its numbers' pixels and refused text
-// refused in the library's words, the loader's ABI 1.22, text (labels shown, changed, picked
+// refused in the library's words, the loader's ABI 1.25, text (labels shown, changed, picked
 // by line, coloured on their box; fonts loaded; refusals) -- and the wgpu library's table
 // rigged: show()/view()'s title and up axis, run()'s camera, pump's waits and count, input,
 // void-call refusals; ABI 1.8's pick (clicks, point), set_double_click_frames, focus and
@@ -567,6 +567,19 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(pixel(drawn, 1, 1), pixel(empty, 1, 1), "a corner outside the sphere changed")
         let pick = try view.pick(x: 160, y: 120)
         XCTAssertEqual(pick?.item, item?.id)
+        // 1.16's user layers: the sphere on layer 3, the layer off (the centre no longer the
+        // sphere's) and on again (the sphere's again); layer 32 refused, for an item and the view.
+        if let item {
+            try item.userLayer(3)
+            try view.userLayer(3, false)
+            XCTAssertNotEqual(pixel(try view.image(), 160, 120), pixel(drawn, 160, 120), "an item on a layer switched off drew")
+            try view.userLayer(3, true)
+            XCTAssertEqual(pixel(try view.image(), 160, 120), pixel(drawn, 160, 120), "an item on a layer switched on again did not draw")
+            XCTAssertTrue(message { try item.userLayer(32) }.contains("past 31"), message { try item.userLayer(32) })
+            XCTAssertTrue(message { try view.userLayer(32, false) }.contains("past 31"), message { try view.userLayer(32, false) })
+            try item.userLayer(0)
+        }
+        XCTAssertEqual(View.Viewport(rect: SIMD4(0, 0, 1, 1), view: [], projection: [], eye: SIMD3(0, 0, 0)).layerMask, 0xFFFF_FFFF)
         let png = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).png")
         try view.save(png.path)
         let bytes = try Data(contentsOf: png)
@@ -1019,16 +1032,166 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(try view.occludedStyle(), OccludedStyle())
     }
 
-    /// The loader binds 95 calls of cadaclysm_view.h 1.22 (all but 1.14's analysis calls, 1.16's
-    /// layers, 1.19's KMS pair and 1.12's texture targets): a 1.21 library (no snapping) is
-    /// refused before any call is bound, in Python's words; 1.22 and later 1.x are taken.
-    func testTheLoaderNeedsViewABI122() throws {
-        try checkABIForTest(version: 0x10016, path: "lib")
-        try checkABIForTest(version: 0x10017, path: "lib")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x10015, path: "lib") },
-                       "lib: view ABI 1.21, this SDK needs 1.22 or a later 1.x")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x20016, path: "lib") },
-                       "lib: view ABI 2.22, this SDK needs 1.22 or a later 1.x")
+    /// 1.23's line colours: a view-wide colour read back, a segment's own curve colour drawn
+    /// and cleared with nil.
+    func testLineColoursDrawAndClear() throws {
+        let view = try offscreen(64, 48)
+        defer { try? view.close() }
+        XCTAssertTrue(try view.curveColour().fromPart, "curves follow their part by default")
+        try view.setIsocurveColour("#00ff00", fromPart: true)
+        XCTAssertEqual(try view.isocurveColour(), LineColour(colour: SIMD3(0, 1, 0), fromPart: true))
+        try view.setEdgeColour("#202020")
+        XCTAssertFalse(try view.edgeColour().fromPart)
+        let line = try view.showLines([-0.8, 0, 0, 0.8, 0, 0], rgb: "red")
+        try view.standard("top")
+        try line.frame()
+        func greens() throws -> Int {
+            let px = try view.image().rgba
+            var n = 0
+            for k in stride(from: 0, to: px.count, by: 4) where px[k + 1] > 150 && px[k] < 100 && px[k + 2] < 100 { n += 1 }
+            return n
+        }
+        XCTAssertEqual(try greens(), 0, "red first")
+        try line.setCurveColour("lime")
+        XCTAssertGreaterThan(try greens(), 0, "the segment green")
+        try line.setCurveColour(nil)
+        XCTAssertEqual(try greens(), 0, "nil: the view's colour again")
+    }
+
+    /// The loader binds 104 calls of cadaclysm_view.h 1.25 (all but 1.14's analysis calls,
+    /// 1.19's KMS pair and 1.12's texture targets): a 1.24 library (no stats) is refused
+    /// before any call is bound, in Python's words; 1.25 and later 1.x are taken.
+    func testTheLoaderNeedsViewABI125() throws {
+        try checkABIForTest(version: 0x10019, path: "lib")
+        try checkABIForTest(version: 0x1001A, path: "lib")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x10018, path: "lib") },
+                       "lib: view ABI 1.24, this SDK needs 1.25 or a later 1.x")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x20019, path: "lib") },
+                       "lib: view ABI 2.25, this SDK needs 1.25 or a later 1.x")
+    }
+
+    /// 1.25's stats on wgpu offscreen: the struct's layout; an offscreen view's frames are its
+    /// images, each counted once with its CPU time, triangles and draw calls.
+    func testStatsCountTheFramesDrawn() throws {
+        XCTAssertEqual(MemoryLayout<CadaclysmViewStats>.size, 40)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewStats>.offset(of: \CadaclysmViewStats.frames_drawn), 8)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewStats>.offset(of: \CadaclysmViewStats.last_frame_ms), 16)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewStats>.offset(of: \CadaclysmViewStats.last_gpu_ms), 20)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewStats>.offset(of: \CadaclysmViewStats.triangles), 24)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewStats>.offset(of: \CadaclysmViewStats.draw_calls), 32)
+        let sv = try offscreen(64, 48)
+        defer { try? sv.close() }
+        var s = try sv.stats()
+        XCTAssertEqual(s.framesDrawn, 0)
+        XCTAssertEqual(s.triangles, 0)
+        _ = try sv.showSolid(try Solid.cuboid(20, 20, 20), tolerance: 0.05, rgb: "#808080")
+        try sv.draw()
+        XCTAssertEqual(try sv.stats().framesDrawn, 0, "an offscreen draw renders nothing")
+        _ = try sv.image()
+        s = try sv.stats()
+        XCTAssertEqual(s.framesDrawn, 1)
+        XCTAssertGreaterThan(s.lastFrameMs, 0)
+        XCTAssertGreaterThanOrEqual(s.triangles, 12)
+        XCTAssertGreaterThanOrEqual(s.drawCalls, 1)
+        XCTAssertTrue(s.lastGpuMs == -1 || (s.lastGpuMs >= 0 && s.lastGpuMs < 1000), "the GPU time: \(s.lastGpuMs)")
+        _ = try sv.image()
+        XCTAssertEqual(try sv.stats().framesDrawn, 2, "each image counts")
+    }
+
+    /// The anchors are the header's ALIGN codes, in its order.
+    func testTheAnchorsAreTheHeadersAlignCodes() {
+        let header: [UInt32] = [UInt32(CADACLYSM_VIEW_ALIGN_TOP_LEFT), UInt32(CADACLYSM_VIEW_ALIGN_TOP),
+                                UInt32(CADACLYSM_VIEW_ALIGN_TOP_RIGHT), UInt32(CADACLYSM_VIEW_ALIGN_LEFT),
+                                UInt32(CADACLYSM_VIEW_ALIGN_CENTRE), UInt32(CADACLYSM_VIEW_ALIGN_RIGHT),
+                                UInt32(CADACLYSM_VIEW_ALIGN_BOTTOM_LEFT), UInt32(CADACLYSM_VIEW_ALIGN_BOTTOM),
+                                UInt32(CADACLYSM_VIEW_ALIGN_BOTTOM_RIGHT)]
+        let ours: [Anchor] = [.topLeft, .top, .topRight, .left, .centre, .right, .bottomLeft, .bottom, .bottomRight]
+        XCTAssertEqual(ours.map { $0.rawValue }, header)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewPick>.size, 40)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewOverlay>.size, 80)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewOverlayImage>.size, 48)
+    }
+
+    /// 1.24's overlays on wgpu offscreen: a holed panel at the centre (its hole picks the part
+    /// beneath), a stroked crosshair, text at the top right, an image moved from the bottom left
+    /// to the bottom right, order, an outline, a removed overlay, and the refusals.
+    func testOverlaysDrawPickAndMove() throws {
+        let ov = try offscreen(200, 120)
+        defer { try? ov.close() }
+        try ov.background("black")
+        let under = try ov.showSolid(try Solid.cuboid(80, 80, 20), tolerance: 0.05, rgb: "#808080")
+        try ov.standard("top")
+        try ov.frame()
+        func px(_ img: ViewImage, _ x: Int, _ y: Int) -> [Int] {
+            let i = (y * Int(img.width) + x) * 4
+            return [Int(img.rgba[i]), Int(img.rgba[i + 1]), Int(img.rgba[i + 2])]
+        }
+        func isAt(_ img: ViewImage, _ x: Int, _ y: Int, _ r: Int, _ g: Int, _ b: Int) -> Bool {
+            let p = px(img, x, y)
+            return abs(p[0] - r) < 40 && abs(p[1] - g) < 40 && abs(p[2] - b) < 40
+        }
+        // A rounded panel with a round hole, red by its own colour, at the window's centre.
+        let shape = try Profile.rect(60, 40).round(6).withHole(try Profile.circle(8)).coloured("red")
+        let panel = try ov.showOverlay(shape, anchor: .centre, x: 0, y: 0)
+        var img = try ov.image()
+        XCTAssertTrue(isAt(img, 120, 60, 255, 0, 0), "the panel red right of its hole: \(px(img, 120, 60))")
+        XCTAssertFalse(isAt(img, 100, 60, 255, 0, 0), "the hole is filled")
+        let onPanel = try ov.pick(x: 120, y: 60)
+        XCTAssertTrue(onPanel?.overlay == true && onPanel?.point == nil && onPanel?.item == panel.id, "a pick on the panel: \(String(describing: onPanel))")
+        let inHole = try ov.pick(x: 100, y: 60)
+        XCTAssertTrue(inHole?.overlay == false && inHole?.item == under.id, "a pick in the hole reaches the part: \(String(describing: inHole))")
+        // A stroked crosshair of two open profiles, 20 px in from the top left.
+        let across = try Profile.polyline([SIMD2(-8, 0), SIMD2(8, 0)])
+        let down = try Profile.polyline([SIMD2(0, -8), SIMD2(0, 8)])
+        let cross = try ov.showOverlay([across, down], anchor: .topLeft, x: 20, y: 20, style: OverlayStyle(stroke: "lime", strokeWidth: 2))
+        img = try ov.image()
+        XCTAssertTrue(isAt(img, 20, 20, 0, 255, 0) && isAt(img, 26, 20, 0, 255, 0) && isAt(img, 20, 14, 0, 255, 0),
+                      "the crosshair's arms: \(px(img, 20, 20)) \(px(img, 26, 20)) \(px(img, 20, 14))")
+        XCTAssertFalse(isAt(img, 25, 25, 0, 255, 0), "between the arms")
+        let c = try ov.pick(x: 26, y: 21)
+        XCTAssertTrue(c?.overlay == true && c?.item == cross.id, "a pick on the crosshair")
+        // Text at the top right, its box's corner 4 px in; setText changes it.
+        let fps = try ov.showOverlayText("FPS 60", anchor: .topRight, x: 4, y: 4, size: 14, colour: "white", box: "blue")
+        img = try ov.image()
+        XCTAssertTrue(isAt(img, 194, 6, 0, 0, 255) && !isAt(img, 197, 2, 0, 0, 255),
+                      "the text's box hangs from the top-right corner: \(px(img, 194, 6)) \(px(img, 197, 2))")
+        try fps.setText("FPS 120")
+        let tp = try ov.pick(x: 194, y: 6)
+        XCTAssertTrue(tp?.overlay == true && tp?.item == fps.id, "a pick on the text")
+        // An image, 2 x 2 yellow pixels drawn 10 x 10, at the bottom left; moved to the bottom right.
+        let yellow = [UInt8]([255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255])
+        let pic = try ov.showOverlayImage(yellow, width: 2, height: 2, anchor: .bottomLeft, x: 4, y: 4, drawWidth: 10, drawHeight: 10)
+        img = try ov.image()
+        XCTAssertTrue(isAt(img, 8, 110, 255, 255, 0), "the image at the bottom left: \(px(img, 8, 110))")
+        try pic.moveTo(.bottomRight, x: 4, y: 4)
+        img = try ov.image()
+        XCTAssertTrue(pic.anchor == .bottomRight && isAt(img, 190, 110, 255, 255, 0) && !isAt(img, 8, 110, 255, 255, 0),
+                      "moved to the bottom right: \(px(img, 190, 110)) \(px(img, 8, 110))")
+        try pic.moveTo(x: 6, y: 6)
+        img = try ov.image()
+        XCTAssertTrue(isAt(img, 188, 108, 255, 255, 0), "moved, the anchor kept: \(px(img, 188, 108))")
+        // Order: a green square of order 1 shown first stays over a later blue one of order 0.
+        let sq = try Profile.rect(20, 20)
+        try ov.showOverlay(sq, anchor: .bottomLeft, x: 60, y: 30, style: OverlayStyle(fill: "lime", order: 1))
+        try ov.showOverlay(sq, anchor: .bottomLeft, x: 65, y: 30, style: OverlayStyle(fill: "blue"))
+        img = try ov.image()
+        XCTAssertTrue(isAt(img, 63, 90, 0, 255, 0), "order 1 over order 0: \(px(img, 63, 90))")
+        // An outline only: "none" fills nothing.
+        let outline = try ov.showOverlay(sq, anchor: .top, x: 0, y: 30, style: OverlayStyle(fill: "none", stroke: "white", strokeWidth: 2))
+        img = try ov.image()
+        XCTAssertTrue(isAt(img, 110, 30, 255, 255, 255) && !isAt(img, 100, 30, 255, 255, 255),
+                      "an outline, its inside not filled: \(px(img, 110, 30)) \(px(img, 100, 30))")
+        // Removed: gone, and the part is picked there again.
+        try panel.remove()
+        img = try ov.image()
+        XCTAssertFalse(isAt(img, 120, 60, 255, 0, 0), "a removed overlay draws")
+        XCTAssertEqual(try ov.pick(x: 120, y: 60)?.overlay, false, "a removed overlay is picked")
+        try outline.remove()
+        XCTAssertTrue(message { _ = try ov.showOverlay(curves: [Float](repeating: 0, count: 15), anchor: .topLeft, x: 0, y: 0) }
+                        .hasPrefix("show_overlay: 16 numbers a curve"))
+        XCTAssertTrue(message { try cross.moveTo(x: .nan, y: 0) }.contains("finite"), message { try cross.moveTo(x: .nan, y: 0) })
+        XCTAssertTrue(message { _ = try ov.showOverlayImage(yellow, width: 3, height: 2, anchor: .topLeft, x: 0, y: 0) }
+                        .hasPrefix("show_overlay_image: 3 x 2 pixels need 24 bytes"))
     }
 
     /// show_points (view ABI 1.11), through the table rigged: the points, their count, the colour

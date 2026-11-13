@@ -12,7 +12,15 @@ return function(t)
     t.ok(cadaclysm.build_date():match("^%d%d%d%d%-%d%d%-%d%d$"), cadaclysm.build_date())
     t.ok(cadaclysm.license_info() ~= "")
     t.ok(type(cadaclysm.license_notice_count()) == "number")
-    t.ok(cadaclysm.library_path():match("cadaclysm_capi"), cadaclysm.library_path())
+    t.ok(cadaclysm.library_path():match("cadaclysm[%w_]*%.%w+$"), cadaclysm.library_path())
+  end)
+
+  t.test("the library says which flavour it is", function()
+    local stem = cadaclysm.library_path():match("([^/\\]+)$"):gsub("^lib", ""):gsub("%.%w+$", "")
+    local want = ({ cadaclysm = "full", cadaclysm_kernel_reader = "kernel-reader", cadaclysm_reader = "reader" })[stem]
+    t.eq(cadaclysm.flavour(), want or "reader")
+    if not want then t.eq(cadaclysm.features(), "")
+    else t.ok(("," .. cadaclysm.features() .. ","):find(",nodes,", 1, true), "features " .. cadaclysm.features()) end
   end)
 
   t.test("mesh formats include stl and glb, with labels", function()

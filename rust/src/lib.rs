@@ -303,6 +303,19 @@ pub fn library_path() -> Result<PathBuf> {
     }
 }
 
+/// Which library this is: `"full"`, `"kernel-reader"` or `"reader"` for a flavour of the single
+/// library, `"reader"` for the separate `cadaclysm_capi` of earlier releases. Loads the
+/// library if nothing has yet.
+pub fn flavour() -> Result<String> {
+    Ok(api()?.flavour().map_or_else(|| "reader".to_string(), |f| f.name.clone()))
+}
+
+/// The features the library was built with, comma-separated (`"nodes,kernel,bim"`), or
+/// `""` for the separate `cadaclysm_capi` of earlier releases.
+pub fn features() -> Result<String> {
+    Ok(api()?.flavour().map_or_else(String::new, |f| f.features.clone()))
+}
+
 /// The version of the library actually loaded, which is the one worth reporting.
 pub fn version() -> Result<String> {
     let api = api()?;
@@ -4074,6 +4087,24 @@ pub struct SvgOptions {
     /// right: set it with `edges` false for an outline-only drawing, or clear it for the
     /// lines alone. Only naming nothing at all is refused.
     pub silhouettes: bool,
+    /// Hidden lines, over the kernel ([`blacksmith::Solid::svg_text`] and the other kernel
+    /// drawings): [`SvgHidden::All`] (the default) draws every line; [`SvgHidden::Removed`]
+    /// draws only what is seen of each solid, the solids hiding one another;
+    /// [`SvgHidden::Dashed`] adds the hidden lines, dashed, in a `solid-<i>-hidden` group. The
+    /// reader's drawings have no hidden-line removal and refuse anything but `All`.
+    pub hidden: SvgHidden,
+}
+
+/// [`SvgOptions::hidden`]: `CADACLYSM_BLACKSMITH_SVG_HIDDEN_REMOVED` (32) and `_DASHED` (64).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SvgHidden {
+    /// Every line, seen or not.
+    #[default]
+    All,
+    /// Only what is seen.
+    Removed,
+    /// What is seen, and the hidden lines dashed.
+    Dashed,
 }
 
 impl Default for SvgOptions {
@@ -4099,6 +4130,7 @@ impl Default for SvgOptions {
             isocurves: false,
             polylines: false,
             silhouettes: true,
+            hidden: SvgHidden::All,
         }
     }
 }
@@ -4113,6 +4145,9 @@ const SVG_TRANSPARENT: u32 = 0xFFFF_FFFF;
 /// carries the library's own default rather than a zeroed struct's. An [`Error`] where
 /// `stroke` or `background` is colour text the library refuses.
 fn build_svg_options(api: &Api, options: &SvgOptions, default_up: Up) -> Result<sys::CadaclysmSvgOptions> {
+    if options.hidden != SvgHidden::All {
+        return Err(Error::new("svg: hidden lines are removed by the kernel's drawings (blacksmith), not the reader's"));
+    }
     let stroke = options.stroke.packed_with("svg: stroke", parse_colour)?;
     let background = match &options.background {
         Some(colour) => colour.packed_with("svg: background", parse_colour)?,
@@ -5554,7 +5589,7 @@ mod tests {
         let Some(mechanism) = open_mechanism_solid() else { return };
         let pose = mechanism.pose(&[], None).unwrap();
         let camera = mechanism.shown_with(fake::leaked(), Shown::Pose(&mechanism, &pose.transforms), &ViewOptions::default(), true).unwrap().expect("a camera");
-        assert_eq!(camera.pick, Some(crate::view::Pick { item: 3, node: 4, face: 5, clicks: 1, point: None }));
+        assert_eq!(camera.pick, Some(crate::view::Pick { item: 3, node: 4, face: 5, clicks: 1, point: None, overlay: false }));
     }
 
     // ---- Node::silhouette_beziers --------------------------------------------------------

@@ -2,7 +2,8 @@
 //! `CadaclysmPath`, `CadaclysmSweepPath`, `CadaclysmSolid`, `CadaclysmAssembly`, `CadaclysmEdge`, `CadaclysmHit`,
 //! the curves in space (`CadaclysmNurbsCurve`, `CadaclysmCurvature`) and the records of the sheets
 //! made from them (`CadaclysmContinuity`, `CadaclysmKnotContinuity`, `CadaclysmPatchReport`, `CadaclysmJoinReport`,
-//! `CadaclysmSymmetryReport`, `CadaclysmCurvatureTurns`, `CadaclysmHighlightKink`),
+//! `CadaclysmSymmetryReport`, `CadaclysmCurvatureTurns`, `CadaclysmHighlightKink`), the feature
+//! patterns and their records (`CadaclysmPattern`, `CadaclysmPatternReport`, `CadaclysmHoleReport`),
 //! `CadaclysmSpot`, `CadaclysmWorkplane`, `CadaclysmSolidFemMesh`, the 2D sketcher (`CadaclysmSketch`,
 //! `CadaclysmSolveReport`, `CadaclysmDof`, `CadaclysmPartDof`), the R-tree (`CadaclysmRTree`,
 //! `CadaclysmRTreeHit`, `CadaclysmRTreePair`), `CadaclysmInterpolator`, the regions of a merge
@@ -24,6 +25,7 @@
 //! Solids are immutable: every operation returns a new `CadaclysmSolid`, or `null` with the
 //! reason in `Cadaclysm.last_error()`.
 use std::cell::RefCell;
+use std::f64::consts::TAU;
 
 use cadaclysm_sdk as sdk;
 use godot::classes::ArrayMesh;
@@ -698,6 +700,64 @@ impl CadaclysmBlacksmith {
     #[func]
     fn brep_layout_id() -> GString {
         gs(ok(bs::brep_layout_id()).unwrap_or_default())
+    }
+
+    /// Hidden-line removal of `solids` (an `Array` of `CadaclysmSolid`s), each where it stands,
+    /// every solid hiding the others: what a drawing of them shows, and what it shows only
+    /// dashed, as a `CadaclysmHlr`. `options` (every key optional): `direction` (from the eye
+    /// toward the model; default `[0, 1, 0]`, the front) and `up` (default `[0, 0, 1]`) for a
+    /// parallel view, or `eye` and `target` for a perspective (not both `direction` and
+    /// `eye`) -- each a `Vector3` or three numbers; `tolerance` (0 or NaN: the solids'
+    /// effective tolerance); `iso` isocurves each way on every face; `smooth_angle` radians,
+    /// default one degree. View coordinates are the camera's (x right, y up). `null` with the
+    /// reason in `Cadaclysm.last_error()` for no solids and refused words.
+    #[func]
+    fn hlr(solids: AnyArray, options: VarDictionary) -> Option<Gd<CadaclysmHlr>> {
+        let words = hlr_options(&options, "hlr")?;
+        let owners = object_list::<CadaclysmSolid>(&solids, "hlr: solids")?;
+        let guards: Vec<GdRef<CadaclysmSolid>> = owners.iter().map(Gd::bind).collect();
+        let held = guards.iter().map(|g| g.held()).collect::<Option<Vec<&bs::Solid>>>()?;
+        ok(bs::hlr(&held, &words)).map(CadaclysmHlr::wrap)
+    }
+
+    /// `hlr` of `meshes` (an `Array` of `CadaclysmTriangleMesh`es), each a solid of flat
+    /// triangles: its lines are the edges whose triangles turn by more than `feature_angle`
+    /// (radians, default thirty degrees), the edges of one triangle, and the outlines; the
+    /// triangles hide exactly. Each line's `source_kind` is `"mesh_edge"`.
+    #[func]
+    fn hlr_mesh(meshes: AnyArray, options: VarDictionary) -> Option<Gd<CadaclysmHlr>> {
+        let words = hlr_options(&options, "hlr_mesh")?;
+        let owners = object_list::<CadaclysmTriangleMesh>(&meshes, "hlr_mesh: meshes")?;
+        let guards: Vec<GdRef<CadaclysmTriangleMesh>> = owners.iter().map(Gd::bind).collect();
+        let held = guards.iter().map(|g| g.held()).collect::<Option<Vec<&bs::TriangleMesh>>>()?;
+        ok(bs::hlr_mesh(&held, &words)).map(CadaclysmHlr::wrap)
+    }
+
+    /// The boundary of the union of the solids' projections, as closed `CadaclysmProfile`s in
+    /// view coordinates (as `hlr`'s): each outer loop counter-clockwise with its holes clockwise
+    /// inside it -- a through hole seen along its axis is a hole. `hlr`'s options. Empty with
+    /// the reason in `Cadaclysm.last_error()` on a refusal.
+    #[func]
+    fn projected_outline(solids: AnyArray, options: VarDictionary) -> Array<Gd<CadaclysmProfile>> {
+        let found = (|| {
+            let words = hlr_options(&options, "projected_outline")?;
+            let owners = object_list::<CadaclysmSolid>(&solids, "projected_outline: solids")?;
+            let guards: Vec<GdRef<CadaclysmSolid>> = owners.iter().map(Gd::bind).collect();
+            let held = guards.iter().map(|g| g.held()).collect::<Option<Vec<&bs::Solid>>>()?;
+            ok(bs::projected_outline(&held, &words))
+        })();
+        found.unwrap_or_default().into_iter().map(CadaclysmProfile::wrap).collect()
+    }
+
+    /// A DXF file's closed loops as `CadaclysmProfile`s: its lines, arcs, circles, ellipses,
+    /// polylines and splines (blocks inserted) chained end to end within `tolerance` (NaN, the
+    /// default: the effective tolerance over the drawing's extents) into closed loops, holes
+    /// nested in the loops around them. Empty, with the reason (naming the line it stopped at)
+    /// in `Cadaclysm.last_error()`, for text that is not DXF.
+    #[func]
+    fn dxf_profiles(text: GString, #[opt(default = f64::NAN)] tolerance: f64) -> Array<Gd<CadaclysmProfile>> {
+        let t = (!tolerance.is_nan()).then_some(tolerance);
+        ok(bs::dxf_profiles(&text.to_string(), t)).unwrap_or_default().into_iter().map(CadaclysmProfile::wrap).collect()
     }
 
     /// The path of `ap203.exp` where one is found; `""` otherwise. Not needed to write
@@ -5363,6 +5423,90 @@ impl CadaclysmOverlap {
     }
 }
 
+/// One thing wrong with one argument (`CadaclysmSolid.check`), as plain data: `kind` names
+/// it, `argument` is 0 for the solid checked and 1 for `other`, and `index`, `other` and
+/// `size` are what the kind gives (-1, -1 and 0 where it gives none): `open` -- the edge
+/// (-1 for a trim naming none), its face, its length; `face_kind` -- the face;
+/// `short_edge` -- the edge, its length; `collapsed_edge` -- the trim; `sliver_face` -- the
+/// face, its width; `tiny_face` -- the face, its area; `tiny_body` -- its diagonal;
+/// `small_hole` -- the loop, its area or width; `loose_edge` -- the edge, how far its sides
+/// part; `self_intersection` -- the two faces (one face twice for a fold), the crossing's
+/// length; `self_overlap` -- the two faces.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmFinding {
+    finding: bs::Finding,
+    /// What is wrong: `"no_faces"`, `"open"`, `"region_wall"`, `"non_manifold"`,
+    /// `"face_kind"`, `"short_edge"`, `"collapsed_edge"`, `"sliver_face"`, `"tiny_face"`,
+    /// `"tiny_body"`, `"small_hole"`, `"loose_edge"`, `"self_intersection"`,
+    /// `"self_overlap"` or `"unmeshable"`.
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    /// 0 for the solid checked, 1 for `other`.
+    #[var(get = get_argument, no_set)]
+    argument: PhantomVar<i64>,
+    /// The edge, face, trim or loop the kind names; -1 where it names none.
+    #[var(get = get_index, no_set)]
+    index: PhantomVar<i64>,
+    /// The second index the kind gives (an open edge's face, a crossing's second face); -1
+    /// where it gives none.
+    #[var(get = get_other, no_set)]
+    other: PhantomVar<i64>,
+    /// The length, width, area or gap the kind measures; 0 where it measures none.
+    #[var(get = get_size, no_set)]
+    size: PhantomVar<f64>,
+}
+
+impl CadaclysmFinding {
+    fn wrap(finding: bs::Finding) -> Gd<CadaclysmFinding> {
+        Gd::from_object(CadaclysmFinding {
+            finding,
+            kind: PhantomVar::default(),
+            argument: PhantomVar::default(),
+            index: PhantomVar::default(),
+            other: PhantomVar::default(),
+            size: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmFinding {
+    fn to_string(&self) -> GString {
+        let f = &self.finding;
+        let id = |i: Option<u32>| i.map_or("-1".to_string(), |i| i.to_string());
+        gs(format!("Finding(kind={}, argument={}, index={}, other={}, size={})", f.kind, f.argument, id(f.index), id(f.other), f.size))
+    }
+}
+
+#[godot_api]
+impl CadaclysmFinding {
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(&self.finding.kind)
+    }
+
+    #[func]
+    fn get_argument(&self) -> i64 {
+        self.finding.argument.into()
+    }
+
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.finding.index.map_or(-1, i64::from)
+    }
+
+    #[func]
+    fn get_other(&self) -> i64 {
+        self.finding.other.map_or(-1, i64::from)
+    }
+
+    #[func]
+    fn get_size(&self) -> f64 {
+        self.finding.size
+    }
+}
+
 // ---- CadaclysmOrientedBox, CadaclysmLength, CadaclysmClosest, CadaclysmClassifier --------
 
 /// A solid's box on its principal axes (`CadaclysmSolid.oriented_box`). Not minimal: where
@@ -6385,7 +6529,8 @@ pub struct CadaclysmNearestObject {
     /// The nearest point of the item.
     #[var(get = get_point_on_item, no_set)]
     point_on_item: PhantomVar<Vector3>,
-    /// The item's own answer: a `CadaclysmCurveBodyFoot`, a `CadaclysmCurvePair` or `null`.
+    /// The item's own answer: a `CadaclysmCurveBodyFoot`, a `CadaclysmCurvePair`, a
+    /// `CadaclysmCurveMeshFoot` or `null`.
     #[var(get = get_answer, no_set)]
     answer: PhantomVar<Variant>,
     /// `point_on_curve` as three doubles.
@@ -6453,13 +6598,15 @@ impl CadaclysmNearestObject {
     }
 
     /// The item's own answer: a `CadaclysmCurveBodyFoot` for a solid or a projector, a
-    /// `CadaclysmCurvePair` for a curve, `null` for a point.
+    /// `CadaclysmCurvePair` for a curve, a `CadaclysmCurveMeshFoot` for a `CadaclysmTriangleMesh`,
+    /// `null` for a point.
     #[func]
     fn get_answer(&self) -> Variant {
         match &self.nearest.answer {
             bs::NearestAnswer::Body(foot) => CadaclysmCurveBodyFoot::wrap(foot.clone()).to_variant(),
             bs::NearestAnswer::Curve(pair) => CadaclysmCurvePair::wrap(pair.clone()).to_variant(),
             bs::NearestAnswer::Point => Variant::nil(),
+            bs::NearestAnswer::Mesh(foot) => CadaclysmCurveMeshFoot::wrap(foot.clone()).to_variant(),
         }
     }
 
@@ -6479,6 +6626,396 @@ impl CadaclysmNearestObject {
     #[func]
     fn equals(&self, other: Variant) -> bool {
         other.try_to::<Gd<CadaclysmNearestObject>>().is_ok_and(|o| o.bind().nearest == self.nearest)
+    }
+}
+
+// ---- CadaclysmTriangleMesh, CadaclysmMeshPoint, CadaclysmCurveMeshFoot ----------------------
+
+/// The nearest point of a `CadaclysmTriangleMesh` to a query point
+/// (`CadaclysmTriangleMesh.closest_point`). Exact: no tolerance, no `refined` figure. `point` lies
+/// on the mesh, `distance` from the query point. `triangle` is the lowest-numbered triangle
+/// holding the point: on an edge or a vertex several triangles share, the lower triangle answers.
+/// `barycentric` are the point's three weights on that triangle's corners, in index order, summing
+/// to 1. `kind` is what the point lies on, `"face"` (inside `triangle`), `"edge"` or `"vertex"`,
+/// and `vertices` names it: an edge's two vertex indices ascending, a vertex's one, none for a
+/// face. `point` is a `Vector3`, so floats; `raw_point` gives the doubles.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmMeshPoint {
+    foot: bs::MeshPoint,
+    /// The point on the mesh.
+    #[var(get = get_point, no_set)]
+    point: PhantomVar<Vector3>,
+    /// From the query point to `point`.
+    #[var(get = get_distance, no_set)]
+    distance: PhantomVar<f64>,
+    /// The lowest-numbered triangle holding `point`.
+    #[var(get = get_triangle, no_set)]
+    triangle: PhantomVar<i64>,
+    /// `point`'s three weights on `triangle`'s corners, in index order, summing to 1.
+    #[var(get = get_barycentric, no_set)]
+    barycentric: PhantomVar<PackedFloat64Array>,
+    /// What `point` lies on: `"face"`, `"edge"` or `"vertex"`.
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    /// What `kind` names: an edge's two vertex indices ascending, a vertex's one, none for a face.
+    #[var(get = get_vertices, no_set)]
+    vertices: PhantomVar<PackedInt64Array>,
+    /// `point` as three doubles.
+    #[var(get = get_raw_point, no_set)]
+    raw_point: PhantomVar<PackedFloat64Array>,
+}
+
+impl CadaclysmMeshPoint {
+    fn wrap(foot: bs::MeshPoint) -> Gd<CadaclysmMeshPoint> {
+        Gd::from_object(CadaclysmMeshPoint {
+            foot,
+            point: PhantomVar::default(),
+            distance: PhantomVar::default(),
+            triangle: PhantomVar::default(),
+            barycentric: PhantomVar::default(),
+            kind: PhantomVar::default(),
+            vertices: PhantomVar::default(),
+            raw_point: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmMeshPoint {
+    fn to_string(&self) -> GString {
+        let f = &self.foot;
+        gs(format!(
+            "MeshPoint(point={:?}, distance={}, triangle={}, barycentric={:?}, kind={}, vertices={:?})",
+            f.point, f.distance, f.triangle, f.barycentric, f.kind, f.vertices
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmMeshPoint {
+    /// The point on the mesh.
+    #[func]
+    fn get_point(&self) -> Vector3 {
+        vector3(self.foot.point)
+    }
+
+    /// From the query point to `point`.
+    #[func]
+    fn get_distance(&self) -> f64 {
+        self.foot.distance
+    }
+
+    /// The lowest-numbered triangle holding `point`.
+    #[func]
+    fn get_triangle(&self) -> i64 {
+        self.foot.triangle.into()
+    }
+
+    /// `point`'s three weights on `triangle`'s corners, in index order, summing to 1.
+    #[func]
+    fn get_barycentric(&self) -> PackedFloat64Array {
+        doubles(&self.foot.barycentric)
+    }
+
+    /// What `point` lies on: `"face"`, `"edge"` or `"vertex"`.
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(&self.foot.kind)
+    }
+
+    /// What `kind` names: an edge's two vertex indices ascending, a vertex's one, none for a face.
+    #[func]
+    fn get_vertices(&self) -> PackedInt64Array {
+        ids_out(&self.foot.vertices)
+    }
+
+    /// `point` as three doubles.
+    #[func]
+    fn get_raw_point(&self) -> PackedFloat64Array {
+        doubles(&self.foot.point)
+    }
+
+    /// Whether `other` is a `CadaclysmMeshPoint` with the same fields, every double equal.
+    #[func]
+    fn equals(&self, other: Variant) -> bool {
+        other.try_to::<Gd<CadaclysmMeshPoint>>().is_ok_and(|o| o.bind().foot == self.foot)
+    }
+}
+
+/// The nearest points of a curve and a `CadaclysmTriangleMesh`
+/// (`CadaclysmTriangleMesh.curve_closest_points`, and a `CadaclysmNearestObject`'s answer for a
+/// mesh): `point_on_curve` at the curve's parameter `t`, and `point_on_mesh`, `distance` apart.
+/// Exact. `crossing` is true where the curve passes through a triangle: `distance` is then exactly
+/// 0, at the earliest crossing in `t`; a curve that touches without passing through is distance 0
+/// and false. The mesh's side is named as `CadaclysmMeshPoint` names it, flat. The points are
+/// `Vector3`s, so floats; the `raw_` properties give the doubles.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmCurveMeshFoot {
+    foot: bs::CurveMeshFoot,
+    /// From `point_on_curve` to `point_on_mesh`.
+    #[var(get = get_distance, no_set)]
+    distance: PhantomVar<f64>,
+    /// The curve's parameter at `point_on_curve`.
+    #[var(get = get_t, no_set)]
+    t: PhantomVar<f64>,
+    /// The nearest point on the curve.
+    #[var(get = get_point_on_curve, no_set)]
+    point_on_curve: PhantomVar<Vector3>,
+    /// The nearest point on the mesh.
+    #[var(get = get_point_on_mesh, no_set)]
+    point_on_mesh: PhantomVar<Vector3>,
+    /// The lowest-numbered triangle holding `point_on_mesh`.
+    #[var(get = get_triangle, no_set)]
+    triangle: PhantomVar<i64>,
+    /// `point_on_mesh`'s three weights on `triangle`'s corners, in index order, summing to 1.
+    #[var(get = get_barycentric, no_set)]
+    barycentric: PhantomVar<PackedFloat64Array>,
+    /// What `point_on_mesh` lies on: `"face"`, `"edge"` or `"vertex"`.
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    /// What `kind` names: an edge's two vertex indices ascending, a vertex's one, none for a face.
+    #[var(get = get_vertices, no_set)]
+    vertices: PhantomVar<PackedInt64Array>,
+    /// Whether the curve passes through a triangle there.
+    #[var(get = get_crossing, no_set)]
+    crossing: PhantomVar<bool>,
+    /// `point_on_curve` as three doubles.
+    #[var(get = get_raw_point_on_curve, no_set)]
+    raw_point_on_curve: PhantomVar<PackedFloat64Array>,
+    /// `point_on_mesh` as three doubles.
+    #[var(get = get_raw_point_on_mesh, no_set)]
+    raw_point_on_mesh: PhantomVar<PackedFloat64Array>,
+}
+
+impl CadaclysmCurveMeshFoot {
+    fn wrap(foot: bs::CurveMeshFoot) -> Gd<CadaclysmCurveMeshFoot> {
+        Gd::from_object(CadaclysmCurveMeshFoot {
+            foot,
+            distance: PhantomVar::default(),
+            t: PhantomVar::default(),
+            point_on_curve: PhantomVar::default(),
+            point_on_mesh: PhantomVar::default(),
+            triangle: PhantomVar::default(),
+            barycentric: PhantomVar::default(),
+            kind: PhantomVar::default(),
+            vertices: PhantomVar::default(),
+            crossing: PhantomVar::default(),
+            raw_point_on_curve: PhantomVar::default(),
+            raw_point_on_mesh: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmCurveMeshFoot {
+    fn to_string(&self) -> GString {
+        let f = &self.foot;
+        gs(format!(
+            "CurveMeshFoot(distance={}, t={}, point_on_curve={:?}, point_on_mesh={:?}, triangle={}, kind={}, vertices={:?}, crossing={})",
+            f.distance, f.t, f.point_on_curve, f.point_on_mesh, f.triangle, f.kind, f.vertices, f.crossing
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmCurveMeshFoot {
+    /// From `point_on_curve` to `point_on_mesh`.
+    #[func]
+    fn get_distance(&self) -> f64 {
+        self.foot.distance
+    }
+
+    /// The curve's parameter at `point_on_curve`.
+    #[func]
+    fn get_t(&self) -> f64 {
+        self.foot.t
+    }
+
+    /// The nearest point on the curve.
+    #[func]
+    fn get_point_on_curve(&self) -> Vector3 {
+        vector3(self.foot.point_on_curve)
+    }
+
+    /// The nearest point on the mesh.
+    #[func]
+    fn get_point_on_mesh(&self) -> Vector3 {
+        vector3(self.foot.point_on_mesh)
+    }
+
+    /// The lowest-numbered triangle holding `point_on_mesh`.
+    #[func]
+    fn get_triangle(&self) -> i64 {
+        self.foot.triangle.into()
+    }
+
+    /// `point_on_mesh`'s three weights on `triangle`'s corners, in index order, summing to 1.
+    #[func]
+    fn get_barycentric(&self) -> PackedFloat64Array {
+        doubles(&self.foot.barycentric)
+    }
+
+    /// What `point_on_mesh` lies on: `"face"`, `"edge"` or `"vertex"`.
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(&self.foot.kind)
+    }
+
+    /// What `kind` names: an edge's two vertex indices ascending, a vertex's one, none for a face.
+    #[func]
+    fn get_vertices(&self) -> PackedInt64Array {
+        ids_out(&self.foot.vertices)
+    }
+
+    /// Whether the curve passes through a triangle there.
+    #[func]
+    fn get_crossing(&self) -> bool {
+        self.foot.crossing
+    }
+
+    /// `point_on_curve` as three doubles.
+    #[func]
+    fn get_raw_point_on_curve(&self) -> PackedFloat64Array {
+        doubles(&self.foot.point_on_curve)
+    }
+
+    /// `point_on_mesh` as three doubles.
+    #[func]
+    fn get_raw_point_on_mesh(&self) -> PackedFloat64Array {
+        doubles(&self.foot.point_on_mesh)
+    }
+
+    /// Whether `other` is a `CadaclysmCurveMeshFoot` with the same fields, every double equal.
+    #[func]
+    fn equals(&self, other: Variant) -> bool {
+        other.try_to::<Gd<CadaclysmCurveMeshFoot>>().is_ok_and(|o| o.bind().foot == self.foot)
+    }
+}
+
+/// A triangle mesh and its search tree, built once and immutable: nearest points
+/// (`closest_point`) and nearest points to a curve (`curve_closest_points`) are answered exactly
+/// against it -- no tolerance, no `refined` figure. `create` copies the vertices and the
+/// triangles (three vertex indices each, any winding); a zero-area triangle is accepted and
+/// answers as its longest edge. `CadaclysmSolid.triangle_mesh` gives a solid's own. Nothing in it
+/// changes after it is built, so calls from several threads at once are safe and do not take
+/// turns. A call that fails answers `null` (0 for a count, an empty box), with the reason in
+/// `Cadaclysm.last_error()`. `close()` frees the mesh; so does the last reference going.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmTriangleMesh {
+    mesh: Option<bs::TriangleMesh>,
+    /// Whether `close` has freed the mesh.
+    #[var(get = get_closed, no_set)]
+    closed: PhantomVar<bool>,
+}
+
+impl CadaclysmTriangleMesh {
+    fn wrap(mesh: bs::TriangleMesh) -> Gd<CadaclysmTriangleMesh> {
+        Gd::from_object(CadaclysmTriangleMesh { mesh: Some(mesh), closed: PhantomVar::default() })
+    }
+
+    fn held(&self) -> Option<&bs::TriangleMesh> {
+        match &self.mesh {
+            Some(mesh) => Some(mesh),
+            None => fail("triangle_mesh: closed"),
+        }
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmTriangleMesh {
+    fn to_string(&self) -> GString {
+        match &self.mesh {
+            Some(mesh) => gs(format!("TriangleMesh({} vertices, {} triangles)", mesh.vertex_count(), mesh.triangle_count())),
+            None => gs("TriangleMesh(closed)"),
+        }
+    }
+}
+
+#[godot_api]
+impl CadaclysmTriangleMesh {
+    /// The mesh of `positions` (a `PackedVector3Array`, or an array of points -- the array keeps
+    /// a double's precision) and `triangles` (a flat `PackedInt32Array` / `PackedInt64Array`,
+    /// three indices a triangle, or an array of triples). `null` with the reason in
+    /// `Cadaclysm.last_error()` for a shape that is not one, an index outside 0 to 4294967295, no
+    /// triangles, an index past the vertex count, or a coordinate that is not finite. (`new` is
+    /// GDScript's own, so the constructor is `create`.)
+    #[func]
+    fn create(positions: Variant, triangles: Variant) -> Option<Gd<CadaclysmTriangleMesh>> {
+        let positions = rtree_points(&positions, "triangle_mesh_new", "point")?;
+        let triangles = triangle_indices(&triangles, "triangle_mesh_new")?;
+        ok(bs::TriangleMesh::new(&positions, &triangles)).map(CadaclysmTriangleMesh::wrap)
+    }
+
+    /// How many vertices the mesh holds; 0 on a closed mesh, with the reason in
+    /// `Cadaclysm.last_error()`.
+    #[func]
+    fn vertex_count(&self) -> i64 {
+        self.held().map_or(0, |m| m.vertex_count().into())
+    }
+
+    /// How many triangles the mesh holds; 0 on a closed mesh, with the reason in
+    /// `Cadaclysm.last_error()`.
+    #[func]
+    fn triangle_count(&self) -> i64 {
+        self.held().map_or(0, |m| m.triangle_count().into())
+    }
+
+    /// The box of every vertex, an `AABB` of floats; empty on a closed mesh. `raw_bounds` gives
+    /// the doubles.
+    #[func]
+    fn bounds(&self) -> Aabb {
+        self.held().and_then(|m| ok(m.bounds())).map(|(lo, hi)| aabb(lo, hi)).unwrap_or_default()
+    }
+
+    /// `bounds` as six doubles: min x, y, z, then max x, y, z. Empty on a closed mesh.
+    #[func]
+    fn raw_bounds(&self) -> PackedFloat64Array {
+        let bounds = self.held().and_then(|m| ok(m.bounds()));
+        bounds.map(|(lo, hi)| PackedFloat64Array::from(&[lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]][..])).unwrap_or_default()
+    }
+
+    /// The nearest point of the mesh to `p` (a `Vector3` or three numbers), as a
+    /// `CadaclysmMeshPoint` -- exact, the lower triangle where several share the point.
+    /// `max_distance` NaN (the default) or `INF` is no limit; a point on the mesh is within 0.
+    /// `null` beyond it (then `Cadaclysm.last_error()` is empty); `null` with the reason in
+    /// `Cadaclysm.last_error()` on a closed mesh, a point that is not three finite numbers, or a
+    /// negative `max_distance`.
+    #[func]
+    fn closest_point(&self, p: Variant, #[opt(default = f64::NAN)] max_distance: f64) -> Option<Gd<CadaclysmMeshPoint>> {
+        let mesh = self.held()?;
+        let p = at(&p, "triangle_mesh_closest_point")?;
+        ok(mesh.closest_point(p, Some(max_distance))).flatten().map(CadaclysmMeshPoint::wrap)
+    }
+
+    /// The nearest points of `curve` and the mesh, as a `CadaclysmCurveMeshFoot` -- exact;
+    /// `crossing` true and distance 0 at the earliest crossing in `t`; among equal distances the
+    /// lower triangle, then the lower `t`. A mesh has no inside: a curve within a closed mesh
+    /// answers its distance to the triangles. `max_distance` NaN (the default) or `INF` is no
+    /// limit. `null` beyond it (then `Cadaclysm.last_error()` is empty); `null` with the reason in
+    /// `Cadaclysm.last_error()` on a closed mesh, an invalid curve or a negative `max_distance`.
+    #[func]
+    fn curve_closest_points(
+        &self,
+        curve: Gd<CadaclysmNurbsCurve>,
+        #[opt(default = f64::NAN)] max_distance: f64,
+    ) -> Option<Gd<CadaclysmCurveMeshFoot>> {
+        let mesh = self.held()?;
+        ok(mesh.curve_closest_points(&curve.bind().curve, Some(max_distance))).flatten().map(CadaclysmCurveMeshFoot::wrap)
+    }
+
+    /// Free the mesh now. Idempotent.
+    #[func]
+    fn close(&mut self) {
+        self.mesh = None;
+    }
+
+    /// Whether `close` has freed the mesh.
+    #[func]
+    fn get_closed(&self) -> bool {
+        self.mesh.is_none()
     }
 }
 
@@ -9041,16 +9578,20 @@ fn rtree_points(v: &Variant, what: &str, name: &str) -> Option<Vec<[f64; 3]>> {
 /// (the way `CadaclysmFemMesh.triangles` hands them out). The shape and an index outside 0 to
 /// 4294967295 are refused here, by triangle; an index past the points is the kernel's.
 fn rtree_triangles(v: &Variant) -> Option<Vec<[u32; 3]>> {
-    const CALL: &str = "rtree_from_triangles";
+    triangle_indices(v, "rtree_from_triangles")
+}
+
+/// `rtree_triangles`, its refusals named for `call`.
+fn triangle_indices(v: &Variant, call: &str) -> Option<Vec<[u32; 3]>> {
     let flat = |list: Vec<i64>| -> Option<Vec<[u32; 3]>> {
         if list.len() % 3 != 0 {
-            return fail(format!("{CALL}: {} indices are not whole triangles", list.len()));
+            return fail(format!("{call}: {} indices are not whole triangles", list.len()));
         }
         list.chunks(3)
             .enumerate()
             .map(|(i, t)| {
                 let what = format!("triangle {i}'s index");
-                Some([rtree_u32(t[0], CALL, &what)?, rtree_u32(t[1], CALL, &what)?, rtree_u32(t[2], CALL, &what)?])
+                Some([rtree_u32(t[0], call, &what)?, rtree_u32(t[1], call, &what)?, rtree_u32(t[2], call, &what)?])
             })
             .collect()
     };
@@ -9063,15 +9604,15 @@ fn rtree_triangles(v: &Variant) -> Option<Vec<[u32; 3]>> {
             for (i, item) in array.iter_shared().enumerate() {
                 let corners = match item.try_to::<AnyArray>() {
                     Ok(t) if t.len() == 3 && t.iter_shared().all(|k| k.get_type() == VariantType::INT) => t,
-                    _ => return fail(format!("{CALL}: triangle {i} is not 3 indices: {item}")),
+                    _ => return fail(format!("{call}: triangle {i} is not 3 indices: {item}")),
                 };
                 let what = format!("triangle {i}'s index");
-                let k = |n: usize| rtree_u32(corners.at(n).to::<i64>(), CALL, &what);
+                let k = |n: usize| rtree_u32(corners.at(n).to::<i64>(), call, &what);
                 out.push([k(0)?, k(1)?, k(2)?]);
             }
             Some(out)
         }
-        _ => fail(format!("{CALL}: expected an array of triangles or a packed array of indices, not {v}")),
+        _ => fail(format!("{call}: expected an array of triangles or a packed array of indices, not {v}")),
     }
 }
 
@@ -10527,14 +11068,15 @@ impl CadaclysmNurbsCurve {
 
     /// The item of `items` nearest to this curve, as a `CadaclysmNearestObject` -- `which` its
     /// index, from zero. Each item is a `CadaclysmSolid`, a `CadaclysmNurbsCurve`, a
-    /// `CadaclysmProjector` or a point (a `Vector3` or three numbers). Items are asked in order,
-    /// each with the best distance so far as its limit; equal distances go to the earlier item.
+    /// `CadaclysmProjector`, a `CadaclysmTriangleMesh` (answered exactly) or a point (a `Vector3`
+    /// or three numbers). Items are asked in order, each with the best distance so far as its
+    /// limit; equal distances go to the earlier item.
     /// `max_distance` NaN or `INF` is no limit; `tolerance` 0 or NaN is each solid's effective
     /// tolerance (a projector keeps its own, and its lock is held for the whole curve query).
     /// `null` where none lies within `max_distance` or `items` is empty (then
     /// `Cadaclysm.last_error()` is empty); `null` with the reason in `Cadaclysm.last_error()` for
-    /// an item of none of those kinds or a point not finite (naming `item <i>`), a closed solid or
-    /// projector, a negative `max_distance`, a negative or infinite tolerance, or a body's own
+    /// an item of none of those kinds or a point not finite (naming `item <i>`), a closed solid,
+    /// projector or mesh, a negative `max_distance`, a negative or infinite tolerance, or a body's own
     /// refusal.
     #[func]
     fn closest_object(
@@ -10548,12 +11090,14 @@ impl CadaclysmNurbsCurve {
             Solid(Gd<CadaclysmSolid>),
             Curve(Gd<CadaclysmNurbsCurve>),
             Projector(Gd<CadaclysmProjector>),
+            Mesh(Gd<CadaclysmTriangleMesh>),
             Point([f64; 3]),
         }
         enum Guard<'a> {
             Solid(GdRef<'a, CadaclysmSolid>),
             Curve(GdRef<'a, CadaclysmNurbsCurve>),
             Projector(GdRef<'a, CadaclysmProjector>),
+            Mesh(GdRef<'a, CadaclysmTriangleMesh>),
             Point([f64; 3]),
         }
         let owners = items
@@ -10569,9 +11113,12 @@ impl CadaclysmNurbsCurve {
                 if let Ok(projector) = item.try_to::<Gd<CadaclysmProjector>>() {
                     return Some(Owner::Projector(projector));
                 }
+                if let Ok(mesh) = item.try_to::<Gd<CadaclysmTriangleMesh>>() {
+                    return Some(Owner::Mesh(mesh));
+                }
                 match numbers(&item, false) {
                     Some(v) if v.len() == 3 => Some(Owner::Point([v[0], v[1], v[2]])),
-                    _ => fail(format!("{W}: item {i}: not a CadaclysmSolid, a CadaclysmNurbsCurve, a CadaclysmProjector or a point of 3 numbers, got {item}")),
+                    _ => fail(format!("{W}: item {i}: not a CadaclysmSolid, a CadaclysmNurbsCurve, a CadaclysmProjector, a CadaclysmTriangleMesh or a point of 3 numbers, got {item}")),
                 }
             })
             .collect::<Option<Vec<Owner>>>()?;
@@ -10581,6 +11128,7 @@ impl CadaclysmNurbsCurve {
                 Owner::Solid(s) => Guard::Solid(s.bind()),
                 Owner::Curve(c) => Guard::Curve(c.bind()),
                 Owner::Projector(p) => Guard::Projector(p.bind()),
+                Owner::Mesh(m) => Guard::Mesh(m.bind()),
                 Owner::Point(p) => Guard::Point(*p),
             })
             .collect();
@@ -10593,6 +11141,10 @@ impl CadaclysmNurbsCurve {
                 Guard::Projector(p) => match &p.projector {
                     Some(projector) => Some(bs::NearItem::Projector(projector)),
                     None => fail(format!("{W}: item {i}: projector: closed")),
+                },
+                Guard::Mesh(m) => match &m.mesh {
+                    Some(mesh) => Some(bs::NearItem::Mesh(mesh)),
+                    None => fail(format!("{W}: item {i}: triangle_mesh: closed")),
                 },
                 Guard::Point(p) => Some(bs::NearItem::Point(*p)),
             })
@@ -11327,6 +11879,221 @@ impl CadaclysmSymmetryReport {
     }
 }
 
+/// What `CadaclysmSolid.pattern` or `CadaclysmSolid.pattern_feature` did: the `instances`
+/// placed (after the skips), the `booleans` run (copies apart from each other share one), and
+/// the copies of a feature's tool `missed` -- sharing no volume with the body, dropped for a cut
+/// and kept as a body of their own for a join.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmPatternReport {
+    value: bs::PatternReport,
+    /// Instances placed, after the skips.
+    #[var(get = get_instances, no_set)]
+    instances: PhantomVar<i64>,
+    /// Booleans run: copies apart from each other share one.
+    #[var(get = get_booleans, no_set)]
+    booleans: PhantomVar<i64>,
+    /// Copies of a feature's tool sharing no volume with the body: dropped for a cut, kept as a body of their own for a join.
+    #[var(get = get_missed, no_set)]
+    missed: PhantomVar<i64>,
+}
+
+impl CadaclysmPatternReport {
+    fn wrap(value: bs::PatternReport) -> Gd<CadaclysmPatternReport> {
+        Gd::from_object(CadaclysmPatternReport {
+            value,
+            instances: PhantomVar::default(),
+            booleans: PhantomVar::default(),
+            missed: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmPatternReport {
+    fn to_string(&self) -> GString {
+        let v = &self.value;
+        gs(format!("PatternReport(instances={}, booleans={}, missed={})", v.instances, v.booleans, v.missed))
+    }
+}
+
+#[godot_api]
+impl CadaclysmPatternReport {
+    /// Instances placed, after the skips.
+    #[func]
+    fn get_instances(&self) -> i64 {
+        self.value.instances.into()
+    }
+
+    /// Booleans run: copies apart from each other share one.
+    #[func]
+    fn get_booleans(&self) -> i64 {
+        self.value.booleans.into()
+    }
+
+    /// Copies of a feature's tool sharing no volume with the body: dropped for a cut, kept as a body of their own for a join.
+    #[func]
+    fn get_missed(&self) -> i64 {
+        self.value.missed.into()
+    }
+}
+
+/// What `CadaclysmSolid.hole` did: the `holes` drilled (one a point), per hole the `bottoms` --
+/// the distance along the axis from the point to where the bore ends, the drill point excluded
+/// -- and `faces_added`, the result's faces on no surface of the body.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmHoleReport {
+    value: bs::HoleReport,
+    /// Holes drilled, one a point.
+    #[var(get = get_holes, no_set)]
+    holes: PhantomVar<i64>,
+    /// Per hole, the distance along the axis from the point to where the bore ends, the drill point excluded: `depth` for a blind hole; for the others the deepest point of the material it passes, rim included.
+    #[var(get = get_bottoms, no_set)]
+    bottoms: PhantomVar<PackedFloat64Array>,
+    /// Faces of the result on no surface of the body.
+    #[var(get = get_faces_added, no_set)]
+    faces_added: PhantomVar<i64>,
+}
+
+impl CadaclysmHoleReport {
+    fn wrap(value: bs::HoleReport) -> Gd<CadaclysmHoleReport> {
+        Gd::from_object(CadaclysmHoleReport {
+            value,
+            holes: PhantomVar::default(),
+            bottoms: PhantomVar::default(),
+            faces_added: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmHoleReport {
+    fn to_string(&self) -> GString {
+        let v = &self.value;
+        gs(format!("HoleReport(holes={}, bottoms={:?}, faces_added={})", v.holes, v.bottoms, v.faces_added))
+    }
+}
+
+#[godot_api]
+impl CadaclysmHoleReport {
+    /// Holes drilled, one a point.
+    #[func]
+    fn get_holes(&self) -> i64 {
+        self.value.holes.into()
+    }
+
+    /// Per hole, the distance along the axis from the point to where the bore ends, the drill point excluded: `depth` for a blind hole; for the others the deepest point of the material it passes, rim included.
+    #[func]
+    fn get_bottoms(&self) -> PackedFloat64Array {
+        doubles(&self.value.bottoms)
+    }
+
+    /// Faces of the result on no surface of the body.
+    #[func]
+    fn get_faces_added(&self) -> i64 {
+        self.value.faces_added.into()
+    }
+}
+
+/// Instance indices to leave out of a pattern, refused where negative.
+fn pattern_skips(skip: &PackedInt64Array, call: &str) -> Option<Vec<u32>> {
+    skip.as_slice().iter().map(|&i| index(i, &format!("{call}: skip"))).collect()
+}
+
+/// Placements as GDScript gets them: an array of `CadaclysmTransform`s, empty on a refusal
+/// (the reason in `Cadaclysm.last_error()`).
+fn placements(result: sdk::Result<Vec<bs::Transform>>) -> Array<Gd<CadaclysmTransform>> {
+    ok(result).unwrap_or_default().into_iter().map(CadaclysmTransform::wrap).collect()
+}
+
+/// Placements for `CadaclysmSolid.pattern` and `CadaclysmSolid.pattern_feature`: arrays of rigid
+/// `CadaclysmTransform`s, instance 0 the identity (the original). `skip` leaves instances out by
+/// index (Fusion's suppressed instances), 0 included. Angles are radians. A count of 0, a
+/// spacing not finite, a zero direction or axis, a skip past the count, or every instance
+/// skipped gives an empty array, with the reason in `Cadaclysm.last_error()`.
+///
+/// ```gdscript
+/// var grid := CadaclysmPattern.rectangular([1, 0, 0], 4, 20, PackedFloat64Array([0, 1, 0]), 3, 20)
+/// var drilled = plate.pattern_feature(tool, "cut", grid)   # [solid, CadaclysmPatternReport]
+/// ```
+#[derive(GodotClass)]
+#[class(no_init, base = Object)]
+pub struct CadaclysmPattern;
+
+#[godot_api]
+impl CadaclysmPattern {
+    /// `count1` instances `spacing1` apart along `direction1`, times `count2` `spacing2` apart
+    /// along `direction2` (three numbers; empty for one row); row-major, direction 1 fastest.
+    /// `symmetric` puts `count` on each side of the original along each direction
+    /// (`2 count - 1`, at offsets `0, +s, -s, +2s, ...`).
+    #[func]
+    fn rectangular(
+        direction1: Variant,
+        count1: i64,
+        spacing1: f64,
+        #[opt(default = &PackedFloat64Array::new())] direction2: PackedFloat64Array,
+        #[opt(default = 1)] count2: i64,
+        #[opt(default = 0.0)] spacing2: f64,
+        #[opt(default = false)] symmetric: bool,
+        #[opt(default = &PackedInt64Array::new())] skip: PackedInt64Array,
+    ) -> Array<Gd<CadaclysmTransform>> {
+        let found = (|| {
+            let d1 = v3(&direction1, "pattern_rectangular: direction1")?;
+            let d2 = optional_v3(&direction2, "pattern_rectangular: direction2")?;
+            let (n1, n2) = (index(count1, "pattern_rectangular: count1")?, index(count2, "pattern_rectangular: count2")?);
+            let skip = pattern_skips(&skip, "pattern_rectangular")?;
+            Some(bs::Pattern::rectangular(d1, n1, spacing1, d2, n2, spacing2, symmetric, &skip))
+        })();
+        found.map_or_else(Array::new, placements)
+    }
+
+    /// `count` instances about the line through `axis_point` along `axis_direction`: a full turn
+    /// (`angle` 2 pi, the default) spaces them evenly, less spreads them over `angle` with both
+    /// ends occupied. `symmetric` spreads `count` over `angle` on each side (not with a full
+    /// turn). Right-handed about the direction.
+    #[func]
+    fn circular(
+        axis_point: Variant,
+        axis_direction: Variant,
+        count: i64,
+        #[opt(default = TAU)] angle: f64,
+        #[opt(default = false)] symmetric: bool,
+        #[opt(default = &PackedInt64Array::new())] skip: PackedInt64Array,
+    ) -> Array<Gd<CadaclysmTransform>> {
+        let found = (|| {
+            let p = v3(&axis_point, "pattern_circular: axis_point")?;
+            let d = v3(&axis_direction, "pattern_circular: axis_direction")?;
+            let n = index(count, "pattern_circular: count")?;
+            let skip = pattern_skips(&skip, "pattern_circular")?;
+            Some(bs::Pattern::circular(p, d, n, angle, symmetric, &skip))
+        })();
+        found.map_or_else(Array::new, placements)
+    }
+
+    /// `count` instances along `curve` by arc length from its start, `spacing` apart, or spread
+    /// over its whole length with both ends occupied (`spacing` `NAN`, the default). `orient`
+    /// `"fixed"` translates each copy; `"path"` also turns it by the curve's rotation-minimising
+    /// frame from the first instance's.
+    #[func]
+    fn along(
+        curve: Gd<CadaclysmNurbsCurve>,
+        count: i64,
+        #[opt(default = f64::NAN)] spacing: f64,
+        #[opt(default = "fixed")] orient: GString,
+        #[opt(default = &PackedInt64Array::new())] skip: PackedInt64Array,
+    ) -> Array<Gd<CadaclysmTransform>> {
+        let found = (|| {
+            let orient = ok(orient.to_string().parse::<bs::PatternOrient>())?;
+            let n = index(count, "pattern_along: count")?;
+            let skip = pattern_skips(&skip, "pattern_along")?;
+            let curve = curve.bind();
+            Some(bs::Pattern::along(&curve.curve, n, optional_number(spacing), orient, &skip))
+        })();
+        found.map_or_else(Array::new, placements)
+    }
+}
+
 /// What `CadaclysmSolid.join_sheets` did: `sewn` edges, the widest `worst_gap` between two sewn
 /// edges, the naked edges `naked_before` and `naked_after`, `refused` groups left apart, faces
 /// `turned`, and whether the result is `closed`: a solid.
@@ -11627,6 +12394,83 @@ impl CadaclysmSolid {
         let mine = self.held()?;
         let theirs = other.bind();
         ok(f(mine, theirs.held()?))
+    }
+
+    /// A pattern's placements: `CadaclysmTransform`s or 16 numbers each.
+    fn transforms(list: &AnyArray, call: &str) -> Option<Vec<bs::Transform>> {
+        list.iter_shared().enumerate().map(|(i, t)| transform_arg(&t, &format!("{call}: transforms[{i}]"))).collect()
+    }
+
+    /// `hole` and `hole_tool`'s points (one point or several) and the rest of the spec.
+    #[allow(clippy::too_many_arguments)]
+    fn hole_args(
+        call: &str,
+        points: &Variant,
+        direction: &PackedFloat64Array,
+        extent: &GString,
+        depth: f64,
+        tip_angle: f64,
+        face: i64,
+        head: &GString,
+        head_diameter: f64,
+        head_depth: f64,
+        head_angle: f64,
+        tolerance: f64,
+    ) -> Option<(Vec<[f64; 3]>, bs::HoleOptions)> {
+        let extent = ok(extent.to_string().parse::<bs::HoleExtent>())?;
+        let head = ok(head.to_string().parse::<bs::HoleHead>())?;
+        let points = match numbers(points, false) {
+            Some(values) if values.len() == 3 => vec![[values[0], values[1], values[2]]],
+            _ => point_list(points, &format!("{call}: points"))?,
+        };
+        let face = if face < 0 { None } else { Some(index(face, &format!("{call}: face"))?) };
+        let options = bs::HoleOptions {
+            direction: optional_v3(direction, &format!("{call}: direction"))?,
+            extent,
+            depth: optional_number(depth),
+            tip_angle,
+            face,
+            head,
+            head_diameter,
+            head_depth,
+            head_angle,
+            tolerance: Some(tolerance),
+        };
+        Some((points, options))
+    }
+
+    /// `web` and `web_tool`: `curves` one `CadaclysmNurbsCurve` or an array of them.
+    #[allow(clippy::too_many_arguments)]
+    fn webbed(
+        &self,
+        call: &str,
+        curves: &Variant,
+        plane: &Variant,
+        thickness: f64,
+        side: &GString,
+        depth: f64,
+        both_ways: bool,
+        tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        let side = ok(side.to_string().parse::<bs::WebSide>())?;
+        let plane = frame(plane, &format!("{call}: plane"))?;
+        let depth = optional_number(depth);
+        let made = |c: &[&bs::NurbsCurve]| {
+            let solid = self.held()?;
+            Self::made(if call == "web" {
+                solid.web(c, &plane, thickness, side, depth, both_ways, Some(tolerance))
+            } else {
+                solid.web_tool(c, &plane, thickness, side, depth, both_ways, Some(tolerance))
+            })
+        };
+        if let Ok(curve) = curves.try_to::<Gd<CadaclysmNurbsCurve>>() {
+            let one = curve.bind();
+            return made(&[&one.curve]);
+        }
+        match curves.try_to::<AnyArray>() {
+            Ok(list) => with_curves(&list, &format!("{call}: curves"), made),
+            Err(_) => fail(format!("{call}: curves: expected a CadaclysmNurbsCurve or an array of them, not {curves}")),
+        }
     }
 
     fn face_index(face: i64, what: &str) -> Option<u32> {
@@ -12180,6 +13024,65 @@ impl CadaclysmSolid {
         self.with(&other, |a, b| a.intersect(b, tolerance)).map(CadaclysmIntersection::wrap)
     }
 
+    /// Where this solid passes through itself, at `tolerance`, as a
+    /// `CadaclysmIntersection` -- `intersect`'s result with this solid on both sides, so
+    /// each chain and overlap names two faces of this solid. Never along its own topology:
+    /// faces meeting at their shared edges and vertices are not a crossing, so a clean
+    /// solid is an empty result, never an error. A chain whose two faces are one face is
+    /// that face folding through itself, and has no curve. A crossing narrower than
+    /// `tolerance` can be missed (the mesh route's limit). `null` (and the error) for a
+    /// `tolerance` not positive and finite, a solid with no faces, or one that meshes to
+    /// nothing.
+    #[func]
+    fn self_intersections(&self, #[opt(default = 0.05)] tolerance: f64) -> Option<Gd<CadaclysmIntersection>> {
+        self.held().and_then(|s| ok(s.self_intersections(tolerance))).map(CadaclysmIntersection::wrap)
+    }
+
+    /// What is wrong with this solid (and `other`, a `CadaclysmSolid`, or `null` for this
+    /// solid alone -- GDScript has no default for an object argument) as the
+    /// arguments of `operation`, at `tolerance`, as an `Array` of `CadaclysmFinding` --
+    /// OCCT's `BRepAlgoAPI_Check`, gathered from what the kernel already measures. An empty
+    /// `Array` is a valid pair; nothing is changed.
+    ///
+    /// Each argument is checked alone whatever the operation: no faces (`no_faces`),
+    /// features smaller than `tolerance` as `health` finds them (`short_edge`,
+    /// `collapsed_edge`, `sliver_face`, `tiny_face`, `tiny_body`, `small_hole`), shared
+    /// edges whose sides part (`loose_edge`), and where it passes through itself as
+    /// `self_intersections` finds it (`self_intersection`, `self_overlap`, or `unmeshable`
+    /// where it could not be meshed to look). `operation` (`""` for none) -- `"join"`,
+    /// `"cut"`, `"common"`, `"split_sheet"`, `"trim"`, `"merge"` or `"intersect"` -- adds
+    /// what that verb refuses each argument for: a boolean wants both closed (`open`, one
+    /// finding per free edge) and holding no region wall (`region_wall`, a merge's body); a
+    /// split or trim only its tool (`other`) closed; a merge closed manifolds
+    /// (`non_manifold`) of planes, cylinders, cones, spheres and tori (`face_kind`, per
+    /// face). Without `other`, this solid is held to what the operation asks of its first
+    /// argument. A free edge is no fault without an operation that asks for a closed
+    /// solid: an open sheet is a fine body.
+    ///
+    /// Not checked: an edge's curve leaving its face's surface, a surface only C0 inside a
+    /// face, sub-shapes a boolean would merge.
+    ///
+    /// `null`, with the reason in `Cadaclysm.last_error()`, for an unknown operation or a
+    /// `tolerance` not positive and finite.
+    #[func]
+    fn check(&self, other: Option<Gd<CadaclysmSolid>>, #[opt(default = "")] operation: GString, #[opt(default = 0.05)] tolerance: f64) -> Variant {
+        let Some(mine) = self.held() else { return Variant::nil() };
+        let guard = other.as_ref().map(|s| s.bind());
+        let b = match &guard {
+            Some(g) => match g.held() {
+                Some(b) => Some(b),
+                None => return Variant::nil(),
+            },
+            None => None,
+        };
+        let op = operation.to_string();
+        let op = (!op.is_empty()).then_some(op.as_str());
+        match ok(mine.check(b, op, tolerance)) {
+            Some(rows) => rows.into_iter().map(CadaclysmFinding::wrap).collect::<Array<Gd<CadaclysmFinding>>>().to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
     /// Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its
     /// loops cut into, as a `CadaclysmSolidHits`. Neither is changed. A point hit lies
     /// within `tolerance` of the segment's exact curve and of the face's exact surface,
@@ -12630,6 +13533,189 @@ impl CadaclysmSolid {
             Some((solid, report)) => varray![&CadaclysmSolid::wrap(solid), &CadaclysmSymmetryReport::wrap(report)].to_variant(),
             None => Variant::nil(),
         }
+    }
+
+    /// This body and its copies at `transforms` (an array of rigid `CadaclysmTransform`s or 16
+    /// numbers each, typically from `CadaclysmPattern`; instance 0 the identity keeps the
+    /// original) as one body -- a pattern of bodies. Copies apart from each other are put
+    /// together with no boolean at all; copies that overlap are joined, one boolean a group.
+    /// An array `[solid, report]`, the report a `CadaclysmPatternReport`, or `null` with the
+    /// reason in `Cadaclysm.last_error()`: no transforms, or one that is not rigid.
+    #[func]
+    fn pattern(&self, transforms: AnyArray, #[opt(default = 0.0)] tolerance: f64) -> Variant {
+        let found = (|| {
+            let transforms = Self::transforms(&transforms, "pattern")?;
+            ok(self.held()?.pattern(&transforms, Some(tolerance)))
+        })();
+        match found {
+            Some((solid, report)) => varray![&CadaclysmSolid::wrap(solid), &CadaclysmPatternReport::wrap(report)].to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    /// `tool` (any closed solid, typically a `_tool` method's result) placed at each of
+    /// `transforms` and applied to this body by `op`, `"cut"` or `"join"` -- a pattern of
+    /// features (Fusion's compute type *identical*). Copies apart from each other go into one
+    /// multi-lump tool and one boolean; overlapping copies fall into a few groups. A copy that
+    /// shares no volume with the body is `missed`: dropped for a cut, kept as a body of its own
+    /// for a join. An array `[solid, report]`, the report a `CadaclysmPatternReport`, or `null`
+    /// with the reason in `Cadaclysm.last_error()`: an unknown `op`, no transforms, one not
+    /// rigid, or a tool that is not closed.
+    #[func]
+    fn pattern_feature(&self, tool: Gd<CadaclysmSolid>, op: GString, transforms: AnyArray, #[opt(default = 0.0)] tolerance: f64) -> Variant {
+        let found = (|| {
+            let op = ok(op.to_string().parse::<bs::FeatureOp>())?;
+            let transforms = Self::transforms(&transforms, "pattern_feature")?;
+            self.with(&tool, |a, b| a.pattern_feature(b, op, &transforms, Some(tolerance)))
+        })();
+        match found {
+            Some((solid, report)) => varray![&CadaclysmSolid::wrap(solid), &CadaclysmPatternReport::wrap(report)].to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    /// This body drilled at `points` -- one point (a `Vector3` or three numbers), or several (a
+    /// `PackedVector3Array` or an array of points): one hole each, all one spec, one cut. The
+    /// bore is an exact cylinder of `diameter`, a counterbore an exact cylinder, a countersink
+    /// and a drill point exact cones. `direction` (three numbers; empty: each point's face's
+    /// inward normal there) is the drilling direction, into the material, shared by every point.
+    /// `extent`: `"through"` everything ahead of the point; `"blind"`, `depth` of full bore then
+    /// a drill point of included angle `tip_angle` (0 or pi: a flat bottom); `"to_face"`, until
+    /// the axis first meets face `face`; `"to_next"`, until the bore first leaves the material.
+    /// `depth` `NAN` and `face` -1 are none. `head`: `"simple"`, `"counterbore"` (`head_diameter`
+    /// across, `head_depth` deep) or `"countersink"` (`head_diameter` across at the point,
+    /// included angle `head_angle`). Angles in radians: `tip_angle` defaults to 118 degrees,
+    /// `head_angle` to 90. An array `[solid, report]`, the report a `CadaclysmHoleReport`, or
+    /// `null` with the reason in `Cadaclysm.last_error()`.
+    #[func]
+    fn hole(
+        &self,
+        points: Variant,
+        diameter: f64,
+        #[opt(default = &PackedFloat64Array::new())] direction: PackedFloat64Array,
+        #[opt(default = "through")] extent: GString,
+        #[opt(default = f64::NAN)] depth: f64,
+        #[opt(default = 2.0594885173533086)] tip_angle: f64,
+        #[opt(default = -1)] face: i64,
+        #[opt(default = "simple")] head: GString,
+        #[opt(default = 0.0)] head_diameter: f64,
+        #[opt(default = 0.0)] head_depth: f64,
+        #[opt(default = 1.5707963267948966)] head_angle: f64,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Variant {
+        let found = (|| {
+            let (points, options) =
+                Self::hole_args("hole", &points, &direction, &extent, depth, tip_angle, face, &head, head_diameter, head_depth, head_angle, tolerance)?;
+            ok(self.held()?.hole(&points, diameter, &options))
+        })();
+        match found {
+            Some((solid, report)) => varray![&CadaclysmSolid::wrap(solid), &CadaclysmHoleReport::wrap(report)].to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    /// The tool `hole` cuts with, from the same arguments: a closed solid, one lump a point --
+    /// for `pattern_feature` or a boolean of your own.
+    #[func]
+    fn hole_tool(
+        &self,
+        points: Variant,
+        diameter: f64,
+        #[opt(default = &PackedFloat64Array::new())] direction: PackedFloat64Array,
+        #[opt(default = "through")] extent: GString,
+        #[opt(default = f64::NAN)] depth: f64,
+        #[opt(default = 2.0594885173533086)] tip_angle: f64,
+        #[opt(default = -1)] face: i64,
+        #[opt(default = "simple")] head: GString,
+        #[opt(default = 0.0)] head_diameter: f64,
+        #[opt(default = 0.0)] head_depth: f64,
+        #[opt(default = 1.5707963267948966)] head_angle: f64,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        let (points, options) =
+            Self::hole_args("hole_tool", &points, &direction, &extent, depth, tip_angle, face, &head, head_diameter, head_depth, head_angle, tolerance)?;
+        self.then(|s| s.hole_tool(&points, diameter, &options))
+    }
+
+    /// This body with a rib along `curve`, an open `CadaclysmNurbsCurve` lying in `plane` (a
+    /// `CadaclysmFrame`, a `Transform3D` or 12 numbers): the region of the plane between the
+    /// curve and the body on the `toward` side (three numbers, a direction in the plane; empty:
+    /// toward the body's nearest point), the curve's ends carried on along their tangents to the
+    /// body, thickened `thickness` along the plane's normal -- `side` `"both"` (half each side),
+    /// `"front"` (+z) or `"back"` (-z) -- and joined. `null` with the reason in
+    /// `Cadaclysm.last_error()` for an unknown `side`, a curve closed or not in the plane, a
+    /// thickness not positive, a slab that meets nothing, or a region not closed by the body.
+    #[func]
+    fn rib(
+        &self,
+        curve: Gd<CadaclysmNurbsCurve>,
+        plane: Variant,
+        thickness: f64,
+        #[opt(default = "both")] side: GString,
+        #[opt(default = &PackedFloat64Array::new())] toward: PackedFloat64Array,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        let side = ok(side.to_string().parse::<bs::RibSide>())?;
+        let plane = frame(&plane, "rib: plane")?;
+        let toward = optional_v3(&toward, "rib: toward")?;
+        let curve = curve.bind();
+        self.then(|s| s.rib(&curve.curve, &plane, thickness, side, toward, Some(tolerance)))
+    }
+
+    /// The slab `rib` joins, alone, from the same arguments.
+    #[func]
+    fn rib_tool(
+        &self,
+        curve: Gd<CadaclysmNurbsCurve>,
+        plane: Variant,
+        thickness: f64,
+        #[opt(default = "both")] side: GString,
+        #[opt(default = &PackedFloat64Array::new())] toward: PackedFloat64Array,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        let side = ok(side.to_string().parse::<bs::RibSide>())?;
+        let plane = frame(&plane, "rib_tool: plane")?;
+        let toward = optional_v3(&toward, "rib_tool: toward")?;
+        let curve = curve.bind();
+        self.then(|s| s.rib_tool(&curve.curve, &plane, thickness, side, toward, Some(tolerance)))
+    }
+
+    /// This body with a web along each of `curves` (one open `CadaclysmNurbsCurve` or an array
+    /// of them, in `plane`): each offset in the plane to `thickness` -- `side` `"both"`,
+    /// `"left"` or `"right"` of the curve's run, the plane's normal up -- its ends carried along
+    /// their tangents to the body, its walls run along the plane's normal until they meet the
+    /// body (`depth` `NAN`, the default) or for `depth`, one way (the normal's) or both when
+    /// `both_ways`. All the webs are one tool and one join; crossing curves make a network.
+    /// `null` with the reason in `Cadaclysm.last_error()` for an unknown `side`, no curves, one
+    /// closed or not in the plane, a thickness not positive, or walls that meet nothing or are
+    /// not closed by the body.
+    #[func]
+    fn web(
+        &self,
+        curves: Variant,
+        plane: Variant,
+        thickness: f64,
+        #[opt(default = "both")] side: GString,
+        #[opt(default = f64::NAN)] depth: f64,
+        #[opt(default = false)] both_ways: bool,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        self.webbed("web", &curves, &plane, thickness, &side, depth, both_ways, tolerance)
+    }
+
+    /// The walls `web` joins, alone, from the same arguments.
+    #[func]
+    fn web_tool(
+        &self,
+        curves: Variant,
+        plane: Variant,
+        thickness: f64,
+        #[opt(default = "both")] side: GString,
+        #[opt(default = f64::NAN)] depth: f64,
+        #[opt(default = false)] both_ways: bool,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        self.webbed("web_tool", &curves, &plane, thickness, &side, depth, both_ways, tolerance)
     }
 
     /// `fillet` with a flat bevel: each edge cut back `distance` along both its faces.
@@ -13303,6 +14389,18 @@ impl CadaclysmSolid {
     #[func]
     fn projector(&self, #[opt(default = f64::NAN)] tolerance: f64) -> Option<Gd<CadaclysmProjector>> {
         self.held().and_then(|s| ok(s.projector(Some(tolerance)))).map(CadaclysmProjector::wrap)
+    }
+
+    /// This solid's **measuring** tessellation as a `CadaclysmTriangleMesh`: the mesh the
+    /// measuring queries search, within a third of `tolerance` of the surface -- finer than the
+    /// display mesh `mesh` gives at the same tolerance. Answers against it are exact for the mesh,
+    /// not for the body. `tolerance` -- absolute, in model units; 0 or NaN (the default) is unset,
+    /// the solid's effective tolerance. The mesh is a copy: it answers on after this solid is
+    /// closed. `null` with the reason in `Cadaclysm.last_error()` for a negative or infinite
+    /// tolerance, or a body that meshes to nothing.
+    #[func]
+    fn triangle_mesh(&self, #[opt(default = f64::NAN)] tolerance: f64) -> Option<Gd<CadaclysmTriangleMesh>> {
+        self.held().and_then(|s| ok(s.triangle_mesh(Some(tolerance)))).map(CadaclysmTriangleMesh::wrap)
     }
 
     /// The nearest points of `curve` and this solid's boundary, as a `CadaclysmCurveBodyFoot`:
@@ -14688,6 +15786,464 @@ impl CadaclysmTool {
     #[func]
     fn with_ramp_angle(&self, degrees: f64) -> Option<Gd<CadaclysmTool>> {
         Self::made(self.tool.with_ramp_angle(degrees))
+    }
+}
+
+// ---- CadaclysmHlr, CadaclysmHlrLine, CadaclysmPage ---------------------------------------
+
+/// `hlr`'s options dictionary as the SDK's `HlrOptions`, refused under `what`'s name for a key
+/// it does not know or a value of the wrong shape.
+fn hlr_options(options: &VarDictionary, what: &str) -> Option<bs::HlrOptions> {
+    let known = ["direction", "eye", "feature_angle", "iso", "smooth_angle", "target", "tolerance", "up"];
+    for key in options.keys_array().iter_shared() {
+        let key = key.to_string();
+        if known.binary_search(&key.as_str()).is_err() {
+            return fail(format!("{what}: no option called {key:?}: {}", known.join(", ")));
+        }
+    }
+    let mut words = bs::HlrOptions::default();
+    if let Some(v) = options.get("direction") {
+        words.direction = Some(v3(&v, &format!("{what}: direction"))?);
+    }
+    if let Some(v) = options.get("up") {
+        words.up = v3(&v, &format!("{what}: up"))?;
+    }
+    if let Some(v) = options.get("eye") {
+        words.eye = Some(v3(&v, &format!("{what}: eye"))?);
+    }
+    if let Some(v) = options.get("target") {
+        words.target = v3(&v, &format!("{what}: target"))?;
+    }
+    let number = |name: &str| -> Option<Option<f64>> {
+        match options.get(name) {
+            None => Some(None),
+            Some(v) => match number(&v) {
+                Some(x) => Some(Some(x)),
+                None => fail(format!("{what}: {name} must be a number, not {v}")),
+            },
+        }
+    };
+    words.tolerance = number("tolerance")?.filter(|t| !t.is_nan());
+    words.smooth_angle = number("smooth_angle")?;
+    words.feature_angle = number("feature_angle")?;
+    if let Some(iso) = number("iso")? {
+        words.iso = index(iso as i64, &format!("{what}: iso"))?;
+    }
+    Some(words)
+}
+
+/// Sixteen numbers a Bézier -- `x y z w` per control point -- as `edge_beziers` gives them.
+fn hlr_flat(beziers: &sdk::Beziers64Data) -> PackedFloat64Array {
+    let mut out = Vec::with_capacity(beziers.weights.len() * 4);
+    for (p, w) in beziers.points.iter().zip(&beziers.weights) {
+        out.extend_from_slice(&[p[0], p[1], p[2], *w]);
+    }
+    doubles(&out)
+}
+
+/// One line of a hidden-line view (`CadaclysmHlr.lines`), as plain data: `kind` (`"sharp"`,
+/// `"smooth"`, `"outline"`, `"iso"` or `"boundary"`), `visible`, the index of the `solid` (or
+/// mesh) it belongs to, its `source_kind` (`"edge"`, `"face"` or `"mesh_edge"`) with `source`
+/// (the edge id, the face index or a mesh edge's first vertex) and `source2` (a mesh edge's
+/// second vertex, -1 otherwise), and its curve as rational cubic Béziers -- sixteen numbers
+/// each, `x y z w` per control point -- on the view plane (`beziers2d`, z 0) and in space
+/// (`beziers3d`), Bézier for Bézier the same span.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmHlrLine {
+    line: bs::HlrLine,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_visible, no_set)]
+    visible: PhantomVar<bool>,
+    #[var(get = get_solid, no_set)]
+    solid: PhantomVar<i64>,
+    #[var(get = get_source_kind, no_set)]
+    source_kind: PhantomVar<GString>,
+    #[var(get = get_source, no_set)]
+    source: PhantomVar<i64>,
+    #[var(get = get_source2, no_set)]
+    source2: PhantomVar<i64>,
+    #[var(get = get_beziers2d, no_set)]
+    beziers2d: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_beziers3d, no_set)]
+    beziers3d: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_length2d, no_set)]
+    length2d: PhantomVar<f64>,
+    #[var(get = get_length3d, no_set)]
+    length3d: PhantomVar<f64>,
+}
+
+impl CadaclysmHlrLine {
+    fn wrap(line: bs::HlrLine) -> Gd<CadaclysmHlrLine> {
+        Gd::from_object(CadaclysmHlrLine {
+            line,
+            kind: PhantomVar::default(),
+            visible: PhantomVar::default(),
+            solid: PhantomVar::default(),
+            source_kind: PhantomVar::default(),
+            source: PhantomVar::default(),
+            source2: PhantomVar::default(),
+            beziers2d: PhantomVar::default(),
+            beziers3d: PhantomVar::default(),
+            length2d: PhantomVar::default(),
+            length3d: PhantomVar::default(),
+        })
+    }
+
+    fn source_parts(&self) -> (&'static str, i64, i64) {
+        match self.line.source {
+            bs::HlrSource::Edge(e) => ("edge", e.into(), -1),
+            bs::HlrSource::Face(f) => ("face", f.into(), -1),
+            bs::HlrSource::MeshEdge(a, b) => ("mesh_edge", a.into(), b.into()),
+        }
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmHlrLine {
+    fn to_string(&self) -> GString {
+        let (kind, source, source2) = self.source_parts();
+        gs(format!(
+            "HlrLine(kind={}, visible={}, solid={}, source=({kind}, {source}, {source2}), length2d={}, length3d={})",
+            self.get_kind(),
+            self.line.visible,
+            self.line.solid,
+            self.line.length2d,
+            self.line.length3d
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmHlrLine {
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(match self.line.kind {
+            bs::HlrKind::Sharp => "sharp",
+            bs::HlrKind::Smooth => "smooth",
+            bs::HlrKind::Outline => "outline",
+            bs::HlrKind::Iso => "iso",
+            bs::HlrKind::Boundary => "boundary",
+        })
+    }
+
+    #[func]
+    fn get_visible(&self) -> bool {
+        self.line.visible
+    }
+
+    #[func]
+    fn get_solid(&self) -> i64 {
+        self.line.solid.into()
+    }
+
+    #[func]
+    fn get_source_kind(&self) -> GString {
+        gs(self.source_parts().0)
+    }
+
+    #[func]
+    fn get_source(&self) -> i64 {
+        self.source_parts().1
+    }
+
+    #[func]
+    fn get_source2(&self) -> i64 {
+        self.source_parts().2
+    }
+
+    #[func]
+    fn get_beziers2d(&self) -> PackedFloat64Array {
+        hlr_flat(&self.line.beziers2d)
+    }
+
+    #[func]
+    fn get_beziers3d(&self) -> PackedFloat64Array {
+        hlr_flat(&self.line.beziers3d)
+    }
+
+    #[func]
+    fn get_length2d(&self) -> f64 {
+        self.line.length2d
+    }
+
+    #[func]
+    fn get_length3d(&self) -> f64 {
+        self.line.length3d
+    }
+}
+
+/// A hidden-line view of solids or meshes (`CadaclysmBlacksmith.hlr`, `.hlr_mesh`): its
+/// `lines()`, what the removal did (`report()`, a `Dictionary` of counts and lengths) and the
+/// `tolerance` it worked at. Placed on a drawing with `CadaclysmPage.add_view`. Immutable;
+/// `close()` frees it, as the last reference going does.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmHlr {
+    view: Option<bs::Hlr>,
+    /// The tolerance the removal worked at, model units; NaN once closed.
+    #[var(get = get_tolerance, no_set)]
+    tolerance: PhantomVar<f64>,
+    /// Whether `close` has freed the view.
+    #[var(get = get_closed, no_set)]
+    closed: PhantomVar<bool>,
+}
+
+impl CadaclysmHlr {
+    fn wrap(view: bs::Hlr) -> Gd<CadaclysmHlr> {
+        Gd::from_object(CadaclysmHlr { view: Some(view), tolerance: PhantomVar::default(), closed: PhantomVar::default() })
+    }
+
+    fn held(&self) -> Option<&bs::Hlr> {
+        match &self.view {
+            Some(view) => Some(view),
+            None => fail("hlr: closed"),
+        }
+    }
+
+    fn some(&self, keep: impl Fn(&bs::HlrLine) -> bool) -> Array<Gd<CadaclysmHlrLine>> {
+        self.held()
+            .map(|v| v.lines().iter().filter(|l| keep(l)).cloned().map(CadaclysmHlrLine::wrap).collect())
+            .unwrap_or_default()
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmHlr {
+    fn to_string(&self) -> GString {
+        match &self.view {
+            Some(view) => gs(format!("Hlr({} lines, tolerance {})", view.lines().len(), view.tolerance())),
+            None => gs("Hlr(closed)"),
+        }
+    }
+}
+
+#[godot_api]
+impl CadaclysmHlr {
+    /// Every line, seen and hidden; empty once closed.
+    #[func]
+    fn lines(&self) -> Array<Gd<CadaclysmHlrLine>> {
+        self.some(|_| true)
+    }
+
+    /// The lines seen.
+    #[func]
+    fn visible(&self) -> Array<Gd<CadaclysmHlrLine>> {
+        self.some(|l| l.visible)
+    }
+
+    /// The lines hidden.
+    #[func]
+    fn hidden(&self) -> Array<Gd<CadaclysmHlrLine>> {
+        self.some(|l| !l.visible)
+    }
+
+    /// What the removal did: `candidates`, `segments`, `crossings`, `pieces`, `degenerate`,
+    /// `rays`, `mesh_hits`, `rejected`, `grazes`, `unsettled`, `mesh_only`, `fallback_edges`,
+    /// `failed_solids`, `candidate_length` and `degenerate_length`. Empty once closed.
+    #[func]
+    fn report(&self) -> VarDictionary {
+        let Some(view) = self.held() else { return VarDictionary::new() };
+        let r = view.report();
+        let mut d = VarDictionary::new();
+        for (key, value) in [
+            ("candidates", r.candidates),
+            ("segments", r.segments),
+            ("crossings", r.crossings),
+            ("pieces", r.pieces),
+            ("degenerate", r.degenerate),
+            ("rays", r.rays),
+            ("mesh_hits", r.mesh_hits),
+            ("rejected", r.rejected),
+            ("grazes", r.grazes),
+            ("unsettled", r.unsettled),
+            ("mesh_only", r.mesh_only),
+            ("fallback_edges", r.fallback_edges),
+            ("failed_solids", r.failed_solids),
+        ] {
+            d.set(key, i64::from(value));
+        }
+        d.set("candidate_length", r.candidate_length);
+        d.set("degenerate_length", r.degenerate_length);
+        d
+    }
+
+    #[func]
+    fn get_tolerance(&self) -> f64 {
+        self.view.as_ref().map_or(f64::NAN, |v| v.tolerance())
+    }
+
+    #[func]
+    fn get_closed(&self) -> bool {
+        self.view.is_none()
+    }
+
+    /// Free the view now; the lines already read stay.
+    #[func]
+    fn close(&mut self) {
+        self.view = None;
+    }
+}
+
+/// A flat drawing page (`CadaclysmPage.create`): hidden-line views, profiles, hatches and text
+/// placed on it, written as SVG (`svg()`) or DXF R2000 (`dxf()`). Layers are made on first use:
+/// a view's own -- `visible`, `outline`, `smooth`, `iso`, `hidden` (dashed) -- and any other
+/// name continuous, colour 7. Each `add_*` changes the page and answers `true`, or `false` with
+/// the reason in `Cadaclysm.last_error()`. `close()` frees it, as the last reference going does.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmPage {
+    page: Option<bs::Page>,
+    /// How many entities the page holds; 0 once closed.
+    #[var(get = get_entity_count, no_set)]
+    entity_count: PhantomVar<i64>,
+    /// Whether `close` has freed the page.
+    #[var(get = get_closed, no_set)]
+    closed: PhantomVar<bool>,
+}
+
+impl CadaclysmPage {
+    fn held(&mut self) -> Option<&mut bs::Page> {
+        match &mut self.page {
+            Some(page) => Some(page),
+            None => fail("page: closed"),
+        }
+    }
+
+    fn shown(&self) -> Option<&bs::Page> {
+        match &self.page {
+            Some(page) => Some(page),
+            None => fail("page: closed"),
+        }
+    }
+}
+
+/// `""` for a layer (or an alignment) left out: the page's own default.
+fn named(text: &GString) -> Option<String> {
+    let s = text.to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmPage {
+    fn to_string(&self) -> GString {
+        match &self.page {
+            Some(page) => gs(format!("Page({} entities)", page.entity_count())),
+            None => gs("Page(closed)"),
+        }
+    }
+}
+
+#[godot_api]
+impl CadaclysmPage {
+    /// An empty page in `units`: `"mm"` (the default), `"cm"`, `"m"`, `"in"`, `"ft"` or
+    /// `"unitless"`. `null` with the reason in `Cadaclysm.last_error()` for any other word.
+    /// (`new` is GDScript's own, so the constructor is `create`.)
+    #[func]
+    fn create(#[opt(default = "mm")] units: GString) -> Option<Gd<CadaclysmPage>> {
+        let units = match units.to_string().as_str() {
+            "unitless" => bs::PageUnits::Unitless,
+            "in" => bs::PageUnits::Inches,
+            "ft" => bs::PageUnits::Feet,
+            "mm" => bs::PageUnits::Millimetres,
+            "cm" => bs::PageUnits::Centimetres,
+            "m" => bs::PageUnits::Metres,
+            other => return fail(format!("page_new: units {other:?}: one of unitless, in, ft, mm, cm, m")),
+        };
+        ok(bs::Page::new(units)).map(|page| Gd::from_object(CadaclysmPage { page: Some(page), entity_count: PhantomVar::default(), closed: PhantomVar::default() }))
+    }
+
+    /// `view`'s lines on the page, a view point `p` landing at `at + scale * p` (`at` a
+    /// `Vector2` or two numbers): each line as the entities that draw it best.
+    #[func]
+    fn add_view(&mut self, view: Gd<CadaclysmHlr>, at: Variant, #[opt(default = 1.0)] scale: f64) -> bool {
+        let Some(at) = v2(&at, "page_add_view: at") else { return false };
+        let guard = view.bind();
+        let Some(v) = guard.held() else { return false };
+        let Some(page) = self.held() else { return false };
+        ok(page.add_view(v, at, scale).map(|_| ())).is_some()
+    }
+
+    /// `profile`'s outline and holes on `layer` (`""`: `0`), moved by `at`.
+    #[func]
+    fn add_profile(&mut self, profile: Gd<CadaclysmProfile>, at: Variant, #[opt(default = "")] layer: GString) -> bool {
+        let Some(at) = v2(&at, "page_add_profile: at") else { return false };
+        let layer = named(&layer);
+        let guard = profile.bind();
+        let Some(page) = self.held() else { return false };
+        ok(page.add_profile(&guard.profile, at, layer.as_deref()).map(|_| ())).is_some()
+    }
+
+    /// `profile` hatched (its holes left out), moved by `at`, on `layer` (`""`: `hatch`):
+    /// `pattern` `SOLID`, `ANSI31`, `ANSI37` or `ANSI32`/`STEEL`, turned `angle` radians, its
+    /// spacing times `scale`. (`at` comes second, as `add_profile`'s: GDScript has no default for
+    /// a `Variant` point.)
+    #[func]
+    fn add_hatch(
+        &mut self,
+        profile: Gd<CadaclysmProfile>,
+        at: Variant,
+        #[opt(default = "ANSI31")] pattern: GString,
+        #[opt(default = 0.0)] angle: f64,
+        #[opt(default = 1.0)] scale: f64,
+        #[opt(default = "")] layer: GString,
+    ) -> bool {
+        let Some(at) = v2(&at, "page_add_hatch: at") else { return false };
+        let layer = named(&layer);
+        let guard = profile.bind();
+        let Some(page) = self.held() else { return false };
+        ok(page.add_hatch(&guard.profile, &pattern.to_string(), angle, scale, at, layer.as_deref()).map(|_| ())).is_some()
+    }
+
+    /// One line of `text` on `layer` (`""`: `text`) at `at`, `height` tall, turned `angle`
+    /// radians; `halign` `left`/`center`/`right`, `valign` `baseline`/`bottom`/`middle`/`top`.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn add_text(
+        &mut self,
+        text: GString,
+        at: Variant,
+        height: f64,
+        #[opt(default = 0.0)] angle: f64,
+        #[opt(default = "left")] halign: GString,
+        #[opt(default = "baseline")] valign: GString,
+        #[opt(default = "")] layer: GString,
+    ) -> bool {
+        let Some(at) = v2(&at, "page_add_text: at") else { return false };
+        let (halign, valign, layer) = (named(&halign), named(&valign), named(&layer));
+        let Some(page) = self.held() else { return false };
+        ok(page.add_text(&text.to_string(), at, height, angle, halign.as_deref(), valign.as_deref(), layer.as_deref()).map(|_| ())).is_some()
+    }
+
+    #[func]
+    fn get_entity_count(&self) -> i64 {
+        self.page.as_ref().map_or(0, |p| p.entity_count().into())
+    }
+
+    #[func]
+    fn get_closed(&self) -> bool {
+        self.page.is_none()
+    }
+
+    /// The page as an SVG document, one group per layer; `""` with the reason in
+    /// `Cadaclysm.last_error()` on a failure.
+    #[func]
+    fn svg(&self) -> GString {
+        gs(self.shown().and_then(|p| ok(p.svg())).unwrap_or_default())
+    }
+
+    /// The page as DXF R2000 (`AC1015`) text; `""` with the reason in `Cadaclysm.last_error()`
+    /// on a failure.
+    #[func]
+    fn dxf(&self) -> GString {
+        gs(self.shown().and_then(|p| ok(p.dxf())).unwrap_or_default())
+    }
+
+    /// Free the page now.
+    #[func]
+    fn close(&mut self) {
+        self.page = None;
     }
 }
 

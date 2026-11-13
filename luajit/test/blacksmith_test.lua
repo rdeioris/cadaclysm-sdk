@@ -69,6 +69,71 @@ return function(t)
     t.raises(function() block:vertex_tolerance({ 1, 2 }) end, "^vertex_tolerance: ")
   end)
 
+  t.test("the library says which flavour it is", function()
+    local stem = bs.library_path():match("([^/\\]+)$"):gsub("^lib", ""):gsub("%.%w+$", "")
+    local want = ({ cadaclysm = "full", cadaclysm_kernel_reader = "kernel-reader", cadaclysm_kernel = "kernel" })[stem]
+    t.eq(bs.flavour(), want or "kernel")
+    if not want then t.eq(bs.features(), "")
+    else t.ok(("," .. bs.features() .. ","):find(",kernel,", 1, true), "features " .. bs.features()) end
+  end)
+
+  t.test("a call the flavour leaves out raises naming it, and the rest still work", function()
+    local solid = bs.Solid.cuboid(1, 2, 3)
+    local features = bs.features()
+    if features == "" or ("," .. features .. ","):find(",write-breps,", 1, true) then
+      t.ok(solid:step_text():find("ISO-10303-21", 1, true), "step text")
+    else
+      -- Asserted here, not left to main.lua's skip: a stub that did not raise fails. The
+      -- failure messages below never quote the flavour's, which would read as a skip.
+      local err = tostring(t.raises(function() return solid:step_text() end))
+      local want = "step: not in this library's flavour ('" .. bs.flavour() .. "', features " .. features .. ")"
+      t.ok(err:sub(1, #want) == want, "step_text raised something other than the flavour's message")
+    end
+    t.near(solid:mass().volume, 6, 1e-9, "volume")
+  end)
+
+  t.test("a flavour without a module half is refused at first use", function()
+    -- A fresh process per library, so plain LuaJIT only; `CADACLYSM_FLAVOURS_DIR` names a
+    -- directory holding the four flavours (`scripts/build-flavour.py`).
+    local dir = os.getenv("CADACLYSM_FLAVOURS_DIR")
+    local exe = not love and not lovr and arg and arg[-1]
+    if not dir or not exe then
+      print("      (not checked: needs plain luajit and CADACLYSM_FLAVOURS_DIR)")
+      return
+    end
+    dir = dir:gsub("\\", "/")
+    local wrapper = package.searchpath("cadaclysm_blacksmith", package.path):gsub("\\", "/"):match("^(.*)/[^/]*$")
+    local script = t.tmp("flavour_probe.lua")
+    local f = assert(io.open(script, "w"))
+    f:write("package.path = ", ("%q"):format(wrapper .. "/?.lua;"), " .. package.path\n",
+      "local ok, r = pcall(function() return require(arg[1]).flavour() end)\n",
+      "io.write(ok and ('OK ' .. r) or ('ERR ' .. tostring(r)))\n")
+    f:close()
+    local function file(stem)
+      if ffi.os == "Windows" then return dir .. "/" .. stem .. ".dll" end
+      return dir .. "/lib" .. stem .. (ffi.os == "OSX" and ".dylib" or ".so")
+    end
+    local function load(module, stem)
+      local command
+      if ffi.os == "Windows" then
+        command = ('"set "CADACLYSM_LIBRARY=%s" && set "CADACLYSM_BLACKSMITH_LIBRARY=" && "%s" "%s" %s 2>&1"')
+          :format(file(stem):gsub("/", "\\"), exe, script, module)
+      else
+        command = ("CADACLYSM_LIBRARY='%s' CADACLYSM_BLACKSMITH_LIBRARY= '%s' '%s' %s 2>&1"):format(file(stem), exe, script, module)
+      end
+      local pipe = assert(io.popen(command))
+      local out = pipe:read("*a")
+      pipe:close()
+      return out
+    end
+    t.ok(load("cadaclysm_blacksmith", "cadaclysm_reader"):find("^ERR .*the 'reader' flavour has no kernel"), "the kernel on the reader flavour is not refused")
+    t.ok(load("cadaclysm", "cadaclysm_kernel"):find("^ERR .*the 'kernel' flavour has no node API"), "the reader on the kernel flavour is not refused")
+    for stem, flavour in pairs({ cadaclysm = "full", cadaclysm_kernel_reader = "kernel-reader", cadaclysm_kernel = "kernel" }) do
+      local out = load("cadaclysm_blacksmith", stem)
+      t.eq(out, "OK " .. flavour, stem)
+    end
+  end)
+
   t.test("the library loads, and every entry point resolves", function()
     local path = bs.library_path()
     t.ok(io.open(path, "rb"), "library_path names a file: " .. path)
@@ -1327,6 +1392,75 @@ return function(t)
     for _, solid in ipairs({ cyl, loop, bs.Solid.sphere(2) }) do
       for _, e in ipairs(solid.edges) do t.ok(e.curve ~= nil) end
     end
+  end)
+
+  t.test("a tube swept through itself reports its crossing, a cube nothing", function()
+    local tol = 1e-3
+    -- A thin rectangle swept open along a path that comes back across its own start: a line
+    -- to (10, 0, 0), a 270-degree turn about (10, 3, 0), a line down to (7, -5, 0) -- through
+    -- the first leg at (7, 0). The profile's x along world y, its y along world z.
+    local back = bs.SweepPath.at({ 0, 0, 0 }):line_to({ 10, 0, 0 }):arc({ 10, 3, 0 }, { 0, 0, 1 }, 1.5 * math.pi):line_to({ 7, -5, 0 })
+    local tube = bs.Solid.sweep_open(bs.Profile.rect(0.2, 5), { 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 }, back)
+    local phases = {}
+    local found = tube:self_intersections(tol, function(phase) phases[phase] = true end)
+    t.ok(getmetatable(found) == bs.Intersection)
+    t.ok(#found.chains > 0)
+    t.ok(phases.mesh)
+    local faces = tube.faces
+    for _, c in ipairs(found.chains) do
+      t.ok(c.faces[1] ~= c.faces[2] and c.faces[1] < faces and c.faces[2] < faces)
+      t.ok(c.curve ~= nil)
+      t.eq(c.curve.kind, "line")
+      for _, p in ipairs(c.points) do
+        t.ok(math.abs(p[1] - 7) <= 0.1 + tol and math.abs(p[2]) <= 0.1 + tol and math.abs(p[3]) <= 2.5 + tol)
+      end
+    end
+    local clean = bs.Solid.cuboid(4, 6, 8):self_intersections(tol)
+    t.eq(#clean.chains, 0)
+    t.eq(#clean.overlaps, 0)
+    t.raises(function() tube:self_intersections(-1.0) end, "self_intersect: tolerance must be positive and finite")
+  end)
+
+  t.test("check finds a tube through itself, its free edges for a cut, nothing wrong with two cubes", function()
+    local tol = 1e-3
+    local back = bs.SweepPath.at({ 0, 0, 0 }):line_to({ 10, 0, 0 }):arc({ 10, 3, 0 }, { 0, 0, 1 }, 1.5 * math.pi):line_to({ 7, -5, 0 })
+    local tube = bs.Solid.sweep_open(bs.Profile.rect(0.2, 5), { 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 }, back)
+    local cube = bs.Solid.cuboid(1, 1, 1)
+    t.eq(#cube:check(), 0)
+    t.eq(#cube:check(bs.Solid.sphere(2), "join", tol), 0)
+    local phases = {}
+    local alone = tube:check(nil, nil, tol, function(phase) phases[phase] = true end)
+    t.ok(phases.health and phases.mesh)
+    t.ok(#alone > 0)
+    for _, f in ipairs(alone) do
+      t.ok(getmetatable(f) == bs.Finding)
+      t.eq(f.kind, "self_intersection")
+      t.eq(f.argument, 0)
+      t.ok(f.index ~= nil and f.other ~= nil and f.index ~= f.other and f.size > 0.1)
+    end
+    local as_cut = tube:check(cube, "cut", tol)
+    local open = 0
+    for _, f in ipairs(as_cut) do
+      t.eq(f.argument, 0)
+      if f.kind == "open" then
+        open = open + 1
+        t.ok(f.other ~= nil and f.size > 0)
+      end
+    end
+    t.ok(open > 0)
+    local tool_open = false
+    for _, f in ipairs(cube:check(tube, "trim", tol)) do
+      if f.kind == "open" and f.argument == 1 then tool_open = true end
+    end
+    t.ok(tool_open)
+    local short = false
+    for _, f in ipairs(bs.Solid.cuboid(4, 4, 0.01):check(nil, nil, 0.05)) do
+      if f.kind == "short_edge" and f.index ~= nil and f.other == nil and f.size < 0.05 then short = true end
+    end
+    t.ok(short)
+    t.raises(function() cube:check(cube, "union") end,
+      'check: unknown operation "union" %(join, cut, common, split_sheet, trim, merge or intersect%)')
+    t.raises(function() cube:check(nil, nil, -1.0) end, "check: tolerance must be positive and finite")
   end)
 
   t.test("two crossed pipes intersect on ellipse chains, coaxial pipes overlap on their wall", function()
@@ -6097,6 +6231,67 @@ return function(t)
       t.raises(function() smooth:mirror_join(plane) end, "^mirror_join: the half lies on both sides of the plane")
     end)
 
+    t.test("holes, ribs and webs, patterns: drill, pattern, rib and web pinned to literals", function()
+      local function rows(tr)
+        local r = {}
+        for i = 1, 16 do r[i] = tr[i] end
+        return r
+      end
+      -- A hole through a block, down from its top face.
+      local blk = bs.Solid.cuboid(40, 30, 20):translate(20, 15, 10)
+      local holed, hr = blk:hole({ 10, 15, 20 }, 4)
+      t.near(holed:mass().volume, 24000 - 80 * pi, 1e-6 * 24000, "hole volume")
+      t.eq(holed.faces, 7)
+      t.eq(("%d %d %d"):format(hr.holes, hr.faces_added, #hr.bottoms), "1 1 1")
+      t.near(hr.bottoms[1], 20, 1e-9, "hole bottom")
+      t.ok(getmetatable(hr) == bs.HoleReport, tostring(hr))
+      t.ok(blk:hole_tool({ 10, 15, 20 }, 4):mass().volume > 80 * pi)
+      -- Twelve holes cut into a plate by one pattern of features.
+      local plate = bs.Solid.cuboid(100, 60, 10):translate(50, 30, 5)
+      local tool = bs.Solid.cylinder(3, 30):translate(10, 10, -10)
+      local grid = bs.Pattern.rectangular({ 1, 0, 0 }, 4, 20, { 0, 1, 0 }, 3, 20)
+      t.eq(#grid, 12)
+      local drilled, pr = plate:pattern_feature(tool, "cut", grid)
+      t.near(drilled:mass().volume, 60000 - 1080 * pi, 1e-6 * 60000, "pattern_feature volume")
+      t.eq(("%d %d %d"):format(pr.instances, pr.booleans, pr.missed), "12 1 0")
+      t.ok(getmetatable(pr) == bs.PatternReport, tostring(pr))
+      -- The placements themselves, row-major.
+      local row = bs.Pattern.rectangular({ 1, 0, 0 }, 3, 10)
+      t.eq(#row, 3)
+      t.ok(getmetatable(row[1]) == bs.Transform)
+      t.ok(same(rows(row[1]), { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }), table.concat(rows(row[1]), " "))
+      t.ok(same(rows(row[2]), { 1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }), table.concat(rows(row[2]), " "))
+      local two = bs.Pattern.rectangular({ 1, 0, 0 }, 2, 8)
+      local bodies, br = blk:pattern({ two[1], two[2] })
+      t.eq(("%d %d"):format(br.instances, br.booleans), "2 1")
+      t.near(bodies:mass().volume, 28800, 1e-6 * 28800, "pattern volume")
+      local ring = bs.Pattern.circular({ 0, 0, 0 }, { 0, 0, 1 }, 6)
+      t.eq(#ring, 6)
+      t.near(ring[2][1], 0.5, 1e-12, "circular cos 60")
+      local along = bs.Pattern.along(bs.NurbsCurve.through({ { 0, 0, 0 }, { 30, 0, 0 } }, 1), 4)
+      t.eq(#along, 4)
+      t.near(along[4][4], 30, 1e-9, "along translation")
+      -- A rib in the corner of an L, across its diagonal.
+      local l = bs.Solid.cuboid(40, 30, 5):translate(20, 15, 2.5):join(bs.Solid.cuboid(5, 30, 40):translate(2.5, 15, 20))
+      t.near(l:mass().volume, 11250, 1e-6 * 11250, "L volume")
+      local diag = bs.NurbsCurve.through({ { 30, 15, 5 }, { 5, 15, 30 } }, 1)
+      local plane = { 0, 15, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0 }
+      t.near(l:rib(diag, plane, 4):mass().volume, 11250 + 1250, 1e-6 * 12500, "rib volume")
+      t.near(l:rib_tool(diag, plane, 4, { side = "front" }):mass().volume, 1250, 1e-6 * 1250, "rib_tool volume")
+      -- A web across an open tray, down from its rim to the floor.
+      local tray = bs.Solid.cuboid(60, 40, 20):translate(30, 20, 10):cut(bs.Solid.cuboid(56, 36, 18):translate(30, 20, 11))
+      local down = { 0, 0, 10, 1, 0, 0, 0, -1, 0, 0, 0, -1 }
+      local line = bs.NurbsCurve.through({ { 10, 20, 10 }, { 50, 20, 10 } }, 1)
+      local webbed = tray:web({ line }, down, 3)
+      t.near(webbed:mass().volume - tray:mass().volume, 1344, 1e-6 * 1344, "web volume")
+      t.ok(tray:web_tool(line, down, 3, { depth = 6 }):mass().volume > 0)
+      -- Refusals, in the library's words, and the wrapper's own for a choice it does not know.
+      t.raises(function() blk:hole({ 10, 15, 20 }, 0) end, "^hole: diameter 0 is not positive and finite")
+      t.raises(function() bs.Pattern.rectangular({ 1, 0, 0 }, 0, 10) end, "^pattern_rectangular: count1 is 0")
+      t.raises(function() blk:hole({ 10, 15, 20 }, 4, { extent = "deep" }) end, "^hole: extent 'deep' is not one of")
+      t.raises(function() blk:hole({ 10, 15, 20 }, 4, { dept = 5 }) end, "^hole: opts has no 'dept'")
+    end)
+
     t.test("sheets from curves: a ring on a square offsets, splits and parts with a panel gap", function()
       local sq = rect_sheet({ 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, 40, 40)
       local pts = {}
@@ -8121,4 +8316,292 @@ return function(t)
       end
     end)
   end
+
+  -- ---- closest points against a triangle mesh: a unit square's face, shared edge, outer edge and
+  -- corner, and a line through a tetrahedron, pinned to their closed forms (literals, not read back
+  -- through the wrapper) at the origin and shifted far out; max_distance on both sides, a solid's
+  -- own mesh, the nearest object naming a mesh item, and the refusals' words.
+  do
+    local SHIFTS = { { 0, 0, 0 }, { 1e4, -1e4, 5e3 }, { 1e6, -1e6, 5e5 } }
+    local function plus(s, p) return { s[1] + p[1], s[2] + p[2], s[3] + p[3] } end
+    local function segment(a, b) return bs.NurbsCurve.new({ a, b }, 1) end
+    local function scaled(s, base)
+      return (base or 1e-12) * (1 + math.max(math.abs(s[1]), math.abs(s[2]), math.abs(s[3])))
+    end
+    local function ids(list) return "{" .. table.concat(list, ", ") .. "}" end
+    local SQUARE = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 1, 0 }, { 0, 1, 0 } }
+    local SQUARE_TRIANGLES = { { 0, 1, 2 }, { 0, 2, 3 } }   -- sharing the diagonal 0-2
+    local TETRA = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } }
+    local TETRA_TRIANGLES = { { 0, 2, 1 }, { 0, 1, 3 }, { 0, 3, 2 }, { 1, 2, 3 } }   -- 0 the z = 0 floor
+    local function mesh_of(points, triangles, s)
+      local moved = {}
+      for i, p in ipairs(points) do moved[i] = plus(s, p) end
+      return bs.TriangleMesh.new(moved, triangles)
+    end
+
+    t.test("mesh closest points: a triangle mesh names its face, edge and vertex feet", function()
+      for _, s in ipairs(SHIFTS) do
+        local tol = scaled(s)
+        local mesh = mesh_of(SQUARE, SQUARE_TRIANGLES, s)
+        t.eq(mesh.vertex_count, 4)
+        t.eq(mesh.triangle_count, 2)
+        local box = mesh.bounds
+        t.ok(all_near(box[1], s, 0) and all_near(box[2], plus(s, { 1, 1, 0 }), 0), "the box")
+        local face = mesh:closest_point(plus(s, { 0.75, 0.25, 2 }))
+        t.eq(getmetatable(face), bs.MeshPoint)
+        t.ok(face.triangle == 0 and face.kind == "face" and #face.vertices == 0, tostring(face))
+        t.ok(all_near(face.point, plus(s, { 0.75, 0.25, 0 }), tol), tostring(face))
+        t.near(face.distance, 2)
+        t.ok(all_near(face.barycentric, { 0.25, 0.5, 0.25 }), tostring(face))
+        local diagonal = mesh:closest_point(plus(s, { 0.5, 0.5, 1 }))
+        t.ok(diagonal.triangle == 0 and diagonal.kind == "edge" and ids(diagonal.vertices) == "{0, 2}", tostring(diagonal))
+        t.near(diagonal.distance, 1)
+        t.ok(all_near(diagonal.barycentric, { 0.5, 0, 0.5 }), tostring(diagonal))
+        local outer = mesh:closest_point(plus(s, { 0.5, -1, 0 }))
+        t.ok(outer.triangle == 0 and outer.kind == "edge" and ids(outer.vertices) == "{0, 1}", tostring(outer))
+        t.ok(all_near(outer.barycentric, { 0.5, 0.5, 0 }), tostring(outer))
+        local corner = mesh:closest_point(plus(s, { 2, 2, 0 }))
+        t.ok(corner.triangle == 0 and corner.kind == "vertex" and ids(corner.vertices) == "{2}", tostring(corner))
+        t.ok(all_near(corner.point, plus(s, { 1, 1, 0 }), tol), tostring(corner))
+        t.near(corner.distance, math.sqrt(2))
+        t.ok(all_near(corner.barycentric, { 0, 0, 1 }), tostring(corner))
+      end
+    end)
+
+    t.test("mesh closest points: a point's max_distance on both sides", function()
+      for _, s in ipairs(SHIFTS) do
+        local mesh = mesh_of(SQUARE, SQUARE_TRIANGLES, s)
+        local p = plus(s, { 0.75, 0.25, 2 })
+        local unlimited = mesh:closest_point(p)
+        t.ok(unlimited ~= nil, "found with no limit")
+        t.ok(mesh:closest_point(p, 2.1) == unlimited, "within 2.1")
+        t.eq(mesh:closest_point(p, 1.9), nil)
+        t.ok(mesh:closest_point(p, 0 / 0) == unlimited, "NaN is no limit")
+        t.ok(mesh:closest_point(p, math.huge) == unlimited, "math.huge is no limit")
+      end
+      local mesh = mesh_of(SQUARE, SQUARE_TRIANGLES, { 0, 0, 0 })
+      t.ok(mesh:closest_point({ 0.5, 0.5, 0 }, 0) ~= nil, "a point on the mesh is within 0")
+      local e = t.raises(function() mesh:closest_point({ 0.5, 0.5, 1 }, -1) end,
+        "^triangle_mesh_closest_point: the max distance must not be negative$")
+      t.ok(is_build_error(e), "a refusal is a BuildError")
+    end)
+
+    t.test("mesh closest points: a line through a tetrahedron crosses its floor first", function()
+      for _, s in ipairs(SHIFTS) do
+        local tol = scaled(s, 1e-9)
+        local mesh = mesh_of(TETRA, TETRA_TRIANGLES, s)
+        local line = segment(plus(s, { 0.2, 0.2, -1 }), plus(s, { 0.2, 0.2, 2 }))
+        local foot = mesh:curve_closest_points(line)
+        t.eq(getmetatable(foot), bs.CurveMeshFoot)
+        t.ok(foot.crossing == true and foot.distance == 0, tostring(foot))
+        t.ok(foot.triangle == 0 and foot.kind == "face" and #foot.vertices == 0, tostring(foot))
+        t.near(foot.t, 1 / 3)
+        t.ok(all_near(foot.point_on_curve, plus(s, { 0.2, 0.2, 0 }), tol), tostring(foot))
+        t.ok(all_near(foot.point_on_mesh, plus(s, { 0.2, 0.2, 0 }), tol), tostring(foot))
+        t.ok(all_near(foot.barycentric, { 0.6, 0.2, 0.2 }), tostring(foot))
+        local beside = segment(plus(s, { 2, 0, 0 }), plus(s, { 3, 0, 0 }))
+        local near = mesh:curve_closest_points(beside, 1.1)
+        t.ok(near ~= nil and near.crossing == false, tostring(near))
+        t.ok(near.triangle == 0 and near.kind == "vertex" and ids(near.vertices) == "{1}", tostring(near))
+        t.near(near.distance, 1, tol)
+        t.near(near.t, 0)
+        t.ok(all_near(near.point_on_mesh, plus(s, { 1, 0, 0 }), tol), tostring(near))
+        t.eq(mesh:curve_closest_points(beside, 0.9), nil)
+        t.ok(mesh:curve_closest_points(beside) == near, "no limit")
+        t.ok(mesh:curve_closest_points(beside, 0 / 0) == near and mesh:curve_closest_points(beside, math.huge) == near,
+          "NaN and math.huge")
+        t.raises(function() mesh:curve_closest_points(beside, -1) end,
+          "^triangle_mesh_curve_closest_points: the max distance must not be negative$")
+      end
+    end)
+
+    t.test("mesh closest points: a bad index and a closed mesh are refused", function()
+      t.raises(function() bs.TriangleMesh.new(SQUARE, { { 0, 1, 4 } }) end,
+        "^triangle_mesh_new: triangle 0 names vertex 4, past the vertex count$")
+      local mesh = bs.TriangleMesh(SQUARE, SQUARE_TRIANGLES)
+      t.eq(mesh.closed, false)
+      mesh:close()
+      mesh:close()
+      t.eq(mesh.closed, true)
+      t.raises(function() mesh:closest_point({ 0, 0, 1 }) end, "^triangle_mesh: closed$")
+      local line = segment({ 0, 0, 1 }, { 1, 0, 1 })
+      t.raises(function() line:closest_object({ mesh }) end, "^triangle_mesh: closed$")
+    end)
+
+    t.test("mesh closest points: a solid's triangle mesh is its measuring tessellation", function()
+      local cube = bs.Solid.cuboid(2, 2, 2)
+      local mesh = cube:triangle_mesh()
+      t.ok(mesh.triangle_count >= 12 and mesh.vertex_count >= 8, tostring(mesh))
+      local box = mesh.bounds
+      t.ok(all_near(box[1], { -1, -1, -1 }) and all_near(box[2], { 1, 1, 1 }), "the 2-cube's box")
+      t.eq(cube:triangle_mesh(0).triangle_count, mesh.triangle_count, "0 is an unset tolerance")
+      for _, bad in ipairs({ -1, math.huge }) do
+        t.raises(function() cube:triangle_mesh(bad) end, "^solid_triangle_mesh: tolerance must be positive and finite$")
+      end
+      cube:close()
+      local foot = mesh:closest_point({ 5, 0.1, 0.2 })
+      t.near(foot.distance, 4)
+      t.ok(all_near(foot.point, { 1, 0.1, 0.2 }), tostring(foot))
+    end)
+
+    t.test("mesh closest points: the nearest object to a curve takes a triangle mesh", function()
+      local mesh = mesh_of(TETRA, TETRA_TRIANGLES, { 0, 0, 0 })
+      local line = segment({ 0.2, 0.2, -1 }, { 0.2, 0.2, 2 })
+      local nearest = line:closest_object({ { 9, 9, 9 }, mesh })
+      local own = mesh:curve_closest_points(line)
+      t.eq(nearest.which, 1)
+      t.ok(getmetatable(nearest.answer) == bs.CurveMeshFoot and nearest.answer == own, tostring(nearest))
+      t.ok(nearest.distance == own.distance and nearest.t == own.t, tostring(nearest))
+      t.ok(all_near(nearest.point_on_curve, own.point_on_curve, 0) and all_near(nearest.point_on_item, own.point_on_mesh, 0),
+        tostring(nearest))
+      local beside = segment({ 2, 0, 0 }, { 3, 0, 0 })
+      local after = beside:closest_object({ mesh, { 2.5, 0.5, 0 } })
+      t.ok(after.which == 1 and after.answer == nil, tostring(after))
+      t.near(after.distance, 0.5)
+      -- 1 from vertex 0 and from the point (0, 0, 0) alike: the earlier item answers.
+      local short = segment({ -2, 0, 0 }, { -1, 0, 0 })
+      local tie = short:closest_object({ mesh, { 0, 0, 0 } })
+      t.ok(tie.which == 0 and tie.distance == 1, tostring(tie))
+      t.ok(getmetatable(tie.answer) == bs.CurveMeshFoot and ids(tie.answer.vertices) == "{0}", tostring(tie))
+      local second = short:closest_object({ { 0, 0, 0 }, mesh })
+      t.ok(second.which == 0 and second.answer == nil, tostring(second))
+      t.eq(beside:closest_object({ mesh }, 0.9), nil)
+    end)
+  end
+
+  -- ---- mechanical drawings: hidden lines, the projected outline, pages, DXF profiles ----
+
+  t.test("a cube on its diagonal shows nine lines and hides three", function()
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    local view = bs.hlr({ cube }, { direction = { -1, -1, -1 } })
+    t.ok(getmetatable(view) == bs.Hlr)
+    t.eq(#view:visible(), 9)
+    t.eq(#view:hidden(), 3)
+    local seen, unseen = 0, 0
+    for _, line in ipairs(view.lines) do
+      t.eq(line.kind, "sharp")
+      t.eq(line.source[1], "edge")
+      t.eq(line.solid, 0)
+      t.ok(line.beziers2d.count >= 1 and line.beziers2d.count == line.beziers3d.count)
+      t.eq(#line.beziers2d.points, 12 * line.beziers2d.count)
+      for k = 3, #line.beziers2d.points, 3 do t.eq(line.beziers2d.points[k], 0) end
+      for _, w in ipairs(line.beziers3d.weights) do t.ok(w > 0) end
+      if line.visible then seen = seen + line.length3d else unseen = unseen + line.length3d end
+    end
+    t.near(seen, 90, 1e-6)
+    t.near(unseen, 30, 1e-6)
+    -- The three hidden edges meet at the far corner.
+    for _, line in ipairs(view:hidden()) do
+      local p, n = line.beziers3d.points, #line.beziers3d.points
+      local function corner(x, y, z) return math.abs(x + 5) < 1e-9 and math.abs(y + 5) < 1e-9 and math.abs(z + 5) < 1e-9 end
+      t.ok(corner(p[1], p[2], p[3]) or corner(p[n - 2], p[n - 1], p[n]))
+    end
+    t.eq(view.report.unsettled, 0)
+    t.near(view.tolerance, bs.effective_tolerance(cube), 1e-12)
+    view:close()
+    view:close()
+    t.raises(function() bs.Page.new():add_view(view) end, "hlr: closed")
+  end)
+
+  t.test("a cube in perspective and as a mesh shows nine and hides three", function()
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    local seen = bs.hlr({ cube }, { eye = { 30, 25, 20 }, target = { 0, 0, 0 } })
+    t.eq(#seen:visible(), 9)
+    t.eq(#seen:hidden(), 3)
+    local positions = { { -5, -5, -5 }, { 5, -5, -5 }, { 5, 5, -5 }, { -5, 5, -5 }, { -5, -5, 5 }, { 5, -5, 5 }, { 5, 5, 5 }, { -5, 5, 5 } }
+    local triangles = { { 0, 2, 1 }, { 0, 3, 2 }, { 4, 5, 6 }, { 4, 6, 7 }, { 0, 1, 5 }, { 0, 5, 4 },
+      { 3, 7, 6 }, { 3, 6, 2 }, { 0, 4, 7 }, { 0, 7, 3 }, { 1, 2, 6 }, { 1, 6, 5 } }
+    local view = bs.hlr_mesh({ bs.TriangleMesh(positions, triangles) }, { direction = { -1, -1, -1 } })
+    t.eq(#view:visible(), 9)
+    t.eq(#view:hidden(), 3)
+    for _, line in ipairs(view.lines) do
+      t.eq(line.source[1], "mesh_edge")
+      t.eq(#line.source, 3)
+      t.ok(line.source[2] < 8 and line.source[3] < 8 and line.source[2] ~= line.source[3])
+    end
+  end)
+
+  t.test("hidden-line words are refused naming the call", function()
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    t.raises(function() bs.hlr({ cube }, { direction = { 0, 0, -1 } }) end, "hlr: up is along the view")
+    t.raises(function() bs.hlr({}) end, "hlr: no solids")
+    t.raises(function() bs.hlr({ cube }, { tolerance = -1 }) end, "hlr: tolerance must be 0 or more")
+    t.raises(function() bs.hlr({ cube }, { direction = { 1, 0, 0 }, eye = { 5, 5, 5 } }) end, "direction %(parallel%) or eye")
+    t.raises(function() bs.Page("furlongs") end, "page_new: units")
+  end)
+
+  t.test("a plate outlines as one profile with its hole", function()
+    local plate = bs.Solid.cuboid(40, 30, 5):cut(bs.Solid.cylinder(5, 20):translate(0, 0, -10), 0)
+    local profiles = bs.projected_outline({ plate }, { direction = { 0, 0, -1 }, up = { 0, 1, 0 } })
+    t.eq(#profiles, 1)
+    local flat = profiles[1]:beziers()
+    local widest = 0
+    for k = 1, #flat, 4 do widest = math.max(widest, math.abs(flat[k])) end
+    t.near(widest, 20, 1e-6)
+    t.ok(#flat / 16 > 4, "the rectangle's four sides, then the hole's pieces")
+    -- The hole is a hole: the outline extruded holds the plate's area less the hole's.
+    t.near(bs.Solid.extrude(profiles[1], XY, 1):mass().volume, 40 * 30 - pi * 25, 0.5)
+  end)
+
+  t.test("svg draws hidden lines removed or dashed", function()
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    local el = math.deg(math.atan(1 / math.sqrt(2)))
+    local function group(svg, id)
+      local start = svg:find('<g id="' .. id .. '"', 1, true)
+      if not start then return nil end
+      local stop = svg:find("</g>", start, true)
+      return svg:sub(start, stop)
+    end
+    local removed = bs.write_svg_text({ cube }, { az = 45, el = el, hidden = "removed" })
+    local drawn = bs.write_svg_text({ cube }, { az = 45, el = el })
+    t.ok(group(removed, "solid-0") ~= nil)
+    t.eq(group(removed, "solid-0-hidden"), nil)
+    -- Removed leaves the three hidden edges out of the solid's own group.
+    t.ok(group(removed, "solid-0") ~= group(drawn, "solid-0"))
+    local dashed = bs.write_svg_text({ cube }, { az = 45, el = el, hidden = "dashed" })
+    local hidden = group(dashed, "solid-0-hidden")
+    t.ok(hidden ~= nil and hidden:find("stroke-dasharray", 1, true) ~= nil)
+    local _, moves = hidden:gsub("M", "")
+    t.eq(moves, 3)
+    t.raises(function() bs.write_svg_text({ cube }, { hidden = "faint" }) end, "hidden")
+  end)
+
+  t.test("a page writes R2000 DXF that reads back as its profiles", function()
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    local plate = bs.Profile.rect(40, 20)
+    local page = bs.Page("mm")
+    t.ok(getmetatable(page) == bs.Page)
+    page:add_view(bs.hlr({ cube }, { direction = { -1, -1, -1 } }), { 50, 50 }, 2)
+    t.eq(page.entity_count, 12)
+    page:add_profile(plate, { 150, 50 }, "parts"):add_hatch(plate, "ANSI31", 0, 1, { 150, 50 })
+      :add_text("PLATE", { 150, 30 }, 3.5, 0, "center")
+    t.eq(page.entity_count, 15)
+    local dxf = page:dxf()
+    local header = "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n"
+    t.eq(dxf:sub(1, #header), header)
+    t.eq(dxf, page:dxf())
+    for _, layer in ipairs({ "visible", "hidden", "parts", "hatch", "text" }) do
+      t.ok(dxf:find("\n  8\n" .. layer .. "\n", 1, true) ~= nil, layer)
+    end
+    local svg = page:svg()
+    t.ok(svg:find("<svg", 1, true) ~= nil and svg:find("PLATE", 1, true) ~= nil)
+
+    -- The rectangle alone round-trips: one profile, where it was put.
+    local back = bs.dxf_profiles(bs.Page("mm"):add_profile(plate, { 150, 50 }):dxf())
+    t.eq(#back, 1)
+    local flat = back[1]:beziers()
+    local lo_x, lo_y, hi_x, hi_y = math.huge, math.huge, -math.huge, -math.huge
+    for k = 1, #flat, 4 do
+      lo_x, lo_y = math.min(lo_x, flat[k]), math.min(lo_y, flat[k + 1])
+      hi_x, hi_y = math.max(hi_x, flat[k]), math.max(hi_y, flat[k + 1])
+    end
+    t.near(lo_x, 130, 1e-6)
+    t.near(lo_y, 40, 1e-6)
+    t.near(hi_x, 170, 1e-6)
+    t.near(hi_y, 60, 1e-6)
+    t.raises(function() bs.dxf_profiles("not a DXF file") end, "dxf_profiles: line ")
+    t.raises(function() page:add_hatch(plate, "BRICK") end, "page_add_hatch: pattern")
+    page:close()
+    t.raises(function() return page.entity_count end, "page: closed")
+  end)
 end

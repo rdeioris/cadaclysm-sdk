@@ -23,19 +23,27 @@
 using cadaclysm::Result;
 namespace bs = cadaclysm::blacksmith;
 using bs::Continuity;
+using bs::Drilled;
+using bs::FeatureOp;
 using bs::Frame;
+using bs::HoleReport;
 using bs::JoinedSheets;
 using bs::Mirrored;
 using bs::NurbsCurve;
 using bs::PatchBoundary;
+using bs::Pattern;
+using bs::Patterned;
 using bs::Profile;
 using bs::Panels;
 using bs::Recessed;
+using bs::RibSide;
 using bs::Solid;
 using bs::Solids;
 using bs::SurfaceFillet;
 using bs::SymmetryReport;
+using bs::Transform;
 using bs::Vec3;
+using bs::WebSide;
 
 static int failures = 0;
 static const double PI = 3.14159265358979323846;
@@ -297,6 +305,71 @@ static Result<void> mirror_join_squares_a_half_roof_to_its_mirror() {
     double body = area_of(smooth.solid), one = area_of(half);
     check(std::abs(body - 2 * one) < 0.01 * one, "mirror_join: area " + num(body) + " against " + num(one));
     refused(smooth.solid.mirror_join(plane), "mirror_join: the half lies on both sides of the plane", "", "mirror_join a whole body");
+    return {};
+}
+
+static double volume_of(const Solid& s) { return must(s.mass(), "mass").volume; }
+
+static bool near(double got, double want, double rel) { return std::abs(got - want) <= rel * std::abs(want); }
+
+// A `w` by `d` by `h` block centred at (x, y, z).
+static Solid block(double w, double d, double h, double x, double y, double z) {
+    return must(must(Solid::cuboid(w, d, h), "cuboid").translate(x, y, z), "translate");
+}
+
+// 6b'': holes, ribs and webs, patterns -- the literals Python's suite pins
+static Result<void> holes_ribs_webs_and_patterns() {
+    Solid blk = block(40, 30, 20, 20, 15, 10);
+    Drilled drilled = must(blk.hole({{10, 15, 20}}, 4), "hole");
+    check(near(volume_of(drilled.solid), 24000 - 80 * PI, 1e-6) && drilled.solid.faces() == 7,
+          "hole: volume " + num(volume_of(drilled.solid)) + ", faces " + std::to_string(drilled.solid.faces()));
+    HoleReport hr = drilled.report;
+    check(hr.holes == 1 && hr.faces_added == 1 && hr.bottoms.size() == 1 && std::abs(hr.bottoms[0] - 20) < 1e-9,
+          "hole report: holes " + std::to_string(hr.holes) + ", faces_added " + std::to_string(hr.faces_added));
+    refused(blk.hole({{10, 15, 20}}, 0), "hole: diameter 0 is not positive and finite", "", "hole of diameter 0");
+    Solid bit = must(blk.hole_tool({{10, 15, 20}}, 4), "hole_tool");
+    check(volume_of(bit) > 80 * PI, "hole_tool volume " + num(volume_of(bit)));
+
+    Solid plate = block(100, 60, 10, 50, 30, 5);
+    Solid tool = must(must(Solid::cylinder(3, 30), "cylinder").translate(10, 10, -10), "tool");
+    std::vector<Transform> grid = must(Pattern::rectangular({1, 0, 0}, 4, 20, Vec3{0, 1, 0}, 3, 20), "grid");
+    check(grid.size() == 12, "pattern_rectangular: " + std::to_string(grid.size()) + " placements");
+    Patterned holed = must(plate.pattern_feature(tool, FeatureOp::cut, grid), "pattern_feature");
+    check(near(volume_of(holed.solid), 60000 - 1080 * PI, 1e-6), "pattern_feature volume " + num(volume_of(holed.solid)));
+    check(holed.report.instances == 12 && holed.report.booleans == 1 && holed.report.missed == 0,
+          "pattern_feature report: " + std::to_string(holed.report.instances) + ", " + std::to_string(holed.report.booleans) + ", " +
+              std::to_string(holed.report.missed));
+
+    std::vector<Transform> row = must(Pattern::rectangular({1, 0, 0}, 3, 10), "row");
+    const std::array<double, 16> identity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const std::array<double, 16> step = {1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    check(row.size() == 3 && row[0].rows() == identity && row[1].rows() == step, "pattern_rectangular row");
+    refused(Pattern::rectangular({1, 0, 0}, 0, 10), "pattern_rectangular: count1 is 0", "", "pattern_rectangular of none");
+    std::vector<Transform> pair = must(Pattern::rectangular({1, 0, 0}, 2, 8), "pair");
+    Patterned bodies = must(blk.pattern({pair[0], pair[1]}), "pattern");
+    check(bodies.report.instances == 2 && bodies.report.booleans == 1 && near(volume_of(bodies.solid), 28800, 1e-6),
+          "pattern: instances " + std::to_string(bodies.report.instances) + ", volume " + num(volume_of(bodies.solid)));
+
+    std::vector<Transform> ring = must(Pattern::circular({0, 0, 0}, {0, 0, 1}, 6), "circular");
+    check(ring.size() == 6 && std::abs(ring[1].rows()[0] - 0.5) < 1e-12, "pattern_circular: " + std::to_string(ring.size()));
+    std::vector<Transform> along = must(Pattern::along(line({0, 0, 0}, {30, 0, 0}), 4), "along");
+    check(along.size() == 4 && std::abs(along[3].rows()[3] - 30) < 1e-9, "pattern_along: " + std::to_string(along.size()));
+
+    Solid l = must(block(40, 30, 5, 20, 15, 2.5).join(block(5, 30, 40, 2.5, 15, 20)), "L");
+    check(near(volume_of(l), 11250, 1e-6), "L volume " + num(volume_of(l)));
+    NurbsCurve diag = line({30, 15, 5}, {5, 15, 30});
+    Frame side = must(Frame::make({0, 15, 0}, {1, 0, 0}, {0, 0, 1}, {0, -1, 0}), "rib plane");
+    Solid ribbed = must(l.rib(diag, side, 4), "rib");
+    check(near(volume_of(ribbed), 11250 + 1250, 1e-6), "rib volume " + num(volume_of(ribbed)));
+    Solid slab = must(l.rib_tool(diag, side, 4, RibSide::front), "rib_tool");
+    check(near(volume_of(slab), 1250, 1e-6), "rib_tool volume " + num(volume_of(slab)));
+
+    Solid tray = must(block(60, 40, 20, 30, 20, 10).cut(block(56, 36, 18, 30, 20, 11)), "tray");
+    Frame top = must(Frame::make({0, 0, 10}, {1, 0, 0}, {0, -1, 0}, {0, 0, -1}), "web plane");
+    Solid webbed = must(tray.web(many(line({10, 20, 10}, {50, 20, 10})), top, 3), "web");
+    check(near(volume_of(webbed) - volume_of(tray), 1344, 1e-6), "web added " + num(volume_of(webbed) - volume_of(tray)));
+    Solid walls = must(tray.web_tool(many(line({10, 20, 10}, {50, 20, 10})), top, 3, WebSide::both, 6.0), "web_tool");
+    check(volume_of(walls) > 0, "web_tool volume " + num(volume_of(walls)));
     return {};
 }
 
@@ -723,6 +796,7 @@ int main(int argc, char** argv) {
         {"trim_by_curve_and_join_refuse_by_name", trim_by_curve_and_join_refuse_by_name},
         {"recess_sets_a_square_window_into_a_flat_sheet", recess_sets_a_square_window_into_a_flat_sheet},
         {"mirror_join_squares_a_half_roof_to_its_mirror", mirror_join_squares_a_half_roof_to_its_mirror},
+        {"holes_ribs_webs_and_patterns", holes_ribs_webs_and_patterns},
         {"a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap", a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap},
         {"continuity_match_and_blend", continuity_match_and_blend},
         {"n_sided_patch_fills_a_pentagon_of_strips", n_sided_patch_fills_a_pentagon_of_strips},

@@ -69,6 +69,7 @@ internal unsafe struct RawViewPick
     public uint Clicks;
     public uint HasPoint;
     public fixed float Point[3];
+    public uint Overlay;
 }
 
 internal struct RawViewLod
@@ -96,6 +97,11 @@ public readonly record struct OccludedStyle(float Dash = 6f, float Gap = 4f, flo
     /// because a struct's own parameterless constructor ignores the parameter defaults above.</summary>
     public OccludedStyle() : this(6f, 4f, 0.5f, null) { }
 }
+
+/// <summary>The colour every edge, curve or isocurve draws in (<see cref="View.EdgeColour()"/>,
+/// <see cref="View.CurveColour()"/>, <see cref="View.IsocurveColour()"/>): <c>Colour</c> (3 numbers in
+/// 0..1), or each part's own colour where <c>FromPart</c>.</summary>
+public readonly record struct LineColour(float[] Colour, bool FromPart);
 
 internal unsafe struct RawViewSnap
 {
@@ -190,6 +196,35 @@ internal unsafe struct RawViewText
     public float BoxPadding;
     public uint OnTop;
     public uint Font;
+    public int Order;
+}
+
+internal unsafe struct RawViewOverlay
+{
+    public uint Size;
+    public uint Anchor;
+    public IntPtr Beziers;
+    public uint CurveCount;
+    public int Order;
+    public fixed float Offset[2];
+    public uint HasFill;
+    public fixed float FillRgba[4];
+    public uint HasStroke;
+    public fixed float StrokeRgba[4];
+    public float StrokeWidth;
+}
+
+internal unsafe struct RawViewOverlayImage
+{
+    public uint Size;
+    public uint Anchor;
+    public IntPtr Rgba;
+    public uint Width;
+    public uint Height;
+    public fixed float Offset[2];
+    public fixed float Extent[2];
+    public float Opacity;
+    public int Order;
 }
 
 internal unsafe struct RawViewProgram
@@ -232,6 +267,19 @@ internal unsafe struct RawViewMachiningInfo
     public float Cell;
     public fixed float Min[2];
     public double CycleTime;
+}
+
+// CadaclysmViewStats, 1.25: 40 bytes, padded explicitly, every field at its natural alignment.
+internal struct RawViewStats
+{
+    public uint Size;
+    public uint Pad0;
+    public ulong FramesDrawn;
+    public float LastFrameMs;
+    public float LastGpuMs;
+    public ulong Triangles;
+    public uint DrawCalls;
+    public uint Pad1;
 }
 
 // 1.10, bound only: nothing in this file fills one yet (C#'s viewport-camera API comes later).
@@ -318,6 +366,10 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] internal static extern void cadaclysm_view_set_orthographic(ViewHandle view, [MarshalAs(UnmanagedType.I1)] bool on);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_layer(ViewHandle view, uint layer, [MarshalAs(UnmanagedType.I1)] bool on);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_item_layer(ViewHandle view, uint item, uint layer);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_user_layer(ViewHandle view, uint layer, [MarshalAs(UnmanagedType.I1)] bool on);
     [DllImport(Lib)] internal static extern void cadaclysm_view_set_background(ViewHandle view, float* rgb);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_lod(ViewHandle view, RawViewLod* lod);
@@ -325,6 +377,10 @@ internal static unsafe class ViewNative
     internal static extern bool cadaclysm_view_set_occluded_style(ViewHandle view, RawOccludedStyle* style);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_occluded_style(ViewHandle view, RawOccludedStyle* style);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_line_colour(ViewHandle view, uint layer, float* rgb, uint fromPart);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_line_colour(ViewHandle view, uint layer, float* rgb, uint* fromPart);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_wake_ms(ViewHandle view);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_node_visible(ViewHandle view, uint item, uint node, [MarshalAs(UnmanagedType.I1)] bool visible);
@@ -365,6 +421,8 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_occluded(ViewHandle view, uint item, uint mode);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_item_line_colour(ViewHandle view, uint item, uint layer, float* rgb);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_finish(ViewHandle view, uint item, uint finish);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_face_colours(ViewHandle view, uint item, uint* faces, float* rgba, uint count);
@@ -398,6 +456,14 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] internal static extern uint cadaclysm_view_show_text(ViewHandle view, RawViewText* text);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_text(ViewHandle view, uint item, [MarshalAs(UnmanagedType.LPUTF8Str)] string text);
+    // 1.24: overlays -- shapes, images and (show_text, SCREEN) text over the whole window.
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_show_overlay(ViewHandle view, RawViewOverlay* shape);
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_show_overlay_image(ViewHandle view, RawViewOverlayImage* image);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_move_overlay(ViewHandle view, uint item, uint anchor, float x, float y);
+    // 1.25: frame statistics.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_stats(ViewHandle view, RawViewStats* stats);
     // 1.8: the double-click opt-in, focus, the navigation mode.
     [DllImport(Lib)] internal static extern void cadaclysm_view_set_double_click_frames(ViewHandle view, [MarshalAs(UnmanagedType.I1)] bool on);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -558,7 +624,7 @@ public static unsafe class ViewLibrary
     }
 
     /// <summary>Why the library at `path`, answering `version` from cadaclysm_view_abi_version, is
-    /// refused -- null when this wrapper takes it (1.22 or a later 1.x).</summary>
+    /// refused -- null when this wrapper takes it (1.25 or a later 1.x).</summary>
     internal static string? AbiRefusal(string path, uint version)
     {
         uint major = version >> 16, minor = version & 0xFFFF;
@@ -568,7 +634,9 @@ public static unsafe class ViewLibrary
         // viewport cameras (bound; C#'s own API for them comes later). 1.11: show_points. 1.13: set_occluded.
         // 1.18: set_finish. 1.20: set_occluded_style and occluded_style. 1.21: show_solid_faces.
         // 1.22: snapping -- set_snap, request_snap_in, snap_result, clear_snap, set_work_plane, clear_work_plane.
-        return major != 1 || minor < 22 ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.22 or a later 1.x" : null;
+        // 1.23: set_line_colour, line_colour and set_item_line_colour. 1.24: overlays -- show_overlay,
+        // show_overlay_image, move_overlay, screen text, the pick's overlay flag. 1.25: stats.
+        return major != 1 || minor < 25 ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.25 or a later 1.x" : null;
     }
 
     private static bool SamePath(string a, string? b) =>
@@ -683,8 +751,9 @@ public sealed record ViewWindow(uint Kind, IntPtr Window, ulong WindowId, IntPtr
 public sealed record ViewEvent(string Type, float X = 0, float Y = 0, uint Button = 0, bool Shift = false, uint PointerId = 0,
     string Pointer = "mouse", float WheelY = 0, string? Key = null, bool KeyDown = true, double TimeMs = 0);
 
-/// <summary>Rect is x, y, w, h in physical pixels, the matrices column-major; Grid: none, top, front or right.</summary>
-public sealed record Viewport(uint[] Rect, float[] View, float[] Projection, float[] Eye, string Grid = "none");
+/// <summary>Rect is x, y, w, h in physical pixels, the matrices column-major; Grid: none, top, front or right;
+/// LayerMask: the user layers drawn here, bit n for layer n (<see cref="Item.UserLayer"/>), every one by default.</summary>
+public sealed record Viewport(uint[] Rect, float[] View, float[] Projection, float[] Eye, string Grid = "none", uint LayerMask = 0xFFFFFFFFu);
 
 /// <summary>A CAM tool: Shape is flat, ball, drill, vbit or bullnose; the flute length, a V-bit's angle and a bull-nose's corner radius are 0 where they mean nothing.</summary>
 public sealed record MachiningTool(uint Number, string Shape, double Diameter, double FluteLength = 0, double Angle = 0, double CornerRadius = 0);
@@ -699,6 +768,12 @@ public sealed record MachiningPart(float[] Positions, uint[] Indices);
 public sealed record MachiningOptions(double? Cell = null, double? Tolerance = null, double? Skin = null, double? RapidRate = null);
 
 /// <summary>Machining.Info(): the move the timeline is at of the job's moves, the height grid and the cycle time in seconds.</summary>
+/// <summary>What a view has drawn (view ABI 1.25, View.Stats): the frames drawn so far -- each frame
+/// drawn to the window, and each Image() rendered; a pump or draw that owes nothing adds none -- and
+/// the last frame's CPU time, GPU time (-1 = unknown: no timestamps on the device, the terminal),
+/// triangles and draw calls.</summary>
+public sealed record ViewStats(ulong FramesDrawn, float LastFrameMs, float LastGpuMs, ulong Triangles, uint DrawCalls);
+
 public sealed record MachiningInfo(uint Moves, uint Move, uint Nx, uint Ny, float Cell, float[] Min, double CycleTime);
 
 /// <summary>A CAM job shown in a View (View.ShowMachining): the stock is this item; the view's timeline plays it.</summary>
@@ -745,8 +820,60 @@ public sealed unsafe class Machining : Item
 
 /// <summary>A pick answer: the item, node and face hit; Clicks 2 for a double click, else 1; Point where
 /// the ray met the model (x, y, z, in the coordinates the items were shown in), or null where the
-/// library read no depth (a machining stock, the terminal library).</summary>
-public sealed record Pick(uint Item, uint Node, uint Face, uint Clicks = 1, float[]? Point = null);
+/// library read no depth (a machining stock, the terminal library). Overlay (1.24): the item is an
+/// overlay -- it was over the pixel, so nothing of the scene beneath it was picked (Face is a text
+/// overlay's line, else 0).</summary>
+public sealed record Pick(uint Item, uint Node, uint Face, uint Clicks = 1, float[]? Point = null, bool Overlay = false);
+
+/// <summary>Where an overlay hangs in the window (view ABI 1.24): a corner, the middle of an edge, or
+/// the centre. An overlay's offset is measured inward from it: x away from the left edge for the left
+/// column and from the right edge for the right one (rightward for the middle column); y down from the
+/// top edge for the top row and up from the bottom edge for the bottom one (upward for the middle
+/// row). So (TopRight, 10, 10) is 10 pixels in from the right and from the top.</summary>
+public enum Anchor { TopLeft, Top, TopRight, Left, Centre, Right, BottomLeft, Bottom, BottomRight }
+
+/// <summary>How <see cref="View.ShowOverlay(Profile, Anchor, float, float, OverlayStyle?)"/> draws a shape.
+/// The fill: <see cref="FillText"/> or <see cref="Fill"/> where set ("none" for no fill), else the
+/// profile's own colour (<see cref="Profile.Coloured(string)"/>), else white -- unless a stroke is set,
+/// when an uncoloured profile is not filled. The stroke only where <see cref="StrokeText"/> or
+/// <see cref="Stroke"/> is set: an open profile, never filled, draws only with one.</summary>
+public sealed class OverlayStyle
+{
+    /// <summary>The fill as text ("#rgb", "#rrggbb", a CSS name, or "none"); it wins over Fill.</summary>
+    public string? FillText { get; init; }
+    /// <summary>The fill as 3 or 4 numbers in 0..1 (alpha 1 where 3).</summary>
+    public float[]? Fill { get; init; }
+    /// <summary>The stroke as text ("#rgb", "#rrggbb", a CSS name); it wins over Stroke.</summary>
+    public string? StrokeText { get; init; }
+    /// <summary>The stroke as 3 or 4 numbers in 0..1 (alpha 1 where 3).</summary>
+    public float[]? Stroke { get; init; }
+    /// <summary>The stroke's width in pixels.</summary>
+    public float StrokeWidth { get; init; } = 1f;
+    /// <summary>Lower draws first; equal orders in show order. Shapes, text and images share it.</summary>
+    public int Order { get; init; }
+}
+
+/// <summary>An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the
+/// window, drawn over everything, untouched by the camera. Remove, UserLayer and (text) SetText work
+/// as on any item.</summary>
+public sealed unsafe class Overlay : Item
+{
+    internal Overlay(View view, uint id, object? shown, Anchor anchor) : base(view, id, shown) { Anchor = anchor; }
+
+    /// <summary>The anchor it hangs from now.</summary>
+    public Anchor Anchor { get; private set; }
+
+    /// <summary>Moved to `x`, `y` pixels inward from its anchor (cadaclysm_view_move_overlay): cheap,
+    /// for a HUD element that moves every frame.</summary>
+    public void MoveTo(float x, float y) => MoveTo(Anchor, x, y);
+
+    /// <summary>Hung from `anchor` instead, `x`, `y` pixels inward from it.</summary>
+    public void MoveTo(Anchor anchor, float x, float y)
+    {
+        Ok(ViewNative.cadaclysm_view_move_overlay(View.Live("cadaclysm_view_move_overlay"), Id, (uint)anchor, x, y));
+        Anchor = anchor;
+    }
+}
 
 /// <summary>A snap answer (view ABI 1.22): its Kind ("vertex", "midpoint", "centre", "quadrant", "edge", "face",
 /// "grid" or "plane"), the Point snapped to (x, y, z, in the coordinates the items were shown in), the item, node
@@ -870,6 +997,39 @@ public unsafe class Item
         Ok(ViewNative.cadaclysm_view_set_finish(View.Live("cadaclysm_view_set_finish"), Id, f));
     }
 
+    /// <summary>Draws the item's edges in <paramref name="rgb"/> -- `"#rgb"`, `"#rrggbb"` or a CSS colour
+    /// name, any case -- over the view's <see cref="View.EdgeColour(string, bool)"/>, the item's colour and
+    /// a solid's own edge paint; null takes the view's colour again.</summary>
+    public void EdgeColour(string? rgb) => LineColourOf(View.LayerEdges, ViewNative.Colour(rgb));
+
+    /// <summary><see cref="EdgeColour(string?)"/> with three numbers in 0..1.</summary>
+    public void EdgeColour(float r, float g, float b) => LineColourOf(View.LayerEdges, new[] { r, g, b });
+
+    /// <summary>Draws the item's curves in <paramref name="rgb"/>, over the view's
+    /// <see cref="View.CurveColour(string, bool)"/> and the item's colour; null takes the view's colour again.</summary>
+    public void CurveColour(string? rgb) => LineColourOf(View.LayerCurves, ViewNative.Colour(rgb));
+
+    /// <summary><see cref="CurveColour(string?)"/> with three numbers in 0..1.</summary>
+    public void CurveColour(float r, float g, float b) => LineColourOf(View.LayerCurves, new[] { r, g, b });
+
+    /// <summary>Draws the item's isocurves in <paramref name="rgb"/>, over the view's
+    /// <see cref="View.IsocurveColour(string, bool)"/> and the item's colour; null takes the view's colour again.</summary>
+    public void IsocurveColour(string? rgb) => LineColourOf(View.LayerIsocurves, ViewNative.Colour(rgb));
+
+    /// <summary><see cref="IsocurveColour(string?)"/> with three numbers in 0..1.</summary>
+    public void IsocurveColour(float r, float g, float b) => LineColourOf(View.LayerIsocurves, new[] { r, g, b });
+
+    private void LineColourOf(uint layer, float[]? rgb)
+    {
+        var h = View.Live("cadaclysm_view_set_item_line_colour");
+        fixed (float* c = rgb) Ok(ViewNative.cadaclysm_view_set_item_line_colour(h, Id, layer, c));
+    }
+
+    /// <summary>The user layer the item is on, 0..31 (every item starts on 0): it draws while the layer is on
+    /// (<see cref="View.UserLayer"/>) and in the viewports whose <see cref="Viewport.LayerMask"/> has its bit.
+    /// A layer past 31 is refused.</summary>
+    public void UserLayer(uint layer) => Ok(ViewNative.cadaclysm_view_set_item_layer(View.Live("cadaclysm_view_set_item_layer"), Id, layer));
+
     public void NodeVisible(uint node, bool on) => Ok(ViewNative.cadaclysm_view_set_node_visible(View.Live("cadaclysm_view_set_node_visible"), Id, node, on));
 
     /// <summary><see cref="NodeColour(uint, float[])"/> with the colour as text (alpha 1); null clears.</summary>
@@ -921,6 +1081,7 @@ public sealed unsafe class View : IDisposable
         ["default"] = 0, ["plastic"] = 1, ["metal"] = 2, ["matte"] = 3, ["paint"] = 4, ["brushed"] = 5, ["glass"] = 6,
     };
     private static readonly Dictionary<string, uint> TextModes = new() { ["label"] = 0, ["world"] = 1 };
+    private const uint TextScreen = 2;   // CADACLYSM_VIEW_TEXT_SCREEN (1.24): an overlay's text
     private static readonly Dictionary<string, uint> Events = new()
     {
         ["pointer_down"] = 1, ["pointer_move"] = 2, ["pointer_up"] = 3, ["pointer_cancel"] = 4, ["wheel"] = 5, ["key"] = 6,
@@ -1048,6 +1209,14 @@ public sealed unsafe class View : IDisposable
     {
         if (id == 0) throw ViewNative.Failure();
         var item = new Item(this, id, shown);
+        lock (Items) Items[id] = item;
+        return item;
+    }
+
+    private Overlay NewOverlay(uint id, object? shown, Anchor anchor)
+    {
+        if (id == 0) throw ViewNative.Failure();
+        var item = new Overlay(this, id, shown, anchor);
         lock (Items) Items[id] = item;
         return item;
     }
@@ -1391,6 +1560,109 @@ public sealed unsafe class View : IDisposable
         finally { Marshal.FreeCoTaskMem(utf8); }
     }
 
+    // ---- overlays (1.24): a HUD over the whole window
+
+    /// <summary>A 2D shape over the window: `shape` in pixels (one profile unit a pixel, y up), its
+    /// origin hung `x`, `y` pixels inward from `anchor` -- a closed profile filled (holes cut, even-odd),
+    /// stroked where the style says (<see cref="OverlayStyle"/>). Drawn after everything else, never
+    /// moved by the camera, kept in place as the window resizes; a click on it picks it
+    /// (<see cref="Pick.Overlay"/>) and nothing beneath.</summary>
+    public Overlay ShowOverlay(Profile shape, Anchor anchor, float x, float y, OverlayStyle? style = null) =>
+        ShowOverlay(new[] { shape }, anchor, x, y, style);
+
+    /// <summary>Several profiles as one overlay -- a crosshair's two strokes, a frame's two loops: their
+    /// fills together by the even-odd rule. The fill falls back on the first coloured profile's colour.</summary>
+    public Overlay ShowOverlay(IEnumerable<Profile> shapes, Anchor anchor, float x, float y, OverlayStyle? style = null)
+    {
+        var list = shapes?.ToList() ?? throw new ViewException("showOverlay: shapes, not null");
+        if (list.Count == 0) throw new ViewException("showOverlay: at least one profile");
+        var beziers = list.SelectMany(p => p.Beziers()).Select(v => (float)v).ToArray();
+        var own = list.Select(p => p.Colour).FirstOrDefault(c => c is not null);
+        var ownRgba = own is null ? null : new[] { (float)own[0], (float)own[1], (float)own[2], 1f };
+        return ShowOverlayCurves(beziers, ownRgba, anchor, x, y, style, list.Count == 1 ? list[0] : list);
+    }
+
+    /// <summary>Rational cubic Beziers, sixteen floats each (x, y, z, w per control point, z not read: a
+    /// profile's <see cref="Profile.Beziers"/>), in pixels, as one overlay: loops split where a curve
+    /// does not start where the last ended, closed where one ends where it started.</summary>
+    public Overlay ShowOverlay(float[] beziers, Anchor anchor, float x, float y, OverlayStyle? style = null) =>
+        ShowOverlayCurves(beziers, null, anchor, x, y, style, null);
+
+    private Overlay ShowOverlayCurves(float[] beziers, float[]? own, Anchor anchor, float x, float y, OverlayStyle? style, object? shown)
+    {
+        if (beziers is null || beziers.Length == 0 || beziers.Length % 16 != 0)
+            throw new ViewException($"showOverlay: 16 numbers a curve, at least one, not {beziers?.Length ?? 0}");
+        var s = style ?? new OverlayStyle();
+        var stroke = s.StrokeText is not null ? ViewNative.Rgba(s.StrokeText) : Rgba(s.Stroke, "showOverlay stroke");
+        float[]? fill;
+        if (s.FillText is not null)
+            fill = s.FillText.Trim().Equals("none", StringComparison.OrdinalIgnoreCase) ? null : ViewNative.Rgba(s.FillText);
+        else
+            fill = Rgba(s.Fill, "showOverlay fill") ?? own ?? (stroke is null ? new[] { 1f, 1f, 1f, 1f } : null);
+        var h = Live("cadaclysm_view_show_overlay");
+        fixed (float* b = beziers)
+        {
+            var raw = new RawViewOverlay
+            {
+                Size = (uint)sizeof(RawViewOverlay), Anchor = (uint)anchor, Beziers = (IntPtr)b, CurveCount = (uint)(beziers.Length / 16),
+                Order = s.Order, HasFill = fill is null ? 0u : 1u, HasStroke = stroke is null ? 0u : 1u, StrokeWidth = s.StrokeWidth,
+            };
+            raw.Offset[0] = x;
+            raw.Offset[1] = y;
+            for (var k = 0; k < 4; k++)
+            {
+                if (fill is not null) raw.FillRgba[k] = fill[k];
+                if (stroke is not null) raw.StrokeRgba[k] = stroke[k];
+            }
+            return NewOverlay(ViewNative.cadaclysm_view_show_overlay(h, &raw), shown, anchor);
+        }
+    }
+
+    /// <summary>Text over the window: its box hangs from `anchor` by the same point (its top-right corner
+    /// for TopRight), `x`, `y` pixels inward -- the box's padding included where it has one. `options`
+    /// as <see cref="ShowText"/>'s, in pixels; its Mode, Align, OnTop, Right and Up are not read.
+    /// <see cref="Item.SetText"/> changes it cheaply (a frame counter).</summary>
+    public Overlay ShowOverlayText(string text, Anchor anchor, float x, float y, TextOptions? options = null, int order = 0)
+    {
+        var o = options ?? new TextOptions();
+        var rgb = Exact(o.ColourText is not null ? ViewNative.Colour(o.ColourText) : o.Colour ?? ViewNative.Colour("white"), 3, "showOverlayText colour")!;
+        var box = o.BoxText is not null ? ViewNative.Rgba(o.BoxText) : Rgba(o.Box, "showOverlayText box");
+        var h = Live("cadaclysm_view_show_text");
+        IntPtr utf8 = Marshal.StringToCoTaskMemUTF8(ViewNative.TextOf(text));
+        try
+        {
+            var t = new RawViewText { Size = (uint)sizeof(RawViewText), Text = utf8, Mode = TextScreen, Height = o.Size, Align = (uint)anchor,
+                                      BoxPadding = o.Padding, OnTop = 1, Font = o.Font, Order = order };
+            for (int k = 0; k < 3; k++) t.Rgb[k] = rgb[k];
+            t.Offset[0] = x;
+            t.Offset[1] = y;
+            if (box is not null) for (int k = 0; k < 4; k++) t.BoxRgba[k] = box[k];
+            return NewOverlay(ViewNative.cadaclysm_view_show_text(h, &t), text, anchor);
+        }
+        finally { Marshal.FreeCoTaskMem(utf8); }
+    }
+
+    /// <summary>An image over the window: `rgba` (width x height x 4 bytes, rows from the top, straight
+    /// alpha), its box hanging from `anchor` by the same point, `x`, `y` pixels inward, drawn `drawWidth`
+    /// x `drawHeight` pixels (0: its own size) at `opacity`.</summary>
+    public Overlay ShowOverlayImage(byte[] rgba, uint width, uint height, Anchor anchor, float x, float y,
+        float drawWidth = 0, float drawHeight = 0, float opacity = 1, int order = 0)
+    {
+        var need = PixelBytes(width, height, "showOverlayImage");
+        if (rgba is null || need != rgba.Length) throw new ViewException($"showOverlayImage: {width} x {height} pixels need {need} bytes (w * h * 4), not {rgba?.Length ?? 0}");
+        if (opacity <= 0) throw new ViewException($"showOverlayImage: opacity {opacity}: more than 0, at most 1 (0 would be the library's 1)");
+        var h = Live("cadaclysm_view_show_overlay_image");
+        fixed (byte* px = NonNull(rgba))
+        {
+            var raw = new RawViewOverlayImage { Size = (uint)sizeof(RawViewOverlayImage), Anchor = (uint)anchor, Rgba = (IntPtr)px, Width = width, Height = height, Opacity = opacity, Order = order };
+            raw.Offset[0] = x;
+            raw.Offset[1] = y;
+            raw.Extent[0] = drawWidth;
+            raw.Extent[1] = drawHeight;
+            return NewOverlay(ViewNative.cadaclysm_view_show_overlay_image(h, &raw), null, anchor);
+        }
+    }
+
     // ---- the camera
 
     public void Orbit(float dx, float dy) => Void("cadaclysm_view_orbit", h => ViewNative.cadaclysm_view_orbit(h, dx, dy));
@@ -1456,7 +1728,7 @@ public sealed unsafe class View : IDisposable
                 for (var k = 0; k < 16; k++) { p[i].View[k] = list[i].View[k]; p[i].Projection[k] = list[i].Projection[k]; }
                 for (var k = 0; k < 3; k++) p[i].Eye[k] = list[i].Eye[k];
                 p[i].Grid = grids[i];
-                p[i].LayerMask = 0xFFFFFFFFu; // every user layer
+                p[i].LayerMask = list[i].LayerMask;
             }
             Ok(ViewNative.cadaclysm_view_set_viewports(handle, p, (uint)raw.Length));
         }
@@ -1468,6 +1740,10 @@ public sealed unsafe class View : IDisposable
         var which = Named(Layers, name, "layer");
         Ok(ViewNative.cadaclysm_view_set_layer(Live("cadaclysm_view_set_layer"), which, on));
     }
+
+    /// <summary>User layer `layer`, 0..31, on or off in every viewport (all start on); see
+    /// <see cref="Item.UserLayer"/>. A layer past 31 is refused.</summary>
+    public void UserLayer(uint layer, bool on) => Ok(ViewNative.cadaclysm_view_set_user_layer(Live("cadaclysm_view_set_user_layer"), layer, on));
 
     /// <summary>The clear colour as text: `"#rgb"`, `"#rrggbb"` or a CSS colour name.</summary>
     public void Background(string rgb)
@@ -1499,6 +1775,64 @@ public sealed unsafe class View : IDisposable
         set => Ok(ViewNative.cadaclysm_view_set_lighting(Live("cadaclysm_view_set_lighting"), Named(LightingKinds, value, "lighting")));
     }
 
+    // CADACLYSM_VIEW_LAYER_EDGES, _CURVES and _ISOCURVES: the layers the line colours take.
+    internal const uint LayerEdges = 1, LayerCurves = 2, LayerIsocurves = 3;
+
+    /// <summary>The colour every edge draws in: <paramref name="rgb"/> -- `"#rgb"`, `"#rrggbb"` or a CSS
+    /// colour name -- or, with <paramref name="fromPart"/>, each part's own colour, brightened so an edge
+    /// reads over its faces (the colour kept for when it is turned off). An item's
+    /// <see cref="Item.EdgeColour(string?)"/> draws over it.</summary>
+    public void EdgeColour(string rgb, bool fromPart = false) => SetLineColour(LayerEdges, "edgeColour", rgb, fromPart);
+
+    /// <summary><see cref="EdgeColour(string, bool)"/> with three numbers in 0..1.</summary>
+    public void EdgeColour(float[] rgb, bool fromPart = false) => SetLineColour(LayerEdges, "edgeColour", rgb, fromPart);
+
+    /// <summary>The edges' colour in use.</summary>
+    public LineColour EdgeColour() => LineColourOf(LayerEdges);
+
+    /// <summary>The colour every curve (a curves or lines item's) draws in: <paramref name="rgb"/>, or
+    /// with <paramref name="fromPart"/> each part's own colour -- the default.</summary>
+    public void CurveColour(string rgb, bool fromPart = false) => SetLineColour(LayerCurves, "curveColour", rgb, fromPart);
+
+    /// <summary><see cref="CurveColour(string, bool)"/> with three numbers in 0..1.</summary>
+    public void CurveColour(float[] rgb, bool fromPart = false) => SetLineColour(LayerCurves, "curveColour", rgb, fromPart);
+
+    /// <summary>The curves' colour in use.</summary>
+    public LineColour CurveColour() => LineColourOf(LayerCurves);
+
+    /// <summary>The colour every isocurve draws in: <paramref name="rgb"/>, or with
+    /// <paramref name="fromPart"/> each part's own colour.</summary>
+    public void IsocurveColour(string rgb, bool fromPart = false) => SetLineColour(LayerIsocurves, "isocurveColour", rgb, fromPart);
+
+    /// <summary><see cref="IsocurveColour(string, bool)"/> with three numbers in 0..1.</summary>
+    public void IsocurveColour(float[] rgb, bool fromPart = false) => SetLineColour(LayerIsocurves, "isocurveColour", rgb, fromPart);
+
+    /// <summary>The isocurves' colour in use.</summary>
+    public LineColour IsocurveColour() => LineColourOf(LayerIsocurves);
+
+    private void SetLineColour(uint layer, string what, string rgb, bool fromPart)
+    {
+        if (rgb is null) throw new ViewException($"{what}: a colour, not none");
+        SetLineColour(layer, what, ViewNative.Colour(rgb)!, fromPart);
+    }
+
+    private void SetLineColour(uint layer, string what, float[] rgb, bool fromPart)
+    {
+        if (rgb is null) throw new ViewException($"{what}: 3 numbers, not none");
+        Exact(rgb, 3, what);
+        var h = Live("cadaclysm_view_set_line_colour");
+        fixed (float* c = rgb) Ok(ViewNative.cadaclysm_view_set_line_colour(h, layer, c, fromPart ? 1u : 0u));
+    }
+
+    private LineColour LineColourOf(uint layer)
+    {
+        var rgb = new float[3];
+        uint fromPart = 0;
+        var h = Live("cadaclysm_view_line_colour");
+        fixed (float* c = rgb) Ok(ViewNative.cadaclysm_view_line_colour(h, layer, c, &fromPart));
+        return new LineColour(rgb, fromPart != 0);
+    }
+
     /// <summary>The view-wide occluded style (see <see cref="OccludedStyle"/>); "solid" and "off" items never use it.</summary>
     public unsafe OccludedStyle OccludedStyle
     {
@@ -1519,6 +1853,15 @@ public sealed unsafe class View : IDisposable
     }
 
     public bool NeedsDraw => ViewNative.cadaclysm_view_needs_draw(Live("cadaclysm_view_needs_draw"));
+
+    /// <summary>What the view has drawn (cadaclysm_view_stats, 1.25): FramesDrawn counts only frames
+    /// really drawn, so an FPS counter read from it stays right while the scene is still.</summary>
+    public ViewStats Stats()
+    {
+        var raw = new RawViewStats { Size = (uint)sizeof(RawViewStats) };
+        Ok(ViewNative.cadaclysm_view_stats(Live("cadaclysm_view_stats"), &raw));
+        return new ViewStats(raw.FramesDrawn, raw.LastFrameMs, raw.LastGpuMs, raw.Triangles, raw.DrawCalls);
+    }
 
     // ---- the rest
 
@@ -1677,7 +2020,7 @@ public sealed unsafe class View : IDisposable
     /// has_point (Python's `_pick_dict`).</summary>
     internal static Pick? PickOf(RawViewPick raw) =>
         raw.Item == 0 ? null : new Pick(raw.Item, raw.Node, raw.Face, raw.Clicks,
-            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null);
+            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null, raw.Overlay != 0);
 
     /// <summary>The buffer a frame of `width` x `height` is read into: a size nobody can allocate is the wrapper's error.</summary>
     internal static byte[] FrameBuffer(ulong width, ulong height)

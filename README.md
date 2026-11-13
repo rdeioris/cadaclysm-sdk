@@ -3,7 +3,7 @@
 Wrappers, headers and samples for [cadaclysm](https://cadaclysm.blitter.studio),
 the CAD import and modelling library: STEP, IGES, IFC, Rhino 3dm, ACIS SAT,
 OCCT .brep and OpenSCAD in; meshes, LODs and exact B-rep out; an exact
-modelling kernel (`cadaclysm_blacksmith`) beside it.
+modelling kernel beside it, all in one library (`cadaclysm`).
 
 Everything in this repository is Apache-2.0. The libraries themselves are
 proprietary, owned by Blitter S.r.l. and Roberto De Ioris, attached to each
@@ -17,11 +17,21 @@ website (the WebAssembly builds), Startup or Standard, at
 
 ## Install
 
-    python fetch.py            # the latest release's archive for this machine -> lib/ and include/
-    python fetch.py v0.4.4     # a specific one
+    python fetch.py                    # the latest release's archive for this machine -> lib/ and include/
+    python fetch.py v0.4.4             # a specific one
+    python fetch.py --flavour reader   # a smaller flavour of the library
 
 or download an archive from the releases page and unpack its `lib/` and
 `include/` here.
+
+The library comes in four flavours, an archive each from v0.14.2, and every
+license covers all four: the flavour is a size choice. `full` (the default,
+`cadaclysm`) has the kernel, every reader and every writer; `kernel-reader`
+(`cadaclysm_kernel_reader`) leaves out the kernel's B-rep writers (STEP, SAT,
+.brep and Rhino 3dm), its IFC export and the parts catalogues; `kernel`
+(`cadaclysm_kernel`) is the kernel and the Document with no file formats;
+`reader` (`cadaclysm_reader`) is the readers, the mesher and the mesh exports. `fetch.py` first clears the libraries an
+earlier fetch left in `lib/`, so one flavour is there at a time.
 
 For Python there is a shorter way: `pip install cadaclysm` installs both
 Python modules together with the libraries of one release -- no `fetch.py`, no
@@ -70,9 +80,9 @@ it. Put it where the libraries look: the `CADACLYSM_LICENSE` environment
 variable (the file's path, or its text), or `cadaclysm.lic` beside your
 executable or in the working directory, or pass it from code (`license()` in
 Python, Node.js, Swift and LuaJIT, `Cadaclysm.License` in C#, `cadaclysm.License` in Go,
-`Cad.license` in Java, `cadaclysm_sdk::license` in Rust). The kernel library
-keeps its own license state: from code, license it with its own call beside
-the reader's (`cadaclysm_blacksmith.license()`, `Blacksmith.License`,
+`Cad.license` in Java, `cadaclysm_sdk::license` in Rust). One license covers
+the whole library: the kernel's own call sets the same one as the
+reader's (`cadaclysm_blacksmith.license()`, `Blacksmith.License`,
 `blacksmith.License`, `Blacksmith.license`, `cadaclysm_sdk::blacksmith::license`,
 `require("cadaclysm_blacksmith").license()` in LuaJIT).
 
@@ -81,20 +91,22 @@ the reader's (`cadaclysm_blacksmith.license()`, `Blacksmith.License`,
 writes it here: the key is the one in your purchase email, and this drops
 `cadaclysm.lic` beside `fetch.py` for the searches above to find. Re-run it
 whenever the license changes -- a renewal, a unit or a plan changed through the
-customer portal -- to pick up the new file the same way.
+customer portal -- to pick up the new file the same way. On its own it fetches
+no library, so it refuses `--flavour`; give a tag to fetch one as well:
+`python fetch.py latest --flavour reader --license KEY`.
 
 ## Languages
 
 | | binding | sample | coverage |
 |---|---|---|---|
-| Python | [python/](python/); [API docs](https://cadaclysm.blitter.studio/docs/python.html) | `python -c "import cadaclysm as c; print(c.open('samples/cube.scad').bounds)"` | the reference set, both libraries |
-| C# | [csharp/](csharp/); [API docs](https://cadaclysm.blitter.studio/docs/csharp.html) | `dotnet run --project csharp/smoke -- samples/cube.scad` | Python's set, both libraries |
-| Go | [go/](go/); [API docs](https://cadaclysm.blitter.studio/docs/go.html) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | Python's set, both libraries |
-| Java | [java/](java/); [API docs](https://cadaclysm.blitter.studio/docs/java.html) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | Python's set, both libraries |
-| Node.js | [node/](node/); [API docs](https://cadaclysm.blitter.studio/docs/node.html) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | Python's set, both libraries |
-| Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk`; [API docs](https://cadaclysm.blitter.studio/docs/rust.html) | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad`, or `--example tree` to print a file's tree | Python's set, both libraries |
-| Swift | [swift/](swift/) -- a Swift package, from v0.4.4; [API docs](https://cadaclysm.blitter.studio/docs/swift.html) | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, both libraries |
-| LuaJIT | [luajit/](luajit/) -- for LÖVE, LÖVR or a plain `luajit`, from v0.4.5; [API docs](https://cadaclysm.blitter.studio/docs/luajit.html), [LÖVE and LÖVR](https://cadaclysm.blitter.studio/engines/love.html) | `luajit luajit/smoke/main.lua samples/cube.scad` | Python's set, both libraries |
+| Python | [python/](python/); [API docs](https://cadaclysm.blitter.studio/docs/python.html) | `python -c "import cadaclysm as c; print(c.open('samples/cube.scad').bounds)"` | the reference set, reader and kernel |
+| C# | [csharp/](csharp/); [API docs](https://cadaclysm.blitter.studio/docs/csharp.html) | `dotnet run --project csharp/smoke -- samples/cube.scad` | Python's set, reader and kernel |
+| Go | [go/](go/); [API docs](https://cadaclysm.blitter.studio/docs/go.html) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | Python's set, reader and kernel |
+| Java | [java/](java/); [API docs](https://cadaclysm.blitter.studio/docs/java.html) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | Python's set, reader and kernel |
+| Node.js | [node/](node/); [API docs](https://cadaclysm.blitter.studio/docs/node.html) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | Python's set, reader and kernel |
+| Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk`; [API docs](https://cadaclysm.blitter.studio/docs/rust.html) | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad`, or `--example tree` to print a file's tree | Python's set, reader and kernel |
+| Swift | [swift/](swift/) -- a Swift package, from v0.4.4; [API docs](https://cadaclysm.blitter.studio/docs/swift.html) | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, reader and kernel |
+| LuaJIT | [luajit/](luajit/) -- for LÖVE, LÖVR or a plain `luajit`, from v0.4.5; [API docs](https://cadaclysm.blitter.studio/docs/luajit.html), [LÖVE and LÖVR](https://cadaclysm.blitter.studio/engines/love.html) | `luajit luajit/smoke/main.lua samples/cube.scad` | Python's set, reader and kernel |
 | C / C++ | [include/](include/); [API docs](https://cadaclysm.blitter.studio/docs/c.html) | the headers are the reference | 100% |
 
 The Go sample's loader must find the library at run time: put the library
@@ -103,11 +115,10 @@ directory on `PATH` (Windows), `LD_LIBRARY_PATH` (Linux) or
 package links `lib/` when it is built and writes it into the executable's rpath
 on macOS and Linux; on Windows `lib` goes on `PATH` -- see
 [swift/README.md](swift/README.md). The LuaJIT modules load the libraries
-through the FFI, nothing compiled: from `CADACLYSM_LIBRARY` /
-`CADACLYSM_BLACKSMITH_LIBRARY`, beside the Lua files, beside a fused LÖVE game's
+through the FFI, nothing compiled: from `CADACLYSM_LIBRARY`, beside the Lua files, beside a fused LÖVE game's
 executable, or `lib/` in any parent -- see [luajit/README.md](luajit/README.md).
 
-Every binding follows the Python modules' object model over both libraries,
+Every binding follows the Python modules' object model over the reader and the kernel,
 with each language's own spelling; its API docs page lists every type and call
 and marks the few it does not have yet. The headers are the reference for the
 whole C API, and each release's notes carry the exact counts. Contributions welcome: a pull request here is ported
@@ -116,18 +127,18 @@ maintained.
 
 ## In a web page (WebAssembly)
 
-The readers and the mesher -- and, in the Web Pro build, the kernel -- also
-ship as WebAssembly for embedding in a website, one package per web license:
-`cadaclysm-<version>-web-reader.zip` and `cadaclysm-<version>-web-pro.zip` on
-each release (from v0.3.0).
+The readers, the mesher, the kernel and the viewer also ship as WebAssembly
+for embedding in a website: one package, `cadaclysm-<version>-web.zip`, on
+each release from v0.14.2 (earlier releases split it in two).
 
-    python fetch.py --license KEY --web   # the license, then the package it covers, into web/
-    python fetch.py --web pro             # a given one: reader or pro
+    python fetch.py --license KEY --web   # the license, then the package, into web/
+    python fetch.py --web v0.14.2         # a given release's
 
-Each holds the module (`pkg/`: an ES module with typings, `load()` and
-`license()`), the WebGL2 viewer this project's site uses (`viewer/`) and an
-example page and worker (`example/`); serve `web/` and open `/example/`. A web
-license names the websites it covers, and the module holds to them -- on
+It holds the module in five builds, one folder each, so a page loads only what
+it uses (`pkg/` has everything: an ES module with typings, `load()` and
+`license()`), and an example page and worker (`example/`); serve `web/` and
+open `/example/`. A web license covers every build. It names the websites it
+covers, and the module holds to them -- on
 another host it runs as if unlicensed, with a notice in the browser console;
 `localhost` always passes. Documentation:
 <https://cadaclysm.blitter.studio/docs/web.html>

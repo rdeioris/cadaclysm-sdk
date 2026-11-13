@@ -945,50 +945,89 @@ _ENTRY_POINTS = [
 ]
 
 
-def _library_name() -> str:
+#: The libraries that carry the node API, in the order they are looked for: the single
+#: library's flavours that hold it, then the separate library of earlier releases.
+#: As `cadaclysm-capi-rt`'s `READER_STEMS`.
+_LIBRARY_STEMS = ['cadaclysm', 'cadaclysm_kernel_reader', 'cadaclysm_reader', 'cadaclysm_capi']
+
+
+def _library_names() -> list[str]:
     suffix = {"Windows": ".dll", "Darwin": ".dylib"}.get(platform.system(), ".so")
-    return "cadaclysm_capi.dll" if suffix == ".dll" else "libcadaclysm_capi" + suffix
+    return [stem + suffix if suffix == ".dll" else "lib" + stem + suffix for stem in _LIBRARY_STEMS]
 
 
 def library_path() -> Path:
     """Where the shared library is, preferring a release build over a debug one.
 
-    `CADACLYSM_LIBRARY` first, so this file works dropped beside a script
-    anywhere; then next to this file; then a `lib/` directory in any ancestor
-    (the SDK layout); then a `target/release` (or `target/debug`) in any ancestor
-    (this repository's layout).
+    `CADACLYSM_LIBRARY` first: a file, or a directory to look in; then next to this file; then
+    a `lib/` directory in any ancestor (the SDK layout); then a `target/release` (or
+    `target/debug`) in any ancestor (this repository's layout). Each place is asked for
+    every name in `_LIBRARY_STEMS`, in order: one library of any flavour that holds
+    the node API, else the separate library of earlier releases.
     """
-    name = _library_name()
-    override = os.environ.get("CADACLYSM_LIBRARY")
+    names = _library_names()
+    P = Path
+    override, variable = os.environ.get("CADACLYSM_LIBRARY"), "CADACLYSM_LIBRARY"
     if override:
-        candidate = Path(override)
+        candidate = P(override)
         # A directory or the library itself, since both are things to point at.
-        candidate = candidate / name if candidate.is_dir() else candidate
-        if candidate.exists():
+        if candidate.is_dir():
+            for name in names:
+                if (candidate / name).exists():
+                    return candidate / name
+        elif candidate.exists():
             return candidate
-        raise CadaclysmError(f"CADACLYSM_LIBRARY={override} names nothing that exists")
+        raise CadaclysmError(f"{variable}={override} names nothing that exists"
+                      + (f" (looked for {', '.join(names)})" if candidate.is_dir() else ""))
 
-    here = Path(__file__).resolve().parent
-    searched = [here / name]
+    here = P(__file__).resolve().parent
     # Walking up from this file: an SDK checkout keeps the library in `lib/` beside
     # the wrappers; the repository this example ships in keeps it in `target/release`
     # (or `target/debug`, a fallback for a machine that only built that).
+    places = [here]
+    places += [ancestor / "lib" for ancestor in [here, *here.parents]]
     for ancestor in [here, *here.parents]:
-        searched.append(ancestor / "lib" / name)
-    for ancestor in [here, *here.parents]:
-        searched += [ancestor / "target" / profile / name for profile in ("release", "debug")]
+        places += [ancestor / "target" / profile for profile in ("release", "debug")]
+    searched = [place / name for place in places for name in names]
     for candidate in searched:
         if candidate.exists():
             return candidate
     raise CadaclysmError(
-        f"{name} not found. Looked in:\n"
-        + "".join(f"    {c}\n" for c in searched)
-        + "Build it with:\n    cargo build --release -p cadaclysm-capi\n"
+        f"none of {', '.join(names)} found. Looked in:\n"
+        + "".join(f"    {place}\n" for place in places)
+        + "Build one with:\n    cargo build --release -p cadaclysm-capi\n"
         "or run fetch.py in an SDK checkout, or point CADACLYSM_LIBRARY at it."
     )
 
 
+def _flavour_of(library) -> tuple[str, str] | None:
+    """`(flavour, features)` for one of the single library's flavours, or None for a
+    separate library of an earlier release, which exports neither call."""
+    try:
+        flavour, features = library.cadaclysm_flavour, library.cadaclysm_features
+    except AttributeError:
+        return None
+    flavour.restype = features.restype = ctypes.c_char_p
+    flavour.argtypes = features.argtypes = []
+    return flavour().decode(), features().decode()
+
+
+def _not_in_flavour(name: str, flavour: str, features: str):
+    """What a flavour that leaves `name` out binds in its place: a call that says so."""
+    def missing(*_args):
+        raise CadaclysmError(f"{_short_name(name)}: not in this library's flavour ('{flavour}', "
+                      f"features {features or 'none'}); the full flavour has it")
+    missing.__name__ = name
+    return missing
+
+
+def _short_name(name: str) -> str:
+    """A C name as this module's errors say it: `cadaclysm_node_count` as `node_count`."""
+    return name.removeprefix("cadaclysm_")
+
+
 _library = None
+_flavour: tuple[str, str] = ("", "")
 
 
 def _lib() -> ctypes.CDLL:
@@ -997,11 +1036,21 @@ def _lib() -> ctypes.CDLL:
     Cached because `CDLL` on an already-loaded library is cheap but the
     `argtypes` assignment below is not free, and because two `CDLL` objects
     over one library would each re-declare the same function objects.
+
+    A flavour of the single library binds what it has: an entry point it leaves out
+    becomes a call that raises, naming the flavour, and only when called. A flavour
+    with no node API at all (the kernel flavour) is refused here, at first use. A
+    separate library of an earlier release must have every entry point, as before.
     """
-    global _library
+    global _library, _flavour
     if _library is None:
         path = library_path()
         library = ctypes.CDLL(str(path))
+        flavoured = _flavour_of(library)
+        if flavoured is not None and "nodes" not in flavoured[1].split(","):
+            raise CadaclysmError(
+                f"{path}: the '{flavoured[0]}' flavour has no node API; load cadaclysm, "
+                "cadaclysm_kernel_reader or cadaclysm_reader")
         for name, restype, argtypes in _ENTRY_POINTS:
             # A library older than this file is the likeliest reason a symbol is
             # missing, and `getattr` on a CDLL reports it as a bare AttributeError
@@ -1012,14 +1061,32 @@ def _lib() -> ctypes.CDLL:
             try:
                 function = getattr(library, name)
             except AttributeError:
+                if flavoured is not None:
+                    setattr(library, name, _not_in_flavour(name, *flavoured))
+                    continue
                 raise CadaclysmError(
                     f"{path} has no {name}: the library is older than this copy of "
                     f"cadaclysm.py, which declares {len(_ENTRY_POINTS)} entry points. "
                     "Rebuild it with `cargo build --release -p cadaclysm-capi`."
                 ) from None
             function.restype, function.argtypes = restype, argtypes
+        _flavour = flavoured or ("reader", "")
         _library = library
     return _library
+
+
+def flavour() -> str:
+    """Which library this is: `"full"`, `"kernel-reader"` or `"reader"` for a flavour of the
+    single library, `"reader"` for the separate `cadaclysm_capi` of earlier releases."""
+    _lib()
+    return _flavour[0]
+
+
+def features() -> str:
+    """The features the library was built with, comma-separated (`"nodes,kernel,bim"`),
+    or `""` for the separate `cadaclysm_capi` of earlier releases."""
+    _lib()
+    return _flavour[1]
 
 
 _numpy_module = None

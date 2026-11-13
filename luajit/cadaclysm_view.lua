@@ -47,7 +47,9 @@ local M = {}
 -- 1.20: cadaclysm_view_set_occluded_style and _occluded_style (View:occluded_style).
 -- 1.21: cadaclysm_view_show_solid_faces (a solid in a material and an opacity, all or some faces).
 -- 1.22: snapping -- cadaclysm_view_set_snap, _request_snap_in, _snap_result, _clear_snap, _set_work_plane, _clear_work_plane.
-local ABI_MAJOR, ABI_MINOR = 1, 22
+-- 1.23: cadaclysm_view_set_line_colour, _line_colour (View:set_edge_colour, :edge_colour and the curve and
+-- isocurve pairs) and _set_item_line_colour (Item:set_edge_colour, :set_curve_colour, :set_isocurve_colour).
+local ABI_MAJOR, ABI_MINOR = 1, 25   -- 1.24: overlays (show_overlay, show_overlay_image, move_overlay, screen text); 1.25: stats
 local NAVIGATION_FLY = 1   -- CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0)
 local OPEN, CLOSED = 1, 2
 local INPUT_CLOSE, NONE_COMING = 1, 0xFFFFFFFF
@@ -302,7 +304,7 @@ local ENTRY_POINTS = {
   "cadaclysm_view_draw", "cadaclysm_view_show", "cadaclysm_view_remove", "cadaclysm_view_set_surfaces",
   "cadaclysm_view_surfaces", "cadaclysm_view_orbit", "cadaclysm_view_pan", "cadaclysm_view_zoom",
   "cadaclysm_view_frame", "cadaclysm_view_standard", "cadaclysm_view_set_orthographic", "cadaclysm_view_set_layer",
-  "cadaclysm_view_set_background", "cadaclysm_view_set_node_visible", "cadaclysm_view_set_node_color",
+  "cadaclysm_view_set_item_layer", "cadaclysm_view_set_user_layer", "cadaclysm_view_set_background", "cadaclysm_view_set_node_visible", "cadaclysm_view_set_node_color",
   "cadaclysm_view_set_node_highlight", "cadaclysm_view_set_viewports", "cadaclysm_view_request_pick",
   "cadaclysm_view_request_pick_in", "cadaclysm_view_pick_result", "cadaclysm_view_frame_node", "cadaclysm_view_look",
   "cadaclysm_view_dolly", "cadaclysm_view_input", "cadaclysm_view_show_mesh", "cadaclysm_view_show_lines",
@@ -319,12 +321,15 @@ local ENTRY_POINTS = {
   "cadaclysm_view_set_double_click_frames", "cadaclysm_view_focus", "cadaclysm_view_navigation",
   "cadaclysm_view_set_lighting", "cadaclysm_view_lighting",
   "cadaclysm_view_set_occluded_style", "cadaclysm_view_occluded_style",
+  "cadaclysm_view_set_line_colour", "cadaclysm_view_line_colour", "cadaclysm_view_set_item_line_colour",
   "cadaclysm_view_viewport_camera", "cadaclysm_view_set_viewport_camera", "cadaclysm_view_set_viewport_rects",
   "cadaclysm_view_aim", "cadaclysm_view_set_pivot", "cadaclysm_view_set_tap", "cadaclysm_view_orbit_in",
   "cadaclysm_view_pan_in", "cadaclysm_view_zoom_in", "cadaclysm_view_look_in", "cadaclysm_view_dolly_in",
   "cadaclysm_view_frame_in", "cadaclysm_view_standard_in",
   "cadaclysm_view_set_snap", "cadaclysm_view_request_snap_in", "cadaclysm_view_snap_result",
   "cadaclysm_view_clear_snap", "cadaclysm_view_set_work_plane", "cadaclysm_view_clear_work_plane",
+  "cadaclysm_view_show_overlay", "cadaclysm_view_show_overlay_image", "cadaclysm_view_move_overlay",
+  "cadaclysm_view_stats",
 }
 
 local open_views = {}   -- windows of a view's own on the wgpu library, in the order made
@@ -891,7 +896,8 @@ function View:tap(px, ms)
   ok(self, self._lib.C.cadaclysm_view_set_tap(self:_live("cadaclysm_view_set_tap"), px, ms))
 end
 
---- { { rect = {x, y, w, h}, view = 16, projection = 16, eye = 3, grid = "none"|"top"|"front"|"right" }, ... },
+--- { { rect = {x, y, w, h}, view = 16, projection = 16, eye = 3, grid = "none"|"top"|"front"|"right",
+--- layer_mask = the user layers drawn, bit n for layer n (Item:user_layer; every layer when absent) }, ... },
 --- matrices column-major. An empty list clears them (the view draws one pane again), as Python's does.
 function View:viewports(list)
   table_of(list, "viewports")
@@ -914,13 +920,20 @@ function View:viewports(list)
     for k = 0, 15 do slot.view[k] = view[k]; slot.projection[k] = projection[k] end
     for k = 0, 2 do slot.eye[k] = eye[k] end
     slot.grid = name_of(GRIDS, v.grid or "none", "grid")
-    slot.layer_mask = 0xFFFFFFFF -- every user layer
+    if v.layer_mask ~= nil then number(v.layer_mask, "viewport layer_mask") end
+    slot.layer_mask = v.layer_mask or 0xFFFFFFFF -- every user layer
   end
   ok(self, self._lib.C.cadaclysm_view_set_viewports(p, raw, #list))
 end
 function View:layer(name, on)
   local which = name_of(LAYERS, name, "layer")
   ok(self, self._lib.C.cadaclysm_view_set_layer(self:_live("cadaclysm_view_set_layer"), which, on ~= false))
+end
+--- User layer `layer`, 0..31, on or off in every viewport (all start on); see Item:user_layer.
+--- A layer past 31 is refused.
+function View:user_layer(layer, on)
+  number(layer, "user_layer layer")
+  ok(self, self._lib.C.cadaclysm_view_set_user_layer(self:_live("cadaclysm_view_set_user_layer"), layer, on ~= false))
 end
 --- Text shown as one item (cadaclysm_view_show_text): a label anchored to `at`, or world text
 --- (`opts.mode = "world"`) in the plane of `opts.right` and `opts.up` through `at`. `opts`: mode
@@ -957,6 +970,157 @@ function View:show_text(text, at, opts)
   t.font = font
   local id = lib.C.cadaclysm_view_show_text(self:_live("cadaclysm_view_show_text"), t)
   return self:_item(id, s)   -- the item holds the string while C reads it (it copies; belt and braces)
+end
+
+-- ---- overlays (1.24): a HUD over the whole window. In a `do` block: no new main-chunk locals.
+do
+  --- An overlay shown: a shape, text or an image hung from an anchor of the window, drawn over
+  --- everything, untouched by the camera. Every Item method works on it (remove, set_text for
+  --- text, user_layer); `anchor` is the anchor it hangs from now.
+  local Overlay = setmetatable({}, { __index = Item })
+  Overlay.__index = Overlay
+  M.Overlay = Overlay
+
+  -- An anchor by name ("top-left", "top", "top-right", "left", "centre", "right", "bottom-left",
+  -- "bottom", "bottom-right"; "_" for "-" and "center" taken too) as its CADACLYSM_VIEW_ALIGN_* code.
+  local function anchor_of(anchor, what)
+    local key = type(anchor) == "string" and anchor:gsub("_", "-") or anchor
+    local n = type(key) == "string" and ALIGN[key]
+    if not n then fail(("%s anchor %s: one of %s"):format(what, describe(anchor), table.concat(ALIGN._list, ", ")), 3) end
+    return n, key == "center" and "centre" or key
+  end
+
+  local function overlay(self, id, anchor, shown)
+    local item = self:_item(id, shown)
+    item.anchor = anchor
+    return setmetatable(item, Overlay)
+  end
+
+  local function is_profile(p)
+    return type(p) == "table" and rawget(p, "_handle") ~= nil and type(p.beziers) == "function"
+  end
+
+  --- A 2D shape over the window, in pixels (one profile unit a pixel, y up), its origin hung
+  --- `x`, `y` pixels inward from `anchor` (x away from the left edge for the left column and from
+  --- the right edge for the right one; y down from the top for the top row and up from the bottom
+  --- for the bottom one). `shape`: a blacksmith Profile, a list of them (one overlay, filled
+  --- together by the even-odd rule), or Beziers (sixteen numbers each, a profile's `beziers()`).
+  --- `opts`: fill (a colour, or "none"), stroke (a colour), stroke_width (1), order (0). The fill:
+  --- `fill` where given, else the profile's own colour, else white -- unless a stroke is given,
+  --- when an uncoloured profile is not filled. A click on it picks it (`pick.overlay`), nothing beneath.
+  function View:show_overlay(shape, anchor, x, y, opts)
+    opts = opts or {}
+    local lib = self._lib
+    local code, name = anchor_of(anchor, "show_overlay")
+    local flat, own = shape, nil
+    if is_profile(shape) or (type(shape) == "table" and is_profile(shape[1])) then
+      local list = is_profile(shape) and { shape } or shape
+      flat = {}
+      for i, p in ipairs(list) do
+        if not is_profile(p) then fail(("show_overlay: item %d is %s, not a Profile"):format(i, describe(p)), 2) end
+        for _, v in ipairs(p:beziers()) do flat[#flat + 1] = v end
+        if own == nil then own = p.colour end
+      end
+    end
+    local b, n = carray("float", flat, "show_overlay")
+    if n == 0 or n % 16 ~= 0 then fail(("show_overlay: 16 numbers a curve, at least one, not %d"):format(n), 2) end
+    local stroke = rgba4(opts.stroke, "show_overlay stroke", lib)
+    local fill
+    if type(opts.fill) == "string" and opts.fill:lower():match("^%s*none%s*$") then
+      fill = nil
+    elseif opts.fill ~= nil then
+      fill = rgba4(opts.fill, "show_overlay fill", lib)
+    elseif own ~= nil then
+      fill = ffi.new("float[4]", own[1], own[2], own[3], 1)
+    elseif stroke == nil then
+      fill = ffi.new("float[4]", 1, 1, 1, 1)
+    end
+    local width = opts.stroke_width == nil and 1 or number(opts.stroke_width, "show_overlay stroke_width")
+    local order = opts.order == nil and 0 or number(opts.order, "show_overlay order")
+    local o = ffi.new("CadaclysmViewOverlay")
+    o.size, o.anchor, o.beziers, o.curve_count = ffi.sizeof("CadaclysmViewOverlay"), code, b, n / 16
+    o.order = order
+    o.offset[0], o.offset[1] = number(x or 0, "show_overlay x"), number(y or 0, "show_overlay y")
+    if fill ~= nil then o.has_fill = 1; for k = 0, 3 do o.fill_rgba[k] = fill[k] end end
+    if stroke ~= nil then o.has_stroke = 1; for k = 0, 3 do o.stroke_rgba[k] = stroke[k] end end
+    o.stroke_width = width
+    local id = lib.C.cadaclysm_view_show_overlay(self:_live("cadaclysm_view_show_overlay"), o)
+    local _ = b   -- held to here: the library read it in place
+    return overlay(self, id, name, shape)
+  end
+
+  --- Text over the window: its box hangs from `anchor` by the same point (its top-right corner
+  --- for "top-right"), `x`, `y` pixels inward -- the box's padding included where it has one.
+  --- `opts`: size (12), colour ("white"), box, padding (4), font, order (0), as show_text's in pixels.
+  --- `set_text` changes it cheaply (a frame counter).
+  function View:show_overlay_text(text, anchor, x, y, opts)
+    opts = opts or {}
+    local lib = self._lib
+    local s = text_of(text)
+    local code, name = anchor_of(anchor, "show_overlay_text")
+    local t = ffi.new("CadaclysmViewText")
+    t.size, t.text, t.mode = ffi.sizeof("CadaclysmViewText"), s, 2   -- CADACLYSM_VIEW_TEXT_SCREEN
+    t.height = opts.size == nil and 12 or number(opts.size, "show_overlay_text size")
+    local rgb = floats3(opts.colour or "white", "show_overlay_text colour", lib)
+    for k = 0, 2 do t.rgb[k] = rgb[k] end
+    t.align = code
+    t.offset[0], t.offset[1] = number(x or 0, "show_overlay_text x"), number(y or 0, "show_overlay_text y")
+    if opts.box then local bx = rgba4(opts.box, "show_overlay_text box", lib); for k = 0, 3 do t.box_rgba[k] = bx[k] end end
+    t.box_padding = opts.padding == nil and 4 or number(opts.padding, "show_overlay_text padding")
+    t.on_top = 1
+    t.font = opts.font == nil and 0 or uint(opts.font, "show_overlay_text font")
+    t.order = opts.order == nil and 0 or number(opts.order, "show_overlay_text order")
+    return overlay(self, lib.C.cadaclysm_view_show_text(self:_live("cadaclysm_view_show_text"), t), name, s)
+  end
+
+  --- An image over the window: `rgba` (a string, a table of bytes or a uint8_t array of
+  --- w * h * 4, rows from the top, straight alpha), its box hanging from `anchor` by the same
+  --- point, `x`, `y` pixels inward. `opts`: draw_width, draw_height (0: its own size), opacity
+  --- (more than 0, at most 1), order (0).
+  function View:show_overlay_image(rgba, w, h, anchor, x, y, opts)
+    opts = opts or {}
+    uint(w, "show_overlay_image width")
+    uint(h, "show_overlay_image height")
+    local code, name = anchor_of(anchor, "show_overlay_image")
+    local need, pixels, have = w * h * 4, nil, nil
+    if type(rgba) == "string" then
+      pixels, have = rgba, #rgba
+    elseif type(rgba) == "table" then
+      pixels = carray("uint8_t", rgba, "show_overlay_image rgba")
+      have = #rgba
+    elseif type(rgba) == "cdata" and tostring(ffi.typeof(rgba)):find("%[") and not tostring(ffi.typeof(rgba)):find("%*") then
+      pixels, have = rgba, ffi.sizeof(rgba)
+    else
+      fail("show_overlay_image: rgba is a string, a table of bytes or a uint8_t array, not " .. describe(rgba), 2)
+    end
+    if need ~= have then fail(("show_overlay_image: %d x %d pixels need %d bytes (w * h * 4), not %d"):format(w, h, need, have), 2) end
+    local opacity = opts.opacity == nil and 1 or number(opts.opacity, "show_overlay_image opacity")
+    if not (opacity > 0) then fail(("show_overlay_image: opacity %s: more than 0, at most 1 (0 would be the library's 1)"):format(tostring(opacity)), 2) end
+    local img = ffi.new("CadaclysmViewOverlayImage")
+    img.size, img.anchor = ffi.sizeof("CadaclysmViewOverlayImage"), code
+    img.rgba = type(pixels) == "string" and ffi.cast("const uint8_t *", pixels) or pixels
+    img.width, img.height = w, h
+    img.offset[0], img.offset[1] = number(x or 0, "show_overlay_image x"), number(y or 0, "show_overlay_image y")
+    img.extent[0] = opts.draw_width == nil and 0 or number(opts.draw_width, "show_overlay_image draw_width")
+    img.extent[1] = opts.draw_height == nil and 0 or number(opts.draw_height, "show_overlay_image draw_height")
+    img.opacity = opacity
+    img.order = opts.order == nil and 0 or number(opts.order, "show_overlay_image order")
+    local id = self._lib.C.cadaclysm_view_show_overlay_image(self:_live("cadaclysm_view_show_overlay_image"), img)
+    local _ = pixels   -- held to here: the library copied it
+    return overlay(self, id, name, nil)
+  end
+
+  --- Moved to `x`, `y` pixels inward from its anchor -- or from `anchor` instead, which it then
+  --- hangs from (cadaclysm_view_move_overlay): cheap, for a HUD element that moves every frame.
+  function Overlay:move_to(x, y, anchor)
+    local code, name = anchor_of(anchor or self.anchor, "move_to")
+    local view = self.view
+    if not view._lib.C.cadaclysm_view_move_overlay(view:_live("cadaclysm_view_move_overlay"), self.id, code,
+        number(x, "move_to x"), number(y, "move_to y")) then
+      failure(view._lib, 2)
+    end
+    self.anchor = name
+  end
 end
 
 --- The clear colour: text ("#rgb", "#rrggbb", a CSS colour name) or three numbers in 0..1.
@@ -1007,16 +1171,56 @@ function View:occluded_style(t)
   end
   ok(self, C.cadaclysm_view_set_occluded_style(self:_live("cadaclysm_view_set_occluded_style"), s))
 end
+-- The colour every line on `layer` (CADACLYSM_VIEW_LAYER_EDGES, _CURVES or _ISOCURVES) draws
+-- in: `rgb` (text or three numbers in 0..1), or with `from_part` each part's own colour.
+function View:_set_line_colour(layer, rgb, from_part, what)
+  if rgb == nil then fail(what .. ": a colour, not nil", 3) end
+  local c = floats3(rgb, what, self._lib)
+  ok(self, self._lib.C.cadaclysm_view_set_line_colour(self:_live("cadaclysm_view_set_line_colour"), layer, c, from_part and 1 or 0))
+end
+function View:_line_colour(layer)
+  local out, part = ffi.new("float[3]"), ffi.new("uint32_t[1]")
+  ok(self, self._lib.C.cadaclysm_view_line_colour(self:_live("cadaclysm_view_line_colour"), layer, out, part))
+  return { colour = { out[0], out[1], out[2] }, from_part = part[0] ~= 0 }
+end
+--- The colour every edge draws in: `rgb` (text or three numbers in 0..1), or with `from_part`
+--- true each part's own colour, brightened so an edge reads over its faces. An item's
+--- Item:set_edge_colour draws over it.
+function View:set_edge_colour(rgb, from_part) self:_set_line_colour(1, rgb, from_part, "set_edge_colour") end
+--- The edges' colour in use: { colour = {r, g, b}, from_part }.
+function View:edge_colour() return self:_line_colour(1) end
+--- The colour every curve (a curves or lines item's) draws in: `rgb`, or with `from_part` each
+--- part's own colour -- the default.
+function View:set_curve_colour(rgb, from_part) self:_set_line_colour(2, rgb, from_part, "set_curve_colour") end
+--- The curves' colour in use: { colour = {r, g, b}, from_part }.
+function View:curve_colour() return self:_line_colour(2) end
+--- The colour every isocurve draws in: `rgb`, or with `from_part` each part's own colour.
+function View:set_isocurve_colour(rgb, from_part) self:_set_line_colour(3, rgb, from_part, "set_isocurve_colour") end
+--- The isocurves' colour in use: { colour = {r, g, b}, from_part }.
+function View:isocurve_colour() return self:_line_colour(3) end
 function View:needs_draw() return self._lib.C.cadaclysm_view_needs_draw(self:_live("cadaclysm_view_needs_draw")) end
+--- What the view has drawn (cadaclysm_view_stats, 1.25): { frames_drawn, last_frame_ms, last_gpu_ms, triangles,
+--- draw_calls }. `frames_drawn` counts every frame drawn to the window and every image() rendered -- a pump or
+--- draw that owes nothing adds none, so an FPS counter read from it stays right while the scene is still;
+--- `last_gpu_ms` is -1 where the GPU's time cannot be measured.
+function View:stats()
+  local out = ffi.new("CadaclysmViewStats")
+  out.size = ffi.sizeof("CadaclysmViewStats")
+  ok(self, self._lib.C.cadaclysm_view_stats(self:_live("cadaclysm_view_stats"), out))
+  return { frames_drawn = tonumber(out.frames_drawn), last_frame_ms = tonumber(out.last_frame_ms),
+    last_gpu_ms = tonumber(out.last_gpu_ms), triangles = tonumber(out.triangles), draw_calls = tonumber(out.draw_calls) }
+end
 
 -- A hit as every pick answer carries it (Python's `_pick_dict`): the item, node and face,
 -- `clicks` (2 for a double click, else 1) and `point` -- where the ray met the model, in the
 -- coordinates the items were shown in -- or nil where the library read no depth (no hit to
--- place, a machining stock, the terminal library). Nil for no item.
+-- place, a machining stock, the terminal library), and `overlay` (1.24): true where the item is
+-- an overlay, over the pixel, so nothing of the scene beneath it was picked. Nil for no item.
 local function pick_of(raw)
   if raw.item == 0 then return nil end
   return { item = raw.item, node = raw.node, face = raw.face, clicks = raw.clicks,
-    point = raw.has_point ~= 0 and { raw.point[0], raw.point[1], raw.point[2] } or nil }
+    point = raw.has_point ~= 0 and { raw.point[0], raw.point[1], raw.point[2] } or nil,
+    overlay = raw.overlay ~= 0 }
 end
 
 --- What is under pixel (x, y) of `viewport` (default 0): { item, node, face, clicks, point }, or nil for nothing.
@@ -1475,6 +1679,27 @@ function Item:finish(finish)
   local f = finish ~= nil and FINISH[finish] or nil
   if type(f) ~= "number" then error(("finish: '%s' is not 'gloss', 'satin' or 'matte'"):format(tostring(finish)), 2) end
   item_ok(self, self.view._lib.C.cadaclysm_view_set_finish(self.view:_live("cadaclysm_view_set_finish"), self.id, f))
+end
+-- The item's lines on `layer` (CADACLYSM_VIEW_LAYER_EDGES, _CURVES or _ISOCURVES) in `rgb`;
+-- nil takes the view's colour again.
+function Item:_line_colour(layer, rgb, what)
+  local c = rgb ~= nil and floats3(rgb, what, self.view._lib) or nil
+  item_ok(self, self.view._lib.C.cadaclysm_view_set_item_line_colour(self.view:_live("cadaclysm_view_set_item_line_colour"), self.id, layer, c))
+end
+--- Draws the item's edges in `rgb` (text or three numbers in 0..1), over the view's
+--- View:set_edge_colour, the item's colour and a solid's own edge paint; nil takes the view's
+--- colour again.
+function Item:set_edge_colour(rgb) self:_line_colour(1, rgb, "set_edge_colour") end
+--- The item's curves in `rgb`, over the view's curve colour and its colour; nil clears.
+function Item:set_curve_colour(rgb) self:_line_colour(2, rgb, "set_curve_colour") end
+--- The item's isocurves in `rgb`, over the view's isocurve colour and its colour; nil clears.
+function Item:set_isocurve_colour(rgb) self:_line_colour(3, rgb, "set_isocurve_colour") end
+-- The user layer the item is on, 0..31 (every item starts on 0): it draws while the layer is
+-- on (View:user_layer) and in the viewports whose layer_mask has its bit. A layer past 31 is
+-- refused.
+function Item:user_layer(layer)
+  number(layer, "user_layer layer")
+  item_ok(self, self.view._lib.C.cadaclysm_view_set_item_layer(self.view:_live("cadaclysm_view_set_item_layer"), self.id, layer))
 end
 function Item:node_visible(node, on)
   local index = node_index(node, "node_visible node")

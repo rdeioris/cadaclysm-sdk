@@ -464,9 +464,21 @@ public final class Cad {
             FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_CROSSING_COUNT, FEM_CROSSING, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
             NODE_EDGE_COLORS, NODE_SURFACE_EDGE_COLORS, PARSE_COLOUR;
 
+    /** {@code {flavour, features}} of the loaded library, or null for the separate {@code
+     *  cadaclysm_capi} of earlier releases; see {@link #flavour()}. Assigned before any
+     *  {@link #bind}, which reads it. */
+    private static final String[] FLAVOURED;
+
     static {
-        SymbolLookup lib = Loader.resolve(Loader.CAPI_LIBRARY);
+        SymbolLookup lib = Loader.resolve(Loader.READER_STEMS);
         Linker linker = Linker.nativeLinker();
+        // A flavour of the single library binds what it has (see bind); one with no node API
+        // at all, the kernel flavour, is refused here, at first use of this class.
+        FLAVOURED = Loader.flavourOf(linker, lib);
+        if (FLAVOURED != null && !Loader.hasFeature(FLAVOURED, "nodes")) {
+            throw new CadaclysmException("the '" + FLAVOURED[0] + "' flavour has no node API; "
+                    + "load cadaclysm, cadaclysm_kernel_reader or cadaclysm_reader");
+        }
         ValueLayout.OfInt I = ValueLayout.JAVA_INT;
         ValueLayout.OfLong L = ValueLayout.JAVA_LONG;
         ValueLayout.OfDouble D = ValueLayout.JAVA_DOUBLE;
@@ -694,10 +706,20 @@ public final class Cad {
         KINEMATICS_BASE = bind(linker, lib, "cadaclysm_kinematics_base", FunctionDescriptor.of(I, A));
     }
 
+    /** One entry point. On a flavour that leaves it out, a handle that throws naming the
+     *  flavour, when called; a separate library of an earlier release must have it, as before. */
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
     private static MethodHandle bind(Linker linker, SymbolLookup lib, String name, FunctionDescriptor fd) {
-        return linker.downcallHandle(
-                lib.find(name).orElseThrow(() -> new UnsatisfiedLinkError(name)), fd);
+        var symbol = lib.find(name);
+        if (symbol.isEmpty() && FLAVOURED != null) return Loader.notInFlavour(name, fd, FLAVOURED, CadaclysmException::new);
+        return linker.downcallHandle(symbol.orElseThrow(() -> new UnsatisfiedLinkError(name)), fd);
+    }
+
+    /** {@code t} out of a downcall as an unchecked exception: a flavour's missing entry point
+     *  throws a {@link CadaclysmException}, which comes out as itself; anything else out of
+     *  {@code invokeExact} is a linkage mistake in this file, wrapped. */
+    private static RuntimeException unchecked(Throwable t) {
+        return t instanceof RuntimeException r ? r : new RuntimeException(t);
     }
 
     /** A named field's byte offset in one of the struct layouts above. */
@@ -723,7 +745,7 @@ public final class Cad {
         try {
             return string((MemorySegment) LAST_ERROR.invokeExact());
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -732,12 +754,25 @@ public final class Cad {
         return e.isEmpty() ? fallback : e;
     }
 
+    /** Which library this is: {@code "full"}, {@code "kernel-reader"} or {@code "reader"} for a
+     *  flavour of the single library, {@code "reader"} for the separate {@code cadaclysm_capi} of
+     *  earlier releases. */
+    public static String flavour() {
+        return FLAVOURED == null ? "reader" : FLAVOURED[0];
+    }
+
+    /** The features the library was built with, comma-separated ({@code "nodes,kernel,bim"}), or
+     *  {@code ""} for the separate {@code cadaclysm_capi} of earlier releases. */
+    public static String features() {
+        return FLAVOURED == null ? "" : FLAVOURED[1];
+    }
+
     /** The version of the library actually loaded, which is the one worth reporting. */
     public static String version() {
         try {
             return string((MemorySegment) VERSION.invokeExact());
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -746,7 +781,7 @@ public final class Cad {
         try {
             return string((MemorySegment) BUILD_DATE.invokeExact());
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -770,7 +805,7 @@ public final class Cad {
         try {
             return (boolean) LICENSE_SET.invokeExact(textOrPath);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -783,7 +818,7 @@ public final class Cad {
             MemorySegment p = (MemorySegment) LICENSE_INFO.invokeExact();
             return p.address() == 0 ? "unlicensed" : string(p);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -792,7 +827,7 @@ public final class Cad {
         try {
             return (long) LICENSE_NOTICE_COUNT.invokeExact();
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -801,7 +836,7 @@ public final class Cad {
         try {
             return (int) LOD_LEVELS.invokeExact();
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -836,7 +871,7 @@ public final class Cad {
         try {
             count = (int) FORMAT_COUNT.invokeExact();
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
         List<Format> out = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
@@ -852,7 +887,7 @@ public final class Cad {
         try {
             return string((MemorySegment) function.invokeExact(index));
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -865,7 +900,7 @@ public final class Cad {
             MemorySegment raw = (MemorySegment) PICK_SAVE.invokeExact(MemorySegment.NULL, name);
             return stringOrNull(raw);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -873,7 +908,7 @@ public final class Cad {
         try {
             return (int) MESH_FORMAT_COUNT.invokeExact();
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -881,7 +916,7 @@ public final class Cad {
         try {
             return string((MemorySegment) MESH_FORMAT.invokeExact(index));
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -889,7 +924,7 @@ public final class Cad {
         try {
             return string((MemorySegment) MESH_FORMAT_EXTENSION.invokeExact(index));
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -903,7 +938,7 @@ public final class Cad {
             MemorySegment raw = (MemorySegment) PICK_FILE.invokeExact(MemorySegment.NULL);
             return stringOrNull(raw);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -1006,7 +1041,7 @@ public final class Cad {
         try {
             OPEN_OPTIONS_INIT.invokeExact(options);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -1023,7 +1058,7 @@ public final class Cad {
         try {
             return (MemorySegment) OPEN.invokeExact(path, options);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -1032,7 +1067,7 @@ public final class Cad {
         try {
             return (MemorySegment) OPEN_MEMORY.invokeExact(bytes, length, format, options);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -1384,7 +1419,7 @@ public final class Cad {
                 return ((int) Math.round(c[0] * 255) << 16) | ((int) Math.round(c[1] * 255) << 8) | (int) Math.round(c[2] * 255);
             }
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
         throw new CadaclysmException("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '" + colour + "'");
     }
@@ -1432,7 +1467,7 @@ public final class Cad {
         try {
             SVG_OPTIONS_INIT.invokeExact(options);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -2279,7 +2314,7 @@ public final class Cad {
             try {
                 BREP_RELEASE.invokeExact(MemorySegment.ofAddress(a));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
     }
@@ -2509,7 +2544,7 @@ public final class Cad {
             try {
                 return string((MemorySegment) BREP_LAYOUT_ID.invokeExact());
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -2530,7 +2565,7 @@ public final class Cad {
                 try {
                     ok = (boolean) BREP_MANIFOLD.invokeExact(p, out);
                 } catch (Throwable t) {
-                    throw new RuntimeException(t);
+                    throw unchecked(t);
                 }
                 if (!ok) throw new CadaclysmException(lastErrorOr("manifold"));
                 return Manifold.of(out.toArray(ValueLayout.JAVA_INT));
@@ -2558,7 +2593,7 @@ public final class Cad {
                     raw = (MemorySegment) BREP_SEW.invokeExact(p, tolerance == null ? Double.NaN : tolerance,
                             vertex == null ? Double.NaN : vertex, counts, gaps);
                 } catch (Throwable t) {
-                    throw new RuntimeException(t);
+                    throw unchecked(t);
                 }
                 if (raw.address() == 0) throw new CadaclysmException(lastErrorOr("sew"));
                 int[] c = counts.toArray(ValueLayout.JAVA_INT);
@@ -2588,7 +2623,7 @@ public final class Cad {
             try {
                 h = (MemorySegment) BREP_HEALTH.invokeExact(p, tolerance == null ? Double.NaN : tolerance, mesh);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
             if (h.address() == 0) throw new CadaclysmException(lastErrorOr("health"));
             try (Arena arena = Arena.ofConfined()) {
@@ -2611,12 +2646,12 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             } finally {
                 try {
                     BREP_HEALTH_FREE.invokeExact(h);
                 } catch (Throwable t) {
-                    throw new RuntimeException(t);
+                    throw unchecked(t);
                 }
                 java.lang.ref.Reference.reachabilityFence(this);
             }
@@ -2649,7 +2684,7 @@ public final class Cad {
             try {
                 h = (MemorySegment) BREP_HEALED.invokeExact(p, tolerance == null ? Double.NaN : tolerance, healFlags(edges, faces, holes));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
             if (h.address() == 0) throw new CadaclysmException(lastErrorOr("healed"));
             try (Arena arena = Arena.ofConfined()) {
@@ -2666,12 +2701,12 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             } finally {
                 try {
                     BREP_HEAL_FREE.invokeExact(h);
                 } catch (Throwable t) {
-                    throw new RuntimeException(t);
+                    throw unchecked(t);
                 }
                 java.lang.ref.Reference.reachabilityFence(this);
             }
@@ -2686,7 +2721,7 @@ public final class Cad {
                 double t = (double) BREP_EDGE_TOLERANCE.invokeExact(p, edge);
                 return Double.isNaN(t) ? null : t;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             } finally {
                 java.lang.ref.Reference.reachabilityFence(this);
             }
@@ -2721,7 +2756,7 @@ public final class Cad {
             try {
                 MESHLETS_FREE.invokeExact(MemorySegment.ofAddress(a));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
     }
@@ -2767,7 +2802,7 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -2817,7 +2852,7 @@ public final class Cad {
             try {
                 return (float) MESHLET_ERROR.invokeExact(handle(), i);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -2844,7 +2879,7 @@ public final class Cad {
                         indices.asSlice(0, triangleCount * 3L * Integer.BYTES).toArray(ValueLayout.JAVA_INT),
                         children.asSlice(0, (long) childCount * Integer.BYTES).toArray(ValueLayout.JAVA_INT));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
     }
@@ -2854,7 +2889,7 @@ public final class Cad {
         try {
             return (int) function.invokeExact(handle, index);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -2863,7 +2898,7 @@ public final class Cad {
         try {
             return (double) function.invokeExact(handle, index);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -2872,7 +2907,7 @@ public final class Cad {
         try {
             POSE_FREE.invokeExact(pose);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -2966,7 +3001,7 @@ public final class Cad {
             try {
                 FEM_FREE.invokeExact(MemorySegment.ofAddress(a));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
     }
@@ -3029,7 +3064,7 @@ public final class Cad {
                 try {
                     ok = (boolean) FEM_VIEW.invokeExact(raw, out);
                 } catch (Throwable t) {
-                    throw new RuntimeException(t);
+                    throw unchecked(t);
                 }
                 if (!ok) {
                     String why = lastErrorOr("fem mesh view");
@@ -3140,7 +3175,7 @@ public final class Cad {
                     try {
                         ok = (boolean) FEM_EDGE_AT.invokeExact(h, i, raw);
                     } catch (Throwable t) {
-                        throw new RuntimeException(t);
+                        throw unchecked(t);
                     }
                     if (!ok) throw new CadaclysmException(lastErrorOr("fem mesh edge " + i));
                     out.add(new FemEdge(
@@ -3180,7 +3215,7 @@ public final class Cad {
                     try {
                         ok = (boolean) FEM_VERTEX_AT.invokeExact(h, i, raw);
                     } catch (Throwable t) {
-                        throw new RuntimeException(t);
+                        throw unchecked(t);
                     }
                     if (!ok) throw new CadaclysmException(lastErrorOr("fem mesh vertex " + i));
                     out.add(new FemVertex(
@@ -3253,7 +3288,7 @@ public final class Cad {
                         try {
                             ok = (boolean) FEM_CROSSING.invokeExact(h, i, a, b);
                         } catch (Throwable t) {
-                            throw new RuntimeException(t);
+                            throw unchecked(t);
                         }
                         if (!ok) throw new CadaclysmException(lastErrorOr("fem mesh crossing " + i));
                         out.add(pair.toArray(ValueLayout.JAVA_INT));
@@ -3279,7 +3314,7 @@ public final class Cad {
                     try {
                         ok = (boolean) row.invokeExact(h, i, a, b, edge);
                     } catch (Throwable t) {
-                        throw new RuntimeException(t);
+                        throw unchecked(t);
                     }
                     if (!ok) throw new CadaclysmException(lastErrorOr("fem mesh " + what + " " + i));
                     out.add(triple.toArray(ValueLayout.JAVA_INT));
@@ -3376,7 +3411,7 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             } finally {
                 java.lang.ref.Reference.reachabilityFence(this);
             }
@@ -3396,7 +3431,7 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             } finally {
                 java.lang.ref.Reference.reachabilityFence(this);
             }
@@ -3458,7 +3493,7 @@ public final class Cad {
         try {
             return (int) PLACEMENT_GEOMETRY.invokeExact(scene, index);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -3466,7 +3501,7 @@ public final class Cad {
         try {
             return (int) PLACEMENT_SELECT.invokeExact(scene, index);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -3474,7 +3509,7 @@ public final class Cad {
         try {
             PLACEMENT_TRANSFORM.invokeExact(scene, index, out);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -3589,7 +3624,7 @@ public final class Cad {
                 rawStart = start.toArray(ValueLayout.JAVA_DOUBLE);
                 rawEnd = end.toArray(ValueLayout.JAVA_DOUBLE);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
             String kindName = stringOrNull(invokeStringAt(JOINT_PAIR_KIND_NAME, scene.handle(), index));
             if (kindName == null) kindName = PairKind.of(kind).name().toLowerCase(java.util.Locale.ROOT);
@@ -3600,7 +3635,7 @@ public final class Cad {
                 long written = (long) JOINT_PAIR_PARAMETERS.invokeExact(scene.handle(), index, out, count);
                 for (long i = 0; i < written; i++) parameters.add(out.getAtIndex(ValueLayout.JAVA_DOUBLE, i));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
             int freedomCount = invokeIntAt(JOINT_FREEDOM_COUNT, scene.handle(), index);
             List<Freedom> freedoms = new ArrayList<>(freedomCount);
@@ -3685,7 +3720,7 @@ public final class Cad {
             double upper = out.get(ValueLayout.JAVA_DOUBLE, offset(FREEDOM, "upper"));
             return new Freedom(motion, axis, hasLower ? lower : null, hasUpper ? upper : null);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -3784,7 +3819,7 @@ public final class Cad {
             seconds = (double) SEQUENCE_SECONDS_PER_UNIT.invokeExact(scene.handle(), index);
             segmentCount = (int) SEQUENCE_SEGMENT_COUNT.invokeExact(scene.handle(), index);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
         List<Segment> segments = new ArrayList<>(segmentCount);
         for (int i = 0; i < segmentCount; i++) {
@@ -3801,7 +3836,7 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
         return new Sequence(index, name, closed,
@@ -3842,7 +3877,7 @@ public final class Cad {
                 for (int i = 0; i < Math.min(count, written); i++)
                     found.add(new Node(scene, out.getAtIndex(ValueLayout.JAVA_INT, i)));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
             return found;
         }
@@ -3887,14 +3922,14 @@ public final class Cad {
                 int p = out.get(ValueLayout.JAVA_INT, 0);
                 if (has && p >= 0 && p < tasks.length && !visiting[p]) parent = buildTask(tasks, p, visiting);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
             MemorySegment h = scene.handle();
             boolean milestone;
             try {
                 milestone = (boolean) TASK_MILESTONE.invokeExact(h, index, i);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
             tasks[i] = new Task(index, i,
                     string(invokeStringAt(TASK_NAME, h, index, i)),
@@ -3926,7 +3961,7 @@ public final class Cad {
                             string(invokeStringAt(TASK_LINK_KIND_NAME, scene.handle(), index, i)),
                             hasLag.get(ValueLayout.JAVA_BOOLEAN, 0) ? lag.get(ValueLayout.JAVA_DOUBLE, 0) : null));
                 } catch (Throwable t) {
-                    throw new RuntimeException(t);
+                    throw unchecked(t);
                 }
             }
             return found;
@@ -3970,7 +4005,7 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
     }
@@ -4013,7 +4048,7 @@ public final class Cad {
         } catch (CadaclysmException e) {
             throw e;
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4025,7 +4060,7 @@ public final class Cad {
             if ((boolean) SCHEDULE_START.invokeExact(h, index, out)) start = out.get(ValueLayout.JAVA_DOUBLE, 0);
             if ((boolean) SCHEDULE_FINISH.invokeExact(h, index, out)) finish = out.get(ValueLayout.JAVA_DOUBLE, 0);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
         return new WorkSchedule(index,
                 string(invokeStringAt(SCHEDULE_NAME, h, index)),
@@ -4047,7 +4082,7 @@ public final class Cad {
             Joint joint = jointIndex == NONE ? null : new Joint(scene, jointIndex);
             return new StateValue(joint, values);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4208,7 +4243,7 @@ public final class Cad {
             try {
                 return (boolean) NODE_VISIBLE.invokeExact(scene.handle(), index);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4246,7 +4281,7 @@ public final class Cad {
             try {
                 return (int) NODE_DEPTH.invokeExact(scene.handle(), index);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4297,7 +4332,7 @@ public final class Cad {
             try {
                 return (boolean) NODE_CAN_MESH.invokeExact(scene.handle(), index);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4408,7 +4443,7 @@ public final class Cad {
                 boolean has = (boolean) NODE_COLOR.invokeExact(scene.handle(), index, rgba);
                 return has ? rgba.toArray(ValueLayout.JAVA_FLOAT) : null;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4424,7 +4459,7 @@ public final class Cad {
                 NODE_TRANSFORM.invokeExact(scene.handle(), index, out);
                 return out.toArray(ValueLayout.JAVA_DOUBLE);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4437,7 +4472,7 @@ public final class Cad {
                         scene.handle(), index);
                 return readBounds(raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4450,7 +4485,7 @@ public final class Cad {
                         scene.handle(), index);
                 return readBounds64(raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4462,7 +4497,7 @@ public final class Cad {
             try {
                 raw = (MemorySegment) NODE_BREP.invokeExact(scene.handle(), index);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
             return raw.address() == 0 ? null : new Brep(raw);
         }
@@ -4474,7 +4509,7 @@ public final class Cad {
                 SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(MESH));
                 return meshOf((MemorySegment) NODE_MESH.invokeExact(allocator, scene.handle(), index));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4488,7 +4523,7 @@ public final class Cad {
                 SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(MESH));
                 return meshOf((MemorySegment) NODE_MESH_LOD.invokeExact(allocator, scene.handle(), index, level));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4498,7 +4533,7 @@ public final class Cad {
             try {
                 return (float) NODE_LOD_ERROR.invokeExact(scene.handle(), index, level);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4582,7 +4617,7 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4605,7 +4640,7 @@ public final class Cad {
                 SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(MESH64));
                 return mesh64Of((MemorySegment) NODE_MESH64.invokeExact(allocator, scene.handle(), index));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4630,7 +4665,7 @@ public final class Cad {
                         scene.handle(), index);
                 return buildSurfaces(raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4663,7 +4698,7 @@ public final class Cad {
                         scene.handle(), index);
                 return buildPolylines(scene, raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4684,7 +4719,7 @@ public final class Cad {
                 }
                 return out;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4725,7 +4760,7 @@ public final class Cad {
                 MemorySegment raw = (MemorySegment) function.invokeExact(allocator, scene.handle(), index);
                 return buildBeziers64(scene, raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4735,7 +4770,7 @@ public final class Cad {
                 MemorySegment raw = (MemorySegment) function.invokeExact(allocator, scene.handle(), index);
                 return buildBeziers(scene, raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4762,7 +4797,7 @@ public final class Cad {
                         out.get(ValueLayout.JAVA_INT, offset(COLLISION, "hull_vertex_count")),
                         out.get(ValueLayout.JAVA_INT, offset(COLLISION, "hull_index_count")));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4779,7 +4814,7 @@ public final class Cad {
                 int indexCount = raw.get(ValueLayout.JAVA_INT, offset(COLLISION_HULL, "index_count"));
                 return new CollisionHull(scene, positions, indices, vertexCount, indexCount);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4798,7 +4833,7 @@ public final class Cad {
                 MemorySegment raw = (MemorySegment) NODE_BOUNDS_PLACED.invokeExact(allocator, scene.handle(), index, matrix);
                 return readBounds(raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4811,7 +4846,7 @@ public final class Cad {
                 MemorySegment raw = (MemorySegment) NODE_BOUNDS_PLACED64.invokeExact(allocator, scene.handle(), index, matrix);
                 return readBounds64(raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4821,7 +4856,7 @@ public final class Cad {
             try {
                 return (boolean) NODE_IS_MESHED.invokeExact(scene.handle(), index);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4864,7 +4899,7 @@ public final class Cad {
                 boolean ok = (boolean) NODE_SURFACE_PICK.invokeExact(scene.handle(), index, a, b, hit);
                 return ok ? hit.toArray(ValueLayout.JAVA_DOUBLE) : null;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4877,7 +4912,7 @@ public final class Cad {
                 SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(MESH));
                 return meshOf((MemorySegment) NODE_SURFACE_PROXY_MESH.invokeExact(allocator, scene.handle(), index, cells));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4887,7 +4922,7 @@ public final class Cad {
             try {
                 return (long) NODE_TRIANGLE_ESTIMATE.invokeExact(scene.handle(), index);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -4917,7 +4952,7 @@ public final class Cad {
         try {
             return (MemorySegment) function.invokeExact(scene, index);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4925,7 +4960,7 @@ public final class Cad {
         try {
             return (int) function.invokeExact(scene, index);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4933,7 +4968,7 @@ public final class Cad {
         try {
             return (int) NODE_CHILD.invokeExact(scene, node, i);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4942,7 +4977,7 @@ public final class Cad {
         try {
             return (int) h.invokeExact(scene, a, b);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4953,7 +4988,7 @@ public final class Cad {
                     scene, node, i);
             return buildAttribute(raw);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4961,7 +4996,7 @@ public final class Cad {
         try {
             return (boolean) NODE_SAVE_MESH.invokeExact(scene, node, path, format);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4969,7 +5004,7 @@ public final class Cad {
         try {
             return (MemorySegment) NODE_SVG_TEXT.invokeExact(scene, node, options);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4977,7 +5012,7 @@ public final class Cad {
         try {
             return (MemorySegment) NODE_SILHOUETTE_BEZIERS.invokeExact(allocator, scene, node, options);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -4985,7 +5020,7 @@ public final class Cad {
         try {
             return (boolean) NODE_SVG.invokeExact(scene, node, path, options);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -5033,7 +5068,7 @@ public final class Cad {
             try {
                 CLOSE.invokeExact(MemorySegment.ofAddress(a));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
     }
@@ -5148,7 +5183,7 @@ public final class Cad {
             try {
                 return string((MemorySegment) SCHEMA.invokeExact(handle()));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5157,7 +5192,7 @@ public final class Cad {
             try {
                 return string((MemorySegment) SCHEMA_READ.invokeExact(handle()));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5184,7 +5219,7 @@ public final class Cad {
             try {
                 return (double) METRES_PER_UNIT.invokeExact(handle());
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5205,7 +5240,7 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5217,7 +5252,7 @@ public final class Cad {
                 MemorySegment raw = (MemorySegment) BOUNDS_OF.invokeExact(allocator, handle());
                 return readBounds(raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5228,7 +5263,7 @@ public final class Cad {
                 MemorySegment raw = (MemorySegment) BOUNDS64_ALL.invokeExact(allocator, handle());
                 return readBounds64(raw);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5335,7 +5370,7 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5355,7 +5390,7 @@ public final class Cad {
             } catch (CadaclysmException e) {
                 throw e;
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5374,7 +5409,7 @@ public final class Cad {
                         POSE_NODE_TRANSFORM.invokeExact(ptr, node, out);
                         transforms[node] = out.toArray(ValueLayout.JAVA_DOUBLE);
                     } catch (Throwable t) {
-                        throw new RuntimeException(t);
+                        throw unchecked(t);
                     }
                 }
                 int unsolvedCount = invokeIntOf(POSE_UNSOLVED_COUNT, ptr);
@@ -5396,7 +5431,7 @@ public final class Cad {
                                     freedomOut.get(ValueLayout.JAVA_INT, 0), valueOut.get(ValueLayout.JAVA_DOUBLE, 0)));
                         }
                     } catch (Throwable t) {
-                        throw new RuntimeException(t);
+                        throw unchecked(t);
                     }
                 }
                 int diagnosticCount = invokeIntOf(POSE_DIAGNOSTIC_COUNT, ptr);
@@ -5426,7 +5461,7 @@ public final class Cad {
             try {
                 return stringOrNull((MemorySegment) SOURCE_NAME.invokeExact(handle()));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5509,7 +5544,7 @@ public final class Cad {
             try {
                 return (int) REALIZE_MESHES.invokeExact(handle(), skipSurfaced ? 1 : 0);
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5529,7 +5564,7 @@ public final class Cad {
             try {
                 CANCEL.invokeExact(handle());
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
 
@@ -5543,7 +5578,7 @@ public final class Cad {
             try {
                 FORGET_MESHES.invokeExact(handle());
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
             forgets++;
         }
@@ -5622,7 +5657,7 @@ public final class Cad {
                 SURFACE_MATRIX.invokeExact(handle(), out);
                 return toRowMajor(out.toArray(ValueLayout.JAVA_FLOAT));
             } catch (Throwable t) {
-                throw new RuntimeException(t);
+                throw unchecked(t);
             }
         }
     }
@@ -5631,7 +5666,7 @@ public final class Cad {
         try {
             return (int) function.invokeExact(scene);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -5639,7 +5674,7 @@ public final class Cad {
         try {
             return (MemorySegment) function.invokeExact(scene, a, b);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -5647,7 +5682,7 @@ public final class Cad {
         try {
             return (MemorySegment) function.invokeExact(scene, index);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -5655,7 +5690,7 @@ public final class Cad {
         try {
             return (int) ROOT.invokeExact(scene, index);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -5663,7 +5698,7 @@ public final class Cad {
         try {
             return (int) QUERY.invokeExact(scene, filter, out, capacity);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -5671,7 +5706,7 @@ public final class Cad {
         try {
             return (boolean) SCENE_SAVE.invokeExact(scene, path, format);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -5679,7 +5714,7 @@ public final class Cad {
         try {
             return (MemorySegment) SCENE_SVG_TEXT.invokeExact(scene, options);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
@@ -5687,16 +5722,17 @@ public final class Cad {
         try {
             return (boolean) SCENE_SVG.invokeExact(scene, path, options);
         } catch (Throwable t) {
-            throw new RuntimeException(t);
+            throw unchecked(t);
         }
     }
 
     // ---- Loader -------------------------------------------------------------------------
 
     /**
-     * Resolves {@code cadaclysm_capi} for every entry point {@link Cad} declares, and {@code
-     * cadaclysm_blacksmith} for {@code Blacksmith.java}'s, so both share one search and one
-     * arena. Nested in {@link Cad} rather than a second top-level class in this file, because
+     * Resolves the library for every entry point {@link Cad} declares -- one of {@link
+     * #READER_STEMS}, in that order -- and holds what {@code Blacksmith.java} shares: the arena,
+     * {@link #KERNEL_STEMS}, the flavour query and the stand-in for an entry point a flavour
+     * leaves out. Nested in {@link Cad} rather than a second top-level class in this file, because
      * javac's {@code auxiliaryclass} lint (rightly) refuses the latter from another source
      * file: a class only findable when its neighbour is on the same javac line is a build
      * that works by accident.
@@ -5704,7 +5740,8 @@ public final class Cad {
      * <p>The reader's rule: {@code CADACLYSM_LIBRARY} as a directory or the file itself; then
      * beside this class's own jar or class directory; then {@code lib/} and {@code
      * target/release} or {@code target/debug} in every ancestor; then the platform's own
-     * search. A variable naming a file or a directory that holds neither library is a mistake
+     * search. Each place is asked for every name in {@link #READER_STEMS}, in order. A
+     * variable naming a file or a directory that holds no cadaclysm library is a mistake
      * worth failing on, not a hint to fall through and load something else by accident. The
      * kernel has its own rule, {@code cadaclysm_blacksmith.py}'s, in {@code Blacksmith.java};
      * it shares {@link #ARENA} and {@link #codeLocation} from here.
@@ -5723,13 +5760,78 @@ public final class Cad {
         // on the `bind(linker, lib, "..."` lookup now; the split does no harm and stays.
         static final String CAPI_LIBRARY = "cadaclysm" + "_capi";
         static final String BLACKSMITH_LIBRARY = "cadaclysm" + "_blacksmith";
-        private static final String[] LIBRARIES = {CAPI_LIBRARY, BLACKSMITH_LIBRARY};
 
-        private static String[] filesOf(String libraryName) {
+        /** The libraries that carry the node API, in the order they are looked for: the single
+         *  library's flavours that hold it, then the separate library of earlier releases. As
+         *  {@code cadaclysm-capi-rt}'s {@code READER_STEMS}. */
+        static final String[] READER_STEMS = {"cadaclysm", "cadaclysm_kernel_reader", "cadaclysm_reader", CAPI_LIBRARY};
+        /** The libraries that carry the kernel, likewise ({@code KERNEL_STEMS}). */
+        static final String[] KERNEL_STEMS = {"cadaclysm", "cadaclysm_kernel_reader", "cadaclysm_kernel", BLACKSMITH_LIBRARY};
+        /** The four flavours: a variable naming one is meant for either half, refused at first
+         *  use by the half it lacks. */
+        private static final String[] FLAVOUR_STEMS = {"cadaclysm", "cadaclysm_kernel_reader", "cadaclysm_kernel", "cadaclysm_reader"};
+        private static final String[] LIBRARIES = {"cadaclysm", "cadaclysm_kernel_reader", "cadaclysm_kernel", "cadaclysm_reader", CAPI_LIBRARY, BLACKSMITH_LIBRARY};
+
+        /** {@code stems} as this platform names the files, in order. */
+        static String[] filesOf(String... stems) {
             String os = System.getProperty("os.name", "").toLowerCase();
-            if (os.contains("win")) return new String[]{libraryName + ".dll"};
-            if (os.contains("mac")) return new String[]{"lib" + libraryName + ".dylib"};
-            return new String[]{"lib" + libraryName + ".so"};
+            String[] files = new String[stems.length];
+            for (int i = 0; i < stems.length; i++) {
+                files[i] = os.contains("win") ? stems[i] + ".dll"
+                        : os.contains("mac") ? "lib" + stems[i] + ".dylib" : "lib" + stems[i] + ".so";
+            }
+            return files;
+        }
+
+        /** {@code {flavour, features}} for one of the single library's flavours, or null for a
+         *  separate library of an earlier release, which exports neither call. Read here, not
+         *  through {@link Cad}'s helpers, so the kernel's side never initializes the reader's. */
+        @SuppressWarnings("restricted") // downcallHandle, reinterpret: two calls every flavour exports.
+        static String[] flavourOf(Linker linker, SymbolLookup lib) {
+            var flavour = lib.find("cadaclysm_flavour");
+            var features = lib.find("cadaclysm_features");
+            if (flavour.isEmpty() || features.isEmpty()) return null;
+            FunctionDescriptor text = FunctionDescriptor.of(ValueLayout.ADDRESS);
+            try {
+                MemorySegment f = (MemorySegment) linker.downcallHandle(flavour.get(), text).invokeExact();
+                MemorySegment g = (MemorySegment) linker.downcallHandle(features.get(), text).invokeExact();
+                return new String[]{f.reinterpret(Long.MAX_VALUE).getString(0), g.reinterpret(Long.MAX_VALUE).getString(0)};
+            } catch (Throwable e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        /** Whether a flavour's comma-separated features name {@code feature}. */
+        static boolean hasFeature(String[] flavoured, String feature) {
+            return Arrays.asList(flavoured[1].split(",")).contains(feature);
+        }
+
+        /** The stand-in for entry point {@code name}, which this flavour leaves out: a handle of
+         *  the downcall's own type that throws {@code make}'s exception naming the flavour, a
+         *  fresh one each call -- so a program binding everything up front loads, and fails only
+         *  where it reaches the missing call. */
+        static MethodHandle notInFlavour(String name, FunctionDescriptor fd, String[] flavoured,
+                                         java.util.function.Function<String, ? extends RuntimeException> make) {
+            String message = name.replaceFirst("^cadaclysm_(blacksmith_)?", "") + ": not in this library's flavour ('"
+                    + flavoured[0] + "', features " + (flavoured[1].isEmpty() ? "none" : flavoured[1])
+                    + "); the full flavour has it";
+            java.lang.invoke.MethodType type = fd.toMethodType();
+            // A struct returned by value takes a leading allocator in the downcall's type.
+            if (fd.returnLayout().orElse(null) instanceof java.lang.foreign.GroupLayout) {
+                type = type.insertParameterTypes(0, SegmentAllocator.class);
+            }
+            java.util.function.Supplier<RuntimeException> fresh = () -> make.apply(message);
+            try {
+                MethodHandle get = java.lang.invoke.MethodHandles.publicLookup()
+                        .findVirtual(java.util.function.Supplier.class, "get", java.lang.invoke.MethodType.methodType(Object.class))
+                        .bindTo(fresh)
+                        .asType(java.lang.invoke.MethodType.methodType(RuntimeException.class));
+                MethodHandle raise = java.lang.invoke.MethodHandles.throwException(type.returnType(), RuntimeException.class);
+                return java.lang.invoke.MethodHandles.dropArguments(
+                        java.lang.invoke.MethodHandles.foldArguments(raise, get), 0, type.parameterList());
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException(e);
+            }
         }
 
         /** Where this class's own code lives -- a jar file or a class-file directory, either
@@ -5745,9 +5847,9 @@ public final class Cad {
             }
         }
 
-        @SuppressWarnings("restricted") // libraryLookup: the two libraries this project ships.
-        static SymbolLookup resolve(String libraryName) {
-            String[] files = filesOf(libraryName);
+        @SuppressWarnings("restricted") // libraryLookup: the libraries this project ships.
+        static SymbolLookup resolve(String[] stems) {
+            String[] files = filesOf(stems);
             List<Path> candidates = new ArrayList<>();
             for (String variable : new String[]{"CADACLYSM_LIBRARY"}) {
                 String env = System.getenv(variable);
@@ -5755,9 +5857,10 @@ public final class Cad {
                 Path at = Path.of(env);
                 if (Files.isDirectory(at)) {
                     // A directory is taken as the place the library is, as Python takes it:
-                    // one holding neither library is the same mistake as a path to nothing,
-                    // not a hint to go on searching and load some other copy. One holding
-                    // only the other library is simply not for this one (see the file case).
+                    // one holding no cadaclysm library is the same mistake as a path to
+                    // nothing, not a hint to go on searching and load some other copy. One
+                    // holding only another library is simply not for this one (see the file
+                    // case). The first of this half's names it holds is the one.
                     boolean holdsThis = false;
                     for (String file : files) {
                         if (Files.exists(at.resolve(file))) {
@@ -5765,7 +5868,7 @@ public final class Cad {
                             holdsThis = true;
                         }
                     }
-                    if (!holdsThis && !holdsEither(at)) {
+                    if (!holdsThis && !holdsAny(at)) {
                         throw new CadaclysmException(variable + "=" + env + " names nothing that exists");
                     }
                     continue;
@@ -5774,20 +5877,17 @@ public final class Cad {
                     throw new CadaclysmException(variable + "=" + env + " names nothing that exists");
                 }
                 String basename = at.getFileName().toString();
-                if (namesOneOf(basename, files)) {
+                // This half's names, or any flavour: one file for both halves, refused at first
+                // use by the half its flavour lacks.
+                if (namesOneOf(basename, files) || namesOneOf(basename, filesOf(FLAVOUR_STEMS))) {
                     candidates.add(at);
                     continue;
                 }
-                boolean namesEither = false;
-                for (String library : LIBRARIES) {
-                    if (namesOneOf(basename, filesOf(library))) namesEither = true;
+                if (!namesOneOf(basename, filesOf(LIBRARIES))) {
+                    throw new CadaclysmException(variable + "=" + env + " names no cadaclysm library");
                 }
-                if (!namesEither) {
-                    throw new CadaclysmException(
-                            variable + "=" + env + " names neither cadaclysm_capi nor cadaclysm_blacksmith");
-                }
-                // Names the *other* library: not a mistake, just not for this resolve -- the
-                // search continues (the next variable, or the walk below).
+                // Names the *other* separate library: not a mistake, just not for this resolve
+                // -- the search continues (the next variable, or the walk below).
             }
             // Beside this class's own code first, as Python looks beside its own file: the
             // class directory itself, or the directory holding the jar -- a deployment that
@@ -5809,8 +5909,15 @@ public final class Cad {
                 }
             }
             // Nothing found by walking up: the platform's own search (PATH, LD_LIBRARY_PATH,
-            // DYLD_LIBRARY_PATH).
-            return SymbolLookup.libraryLookup(files[0], ARENA);
+            // DYLD_LIBRARY_PATH), for each name in order; the last one's failure is the report.
+            for (int i = 0; i < files.length - 1; i++) {
+                try {
+                    return SymbolLookup.libraryLookup(files[i], ARENA);
+                } catch (IllegalArgumentException notThere) {
+                    // the next name
+                }
+            }
+            return SymbolLookup.libraryLookup(files[files.length - 1], ARENA);
         }
 
         private static boolean namesOneOf(String basename, String[] files) {
@@ -5818,11 +5925,9 @@ public final class Cad {
             return false;
         }
 
-        /** Whether {@code dir} holds a copy of either library. */
-        private static boolean holdsEither(Path dir) {
-            for (String library : LIBRARIES) {
-                for (String file : filesOf(library)) if (Files.exists(dir.resolve(file))) return true;
-            }
+        /** Whether {@code dir} holds any cadaclysm library. */
+        private static boolean holdsAny(Path dir) {
+            for (String file : filesOf(LIBRARIES)) if (Files.exists(dir.resolve(file))) return true;
             return false;
         }
     }

@@ -287,6 +287,17 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("point_count"),
             ValueLayout.JAVA_INT.withName("loop_count"));
 
+    /** {@code CadaclysmBlacksmithFinding} (32 bytes): one thing wrong with one argument, copied
+     *  out of a check result. The {@code kind} pointer is a static string the library owns --
+     *  copied, never freed; four bytes of padding after {@code other}. */
+    private static final MemoryLayout FINDING = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("kind"),
+            ValueLayout.JAVA_INT.withName("argument"),
+            ValueLayout.JAVA_INT.withName("index"),
+            ValueLayout.JAVA_INT.withName("other"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.JAVA_DOUBLE.withName("size"));
+
     /** {@code CadaclysmBlacksmithBox}: {@code lo} and {@code hi}, three doubles each. Named
      *  {@code BOX_LAYOUT}, not {@code BOX}: {@code BOX} is already the {@link MethodHandle} for
      *  {@code cadaclysm_blacksmith_box} (Solid.bounds's own call), on this same class. */
@@ -384,6 +395,54 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("refused"),
             ValueLayout.JAVA_INT.withName("confirmed"));
 
+    /** {@code CadaclysmBlacksmithHlrOptions} (120 bytes). {@code cadaclysm_blacksmith_hlr_options_init}
+     *  fills the whole struct, so this must match the header field for field; never reorder. */
+    private static final MemoryLayout HLR_OPTIONS_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("projection"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("direction"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("up"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("eye"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("target"),
+            ValueLayout.JAVA_DOUBLE.withName("tolerance"),
+            ValueLayout.JAVA_DOUBLE.withName("smooth_angle"),
+            ValueLayout.JAVA_DOUBLE.withName("feature_angle"),
+            ValueLayout.JAVA_INT.withName("iso"),
+            ValueLayout.JAVA_INT.withName("reserved"));
+
+    /** {@code CadaclysmBlacksmithHlrLine} (48 bytes): one line of a hidden-line view. */
+    private static final MemoryLayout HLR_LINE_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("kind"),
+            ValueLayout.JAVA_INT.withName("visible"),
+            ValueLayout.JAVA_INT.withName("solid"),
+            ValueLayout.JAVA_INT.withName("source_kind"),
+            ValueLayout.JAVA_INT.withName("source"),
+            ValueLayout.JAVA_INT.withName("source2"),
+            ValueLayout.JAVA_INT.withName("bezier_count"),
+            ValueLayout.JAVA_INT.withName("reserved"),
+            ValueLayout.JAVA_DOUBLE.withName("length2d"),
+            ValueLayout.JAVA_DOUBLE.withName("length3d"));
+
+    /** {@code CadaclysmBlacksmithHlrReport} (80 bytes): what a view's hidden-line removal did. */
+    private static final MemoryLayout HLR_REPORT_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("candidates"),
+            ValueLayout.JAVA_INT.withName("segments"),
+            ValueLayout.JAVA_INT.withName("crossings"),
+            ValueLayout.JAVA_INT.withName("pieces"),
+            ValueLayout.JAVA_INT.withName("degenerate"),
+            ValueLayout.JAVA_INT.withName("rays"),
+            ValueLayout.JAVA_INT.withName("mesh_hits"),
+            ValueLayout.JAVA_INT.withName("rejected"),
+            ValueLayout.JAVA_INT.withName("grazes"),
+            ValueLayout.JAVA_INT.withName("unsettled"),
+            ValueLayout.JAVA_INT.withName("mesh_only"),
+            ValueLayout.JAVA_INT.withName("fallback_edges"),
+            ValueLayout.JAVA_INT.withName("failed_solids"),
+            ValueLayout.JAVA_INT.withName("reserved"),
+            ValueLayout.JAVA_DOUBLE.withName("candidate_length"),
+            ValueLayout.JAVA_DOUBLE.withName("degenerate_length"),
+            ValueLayout.JAVA_DOUBLE.withName("tolerance"));
+
     /** {@code CadaclysmBlacksmithOrientedBox}: centre, three axes (row-major), three half
      *  extents. Named {@code ORIENTED_BOX_LAYOUT}, not {@code ORIENTED_BOX}: that is the
      *  {@link MethodHandle} for {@code cadaclysm_blacksmith_oriented_box}, on this same class. */
@@ -447,9 +506,30 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("crossing"),
             MemoryLayout.paddingLayout(4));
 
-    /** {@code CadaclysmBlacksmithNearestObject} (288 bytes). Only the member {@code answer_kind}
-     *  names is filled (0 {@code body}, 1 {@code pair}, 2 neither); every byte of the other is
-     *  zero, its {@code kind} a null pointer, so it is never read. */
+    /** {@code CadaclysmBlacksmithMeshPoint} (72 bytes): the nearest point of a triangle mesh,
+     *  {@code kind} 0 face, 1 edge, 2 vertex, an unused {@code vertices} slot {@code UINT32_MAX}. */
+    private static final MemoryLayout MESH_POINT_LAYOUT = MemoryLayout.structLayout(
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point"),
+            ValueLayout.JAVA_DOUBLE.withName("distance"),
+            ValueLayout.JAVA_INT.withName("triangle"),
+            ValueLayout.JAVA_INT.withName("kind"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("barycentric"),
+            MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_INT).withName("vertices"));
+
+    /** {@code CadaclysmBlacksmithCurveMeshFoot} (120 bytes): the curve's side, then the mesh's as
+     *  a mesh point; four bytes of padding after {@code crossing}. */
+    private static final MemoryLayout CURVE_MESH_FOOT_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_DOUBLE.withName("distance"),
+            ValueLayout.JAVA_DOUBLE.withName("t"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point_on_curve"),
+            MESH_POINT_LAYOUT.withName("mesh"),
+            ValueLayout.JAVA_INT.withName("crossing"),
+            MemoryLayout.paddingLayout(4));
+
+    /** {@code CadaclysmBlacksmithNearestObject} (408 bytes). Only the member {@code answer_kind}
+     *  names is filled (0 {@code body}, 1 {@code pair}, 2 neither, 3 {@code mesh}); every byte of
+     *  the others is zero, a {@code kind} a null pointer, so it is never read. C writes the whole
+     *  struct, {@code mesh} included. */
     private static final MemoryLayout NEAREST_OBJECT_LAYOUT = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("which"),
             ValueLayout.JAVA_INT.withName("answer_kind"),
@@ -458,7 +538,8 @@ public final class Blacksmith {
             MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point_on_curve"),
             MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point_on_item"),
             CURVE_BODY_FOOT_LAYOUT.withName("body"),
-            CURVE_PAIR_LAYOUT.withName("pair"));
+            CURVE_PAIR_LAYOUT.withName("pair"),
+            CURVE_MESH_FOOT_LAYOUT.withName("mesh"));
 
     /** {@code CadaclysmBlacksmithAt}: a point and its tangent, the curve's parameter, the segment
      *  ({@code NONE} on a solid's edge), an error bound, a flag (80 bytes). */
@@ -787,7 +868,7 @@ public final class Blacksmith {
             HISTORY_GENERATED_COUNT, HISTORY_GENERATED_AT, HISTORY_DELETED_COUNT, HISTORY_DELETED_AT,
             EDGE_REF, FIND_EDGE, VERTEX_COUNT, VERTEX_REF, FIND_VERTEX, FACE_KIND, MASS_PROPERTIES, COLOURED, COLOUR,
             PROFILE_COLOURED, PROFILE_COLOUR, EDGES_COLOURED, EDGE_COLOUR, EDGE_POLYLINE_COLOURS,
-            EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
+            EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, SELF_INTERSECT, CHECK, CHECK_FREE, CHECK_COUNT, CHECK_FINDING, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
             HEALTH, HEALTH_FREE, HEALTH_SUMMARY, HEALTH_FREE_EDGES, HEALTH_WIRES, HEALTH_SMALL, HEALTH_CRACK_EDGES,
             HEALED, HEAL_BODY, HEAL_FREE, HEAL_SUMMARY, HEAL_FIXES, HEAL_REFUSED, EDGE_TOLERANCE,
             EFFECTIVE_TOLERANCE, SOLID_TOLERANCES, SOLID_WITH_TOLERANCES, VERTEX_TOLERANCE,
@@ -826,6 +907,11 @@ public final class Blacksmith {
             PROFILE_POINT_AT_LENGTH, PROFILE_DIVIDE_BY_COUNT, PROFILE_DIVIDE_BY_LENGTH, SAMPLES_COUNT, SAMPLES_AT, SAMPLES_FREE, CONTAINS, CLASSIFIER_NEW, CLASSIFIER_CONTAINS, CLASSIFIER_FREE, CLOSEST,
             CLOSEST_POINT, PROJECTOR_NEW, PROJECTOR_CLOSEST_POINT, PROJECTOR_FREE, FACE_CLOSEST_POINT, EDGE_CLOSEST_POINT, NURBS_CURVE_CLOSEST_POINT,
             NURBS_CURVE_CLOSEST_POINT_WITHIN, NURBS_CURVE_CLOSEST_POINTS, CURVE_CLOSEST_POINTS, PROJECTOR_CURVE_CLOSEST_POINTS, NURBS_CURVE_CLOSEST_OBJECT,
+            TRIANGLE_MESH_NEW, SOLID_TRIANGLE_MESH, TRIANGLE_MESH_FREE, TRIANGLE_MESH_VERTEX_COUNT, TRIANGLE_MESH_TRIANGLE_COUNT, TRIANGLE_MESH_BOUNDS,
+            TRIANGLE_MESH_CLOSEST_POINT, TRIANGLE_MESH_CURVE_CLOSEST_POINTS,
+            HLR_OPTIONS_INIT, HLR, HLR_MESH, HLR_LINE_COUNT, HLR_LINE, HLR_LINE_BEZIERS2D, HLR_LINE_BEZIERS3D, HLR_REPORT, HLR_FREE,
+            PROJECTED_OUTLINE, PAGE_NEW, PAGE_ADD_VIEW, PAGE_ADD_PROFILE, PAGE_ADD_HATCH, PAGE_ADD_TEXT, PAGE_ENTITY_COUNT,
+            PAGE_SVG_TEXT, PAGE_DXF_TEXT, PAGE_FREE, DXF_PROFILES,
             RTREE_NEW, RTREE_FROM_BOXES, RTREE_FROM_POINTS, RTREE_FROM_TRIANGLES, SOLID_FACE_TREE, RTREE_INSERT, RTREE_INSERT_POINT, RTREE_REMOVE, RTREE_COUNT, RTREE_BOUNDS,
             RTREE_FREE, RTREE_SEARCH, RTREE_WITHIN, RTREE_NEAREST, RTREE_RAY, RTREE_HITS_COUNT, RTREE_HITS_AT, RTREE_HITS_FREE,
             RTREE_OVERLAPS, RTREE_SELF_OVERLAPS, RTREE_PAIRS_COUNT, RTREE_PAIRS_AT, RTREE_PAIRS_FREE,
@@ -860,7 +946,8 @@ public final class Blacksmith {
     private static final MethodHandle LOFT_CURVES, SWEEP_RAIL, SWEEP_TWO_RAILS, EDGE_SURFACE, NETWORK_SURFACE, CONTINUITY, EDGE_CONTINUITY,
             SURFACE_FAIRED, CURVATURE_TURNS, CURVATURE_TURN_POINTS, HIGHLIGHT_KINK,
             MATCH_SIDE, BLEND_SIDES, N_SIDED_PATCH, FILLET_SURFACES, FILLET_VARYING, FILLET_LAW, SPLIT_BY_CURVE, TRIM_BY_CURVE, JOIN_SHEETS,
-            FLANGE, EXTRUDE_TO, RECESS, MIRROR_JOIN, SPLIT_ALONG_CURVE, PANEL_GAP, NURBS_CURVE_OFFSET_ON_SHEET;
+            FLANGE, EXTRUDE_TO, RECESS, MIRROR_JOIN, SPLIT_ALONG_CURVE, PANEL_GAP, NURBS_CURVE_OFFSET_ON_SHEET,
+            PATTERN_RECTANGULAR, PATTERN_CIRCULAR, PATTERN_ALONG, PATTERN, PATTERN_FEATURE, HOLE, HOLE_TOOL, RIB, RIB_TOOL, WEB, WEB_TOOL;
     private static final MethodHandle FACE_ROUND_RADIUS, FACE_CHAMFER_DISTANCE, EDGE_BEZIER_COUNT, EDGE_BEZIERS,
             ISOCURVE_BEZIER_COUNT, ISOCURVE_BEZIERS, MESH_FILE;
 
@@ -872,9 +959,22 @@ public final class Blacksmith {
             DOCUMENT_PARAMS, DOCUMENT_EVALUATE, DOCUMENT_EVALUATE_WITH, DOCUMENT_RESULT_KIND, DOCUMENT_RESULT_SOLID, DOCUMENT_RESULT_PROFILE, DOCUMENT_RESULT_PROFILE_COUNT, DOCUMENT_RESULT_PROFILE_AT, DOCUMENT_RESULT_NURBS_CURVE, DOCUMENT_RESULT_SUBD, DOCUMENT_VALUE, DOCUMENT_ERRORS, DOCUMENT_KINDS,
             DOCUMENT_SOLID_BODY, DOCUMENT_PROFILE_PATH, DOCUMENT_BRANCH_NEW, DOCUMENT_BRANCH_SWITCH, DOCUMENT_TIPS, DOCUMENT_BRANCH_RENAME, DOCUMENT_BRANCH_DELETE, DOCUMENT_BRANCH_LIST, DOCUMENT_LOG, DOCUMENT_FREE, BIM_DOCUMENT_NEW, BIM_DOCUMENT_LOAD, BIM_KINDS, BIM_DOCUMENT_EXPORT_IFC;
 
+    /** {@code {flavour, features}} of the loaded library, or null for the separate {@code
+     *  cadaclysm_blacksmith} of earlier releases; see {@link #flavour()}. Assigned before any
+     *  {@link #bind}, which reads it. */
+    private static final String[] FLAVOURED;
+
     static {
         SymbolLookup lib = library();
         Linker linker = Linker.nativeLinker();
+        // A flavour of the single library binds what it has (see bind): the writers and parts
+        // the kernel and kernel-reader flavours leave out throw when called. One with no kernel
+        // at all, the reader flavour, is refused here, at first use of this class.
+        FLAVOURED = Cad.Loader.flavourOf(linker, lib);
+        if (FLAVOURED != null && !Cad.Loader.hasFeature(FLAVOURED, "kernel")) {
+            throw new BuildException("the '" + FLAVOURED[0] + "' flavour has no kernel; "
+                    + "load cadaclysm, cadaclysm_kernel_reader or cadaclysm_kernel");
+        }
         ValueLayout.OfInt I = ValueLayout.JAVA_INT;
         ValueLayout.OfLong L = ValueLayout.JAVA_LONG;
         ValueLayout.OfDouble D = ValueLayout.JAVA_DOUBLE;
@@ -1041,7 +1141,36 @@ public final class Blacksmith {
         CURVE_CLOSEST_POINTS = bind(linker, lib, "cadaclysm_blacksmith_curve_closest_points", FunctionDescriptor.of(I, A, A, D, D, A));
         PROJECTOR_CURVE_CLOSEST_POINTS = bind(linker, lib, "cadaclysm_blacksmith_projector_curve_closest_points", FunctionDescriptor.of(I, A, A, D, A));
         NURBS_CURVE_CLOSEST_OBJECT = bind(linker, lib, "cadaclysm_blacksmith_nurbs_curve_closest_object",
-                FunctionDescriptor.of(I, A, A, I, A, I, A, I, A, I, A, I, D, D, A));
+                FunctionDescriptor.of(I, A, A, I, A, I, A, I, A, I, A, I, A, I, D, D, A));
+        TRIANGLE_MESH_NEW = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_new", FunctionDescriptor.of(A, A, I, A, I));
+        SOLID_TRIANGLE_MESH = bind(linker, lib, "cadaclysm_blacksmith_solid_triangle_mesh", FunctionDescriptor.of(A, A, D));
+        TRIANGLE_MESH_FREE = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_free", FunctionDescriptor.ofVoid(A));
+        TRIANGLE_MESH_VERTEX_COUNT = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_vertex_count", FunctionDescriptor.of(I, A));
+        TRIANGLE_MESH_TRIANGLE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_triangle_count", FunctionDescriptor.of(I, A));
+        TRIANGLE_MESH_BOUNDS = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_bounds", FunctionDescriptor.of(B, A, A));
+        TRIANGLE_MESH_CLOSEST_POINT = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_closest_point", FunctionDescriptor.of(I, A, A, D, A));
+        TRIANGLE_MESH_CURVE_CLOSEST_POINTS = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_curve_closest_points",
+                FunctionDescriptor.of(I, A, A, D, A));
+        HLR_OPTIONS_INIT = bind(linker, lib, "cadaclysm_blacksmith_hlr_options_init", FunctionDescriptor.ofVoid(A));
+        HLR = bind(linker, lib, "cadaclysm_blacksmith_hlr", FunctionDescriptor.of(A, A, L, A));
+        HLR_MESH = bind(linker, lib, "cadaclysm_blacksmith_hlr_mesh", FunctionDescriptor.of(A, A, L, A));
+        HLR_LINE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_hlr_line_count", FunctionDescriptor.of(I, A));
+        HLR_LINE = bind(linker, lib, "cadaclysm_blacksmith_hlr_line", FunctionDescriptor.of(B, A, I, A));
+        HLR_LINE_BEZIERS2D = bind(linker, lib, "cadaclysm_blacksmith_hlr_line_beziers2d", FunctionDescriptor.of(B, A, I, A));
+        HLR_LINE_BEZIERS3D = bind(linker, lib, "cadaclysm_blacksmith_hlr_line_beziers3d", FunctionDescriptor.of(B, A, I, A));
+        HLR_REPORT = bind(linker, lib, "cadaclysm_blacksmith_hlr_report", FunctionDescriptor.of(B, A, A));
+        HLR_FREE = bind(linker, lib, "cadaclysm_blacksmith_hlr_free", FunctionDescriptor.ofVoid(A));
+        PROJECTED_OUTLINE = bind(linker, lib, "cadaclysm_blacksmith_projected_outline", FunctionDescriptor.of(A, A, L, A));
+        PAGE_NEW = bind(linker, lib, "cadaclysm_blacksmith_page_new", FunctionDescriptor.of(A, I));
+        PAGE_ADD_VIEW = bind(linker, lib, "cadaclysm_blacksmith_page_add_view", FunctionDescriptor.of(B, A, A, D, D, D));
+        PAGE_ADD_PROFILE = bind(linker, lib, "cadaclysm_blacksmith_page_add_profile", FunctionDescriptor.of(B, A, A, A, D, D));
+        PAGE_ADD_HATCH = bind(linker, lib, "cadaclysm_blacksmith_page_add_hatch", FunctionDescriptor.of(B, A, A, A, A, D, D, D, D));
+        PAGE_ADD_TEXT = bind(linker, lib, "cadaclysm_blacksmith_page_add_text", FunctionDescriptor.of(B, A, A, A, D, D, D, D, A, A));
+        PAGE_ENTITY_COUNT = bind(linker, lib, "cadaclysm_blacksmith_page_entity_count", FunctionDescriptor.of(I, A));
+        PAGE_SVG_TEXT = bind(linker, lib, "cadaclysm_blacksmith_page_svg_text", FunctionDescriptor.of(A, A));
+        PAGE_DXF_TEXT = bind(linker, lib, "cadaclysm_blacksmith_page_dxf_text", FunctionDescriptor.of(A, A));
+        PAGE_FREE = bind(linker, lib, "cadaclysm_blacksmith_page_free", FunctionDescriptor.ofVoid(A));
+        DXF_PROFILES = bind(linker, lib, "cadaclysm_blacksmith_dxf_profiles", FunctionDescriptor.of(A, A, D));
         RTREE_NEW = bind(linker, lib, "cadaclysm_blacksmith_rtree_new", FunctionDescriptor.of(A));
         RTREE_FROM_BOXES = bind(linker, lib, "cadaclysm_blacksmith_rtree_from_boxes", FunctionDescriptor.of(A, A, A, I));
         RTREE_FROM_POINTS = bind(linker, lib, "cadaclysm_blacksmith_rtree_from_points", FunctionDescriptor.of(A, A, I));
@@ -1137,7 +1266,12 @@ public final class Blacksmith {
         EDGE_AT = bind(linker, lib, "cadaclysm_blacksmith_edge", FunctionDescriptor.of(B, A, I, A));
         EDGE_CURVE = bind(linker, lib, "cadaclysm_blacksmith_edge_curve", FunctionDescriptor.of(B, A, I, A));
         INTERSECT = bind(linker, lib, "cadaclysm_blacksmith_intersect", FunctionDescriptor.of(A, A, A, D, A, A));
+        SELF_INTERSECT = bind(linker, lib, "cadaclysm_blacksmith_self_intersect", FunctionDescriptor.of(A, A, D, A, A));
         INTERSECTION_FREE = bind(linker, lib, "cadaclysm_blacksmith_intersection_free", FunctionDescriptor.ofVoid(A));
+        CHECK = bind(linker, lib, "cadaclysm_blacksmith_check", FunctionDescriptor.of(A, A, A, A, D, A, A));
+        CHECK_FREE = bind(linker, lib, "cadaclysm_blacksmith_check_free", FunctionDescriptor.ofVoid(A));
+        CHECK_COUNT = bind(linker, lib, "cadaclysm_blacksmith_check_count", FunctionDescriptor.of(I, A));
+        CHECK_FINDING = bind(linker, lib, "cadaclysm_blacksmith_check_finding", FunctionDescriptor.of(B, A, I, A));
         INTERSECTION_CHAIN_COUNT = bind(linker, lib, "cadaclysm_blacksmith_intersection_chain_count", FunctionDescriptor.of(I, A));
         INTERSECTION_CHAIN = bind(linker, lib, "cadaclysm_blacksmith_intersection_chain", FunctionDescriptor.of(B, A, I, A));
         INTERSECTION_CURVE = bind(linker, lib, "cadaclysm_blacksmith_intersection_curve", FunctionDescriptor.of(B, A, I, A));
@@ -1379,6 +1513,17 @@ public final class Blacksmith {
         EXTRUDE_TO = bind(linker, lib, "cadaclysm_blacksmith_extrude_to", FunctionDescriptor.of(A, A, A, L, A, A, D, B, A));
         RECESS = bind(linker, lib, "cadaclysm_blacksmith_recess", FunctionDescriptor.of(A, A, A, D, D, D, B, D, A));
         MIRROR_JOIN = bind(linker, lib, "cadaclysm_blacksmith_mirror_join", FunctionDescriptor.of(A, A, A, D, D, A));
+        PATTERN_RECTANGULAR = bind(linker, lib, "cadaclysm_blacksmith_pattern_rectangular", FunctionDescriptor.of(I, A, I, D, A, I, D, B, A, I, A));
+        PATTERN_CIRCULAR = bind(linker, lib, "cadaclysm_blacksmith_pattern_circular", FunctionDescriptor.of(I, A, I, D, B, A, I, A));
+        PATTERN_ALONG = bind(linker, lib, "cadaclysm_blacksmith_pattern_along", FunctionDescriptor.of(I, A, I, D, I, A, I, A));
+        PATTERN = bind(linker, lib, "cadaclysm_blacksmith_pattern", FunctionDescriptor.of(A, A, A, I, D, A));
+        PATTERN_FEATURE = bind(linker, lib, "cadaclysm_blacksmith_pattern_feature", FunctionDescriptor.of(A, A, A, I, A, I, D, A));
+        HOLE = bind(linker, lib, "cadaclysm_blacksmith_hole", FunctionDescriptor.of(A, A, A, I, D, A, I, D, D, I, I, D, D, D, D, A, A));
+        HOLE_TOOL = bind(linker, lib, "cadaclysm_blacksmith_hole_tool", FunctionDescriptor.of(A, A, A, I, D, A, I, D, D, I, I, D, D, D, D));
+        RIB = bind(linker, lib, "cadaclysm_blacksmith_rib", FunctionDescriptor.of(A, A, A, A, D, I, A, D));
+        RIB_TOOL = bind(linker, lib, "cadaclysm_blacksmith_rib_tool", FunctionDescriptor.of(A, A, A, A, D, I, A, D));
+        WEB = bind(linker, lib, "cadaclysm_blacksmith_web", FunctionDescriptor.of(A, A, A, I, A, D, I, D, B, D));
+        WEB_TOOL = bind(linker, lib, "cadaclysm_blacksmith_web_tool", FunctionDescriptor.of(A, A, A, I, A, D, I, D, B, D));
         SPLIT_ALONG_CURVE = bind(linker, lib, "cadaclysm_blacksmith_split_along_curve", FunctionDescriptor.of(A, A, A, D));
         PANEL_GAP = bind(linker, lib, "cadaclysm_blacksmith_panel_gap", FunctionDescriptor.of(B, A, A, D, D, D, A));
         NURBS_CURVE_OFFSET_ON_SHEET = bind(linker, lib, "cadaclysm_blacksmith_nurbs_curve_offset_on_sheet", FunctionDescriptor.of(A, A, A, D, D, A));
@@ -1641,10 +1786,14 @@ public final class Blacksmith {
         BIM_DOCUMENT_EXPORT_IFC = bind(linker, lib, "cadaclysm_bim_document_export_ifc", FunctionDescriptor.of(A, A, A));
     }
 
+    /** One entry point. On a flavour that leaves it out, a handle that throws a {@link
+     *  BuildException} naming the flavour, when called; a separate library of an earlier
+     *  release must have it, as before. */
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
     private static MethodHandle bind(Linker linker, SymbolLookup lib, String name, FunctionDescriptor fd) {
-        return linker.downcallHandle(
-                lib.find(name).orElseThrow(() -> new UnsatisfiedLinkError(name)), fd);
+        var symbol = lib.find(name);
+        if (symbol.isEmpty() && FLAVOURED != null) return Cad.Loader.notInFlavour(name, fd, FLAVOURED, BuildException::new);
+        return linker.downcallHandle(symbol.orElseThrow(() -> new UnsatisfiedLinkError(name)), fd);
     }
 
     // ---- small native-call helpers -------------------------------------------------------
@@ -1978,6 +2127,20 @@ public final class Blacksmith {
 
     // ---- the module-level entry points ---------------------------------------------------
 
+    /** Which library this is: {@code "full"}, {@code "kernel-reader"} or {@code "kernel"} for a
+     *  flavour of the single library, {@code "kernel"} for the separate {@code
+     *  cadaclysm_blacksmith} of earlier releases. */
+    public static String flavour() {
+        return FLAVOURED == null ? "kernel" : FLAVOURED[0];
+    }
+
+    /** The features the library was built with, comma-separated ({@code
+     *  "nodes,kernel,write-breps,write-meshes,bim,parts"}), or {@code ""} for the separate {@code
+     *  cadaclysm_blacksmith} of earlier releases. */
+    public static String features() {
+        return FLAVOURED == null ? "" : FLAVOURED[1];
+    }
+
     /** The version of the library actually loaded, which is the one worth reporting. */
     public static String version() {
         return string(call(() -> (MemorySegment) VERSION.invokeExact()));
@@ -2049,48 +2212,72 @@ public final class Blacksmith {
 
     /**
      * The kernel library, found by {@code cadaclysm_blacksmith.py}'s own rule, {@code
-     * library_path()}: {@code CADACLYSM_BLACKSMITH_LIBRARY} (the library, or a directory
-     * holding it) and nothing else if it is set; else beside this class's own jar or class
-     * directory; else {@code lib/} in any ancestor (the SDK layout); else {@code
-     * target/release} or {@code target/debug} in any ancestor (this repository's). Nothing
-     * found is a {@link BuildException} naming every place looked, as Python's {@code
-     * BuildError} does -- never the platform's own search, which would load whatever copy
-     * happens to be on the path.
+     * library_path()}: {@code CADACLYSM_BLACKSMITH_LIBRARY} (the separate kernel library's
+     * variable: the library, or a directory holding it) and nothing else if it is set; else
+     * {@code CADACLYSM_LIBRARY}, the one variable for one library of any flavour; else beside
+     * this class's own jar or class directory; else {@code lib/} in any ancestor (the SDK
+     * layout); else {@code target/release} or {@code target/debug} in any ancestor (this
+     * repository's). Each place is asked for every name in {@link Cad.Loader#KERNEL_STEMS}, in
+     * order. Nothing found is a {@link BuildException} naming every place looked, as Python's
+     * {@code BuildError} does -- never the platform's own search, which would load whatever
+     * copy happens to be on the path.
+     *
+     * <p>{@code CADACLYSM_LIBRARY} was the reader's alone before the single library, so where it
+     * names the separate {@code cadaclysm_capi}, or a directory holding none of the kernel's
+     * names, it is not for this library and the search goes on, as it did then.
      */
     @SuppressWarnings("restricted") // libraryLookup: the library this file binds.
     private static SymbolLookup library() {
-        String os = System.getProperty("os.name", "").toLowerCase();
-        String name = os.contains("win") ? "cadaclysm_blacksmith.dll"
-                : os.contains("mac") ? "libcadaclysm_blacksmith.dylib" : "libcadaclysm_blacksmith.so";
+        String[] names = Cad.Loader.filesOf(Cad.Loader.KERNEL_STEMS);
         String override = System.getenv("CADACLYSM_BLACKSMITH_LIBRARY");
         if (override != null && !override.isEmpty()) {
             // A directory or the library itself, since both are things to point at.
             java.nio.file.Path candidate = java.nio.file.Path.of(override);
-            if (Files.isDirectory(candidate)) candidate = candidate.resolve(name);
-            if (Files.exists(candidate)) return SymbolLookup.libraryLookup(candidate, Cad.Loader.ARENA);
+            if (Files.isDirectory(candidate)) {
+                for (String name : names) {
+                    if (Files.exists(candidate.resolve(name))) return SymbolLookup.libraryLookup(candidate.resolve(name), Cad.Loader.ARENA);
+                }
+            } else if (Files.exists(candidate)) {
+                return SymbolLookup.libraryLookup(candidate, Cad.Loader.ARENA);
+            }
             throw new BuildException("CADACLYSM_BLACKSMITH_LIBRARY=" + override + " names nothing that exists");
+        }
+        String shared = System.getenv("CADACLYSM_LIBRARY");
+        if (shared != null && !shared.isEmpty()) {
+            java.nio.file.Path candidate = java.nio.file.Path.of(shared);
+            if (Files.isDirectory(candidate)) {
+                for (String name : names) {
+                    if (Files.exists(candidate.resolve(name))) return SymbolLookup.libraryLookup(candidate.resolve(name), Cad.Loader.ARENA);
+                }
+            } else if (!Files.exists(candidate)) {
+                throw new BuildException("CADACLYSM_LIBRARY=" + shared + " names nothing that exists");
+            } else if (!candidate.getFileName().toString().equalsIgnoreCase(Cad.Loader.filesOf(Cad.Loader.CAPI_LIBRARY)[0])) {
+                return SymbolLookup.libraryLookup(candidate, Cad.Loader.ARENA);
+            }
         }
         java.nio.file.Path start = Cad.Loader.codeLocation();
         java.nio.file.Path here = start == null || Files.isDirectory(start) ? start : start.getParent();
         List<java.nio.file.Path> ancestors = new ArrayList<>();
         for (java.nio.file.Path at = here; at != null; at = at.getParent()) ancestors.add(at);
-        List<java.nio.file.Path> searched = new ArrayList<>();
-        if (here != null) searched.add(here.resolve(name));
+        List<java.nio.file.Path> places = new ArrayList<>();
+        if (here != null) places.add(here);
         // Walking up from this class's code: an SDK checkout keeps the library in `lib/`
         // beside the wrappers; the repository this example ships in keeps it in
         // `target/release` (or `target/debug`, a fallback for a machine that only built that).
-        for (java.nio.file.Path at : ancestors) searched.add(at.resolve("lib").resolve(name));
+        for (java.nio.file.Path at : ancestors) places.add(at.resolve("lib"));
         for (java.nio.file.Path at : ancestors) {
-            searched.add(at.resolve("target").resolve("release").resolve(name));
-            searched.add(at.resolve("target").resolve("debug").resolve(name));
+            places.add(at.resolve("target").resolve("release"));
+            places.add(at.resolve("target").resolve("debug"));
         }
+        List<java.nio.file.Path> searched = new ArrayList<>();
+        for (java.nio.file.Path place : places) for (String name : names) searched.add(place.resolve(name));
         for (java.nio.file.Path candidate : searched) {
             if (Files.exists(candidate)) return SymbolLookup.libraryLookup(candidate, Cad.Loader.ARENA);
         }
-        StringBuilder message = new StringBuilder(name).append(" not found. Looked in:\n");
+        StringBuilder message = new StringBuilder("none of ").append(String.join(", ", names)).append(" found. Looked in:\n");
         for (java.nio.file.Path candidate : searched) message.append("    ").append(candidate).append('\n');
         message.append("Build it with:\n    cargo build --release -p cadaclysm-blacksmith-capi\n")
-                .append("or run fetch.py in an SDK checkout, or point CADACLYSM_BLACKSMITH_LIBRARY at it.");
+                .append("or run fetch.py in an SDK checkout, or point CADACLYSM_LIBRARY (or, for the separate kernel library, CADACLYSM_BLACKSMITH_LIBRARY) at it.");
         throw new BuildException(message.toString());
     }
 
@@ -2160,6 +2347,18 @@ public final class Blacksmith {
         }
     }
 
+    /** {@link SvgOptions#hidden()}: whether the drawing removes hidden lines
+     *  ({@code CADACLYSM_BLACKSMITH_SVG_HIDDEN_REMOVED}, 32) or dashes them ({@code _HIDDEN_DASHED}, 64). */
+    public enum SvgHidden {
+        NONE(0), REMOVED(32), DASHED(64);
+
+        final int flag;
+
+        SvgHidden(int flag) {
+            this.flag = flag;
+        }
+    }
+
     /**
      * How an SVG drawing is made -- the camera in the viewer's words, the page, the pen and
      * which line sets. Mirrors {@code CadaclysmBlacksmithSvgOptions}, {@link #defaults()} the
@@ -2182,7 +2381,26 @@ public final class Blacksmith {
                               double width, double height, double margin, double tolerance,
                               String stroke, double strokeWidth, Integer background,
                               boolean edges, boolean curves, boolean isocurves, boolean polylines,
-                              boolean silhouettes) {
+                              boolean silhouettes, SvgHidden hidden) {
+        /** Every field but {@code hidden}, which is {@link SvgHidden#NONE}: every line drawn. */
+        public SvgOptions(SvgView view, Double azimuth, Double elevation, String up, double fov,
+                          double width, double height, double margin, double tolerance,
+                          String stroke, double strokeWidth, Integer background,
+                          boolean edges, boolean curves, boolean isocurves, boolean polylines,
+                          boolean silhouettes) {
+            this(view, azimuth, elevation, up, fov, width, height, margin, tolerance, stroke, strokeWidth, background,
+                    edges, curves, isocurves, polylines, silhouettes, SvgHidden.NONE);
+        }
+
+        /** These options with hidden-line removal: {@link SvgHidden#NONE} draws every line,
+         *  {@link SvgHidden#REMOVED} only what is seen (the solids hiding one another),
+         *  {@link SvgHidden#DASHED} adds the hidden lines, dashed, in a {@code solid-<i>-hidden}
+         *  group. */
+        public SvgOptions withHidden(SvgHidden hidden) {
+            return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
+                    stroke, strokeWidth, background, edges, curves, isocurves, polylines, silhouettes, hidden);
+        }
+
         /**
          * {@code view = ISO}, {@code azimuth}/{@code elevation}/{@code up}/{@code background}
          * null (fall through to {@link #view()}, "z", and transparent), {@code fov = 0}
@@ -2210,7 +2428,7 @@ public final class Blacksmith {
          *  or a CSS colour name, read when the drawing is made. */
         public SvgOptions withStroke(String colour) {
             return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
-                    colour, strokeWidth, background, edges, curves, isocurves, polylines, silhouettes);
+                    colour, strokeWidth, background, edges, curves, isocurves, polylines, silhouettes, hidden);
         }
 
         /** These options with {@code stroke} a packed {@code 0xRRGGBB}. */
@@ -2224,14 +2442,14 @@ public final class Blacksmith {
         public SvgOptions withBackground(String colour) {
             return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
                     stroke, strokeWidth, colour == null ? null : packedField(colour, "svg: background"), edges,
-                    curves, isocurves, polylines, silhouettes);
+                    curves, isocurves, polylines, silhouettes, hidden);
         }
 
         /** These options with {@code background} a packed {@code 0xRRGGBB}. */
         public SvgOptions withBackground(int packed) {
             hexColour(packed, "svg: background");
             return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
-                    stroke, strokeWidth, packed, edges, curves, isocurves, polylines, silhouettes);
+                    stroke, strokeWidth, packed, edges, curves, isocurves, polylines, silhouettes, hidden);
         }
     }
 
@@ -2314,7 +2532,7 @@ public final class Blacksmith {
         out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "background"),
                 o.background() == null ? 0xFFFFFFFF : o.background()); // CADACLYSM_BLACKSMITH_SVG_TRANSPARENT
         int flags = (o.edges() ? 1 : 0) | (o.curves() ? 2 : 0) | (o.isocurves() ? 4 : 0) | (o.polylines() ? 8 : 0)
-                | (o.silhouettes() ? 16 : 0);
+                | (o.silhouettes() ? 16 : 0) | (o.hidden() == null ? 0 : o.hidden().flag);
         out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "flags"), flags);
         return out;
     }
@@ -4314,6 +4532,256 @@ public final class Blacksmith {
     public record Mirrored(Solid solid, SymmetryReport report) {
     }
 
+    /** What {@link Solid#pattern} or {@link Solid#patternFeature} did: the {@code instances}
+     *  placed (after the skips), the {@code booleans} run (copies apart from each other share
+     *  one), and the copies of a feature's tool {@code missed} -- sharing no volume with the
+     *  body, dropped for a cut and kept as a body of their own for a join. */
+    public record PatternReport(int instances, int booleans, int missed) {
+        static PatternReport of(MemorySegment s) {
+            return new PatternReport((int) s.getAtIndex(ValueLayout.JAVA_DOUBLE, 0), (int) s.getAtIndex(ValueLayout.JAVA_DOUBLE, 1),
+                    (int) s.getAtIndex(ValueLayout.JAVA_DOUBLE, 2));
+        }
+    }
+
+    /** The result of {@link Solid#pattern} and {@link Solid#patternFeature}: the body and the
+     *  {@link PatternReport}. */
+    public record Patterned(Solid solid, PatternReport report) {
+    }
+
+    /** What {@link Solid#hole} did: the {@code holes} drilled (one a point), per hole the {@code
+     *  bottoms} -- the distance along the axis from the point to where the bore ends, the drill
+     *  point excluded ({@code depth} for a blind hole; for the others the deepest point of the
+     *  material it passes, rim included) -- and {@code facesAdded}, the result's faces on no
+     *  surface of the body. */
+    public record HoleReport(int holes, List<Double> bottoms, int facesAdded) {
+        public HoleReport {
+            bottoms = List.copyOf(bottoms);
+        }
+    }
+
+    /** The result of {@link Solid#hole}: the drilled body and the {@link HoleReport}. */
+    public record Drilled(Solid solid, HoleReport report) {
+    }
+
+    /** How far {@link Solid#hole} drills; {@link #code} is the C ABI's {@code
+     *  CADACLYSM_BLACKSMITH_HOLE_THROUGH} .. {@code _TO_NEXT}. */
+    public enum HoleExtent {
+        /** Through everything ahead of the point. */
+        THROUGH(0),
+        /** {@code depth} of full bore, then a drill point of {@code tipAngle}. */
+        BLIND(1),
+        /** Until the axis first meets face {@code face}, the bore ending on it. */
+        TO_FACE(2),
+        /** Until the bore first leaves the material. */
+        TO_NEXT(3);
+
+        /** The extent's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        HoleExtent(int code) {
+            this.code = code;
+        }
+    }
+
+    /** A hole's head; {@link #code} is the C ABI's {@code CADACLYSM_BLACKSMITH_HOLE_SIMPLE},
+     *  {@code _COUNTERBORE}, {@code _COUNTERSINK}. */
+    public enum HoleHead {
+        /** None: the bore alone. */
+        SIMPLE(0),
+        /** A wider bore {@code headDiameter} across and {@code headDepth} deep. */
+        COUNTERBORE(1),
+        /** A cone {@code headDiameter} across at the point, included angle {@code headAngle}. */
+        COUNTERSINK(2);
+
+        /** The head's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        HoleHead(int code) {
+            this.code = code;
+        }
+    }
+
+    /** How {@link Solid#patternFeature} applies its tool; {@link #code} is the C ABI's {@code
+     *  CADACLYSM_BLACKSMITH_FEATURE_CUT}, {@code _JOIN}. */
+    public enum FeatureOp {
+        /** Cut the tool from the body. */
+        CUT(0),
+        /** Join the tool to the body. */
+        JOIN(1);
+
+        /** The operation's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        FeatureOp(int code) {
+            this.code = code;
+        }
+    }
+
+    /** Which side of its plane a {@link Solid#rib} is thickened; {@link #code} is the C ABI's
+     *  {@code CADACLYSM_BLACKSMITH_RIB_BOTH}, {@code _FRONT}, {@code _BACK}. */
+    public enum RibSide {
+        /** Half the thickness each side of the plane. */
+        BOTH(0),
+        /** The thickness on the plane's +z side. */
+        FRONT(1),
+        /** The thickness on the plane's -z side. */
+        BACK(2);
+
+        /** The side's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        RibSide(int code) {
+            this.code = code;
+        }
+    }
+
+    /** Which side of its curve a {@link Solid#web} is offset; {@link #code} is the C ABI's
+     *  {@code CADACLYSM_BLACKSMITH_WEB_BOTH}, {@code _LEFT}, {@code _RIGHT}. */
+    public enum WebSide {
+        /** Half the thickness each side of the curve. */
+        BOTH(0),
+        /** The thickness left of the curve's run, the plane's normal up. */
+        LEFT(1),
+        /** The thickness right of the curve's run. */
+        RIGHT(2);
+
+        /** The side's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        WebSide(int code) {
+            this.code = code;
+        }
+    }
+
+    /** How {@link Pattern#along} turns its copies; {@link #code} is the C ABI's {@code
+     *  CADACLYSM_BLACKSMITH_ORIENT_FIXED}, {@code _PATH}. */
+    public enum PatternOrient {
+        /** Copies translated only. */
+        FIXED(0),
+        /** Copies also turned by the curve's rotation-minimising frame from the first instance's. */
+        PATH(1);
+
+        /** The orientation's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        PatternOrient(int code) {
+            this.code = code;
+        }
+    }
+
+    /** Placements for {@link Solid#pattern} and {@link Solid#patternFeature}: lists of rigid
+     *  {@link Transform}s, instance 0 the identity (the original). {@code skip} (null: none)
+     *  leaves instances out by index (Fusion's suppressed instances), 0 included. Angles are
+     *  radians. Each throws {@link BuildException} with the library's reason when refused. */
+    public static final class Pattern {
+        private Pattern() {
+        }
+
+        /** A placement downcall, handed its {@code out} (NULL to count). */
+        @FunctionalInterface
+        private interface Placements {
+            int call(MemorySegment out) throws Throwable;
+        }
+
+        private static List<Transform> placements(String what, Placements body) {
+            int n = call(() -> body.call(MemorySegment.NULL));
+            if (n == 0) throw failure(what);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 16L * Integer.toUnsignedLong(n));
+                if (call(() -> body.call(out)) != n) throw failure(what);
+                double[] flat = out.toArray(ValueLayout.JAVA_DOUBLE);
+                List<Transform> list = new ArrayList<>(n);
+                for (int i = 0; i < n; i++) list.add(new Transform(Arrays.copyOfRange(flat, 16 * i, 16 * i + 16)));
+                return list;
+            }
+        }
+
+        private static MemorySegment skips(Arena arena, int[] skip) {
+            int[] s = skip == null ? new int[0] : skip;
+            for (int i : s) if (i < 0) throw new BuildException("skip: instance index " + i + " is negative");
+            return arena.allocateFrom(ValueLayout.JAVA_INT, s.length == 0 ? new int[] {0} : s);
+        }
+
+        /** {@code count1} instances {@code spacing1} apart along {@code direction1}, times
+         *  {@code count2} {@code spacing2} apart along {@code direction2} (null: one row);
+         *  row-major, direction 1 fastest. {@code symmetric} puts the count on each side of the
+         *  original along each direction ({@code 2 count - 1}, at offsets {@code 0, +s, -s, +2s,
+         *  ...}). */
+        public static List<Transform> rectangular(double[] direction1, int count1, double spacing1, double[] direction2, int count2,
+                                                  double spacing2, boolean symmetric, int[] skip) {
+            int c1 = u32of(count1, "pattern_rectangular", "count1"), c2 = u32of(count2, "pattern_rectangular", "count2");
+            int nSkip = skip == null ? 0 : skip.length;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment d1 = doublesIn(arena, doubles(direction1, 3, "pattern_rectangular"));
+                MemorySegment d2 = direction2 == null ? MemorySegment.NULL : doublesIn(arena, doubles(direction2, 3, "pattern_rectangular"));
+                MemorySegment s = skips(arena, skip);
+                return placements("pattern_rectangular", out ->
+                        (int) PATTERN_RECTANGULAR.invokeExact(d1, c1, spacing1, d2, c2, spacing2, symmetric, s, nSkip, out));
+            }
+        }
+
+        /** {@link #rectangular(double[], int, double, double[], int, double, boolean, int[])}
+         *  in one row, not symmetric, nothing skipped. */
+        public static List<Transform> rectangular(double[] direction1, int count1, double spacing1) {
+            return rectangular(direction1, count1, spacing1, null, 1, 0.0, false, null);
+        }
+
+        /** {@link #rectangular(double[], int, double, double[], int, double, boolean, int[])}
+         *  not symmetric, nothing skipped. */
+        public static List<Transform> rectangular(double[] direction1, int count1, double spacing1, double[] direction2, int count2,
+                                                  double spacing2) {
+            return rectangular(direction1, count1, spacing1, direction2, count2, spacing2, false, null);
+        }
+
+        /** {@code count} instances about the line through {@code axisPoint} along {@code
+         *  axisDirection}: a full turn ({@code angle} 2 pi) spaces them evenly, less spreads
+         *  them over {@code angle} with both ends occupied. {@code symmetric} spreads the count
+         *  over {@code angle} on each side (not with a full turn). Radians, right-handed about
+         *  the direction. */
+        public static List<Transform> circular(double[] axisPoint, double[] axisDirection, int count, double angle, boolean symmetric,
+                                               int[] skip) {
+            int c = u32of(count, "pattern_circular", "count");
+            int nSkip = skip == null ? 0 : skip.length;
+            double[] p = doubles(axisPoint, 3, "pattern_circular"), d = doubles(axisDirection, 3, "pattern_circular");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment axis = doublesIn(arena, new double[] {p[0], p[1], p[2], d[0], d[1], d[2]});
+                MemorySegment s = skips(arena, skip);
+                return placements("pattern_circular", out ->
+                        (int) PATTERN_CIRCULAR.invokeExact(axis, c, angle, symmetric, s, nSkip, out));
+            }
+        }
+
+        /** {@link #circular(double[], double[], int, double, boolean, int[])} over a full turn,
+         *  nothing skipped. */
+        public static List<Transform> circular(double[] axisPoint, double[] axisDirection, int count) {
+            return circular(axisPoint, axisDirection, count, 2 * Math.PI, false, null);
+        }
+
+        /** {@code count} instances along {@code curve} by arc length from its start, {@code
+         *  spacing} apart, or spread over its whole length with both ends occupied ({@code
+         *  spacing} null). {@code orient} {@link PatternOrient#FIXED} translates each copy;
+         *  {@link PatternOrient#PATH} also turns it by the curve's rotation-minimising frame
+         *  from the first instance's. */
+        public static List<Transform> along(NurbsCurve curve, int count, Double spacing, PatternOrient orient, int[] skip) {
+            int c = u32of(count, "pattern_along", "count");
+            int nSkip = skip == null ? 0 : skip.length;
+            double sp = spacing == null ? Double.NaN : spacing;
+            int o = (orient == null ? PatternOrient.FIXED : orient).code;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = curve.handle(), s = skips(arena, skip);
+                return placements("pattern_along", out -> (int) PATTERN_ALONG.invokeExact(h, c, sp, o, s, nSkip, out));
+            } finally {
+                keep(curve);
+            }
+        }
+
+        /** {@link #along(NurbsCurve, int, Double, PatternOrient, int[])} over the whole curve,
+         *  translated only, nothing skipped. */
+        public static List<Transform> along(NurbsCurve curve, int count) {
+            return along(curve, count, null, PatternOrient.FIXED, null);
+        }
+    }
+
     /** A side as the C ABI numbers it. */
     private static int sheetSide(String side) {
         return switch (side == null ? "" : side) {
@@ -5059,9 +5527,9 @@ public final class Blacksmith {
         /** The item of {@code items} nearest to this curve, as a {@link NearestObject} -- {@code
          *  which} its index -- or null where none lies within {@code maxDistance} (null, NaN or
          *  +inf: no limit) or the list is empty. Each item is a {@link Solid}, a {@link
-         *  NurbsCurve}, a {@link Projector} or a point (a {@code double[3]}). Items are asked in
-         *  order, each with the best distance so far as its limit; equal distances go to the
-         *  earlier item. {@code tolerance} (null, 0 or NaN: each solid's effective tolerance) sizes
+         *  NurbsCurve}, a {@link Projector}, a {@link TriangleMesh} (answered exactly) or a point
+         *  (a {@code double[3]}). Items are asked in order, each with the best distance so far as
+         *  its limit; equal distances go to the earlier item. {@code tolerance} (null, 0 or NaN: each solid's effective tolerance) sizes
          *  each solid's search; a projector keeps its own, and its lock is held for the whole curve
          *  query. */
         public NearestObject closestObject(List<?> items, Double maxDistance, Double tolerance) {
@@ -5069,7 +5537,7 @@ public final class Blacksmith {
             if (items == null) throw new NullPointerException("items");
             double limit = maxDistance == null ? Double.NaN : maxDistance, tol = tolerance == null ? Double.NaN : tolerance;
             List<Object> owners = new ArrayList<>();
-            List<MemorySegment> solids = new ArrayList<>(), curves = new ArrayList<>(), projectors = new ArrayList<>();
+            List<MemorySegment> solids = new ArrayList<>(), curves = new ArrayList<>(), projectors = new ArrayList<>(), meshes = new ArrayList<>();
             List<Double> points = new ArrayList<>();
             byte[] kinds = new byte[items.size()];
             try (Arena arena = Arena.ofConfined()) {
@@ -5084,24 +5552,29 @@ public final class Blacksmith {
                     } else if (item instanceof Projector projector) {
                         kinds[i] = 3;
                         projectors.add(projector.handle());
+                    } else if (item instanceof TriangleMesh mesh) {
+                        kinds[i] = 4;
+                        meshes.add(mesh.handle());
                     } else if (item instanceof double[] xyz && xyz.length == 3) {
                         kinds[i] = 2;
                         for (double v : xyz) points.add(v);
                     } else {
-                        throw new BuildException(what + ": item " + i + ": not a Solid, a NurbsCurve, a Projector or a point of 3 numbers, got " + item);
+                        throw new BuildException(what + ": item " + i + ": not a Solid, a NurbsCurve, a Projector, a TriangleMesh or a point of 3 numbers, got " + item);
                     }
                     owners.add(item);
                 }
                 MemorySegment ks = arena.allocate(ValueLayout.JAVA_BYTE, Math.max(kinds.length, 1));
                 ks.copyFrom(MemorySegment.ofArray(kinds));
                 MemorySegment ss = addresses(arena, solids), cs = addresses(arena, curves), prs = addresses(arena, projectors);
+                MemorySegment ms = addresses(arena, meshes);
                 MemorySegment ps = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(points.size(), 1));
                 for (int i = 0; i < points.size(); i++) ps.setAtIndex(ValueLayout.JAVA_DOUBLE, i, points.get(i));
                 MemorySegment out = arena.allocate(NEAREST_OBJECT_LAYOUT);
                 MemorySegment h = handle.live();
                 int count = kinds.length, nSolids = solids.size(), nCurves = curves.size(), nPoints = points.size() / 3, nProjectors = projectors.size();
+                int nMeshes = meshes.size();
                 int found = call(() -> (int) NURBS_CURVE_CLOSEST_OBJECT.invokeExact(h, ks, count, ss, nSolids, cs, nCurves, ps, nPoints,
-                                                                                      prs, nProjectors, limit, tol, out));
+                                                                                      prs, nProjectors, ms, nMeshes, limit, tol, out));
                 if (found < 0) throw failure(what);
                 return found == 0 ? null : NearestObject.of(out);
             } finally {
@@ -5393,24 +5866,88 @@ public final class Blacksmith {
         }
     }
 
+    /** A mesh point's {@code kind} as its word: 0 face, 1 edge, 2 vertex. */
+    private static String meshKind(int kind) {
+        return switch (kind) {
+            case 0 -> "face";
+            case 1 -> "edge";
+            case 2 -> "vertex";
+            default -> throw new BuildException("triangle mesh: the library answered kind " + kind + ", not 0, 1 or 2");
+        };
+    }
+
+    /** The nearest point of a {@link TriangleMesh} to a query point ({@link
+     *  TriangleMesh#closestPoint}). Exact: no tolerance, no {@code refined} figure. {@code point}
+     *  lies on the mesh, {@code distance} from the query point. {@code triangle} is the
+     *  lowest-numbered triangle holding the point: on an edge or a vertex several triangles share,
+     *  the lower triangle answers. {@code barycentric} are the point's three weights on that
+     *  triangle's corners, in index order, summing to 1. {@code kind} is what the point lies on,
+     *  {@code "face"} (inside {@code triangle}), {@code "edge"} or {@code "vertex"}, and {@code
+     *  vertices} names it: an edge's two vertex indices ascending, a vertex's one, none for a
+     *  face. */
+    public record MeshPoint(double[] point, double distance, int triangle, double[] barycentric, String kind, int[] vertices) {
+        static MeshPoint of(MemorySegment s) {
+            long at = offset(MESH_POINT_LAYOUT, "vertices");
+            // UINT32_MAX (-1 as a Java int) marks an unused slot: a face has none, a vertex one.
+            int a = s.get(ValueLayout.JAVA_INT, at), b = s.get(ValueLayout.JAVA_INT, at + 4);
+            int[] vertices = a == -1 ? new int[0] : b == -1 ? new int[] {a} : new int[] {a, b};
+            return new MeshPoint(triple(s, offset(MESH_POINT_LAYOUT, "point")), s.get(ValueLayout.JAVA_DOUBLE, offset(MESH_POINT_LAYOUT, "distance")),
+                                 s.get(ValueLayout.JAVA_INT, offset(MESH_POINT_LAYOUT, "triangle")), triple(s, offset(MESH_POINT_LAYOUT, "barycentric")),
+                                 meshKind(s.get(ValueLayout.JAVA_INT, offset(MESH_POINT_LAYOUT, "kind"))), vertices);
+        }
+
+        @Override
+        public String toString() {
+            return "MeshPoint(distance=" + distance + ", triangle=" + triangle + ", " + kind + " " + Arrays.toString(vertices) + ")";
+        }
+    }
+
+    /** The nearest points of a curve and a {@link TriangleMesh} ({@link
+     *  TriangleMesh#curveClosestPoints}, and a {@link NearestObject}'s answer for a mesh): {@code
+     *  pointOnCurve} at the curve's parameter {@code t}, {@code pointOnMesh}, {@code distance}
+     *  apart. Exact. {@code crossing} is true where the curve passes through a triangle: {@code
+     *  distance} is then exactly 0, at the earliest crossing in {@code t}; a curve that touches
+     *  without passing through is distance 0 and false. The mesh's side is named as {@link
+     *  MeshPoint} names it, flat. */
+    public record CurveMeshFoot(double distance, double t, double[] pointOnCurve, double[] pointOnMesh, int triangle,
+                                double[] barycentric, String kind, int[] vertices, boolean crossing) {
+        static CurveMeshFoot of(MemorySegment s) {
+            MeshPoint mesh = MeshPoint.of(s.asSlice(offset(CURVE_MESH_FOOT_LAYOUT, "mesh"), MESH_POINT_LAYOUT.byteSize()));
+            return new CurveMeshFoot(s.get(ValueLayout.JAVA_DOUBLE, offset(CURVE_MESH_FOOT_LAYOUT, "distance")),
+                                     s.get(ValueLayout.JAVA_DOUBLE, offset(CURVE_MESH_FOOT_LAYOUT, "t")),
+                                     triple(s, offset(CURVE_MESH_FOOT_LAYOUT, "point_on_curve")), mesh.point(), mesh.triangle(),
+                                     mesh.barycentric(), mesh.kind(), mesh.vertices(),
+                                     s.get(ValueLayout.JAVA_INT, offset(CURVE_MESH_FOOT_LAYOUT, "crossing")) != 0);
+        }
+
+        @Override
+        public String toString() {
+            return "CurveMeshFoot(distance=" + distance + ", t=" + t + ", triangle=" + triangle + ", " + kind + " " + Arrays.toString(vertices)
+                + ", crossing=" + crossing + ")";
+        }
+    }
+
     /** The nearest of a list of things to a curve ({@link NurbsCurve#closestObject}): {@code which}
      *  the item's index in the list, {@code distance} from {@code pointOnCurve} (at the curve's
      *  parameter {@code t}) to {@code pointOnItem}. The item's own answer is {@code body} for a
-     *  solid or a projector, {@code pair} (side {@code a} the curve asked) for a curve, and
-     *  neither (both null) for a point. */
+     *  solid or a projector, {@code pair} (side {@code a} the curve asked) for a curve, {@code
+     *  mesh} for a {@link TriangleMesh}, and none of them (all null) for a point. */
     public record NearestObject(int which, double distance, double t, double[] pointOnCurve, double[] pointOnItem,
-                                CurveBodyFoot body, CurvePair pair) {
+                                CurveBodyFoot body, CurvePair pair, CurveMeshFoot mesh) {
         static NearestObject of(MemorySegment s) {
-            // Only the member answer_kind names is read: the other is zero bytes (a null kind).
+            // Only the member answer_kind names is read: the others are zero bytes (a null kind, a
+            // mesh's vertices 0 rather than UINT32_MAX).
             int kind = s.get(ValueLayout.JAVA_INT, offset(NEAREST_OBJECT_LAYOUT, "answer_kind"));
             CurveBodyFoot body = kind == 0
                 ? CurveBodyFoot.of(s.asSlice(offset(NEAREST_OBJECT_LAYOUT, "body"), CURVE_BODY_FOOT_LAYOUT.byteSize())) : null;
             CurvePair pair = kind == 1 ? CurvePair.of(s.asSlice(offset(NEAREST_OBJECT_LAYOUT, "pair"), CURVE_PAIR_LAYOUT.byteSize())) : null;
+            CurveMeshFoot mesh = kind == 3
+                ? CurveMeshFoot.of(s.asSlice(offset(NEAREST_OBJECT_LAYOUT, "mesh"), CURVE_MESH_FOOT_LAYOUT.byteSize())) : null;
             return new NearestObject(s.get(ValueLayout.JAVA_INT, offset(NEAREST_OBJECT_LAYOUT, "which")),
                                      s.get(ValueLayout.JAVA_DOUBLE, offset(NEAREST_OBJECT_LAYOUT, "distance")),
                                      s.get(ValueLayout.JAVA_DOUBLE, offset(NEAREST_OBJECT_LAYOUT, "t")),
                                      triple(s, offset(NEAREST_OBJECT_LAYOUT, "point_on_curve")),
-                                     triple(s, offset(NEAREST_OBJECT_LAYOUT, "point_on_item")), body, pair);
+                                     triple(s, offset(NEAREST_OBJECT_LAYOUT, "point_on_item")), body, pair, mesh);
         }
 
         @Override
@@ -6174,6 +6711,19 @@ public final class Blacksmith {
 
     // -- health and healing: the reader's report types, one set of this library's own (as
     // Python has one in each module), built from the same flat rows.
+
+    /** One thing wrong with one argument ({@link Solid#check(Solid, String, double)}):
+     *  {@code kind} names it, {@code argument} is 0 for the solid checked and 1 for
+     *  {@code other}, and {@code index}, {@code other} and {@code size} are what the kind gives
+     *  (null, null and 0 where it gives none): {@code open} -- the edge (null for a trim naming
+     *  none), its face, its length; {@code face_kind} -- the face; {@code short_edge} -- the
+     *  edge, its length; {@code collapsed_edge} -- the trim; {@code sliver_face} -- the face,
+     *  its width; {@code tiny_face} -- the face, its area; {@code tiny_body} -- its diagonal;
+     *  {@code small_hole} -- the loop, its area or width; {@code loose_edge} -- the edge, how
+     *  far its sides part; {@code self_intersection} -- the two faces (one face twice for a
+     *  fold), the crossing's length; {@code self_overlap} -- the two faces. */
+    public record Finding(String kind, int argument, Integer index, Integer other, double size) {
+    }
 
     /** One free edge (a side only one face bounds), from {@link HealthReport#freeEdges()}: its
      *  {@code trim} (the face's side), the {@code edge} it lies on (null for a side with no
@@ -7675,6 +8225,250 @@ public final class Blacksmith {
             return mirrorJoin(plane, 0.0, 0.0);
         }
 
+        /** {@code transforms}' 16 numbers each, in one C array (one unused block for none). */
+        private static MemorySegment transformsIn(Arena arena, List<Transform> transforms) {
+            MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 16L * Math.max(transforms.size(), 1));
+            int i = 0;
+            for (Transform t : transforms) {
+                MemorySegment.copy(t.rows(), 0, out, ValueLayout.JAVA_DOUBLE, 16L * i * Double.BYTES, 16);
+                i++;
+            }
+            return out;
+        }
+
+        /** This body and its copies at {@code transforms} (rigid {@link Transform}s, typically
+         *  from {@link Pattern}; instance 0 the identity keeps the original) as one body -- a
+         *  pattern of bodies -- and a {@link PatternReport}. Copies apart from each other are put
+         *  together with no boolean at all; copies that overlap are joined, one boolean a group.
+         *  {@code tolerance} null: the inputs' effective tolerance. Throws {@link
+         *  BuildException} for no transforms or one that is not rigid. */
+        public Patterned pattern(List<Transform> transforms, Double tolerance) {
+            double tol = tolerance == null ? Double.NaN : tolerance;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment report = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment s = handle(), t = transformsIn(arena, transforms);
+                int n = transforms.size();
+                Solid out = new Solid(call(() -> (MemorySegment) PATTERN.invokeExact(s, t, n, tol, report)));
+                return new Patterned(out, PatternReport.of(report));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #pattern(List, Double)} at the inputs' effective tolerance. */
+        public Patterned pattern(List<Transform> transforms) {
+            return pattern(transforms, null);
+        }
+
+        /** {@code tool} (any closed solid, typically a {@code ...Tool} method's result) placed at
+         *  each of {@code transforms} and applied to this body by {@code op} -- a pattern of
+         *  features (Fusion's compute type <i>identical</i>) -- and a {@link PatternReport}.
+         *  Copies apart from each other go into one multi-lump tool and one boolean; overlapping
+         *  copies fall into a few groups. A copy that shares no volume with the body is missed:
+         *  dropped for a cut, kept as a body of its own for a join. Throws {@link
+         *  BuildException} for no transforms, one not rigid, or a tool that is not closed. */
+        public Patterned patternFeature(Solid tool, FeatureOp op, List<Transform> transforms, Double tolerance) {
+            double tol = tolerance == null ? Double.NaN : tolerance;
+            int code = op.code;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment report = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment s = handle(), k = tool.handle(), t = transformsIn(arena, transforms);
+                int n = transforms.size();
+                Solid out = new Solid(call(() -> (MemorySegment) PATTERN_FEATURE.invokeExact(s, k, code, t, n, tol, report)));
+                return new Patterned(out, PatternReport.of(report));
+            } finally {
+                keep(this, tool);
+            }
+        }
+
+        /** {@link #patternFeature(Solid, FeatureOp, List, Double)} at the inputs' effective tolerance. */
+        public Patterned patternFeature(Solid tool, FeatureOp op, List<Transform> transforms) {
+            return patternFeature(tool, op, transforms, null);
+        }
+
+        /** {@code points} flattened to x, y, z triples (one unused triple for none). */
+        private static double[] holePoints(double[][] points) {
+            double[] flat = new double[3 * Math.max(points.length, 1)];
+            for (int i = 0; i < points.length; i++) System.arraycopy(doubles(points[i], 3, "hole"), 0, flat, 3 * i, 3);
+            return flat;
+        }
+
+        /** This body drilled at {@code points} (one hole each, all one spec, one cut) -- the bore
+         *  an exact cylinder of {@code diameter}, a counterbore an exact cylinder, a countersink
+         *  and a drill point exact cones -- and a {@link HoleReport}. {@code direction} is the
+         *  drilling direction, into the material, shared by every point; null drills each point
+         *  along the inward normal of the face it lies on (on an edge, the lowest-numbered
+         *  face's). {@code extent}: {@link HoleExtent#THROUGH} everything ahead of the point;
+         *  {@link HoleExtent#BLIND}, {@code depth} of full bore then a drill point of included
+         *  angle {@code tipAngle} (0 or pi: a flat bottom); {@link HoleExtent#TO_FACE}, until the
+         *  axis first meets face {@code face}, the bore ending on it; {@link HoleExtent#TO_NEXT},
+         *  until the bore first leaves the material. {@code depth} and {@code face} are null
+         *  unless their extent asks for them. {@code head}: {@link HoleHead#SIMPLE}, or {@link
+         *  HoleHead#COUNTERBORE} ({@code headDiameter} across, {@code headDepth} deep) or {@link
+         *  HoleHead#COUNTERSINK} ({@code headDiameter} across at the point, included angle {@code
+         *  headAngle}), measured from the point. Angles in radians. {@code tolerance} null: the
+         *  inputs' effective tolerance. Throws {@link BuildException} for a diameter not
+         *  positive, a depth or face its extent does not take, a head not wider than the bore, an
+         *  angle out of range, a point not on a face with no direction, a hole that removes
+         *  nothing, or a face the axis never meets. */
+        public Drilled hole(double[][] points, double diameter, double[] direction, HoleExtent extent, Double depth, double tipAngle,
+                            Integer face, HoleHead head, double headDiameter, double headDepth, double headAngle, Double tolerance) {
+            double[] flat = holePoints(points);
+            int n = points.length;
+            double[] d = direction == null ? null : doubles(direction, 3, "hole");
+            int ext = extent.code, kind = head.code, f = face == null ? NONE : index(face);
+            double dep = depth == null ? Double.NaN : depth, tol = tolerance == null ? Double.NaN : tolerance;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment report = arena.allocate(ValueLayout.JAVA_DOUBLE, 2);
+                MemorySegment bottoms = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(n, 1));
+                MemorySegment s = handle(), p = doublesIn(arena, flat), dir = d == null ? MemorySegment.NULL : doublesIn(arena, d);
+                Solid out = new Solid(call(() -> (MemorySegment) HOLE.invokeExact(s, p, n, diameter, dir, ext, dep, tipAngle, f, kind,
+                        headDiameter, headDepth, headAngle, tol, report, bottoms)));
+                List<Double> bottom = new ArrayList<>(n);
+                for (int i = 0; i < n; i++) bottom.add(bottoms.getAtIndex(ValueLayout.JAVA_DOUBLE, i));
+                return new Drilled(out, new HoleReport((int) report.getAtIndex(ValueLayout.JAVA_DOUBLE, 0), bottom,
+                        (int) report.getAtIndex(ValueLayout.JAVA_DOUBLE, 1)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #hole(double[][], double, double[], HoleExtent, Double, double, Integer, HoleHead, double, double, double, Double)}
+         *  through, along each point's face normal, no head. */
+        public Drilled hole(double[][] points, double diameter) {
+            return hole(points, diameter, null, HoleExtent.THROUGH, null, Math.toRadians(118), null, HoleHead.SIMPLE, 0.0, 0.0,
+                    Math.toRadians(90), null);
+        }
+
+        /** {@link #hole(double[][], double)} at one point. */
+        public Drilled hole(double[] point, double diameter) {
+            return hole(new double[][] {point}, diameter);
+        }
+
+        /** The tool {@link #hole(double[][], double, double[], HoleExtent, Double, double, Integer, HoleHead, double, double, double, Double)}
+         *  cuts with, from the same arguments: a closed solid, one lump a point -- for {@link
+         *  #patternFeature} or a boolean of your own. Refused as {@code hole} is, but for a hole
+         *  that removes nothing. */
+        public Solid holeTool(double[][] points, double diameter, double[] direction, HoleExtent extent, Double depth, double tipAngle,
+                              Integer face, HoleHead head, double headDiameter, double headDepth, double headAngle, Double tolerance) {
+            double[] flat = holePoints(points);
+            int n = points.length;
+            double[] d = direction == null ? null : doubles(direction, 3, "hole_tool");
+            int ext = extent.code, kind = head.code, f = face == null ? NONE : index(face);
+            double dep = depth == null ? Double.NaN : depth, tol = tolerance == null ? Double.NaN : tolerance;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = handle(), p = doublesIn(arena, flat), dir = d == null ? MemorySegment.NULL : doublesIn(arena, d);
+                return new Solid(call(() -> (MemorySegment) HOLE_TOOL.invokeExact(s, p, n, diameter, dir, ext, dep, tipAngle, f, kind,
+                        headDiameter, headDepth, headAngle, tol)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #holeTool(double[][], double, double[], HoleExtent, Double, double, Integer, HoleHead, double, double, double, Double)}
+         *  through, along each point's face normal, no head. */
+        public Solid holeTool(double[][] points, double diameter) {
+            return holeTool(points, diameter, null, HoleExtent.THROUGH, null, Math.toRadians(118), null, HoleHead.SIMPLE, 0.0, 0.0,
+                    Math.toRadians(90), null);
+        }
+
+        /** {@link #holeTool(double[][], double)} at one point. */
+        public Solid holeTool(double[] point, double diameter) {
+            return holeTool(new double[][] {point}, diameter);
+        }
+
+        private Solid ribCall(MethodHandle verb, String what, NurbsCurve curve, double[] plane, double thickness, RibSide side,
+                              double[] toward, Double tolerance) {
+            double[] w = toward == null ? null : doubles(toward, 3, what);
+            int code = side.code;
+            double tol = tolerance == null ? Double.NaN : tolerance;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = handle(), c = curve.handle(), p = doublesIn(arena, frame(plane));
+                MemorySegment t = w == null ? MemorySegment.NULL : doublesIn(arena, w);
+                return new Solid(call(() -> (MemorySegment) verb.invokeExact(s, c, p, thickness, code, t, tol)));
+            } finally {
+                keep(this, curve);
+            }
+        }
+
+        /** This body with a rib along {@code curve}, an open curve lying in {@code plane} (a
+         *  frame): the region of the plane between the curve and the body on the {@code toward}
+         *  side (a direction in the plane; null: toward the body's nearest point), the curve's
+         *  ends carried on along their tangents to the body, thickened {@code thickness} along
+         *  the plane's normal -- {@code side} {@link RibSide#BOTH} (half each side), {@link
+         *  RibSide#FRONT} (+z) or {@link RibSide#BACK} (-z) -- and joined. {@code tolerance}
+         *  null: the inputs' effective tolerance. Throws {@link BuildException} for a curve
+         *  closed or not in the plane, a thickness not positive, a slab that meets nothing, or a
+         *  region not closed by the body. */
+        public Solid rib(NurbsCurve curve, double[] plane, double thickness, RibSide side, double[] toward, Double tolerance) {
+            return ribCall(RIB, "rib", curve, plane, thickness, side, toward, tolerance);
+        }
+
+        /** {@link #rib(NurbsCurve, double[], double, RibSide, double[], Double)} half each side,
+         *  toward the body's nearest point. */
+        public Solid rib(NurbsCurve curve, double[] plane, double thickness) {
+            return rib(curve, plane, thickness, RibSide.BOTH, null, null);
+        }
+
+        /** The slab {@link #rib(NurbsCurve, double[], double, RibSide, double[], Double)} joins,
+         *  alone, from the same arguments. */
+        public Solid ribTool(NurbsCurve curve, double[] plane, double thickness, RibSide side, double[] toward, Double tolerance) {
+            return ribCall(RIB_TOOL, "rib_tool", curve, plane, thickness, side, toward, tolerance);
+        }
+
+        /** {@link #ribTool(NurbsCurve, double[], double, RibSide, double[], Double)} half each
+         *  side, toward the body's nearest point. */
+        public Solid ribTool(NurbsCurve curve, double[] plane, double thickness) {
+            return ribTool(curve, plane, thickness, RibSide.BOTH, null, null);
+        }
+
+        private Solid webCall(MethodHandle verb, List<NurbsCurve> curves, double[] plane, double thickness, WebSide side, Double depth,
+                              boolean bothWays, Double tolerance) {
+            int code = side.code;
+            double dep = depth == null ? Double.NaN : depth, tol = tolerance == null ? Double.NaN : tolerance;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = handle(), arr = curveHandles(arena, curves), p = doublesIn(arena, frame(plane));
+                int n = curves.size();
+                return new Solid(call(() -> (MemorySegment) verb.invokeExact(s, arr, n, p, thickness, code, dep, bothWays, tol)));
+            } finally {
+                keep(this, curves);
+            }
+        }
+
+        /** This body with a web along each of {@code curves} (open curves in {@code plane}):
+         *  each offset in the plane to {@code thickness} -- {@code side} {@link WebSide#BOTH},
+         *  {@link WebSide#LEFT} or {@link WebSide#RIGHT} of the curve's run, the plane's normal
+         *  up -- its ends carried along their tangents to the body, its walls run along the
+         *  plane's normal until they meet the body ({@code depth} null) or for {@code depth}, one
+         *  way (the normal's) or both when {@code bothWays}. All the webs are one tool and one
+         *  join; crossing curves make a network. {@code tolerance} null: the inputs' effective
+         *  tolerance. Throws {@link BuildException} for no curves, one closed or not in the
+         *  plane, a thickness not positive, or walls that meet nothing or are not closed by the
+         *  body. */
+        public Solid web(List<NurbsCurve> curves, double[] plane, double thickness, WebSide side, Double depth, boolean bothWays,
+                         Double tolerance) {
+            return webCall(WEB, curves, plane, thickness, side, depth, bothWays, tolerance);
+        }
+
+        /** {@link #web(List, double[], double, WebSide, Double, boolean, Double)} half each side,
+         *  the walls run to the body. */
+        public Solid web(List<NurbsCurve> curves, double[] plane, double thickness) {
+            return web(curves, plane, thickness, WebSide.BOTH, null, false, null);
+        }
+
+        /** The walls {@link #web(List, double[], double, WebSide, Double, boolean, Double)}
+         *  joins, alone, from the same arguments. */
+        public Solid webTool(List<NurbsCurve> curves, double[] plane, double thickness, WebSide side, Double depth, boolean bothWays,
+                             Double tolerance) {
+            return webCall(WEB_TOOL, curves, plane, thickness, side, depth, bothWays, tolerance);
+        }
+
+        /** {@link #webTool(List, double[], double, WebSide, Double, boolean, Double)} half each
+         *  side, the walls run to the body. */
+        public Solid webTool(List<NurbsCurve> curves, double[] plane, double thickness) {
+            return webTool(curves, plane, thickness, WebSide.BOTH, null, false, null);
+        }
+
         // -- combining
 
         /** One of the four booleans; the progress callback and its user pointer are null. */
@@ -7861,6 +8655,110 @@ public final class Blacksmith {
                         call(() -> (MemorySegment) INTERSECT.invokeExact(a, b, tolerance, MemorySegment.NULL, MemorySegment.NULL)),
                         "intersect");
                 return intersectionOf(h);
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** {@link #selfIntersections(double)} at 0.05. */
+        public Intersection selfIntersections() {
+            return selfIntersections(0.05);
+        }
+
+        /** Where this solid passes through itself, at {@code tolerance}, as an
+         *  {@link Intersection} -- {@link #intersect}'s result with this solid on both sides, so
+         *  each {@link Chain} and {@link Overlap} names two faces of this solid. Never along its
+         *  own topology: faces meeting at their shared edges and vertices are not a crossing, so
+         *  a clean solid is an empty result, never an error. A chain whose two faces are one face
+         *  is that face folding through itself, and has no {@code curve}. The solid is not
+         *  changed; it may be an open sheet.
+         *
+         *  <p>The solid is meshed once and crossed against itself, the exact face-pair engine
+         *  refining each crossing of two faces, so the mesh route's known limit holds: a crossing
+         *  narrower than {@code tolerance} -- two faces passing within it without their meshes
+         *  crossing -- can be missed.
+         *
+         *  <p>Throws {@link BuildException} for a {@code tolerance} not positive and finite, a
+         *  solid with no faces, or one that meshes to nothing. */
+        public Intersection selfIntersections(double tolerance) {
+            try {
+                MemorySegment a = handle();
+                MemorySegment h = checked(
+                        call(() -> (MemorySegment) SELF_INTERSECT.invokeExact(a, tolerance, MemorySegment.NULL, MemorySegment.NULL)),
+                        "self_intersect");
+                return intersectionOf(h);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #check(Solid, String, double)} of this solid alone, with no operation, at 0.05. */
+        public List<Finding> check() {
+            return check(null, null, 0.05);
+        }
+
+        /** {@link #check(Solid, String, double)} at 0.05. */
+        public List<Finding> check(Solid other, String operation) {
+            return check(other, operation, 0.05);
+        }
+
+        /** What is wrong with this solid (and {@code other}, if not null) as the arguments of
+         *  {@code operation} (null for none), at {@code tolerance}, as a list of {@link Finding}
+         *  -- OCCT's {@code BRepAlgoAPI_Check}, gathered from what the kernel already measures.
+         *  An empty list is a valid pair; nothing is changed.
+         *
+         *  <p>Each argument is checked alone whatever the operation: no faces
+         *  ({@code no_faces}), features smaller than {@code tolerance} as {@link #health} finds
+         *  them ({@code short_edge}, {@code collapsed_edge}, {@code sliver_face},
+         *  {@code tiny_face}, {@code tiny_body}, {@code small_hole}), shared edges whose sides
+         *  part ({@code loose_edge}), and where it passes through itself as
+         *  {@link #selfIntersections} finds it ({@code self_intersection}, {@code self_overlap},
+         *  or {@code unmeshable} where it could not be meshed to look). {@code operation} --
+         *  "join", "cut", "common", "split_sheet", "trim", "merge" or "intersect" -- adds what
+         *  that verb refuses each argument for: a boolean wants both closed ({@code open}, one
+         *  finding per free edge) and holding no region wall ({@code region_wall}, a merge's
+         *  body); a split or trim only its tool ({@code other}) closed; a merge closed manifolds
+         *  ({@code non_manifold}) of planes, cylinders, cones, spheres and tori
+         *  ({@code face_kind}, per face). Without {@code other}, this solid is held to what the
+         *  operation asks of its first argument. A free edge is no fault without an operation
+         *  that asks for a closed solid: an open sheet is a fine body.
+         *
+         *  <p>Not checked: an edge's curve leaving its face's surface, a surface only C0 inside a
+         *  face, sub-shapes a boolean would merge.
+         *
+         *  <p>Throws {@link BuildException} for an unknown operation or a {@code tolerance} not
+         *  positive and finite. */
+        public List<Finding> check(Solid other, String operation, double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment a = handle();
+                MemorySegment b = other == null ? MemorySegment.NULL : other.handle();
+                MemorySegment op = operation == null ? MemorySegment.NULL : arena.allocateFrom(operation);
+                MemorySegment h = checked(
+                        call(() -> (MemorySegment) CHECK.invokeExact(a, b, op, tolerance, MemorySegment.NULL, MemorySegment.NULL)),
+                        "check");
+                try {
+                    int n = call(() -> (int) CHECK_COUNT.invokeExact(h));
+                    List<Finding> found = new ArrayList<>(n);
+                    MemorySegment raw = arena.allocate(FINDING);
+                    for (int i = 0; i < n; i++) {
+                        int at = i;
+                        boolean ok = call(() -> (boolean) CHECK_FINDING.invokeExact(h, at, raw));
+                        if (!ok) throw failure("check_finding");
+                        int index = raw.get(ValueLayout.JAVA_INT, offset(FINDING, "index"));
+                        int second = raw.get(ValueLayout.JAVA_INT, offset(FINDING, "other"));
+                        found.add(new Finding(string(raw.get(ValueLayout.ADDRESS, offset(FINDING, "kind"))),
+                                              raw.get(ValueLayout.JAVA_INT, offset(FINDING, "argument")),
+                                              index == NONE ? null : index,
+                                              second == NONE ? null : second,
+                                              raw.get(ValueLayout.JAVA_DOUBLE, offset(FINDING, "size"))));
+                    }
+                    return List.copyOf(found);
+                } finally {
+                    call(() -> {
+                        CHECK_FREE.invokeExact(h);
+                        return null;
+                    });
+                }
             } finally {
                 keep(this, other);
             }
@@ -9013,6 +9911,28 @@ public final class Blacksmith {
         /** {@link #projector(Double)} with the tolerance unset. */
         public Projector projector() {
             return projector(null);
+        }
+
+        /** This solid's <b>measuring</b> tessellation as a {@link TriangleMesh}: the mesh the
+         * measuring queries search, within a third of {@code tolerance} of the surface -- finer
+         * than the display mesh {@link #mesh} gives at the same tolerance. Answers against it are
+         * exact for the mesh, not for the body. {@code tolerance} -- absolute, in model units;
+         * null (or 0, or NaN) is unset, the solid's effective tolerance. The mesh is a copy: it
+         * answers on after this solid is closed. A negative or infinite tolerance, or a body that
+         * meshes to nothing, throws. */
+        public TriangleMesh triangleMesh(Double tolerance) {
+            double tol = tolerance == null ? Double.NaN : tolerance;
+            try {
+                MemorySegment h = handle();
+                return new TriangleMesh(call(() -> (MemorySegment) SOLID_TRIANGLE_MESH.invokeExact(h, tol)), "solid_triangle_mesh");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #triangleMesh(Double)} with the tolerance unset. */
+        public TriangleMesh triangleMesh() {
+            return triangleMesh(null);
         }
 
         /** The nearest point to {@code p} of face {@code face} alone, inside its trims or on its
@@ -12768,6 +13688,179 @@ public final class Blacksmith {
         /** {@link #curveClosestPoints(NurbsCurve, Double)} with no limit. */
         public CurveBodyFoot curveClosestPoints(NurbsCurve curve) {
             return curveClosestPoints(curve, null);
+        }
+    }
+
+    /**
+     * A triangle mesh and its search tree, built once and immutable: nearest points ({@link
+     * #closestPoint}) and nearest points to a curve ({@link #curveClosestPoints}) are answered
+     * exactly against it -- no tolerance, no {@code refined} figure. The vertices and the
+     * triangles (three vertex indices each, any winding) are copied; a zero-area triangle is
+     * accepted and answers as its longest edge. {@link Solid#triangleMesh} gives a solid's own. No
+     * triangles, an index past the vertex count, or a coordinate that is not finite throws.
+     * Nothing in it changes after it is built, so calls from several threads at once are safe and
+     * do not take turns. {@link #close} frees this handle; so does the garbage collector. A call
+     * after {@link #close} throws {@code triangle_mesh: closed}.
+     */
+    public static final class TriangleMesh implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        /** The mesh of {@code positions} (three numbers a vertex, flat) and {@code indices}
+         *  (three vertex indices a triangle, flat; each an unsigned 32-bit index). */
+        public TriangleMesh(double[] positions, int[] indices) {
+            this(build(positions, indices), "triangle_mesh_new");
+        }
+
+        /** The mesh of {@code positions} (one {@code double[3]} a vertex) and {@code triangles}
+         *  (one {@code int[3]} a triangle). */
+        public TriangleMesh(double[][] positions, int[][] triangles) {
+            this(flat(positions), flat(triangles));
+        }
+
+        private TriangleMesh(MemorySegment raw, String what) {
+            handle = new Handle(TRIANGLE_MESH_FREE, "triangle_mesh: closed", checked(raw, what));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        private static MemorySegment build(double[] positions, int[] indices) {
+            final String what = "triangle_mesh_new";
+            if (positions == null) throw new NullPointerException("positions");
+            if (indices == null) throw new NullPointerException("indices");
+            if (positions.length % 3 != 0) throw new BuildException(what + ": " + positions.length + " numbers are not three a vertex");
+            if (indices.length % 3 != 0) throw new BuildException(what + ": " + indices.length + " indices are not three a triangle");
+            try (Arena arena = Arena.ofConfined()) {
+                // One slot at least; the counts say how many are real (0 triangles: refused by the library).
+                MemorySegment ps = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(positions.length, 1));
+                MemorySegment.copy(positions, 0, ps, ValueLayout.JAVA_DOUBLE, 0, positions.length);
+                MemorySegment is = arena.allocate(ValueLayout.JAVA_INT, Math.max(indices.length, 1));
+                MemorySegment.copy(indices, 0, is, ValueLayout.JAVA_INT, 0, indices.length);
+                int nv = positions.length / 3, nt = indices.length / 3;
+                return call(() -> (MemorySegment) TRIANGLE_MESH_NEW.invokeExact(ps, nv, is, nt));
+            }
+        }
+
+        private static double[] flat(double[][] rows) {
+            if (rows == null) throw new NullPointerException("positions");
+            double[] out = new double[3 * rows.length];
+            for (int i = 0; i < rows.length; i++) {
+                if (rows[i] == null || rows[i].length != 3) throw new BuildException("triangle_mesh_new: vertex " + i + " is not 3 numbers");
+                System.arraycopy(rows[i], 0, out, 3 * i, 3);
+            }
+            return out;
+        }
+
+        private static int[] flat(int[][] rows) {
+            if (rows == null) throw new NullPointerException("triangles");
+            int[] out = new int[3 * rows.length];
+            for (int i = 0; i < rows.length; i++) {
+                if (rows[i] == null || rows[i].length != 3) throw new BuildException("triangle_mesh_new: triangle " + i + " is not 3 indices");
+                System.arraycopy(rows[i], 0, out, 3 * i, 3);
+            }
+            return out;
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the mesh back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** How many vertices the mesh holds. */
+        public int vertexCount() {
+            try {
+                MemorySegment h = handle();
+                return call(() -> (int) TRIANGLE_MESH_VERTEX_COUNT.invokeExact(h));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** How many triangles the mesh holds. */
+        public int triangleCount() {
+            try {
+                MemorySegment h = handle();
+                return call(() -> (int) TRIANGLE_MESH_TRIANGLE_COUNT.invokeExact(h));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The box of every vertex. */
+        public Bounds bounds() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 6);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) TRIANGLE_MESH_BOUNDS.invokeExact(h, out));
+                if (!ok) throw failure("triangle_mesh_bounds");
+                double[] o = out.toArray(ValueLayout.JAVA_DOUBLE);
+                return new Bounds(new double[] {o[0], o[1], o[2]}, new double[] {o[3], o[4], o[5]});
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The nearest point of the mesh to {@code p}, as a {@link MeshPoint} -- exact, the lower
+         * triangle where several share the point -- or null where it lies beyond {@code
+         * maxDistance} (null, NaN or +inf: no limit; a point on the mesh is within 0). A point not
+         * finite or a negative limit throws. */
+        public MeshPoint closestPoint(double[] p, Double maxDistance) {
+            final String what = "triangle_mesh_closest_point";
+            double[] q = point3(p, what);
+            double limit = maxDistance == null ? Double.NaN : maxDistance;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ps = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, q);
+                MemorySegment out = arena.allocate(MESH_POINT_LAYOUT);
+                MemorySegment h = handle();
+                int found = call(() -> (int) TRIANGLE_MESH_CLOSEST_POINT.invokeExact(h, ps, limit, out));
+                if (found < 0) throw failure(what);
+                return found == 0 ? null : MeshPoint.of(out);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #closestPoint(double[], Double)} with no limit. */
+        public MeshPoint closestPoint(double[] p) {
+            return closestPoint(p, null);
+        }
+
+        /** The nearest points of {@code curve} and the mesh, as a {@link CurveMeshFoot} -- exact;
+         * {@code crossing} true and distance 0 at the earliest crossing in {@code t}; among equal
+         * distances the lower triangle, then the lower {@code t} -- or null where the mesh lies
+         * farther than {@code maxDistance} (null, NaN or +inf: no limit). A mesh has no inside: a
+         * curve within a closed mesh answers its distance to the triangles. A curve that is not
+         * valid or a negative limit throws. */
+        public CurveMeshFoot curveClosestPoints(NurbsCurve curve, Double maxDistance) {
+            if (curve == null) throw new NullPointerException("curve");
+            double limit = maxDistance == null ? Double.NaN : maxDistance;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(CURVE_MESH_FOOT_LAYOUT);
+                MemorySegment h = handle(), c = curve.handle.live();
+                int found = call(() -> (int) TRIANGLE_MESH_CURVE_CLOSEST_POINTS.invokeExact(h, c, limit, out));
+                if (found < 0) throw failure("triangle_mesh_curve_closest_points");
+                return found == 0 ? null : CurveMeshFoot.of(out);
+            } finally {
+                keep(this, curve);
+            }
+        }
+
+        /** {@link #curveClosestPoints(NurbsCurve, Double)} with no limit. */
+        public CurveMeshFoot curveClosestPoints(NurbsCurve curve) {
+            return curveClosestPoints(curve, null);
+        }
+
+        @Override
+        public String toString() {
+            return closed() ? "TriangleMesh(closed)" : "TriangleMesh(" + vertexCount() + " vertices, " + triangleCount() + " triangles)";
         }
     }
 
@@ -17952,6 +19045,493 @@ public final class Blacksmith {
                     return null;
                 });
             }
+        }
+    }
+
+    // ---- mechanical drawings: hidden lines, the projected outline, pages, DXF profiles ----
+
+    /**
+     * How a hidden-line view sees the solids ({@link #hlr}, {@link #hlrMesh}, {@link
+     * #projectedOutline}): along {@code direction} (parallel; null is (0, 1, 0), the front,
+     * from the eye toward the model), or, with {@code eye} given, in perspective from it toward
+     * {@code target}. {@code up} is the page's up; {@code tolerance} null (or 0) the solids'
+     * effective tolerance; {@code iso} isocurves per direction per face; {@code smoothAngle}
+     * (radians, null one degree) how near tangent two faces are for their edge to be smooth;
+     * {@code featureAngle} (radians, meshes only, null thirty degrees) how far a mesh edge's
+     * triangles turn for it to be drawn. Start from {@link #defaults()} and the {@code with*}s.
+     */
+    public record HlrOptions(double[] direction, double[] up, double[] eye, double[] target, Double tolerance, int iso,
+                             Double smoothAngle, Double featureAngle) {
+        /** The front view: parallel along +Y, Z up, at the effective tolerance, no isocurves. */
+        public static HlrOptions defaults() {
+            return new HlrOptions(null, new double[] {0, 0, 1}, null, new double[] {0, 0, 0}, null, 0, null, null);
+        }
+
+        /** These options seen along {@code (x, y, z)}, parallel. */
+        public HlrOptions withDirection(double x, double y, double z) {
+            return new HlrOptions(new double[] {x, y, z}, up, eye, target, tolerance, iso, smoothAngle, featureAngle);
+        }
+
+        /** These options with the page's up {@code (x, y, z)}. */
+        public HlrOptions withUp(double x, double y, double z) {
+            return new HlrOptions(direction, new double[] {x, y, z}, eye, target, tolerance, iso, smoothAngle, featureAngle);
+        }
+
+        /** These options in perspective, the eye at {@code (x, y, z)}. */
+        public HlrOptions withEye(double x, double y, double z) {
+            return new HlrOptions(direction, up, new double[] {x, y, z}, target, tolerance, iso, smoothAngle, featureAngle);
+        }
+
+        /** These options with the perspective eye looking at {@code (x, y, z)}. */
+        public HlrOptions withTarget(double x, double y, double z) {
+            return new HlrOptions(direction, up, eye, new double[] {x, y, z}, tolerance, iso, smoothAngle, featureAngle);
+        }
+
+        /** These options at {@code tolerance} (null or 0: the effective tolerance). */
+        public HlrOptions withTolerance(Double tolerance) {
+            return new HlrOptions(direction, up, eye, target, tolerance, iso, smoothAngle, featureAngle);
+        }
+
+        /** These options drawing {@code iso} isocurves per direction on each face. */
+        public HlrOptions withIso(int iso) {
+            return new HlrOptions(direction, up, eye, target, tolerance, iso, smoothAngle, featureAngle);
+        }
+
+        /** These options with the smooth angle {@code radians}. */
+        public HlrOptions withSmoothAngle(double radians) {
+            return new HlrOptions(direction, up, eye, target, tolerance, iso, radians, featureAngle);
+        }
+
+        /** These options with the mesh feature angle {@code radians}. */
+        public HlrOptions withFeatureAngle(double radians) {
+            return new HlrOptions(direction, up, eye, target, tolerance, iso, smoothAngle, radians);
+        }
+
+        private static void put(MemorySegment out, String field, double[] v, String what) {
+            if (v == null || v.length != 3) throw new BuildException("hlr: " + what + " must be three numbers");
+            long at = offset(HLR_OPTIONS_LAYOUT, field);
+            for (int i = 0; i < 3; i++) out.set(ValueLayout.JAVA_DOUBLE, at + 8L * i, v[i]);
+        }
+
+        /** Packed into {@link #HLR_OPTIONS_LAYOUT}, filled first by the library's own init. */
+        MemorySegment raw(Arena arena) {
+            MemorySegment out = arena.allocate(HLR_OPTIONS_LAYOUT);
+            call(() -> {
+                HLR_OPTIONS_INIT.invokeExact(out);
+                return null;
+            });
+            if (eye != null) {
+                if (direction != null) throw new BuildException("hlr: give a direction (parallel) or an eye (perspective), not both");
+                out.set(ValueLayout.JAVA_INT, offset(HLR_OPTIONS_LAYOUT, "projection"), 1);
+                put(out, "eye", eye, "eye");
+                put(out, "target", target == null ? new double[] {0, 0, 0} : target, "target");
+            } else if (direction != null) {
+                put(out, "direction", direction, "direction");
+            }
+            put(out, "up", up == null ? new double[] {0, 0, 1} : up, "up");
+            out.set(ValueLayout.JAVA_DOUBLE, offset(HLR_OPTIONS_LAYOUT, "tolerance"), tolerance == null ? Double.NaN : tolerance);
+            out.set(ValueLayout.JAVA_INT, offset(HLR_OPTIONS_LAYOUT, "iso"), iso);
+            if (smoothAngle != null) out.set(ValueLayout.JAVA_DOUBLE, offset(HLR_OPTIONS_LAYOUT, "smooth_angle"), smoothAngle);
+            if (featureAngle != null) out.set(ValueLayout.JAVA_DOUBLE, offset(HLR_OPTIONS_LAYOUT, "feature_angle"), featureAngle);
+            return out;
+        }
+    }
+
+    /** {@link HlrLine#kind()}, as {@code CADACLYSM_BLACKSMITH_HLR_SHARP} .. {@code _BOUNDARY} number them. */
+    public enum HlrKind {
+        /** An edge between faces meeting at an angle. */
+        SHARP,
+        /** An edge between faces meeting within the smooth angle of tangent. */
+        SMOOTH,
+        /** Where a surface turns away from the eye (a silhouette). */
+        OUTLINE,
+        /** An isocurve. */
+        ISO,
+        /** An edge only one face bounds. */
+        BOUNDARY
+    }
+
+    /** {@link HlrLine#source()}'s kind, as {@code CADACLYSM_BLACKSMITH_HLR_SOURCE_*} number them:
+     *  an edge (its id), a face (its index), a mesh edge (its two vertices). */
+    public enum HlrSource {
+        EDGE, FACE, MESH_EDGE
+    }
+
+    /** One line of a hidden-line view: its {@code kind}, whether it is {@code visible}, the
+     *  index of the {@code solid} (or mesh) it belongs to, what it is a span of ({@code source},
+     *  {@code index}, and {@code index2} for a mesh edge's second vertex, else null), its curve as
+     *  rational cubic Béziers on the view plane ({@code beziers2d}, z 0) and in space
+     *  ({@code beziers3d}), Bézier for Bézier the same span, and its lengths there. Plain data. */
+    public record HlrLine(HlrKind kind, boolean visible, int solid, HlrSource source, int index, Integer index2,
+                          Cad.BeziersData64 beziers2d, Cad.BeziersData64 beziers3d, double length2d, double length3d) {
+    }
+
+    /** What a view's hidden-line removal did ({@link Hlr#report()}): the curves it considered,
+     *  the pieces it classified and how, the solids it could not place. */
+    public record HlrReport(int candidates, int segments, int crossings, int pieces, int degenerate, int rays, int meshHits,
+                            int rejected, int grazes, int unsettled, int meshOnly, int fallbackEdges, int failedSolids,
+                            double candidateLength, double degenerateLength) {
+    }
+
+    /**
+     * A hidden-line view of solids or meshes ({@link #hlr}, {@link #hlrMesh}): its {@link
+     * #lines()}, what the removal did ({@link #report()}) and the {@link #tolerance()} it worked
+     * at, all read out when it is made. Placed on a drawing with {@link Page#addView}.
+     * Immutable. {@link #close} frees the handle; so does the garbage collector.
+     */
+    public static final class Hlr implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+        private final List<HlrLine> lines;
+        private final HlrReport report;
+        private final double tolerance;
+
+        private Hlr(MemorySegment raw, String what) {
+            handle = new Handle(HLR_FREE, "hlr: closed", checked(raw, what));
+            cleanable = CLEANER.register(this, handle);
+            MemorySegment h = handle.live();
+            try (Arena arena = Arena.ofConfined()) {
+                int n = call(() -> (int) HLR_LINE_COUNT.invokeExact(h));
+                List<HlrLine> found = new ArrayList<>(n);
+                MemorySegment line = arena.allocate(HLR_LINE_LAYOUT);
+                for (int i = 0; i < n; i++) {
+                    int at = i;
+                    boolean ok = call(() -> (boolean) HLR_LINE.invokeExact(h, at, line));
+                    if (!ok) throw failure("hlr_line");
+                    int count = line.get(ValueLayout.JAVA_INT, offset(HLR_LINE_LAYOUT, "bezier_count"));
+                    MemorySegment b2 = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(16L * count, 1));
+                    MemorySegment b3 = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(16L * count, 1));
+                    if (!call(() -> (boolean) HLR_LINE_BEZIERS2D.invokeExact(h, at, b2))) throw failure("hlr_line_beziers2d");
+                    if (!call(() -> (boolean) HLR_LINE_BEZIERS3D.invokeExact(h, at, b3))) throw failure("hlr_line_beziers3d");
+                    HlrSource source = HlrSource.values()[line.get(ValueLayout.JAVA_INT, offset(HLR_LINE_LAYOUT, "source_kind"))];
+                    found.add(new HlrLine(
+                            HlrKind.values()[line.get(ValueLayout.JAVA_INT, offset(HLR_LINE_LAYOUT, "kind"))],
+                            line.get(ValueLayout.JAVA_INT, offset(HLR_LINE_LAYOUT, "visible")) != 0,
+                            line.get(ValueLayout.JAVA_INT, offset(HLR_LINE_LAYOUT, "solid")),
+                            source,
+                            line.get(ValueLayout.JAVA_INT, offset(HLR_LINE_LAYOUT, "source")),
+                            source == HlrSource.MESH_EDGE ? line.get(ValueLayout.JAVA_INT, offset(HLR_LINE_LAYOUT, "source2")) : null,
+                            split(b2, count), split(b3, count),
+                            line.get(ValueLayout.JAVA_DOUBLE, offset(HLR_LINE_LAYOUT, "length2d")),
+                            line.get(ValueLayout.JAVA_DOUBLE, offset(HLR_LINE_LAYOUT, "length3d"))));
+                }
+                lines = List.copyOf(found);
+                MemorySegment r = arena.allocate(HLR_REPORT_LAYOUT);
+                if (!call(() -> (boolean) HLR_REPORT.invokeExact(h, r))) throw failure("hlr_report");
+                java.util.function.ToIntFunction<String> u = name -> r.get(ValueLayout.JAVA_INT, offset(HLR_REPORT_LAYOUT, name));
+                report = new HlrReport(u.applyAsInt("candidates"), u.applyAsInt("segments"), u.applyAsInt("crossings"),
+                        u.applyAsInt("pieces"), u.applyAsInt("degenerate"), u.applyAsInt("rays"), u.applyAsInt("mesh_hits"),
+                        u.applyAsInt("rejected"), u.applyAsInt("grazes"), u.applyAsInt("unsettled"), u.applyAsInt("mesh_only"),
+                        u.applyAsInt("fallback_edges"), u.applyAsInt("failed_solids"),
+                        r.get(ValueLayout.JAVA_DOUBLE, offset(HLR_REPORT_LAYOUT, "candidate_length")),
+                        r.get(ValueLayout.JAVA_DOUBLE, offset(HLR_REPORT_LAYOUT, "degenerate_length")));
+                tolerance = r.get(ValueLayout.JAVA_DOUBLE, offset(HLR_REPORT_LAYOUT, "tolerance"));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@code count} Béziers of sixteen doubles ({@code x y z w} a control point) as points and weights. */
+        private static Cad.BeziersData64 split(MemorySegment flat, int count) {
+            double[] all = flat.asSlice(0, 8L * 16 * count).toArray(ValueLayout.JAVA_DOUBLE);
+            double[] points = new double[12 * count];
+            double[] weights = new double[4 * count];
+            for (int i = 0; i < count; i++) {
+                for (int k = 0; k < 4; k++) {
+                    System.arraycopy(all, i * 16 + k * 4, points, i * 12 + k * 3, 3);
+                    weights[i * 4 + k] = all[i * 16 + k * 4 + 3];
+                }
+            }
+            return new Cad.BeziersData64(points, weights);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the view back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** Every line, seen and hidden. */
+        public List<HlrLine> lines() {
+            return lines;
+        }
+
+        /** The lines seen. */
+        public List<HlrLine> visible() {
+            return lines.stream().filter(HlrLine::visible).toList();
+        }
+
+        /** The lines hidden. */
+        public List<HlrLine> hidden() {
+            return lines.stream().filter(l -> !l.visible()).toList();
+        }
+
+        /** What the removal did. */
+        public HlrReport report() {
+            return report;
+        }
+
+        /** The tolerance it worked at, model units (null / 0 resolved). */
+        public double tolerance() {
+            return tolerance;
+        }
+
+        @Override
+        public String toString() {
+            return "Hlr(" + lines.size() + " lines, " + visible().size() + " seen)";
+        }
+    }
+
+    /** {@link #hlr(Collection, HlrOptions)} from the front, every default. */
+    public static Hlr hlr(Collection<Solid> solids) {
+        return hlr(solids, null);
+    }
+
+    /**
+     * Hidden-line removal of {@code solids}, each where it stands, every solid hiding the
+     * others: what a drawing of them shows, and what it shows only dashed. Seen as {@code
+     * options} says (null: the front, parallel, Z up). Each line is a span of an edge's own curve
+     * or a silhouette, exact as rational cubic Béziers. View coordinates are the camera's (x
+     * right, y up), the origin on the sight line through the solids' box centre. Throws {@link
+     * BuildException} for no solids and refused words, in the library's words.
+     */
+    public static Hlr hlr(Collection<Solid> solids, HlrOptions options) {
+        Solid[] all = solids.toArray(new Solid[0]);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+            for (int i = 0; i < all.length; i++) handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+            MemorySegment o = (options == null ? HlrOptions.defaults() : options).raw(arena);
+            long n = all.length;
+            return new Hlr(call(() -> (MemorySegment) HLR.invokeExact(handles, n, o)), "hlr");
+        } finally {
+            keep((Object[]) all);
+        }
+    }
+
+    /** {@link #hlr(Collection, HlrOptions)} of triangle meshes, each a solid of flat triangles:
+     *  its lines are the edges whose triangles turn by more than the feature angle, the edges of
+     *  one triangle and the outlines; the triangles hide exactly. Each line's source is {@link
+     *  HlrSource#MESH_EDGE}. */
+    public static Hlr hlrMesh(Collection<TriangleMesh> meshes, HlrOptions options) {
+        TriangleMesh[] all = meshes.toArray(new TriangleMesh[0]);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+            for (int i = 0; i < all.length; i++) handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+            MemorySegment o = (options == null ? HlrOptions.defaults() : options).raw(arena);
+            long n = all.length;
+            return new Hlr(call(() -> (MemorySegment) HLR_MESH.invokeExact(handles, n, o)), "hlr_mesh");
+        } finally {
+            keep((Object[]) all);
+        }
+    }
+
+    /** The boundary of the union of the solids' projections, as closed profiles in view
+     *  coordinates (as {@link #hlr}'s): each outer loop counter-clockwise with its holes
+     *  clockwise inside it -- a through hole seen along its axis is a hole. */
+    public static List<Profile> projectedOutline(Collection<Solid> solids, HlrOptions options) {
+        Solid[] all = solids.toArray(new Solid[0]);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+            for (int i = 0; i < all.length; i++) handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+            MemorySegment o = (options == null ? HlrOptions.defaults() : options).raw(arena);
+            long n = all.length;
+            return Profile.profileList(call(() -> (MemorySegment) PROJECTED_OUTLINE.invokeExact(handles, n, o)), "projected_outline");
+        } finally {
+            keep((Object[]) all);
+        }
+    }
+
+    /** {@link #dxfProfiles(String, Double)} at the effective tolerance. */
+    public static List<Profile> dxfProfiles(String text) {
+        return dxfProfiles(text, null);
+    }
+
+    /** A DXF file's closed loops as profiles: its lines, arcs, circles, ellipses, polylines and
+     *  splines (blocks inserted) chained end to end within {@code tolerance} (null or 0: the
+     *  effective tolerance over the drawing's extents) into closed loops, holes nested in the
+     *  loops around them. Throws {@link BuildException} for text that is not DXF, naming the line
+     *  it stopped at. */
+    public static List<Profile> dxfProfiles(String text, Double tolerance) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment t = arena.allocateFrom(text);
+            double tol = tolerance == null ? Double.NaN : tolerance;
+            return Profile.profileList(call(() -> (MemorySegment) DXF_PROFILES.invokeExact(t, tol)), "dxf_profiles");
+        }
+    }
+
+    /** {@link Page}'s units: the DXF {@code $INSUNITS} codes {@code cadaclysm_blacksmith_page_new} takes. */
+    public enum PageUnits {
+        UNITLESS(0), INCHES(1), FEET(2), MILLIMETRES(4), CENTIMETRES(5), METRES(6);
+
+        final int code;
+
+        PageUnits(int code) {
+            this.code = code;
+        }
+    }
+
+    /**
+     * A flat drawing page: hidden-line views, profiles, hatches and text placed on it, written
+     * as SVG ({@link #svg()}) or DXF R2000 ({@link #dxf()}). Layers are made on first use: a
+     * view's own -- {@code visible}, {@code outline}, {@code smooth}, {@code iso}, {@code hidden}
+     * (dashed) -- and any other name continuous, colour 7. Mutable: each {@code add*} changes
+     * the page and returns it. {@link #close} frees the handle; so does the garbage collector.
+     */
+    public static final class Page implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        /** An empty page in millimetres. */
+        public Page() {
+            this(PageUnits.MILLIMETRES);
+        }
+
+        /** An empty page in {@code units}. */
+        public Page(PageUnits units) {
+            int code = units.code;
+            handle = new Handle(PAGE_FREE, "page: closed", checked(call(() -> (MemorySegment) PAGE_NEW.invokeExact(code)), "page_new"));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the page back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** How many entities the page holds. */
+        public int entityCount() {
+            try {
+                MemorySegment h = handle();
+                return call(() -> (int) PAGE_ENTITY_COUNT.invokeExact(h));
+            } finally {
+                keep(this);
+            }
+        }
+
+        private static MemorySegment text(Arena arena, String s) {
+            return s == null ? MemorySegment.NULL : arena.allocateFrom(s);
+        }
+
+        /** {@code view}'s lines on the page, a view point {@code p} landing at {@code (x, y) +
+         *  scale * p}: each line as the entities that draw it best (lines, arcs, circles,
+         *  elliptical arcs, splines). */
+        public Page addView(Hlr view, double x, double y, double scale) {
+            try {
+                MemorySegment h = handle();
+                MemorySegment v = view.handle();
+                if (!call(() -> (boolean) PAGE_ADD_VIEW.invokeExact(h, v, x, y, scale))) throw failure("page_add_view");
+                return this;
+            } finally {
+                keep(this, view);
+            }
+        }
+
+        /** {@code profile}'s outline and holes on layer {@code 0}, moved by {@code (x, y)}. */
+        public Page addProfile(Profile profile, double x, double y) {
+            return addProfile(profile, x, y, null);
+        }
+
+        /** {@code profile}'s outline and holes on {@code layer} (null: {@code 0}), moved by {@code (x, y)}. */
+        public Page addProfile(Profile profile, double x, double y, String layer) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment p = profile.handle();
+                MemorySegment l = text(arena, layer);
+                if (!call(() -> (boolean) PAGE_ADD_PROFILE.invokeExact(h, p, l, x, y))) throw failure("page_add_profile");
+                return this;
+            } finally {
+                keep(this, profile);
+            }
+        }
+
+        /** {@link #addHatch(Profile, String, double, double, double, double, String)} unturned, at
+         *  scale 1, on layer {@code hatch}. */
+        public Page addHatch(Profile profile, String pattern, double x, double y) {
+            return addHatch(profile, pattern, 0.0, 1.0, x, y, null);
+        }
+
+        /** {@code profile} hatched (its holes left out) on {@code layer} (null: {@code hatch}),
+         *  moved by {@code (x, y)}: {@code pattern} {@code SOLID}, {@code ANSI31}, {@code ANSI37}
+         *  or {@code ANSI32}/{@code STEEL}, turned {@code angle} radians, its spacing times
+         *  {@code scale}. */
+        public Page addHatch(Profile profile, String pattern, double angle, double scale, double x, double y, String layer) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment p = profile.handle();
+                MemorySegment l = text(arena, layer);
+                MemorySegment pat = arena.allocateFrom(pattern);
+                if (!call(() -> (boolean) PAGE_ADD_HATCH.invokeExact(h, p, l, pat, angle, scale, x, y))) throw failure("page_add_hatch");
+                return this;
+            } finally {
+                keep(this, profile);
+            }
+        }
+
+        /** {@link #addText(String, double, double, double, double, String, String, String)}
+         *  unturned, left on the baseline, on layer {@code text}. */
+        public Page addText(String text, double x, double y, double height) {
+            return addText(text, x, y, height, 0.0, null, null, null);
+        }
+
+        /** One line of {@code text} on {@code layer} (null: {@code text}) at {@code (x, y)},
+         *  {@code height} tall, turned {@code angle} radians; {@code halign}
+         *  {@code left}/{@code center}/{@code right} (null: left), {@code valign}
+         *  {@code baseline}/{@code bottom}/{@code middle}/{@code top} (null: baseline). */
+        public Page addText(String text, double x, double y, double height, double angle, String halign, String valign,
+                            String layer) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment t = arena.allocateFrom(text);
+                MemorySegment l = text(arena, layer);
+                MemorySegment ha = text(arena, halign);
+                MemorySegment va = text(arena, valign);
+                if (!call(() -> (boolean) PAGE_ADD_TEXT.invokeExact(h, t, l, x, y, height, angle, ha, va))) throw failure("page_add_text");
+                return this;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The page as an SVG document, one group per layer. */
+        public String svg() {
+            try {
+                MemorySegment h = handle();
+                return ownedText(call(() -> (MemorySegment) PAGE_SVG_TEXT.invokeExact(h)), "page_svg_text");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The page as DXF R2000 ({@code AC1015}) text: the same text for the same page. */
+        public String dxf() {
+            try {
+                MemorySegment h = handle();
+                return ownedText(call(() -> (MemorySegment) PAGE_DXF_TEXT.invokeExact(h)), "page_dxf_text");
+            } finally {
+                keep(this);
+            }
+        }
+
+        @Override
+        public String toString() {
+            return closed() ? "Page(closed)" : "Page(" + entityCount() + " entities)";
         }
     }
 

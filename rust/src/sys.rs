@@ -20,7 +20,7 @@
 use std::ffi::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 
-use crate::loader::{entry_points, Loader};
+use crate::loader::{entry_points, Half, Loader};
 
 /// What the ABI returns for "no such node" -- `CADACLYSM_NONE`, `UINT32_MAX`.
 pub const CADACLYSM_NONE: u32 = u32::MAX;
@@ -654,11 +654,27 @@ entry_points! {
 
 // ---- loading --------------------------------------------------------------------
 
-static LIBRARY: Loader<Api> = Loader::new("cadaclysm_capi", "CADACLYSM_LIBRARY", Api::bind, ENTRY_POINTS);
+/// The libraries that carry the node API, in the order they are looked for: the single
+/// library's flavours that hold it, then the separate library of earlier releases. As
+/// `cadaclysm-capi-rt`'s `READER_STEMS`.
+pub const LIBRARY_STEMS: &[&str] = &["cadaclysm", "cadaclysm_kernel_reader", "cadaclysm_reader", "cadaclysm_capi"];
 
-/// The library's file name on this platform.
+static LIBRARY: Loader<Api> = Loader::new(
+    LIBRARY_STEMS,
+    &["CADACLYSM_LIBRARY"],
+    Half { feature: "nodes", what: "node API", instead: "cadaclysm, cadaclysm_kernel_reader or cadaclysm_reader" },
+    Api::bind,
+    ENTRY_POINTS,
+);
+
+/// The library's file names on this platform, in the order they are looked for.
+pub fn library_names() -> Vec<String> {
+    LIBRARY.file_names()
+}
+
+/// The first of [`library_names`]: the full flavour's file name on this platform.
 pub fn library_name() -> String {
-    LIBRARY.file_name()
+    LIBRARY.file_names().remove(0)
 }
 
 /// Where the library would be loaded from, without loading it -- or, where nothing
@@ -667,7 +683,8 @@ pub fn library_name() -> String {
 /// `CADACLYSM_LIBRARY` first (the library itself or its directory); then beside the
 /// running executable; then a `lib/` directory in any ancestor of the executable or
 /// of the working directory (the SDK's layout); then a `target/release` or
-/// `target/debug` in any of those ancestors (the repository's layout).
+/// `target/debug` in any of those ancestors (the repository's layout). Each place is
+/// asked for every name in [`library_names`] in turn.
 pub fn find_library() -> Result<PathBuf, String> {
     LIBRARY.find()
 }

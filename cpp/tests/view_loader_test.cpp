@@ -1,6 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS  // std::fopen under MSVC /W4 /WX and Windows clang -Werror
 // view_loader.h on its own: the search and its messages, the camera maths, the PNG
-// writer, a refused non-library, the ABI 1.22 the table needs (a 1.21 stand-in refused), and -- over a table of fakes -- the order and the
+// writer, a refused non-library, the ABI 1.25 the table needs (a 1.24 stand-in refused), and -- over a table of fakes -- the order and the
 // refusals of cvl_draw_object, cvl_pick and cvl_snap. Needs no view library and no GPU; the exit
 // code is the verdict.
 #include <cadaclysm/view_loader.h>
@@ -176,6 +176,7 @@ static bool fake_pick_result(CadaclysmView*, CadaclysmViewPick* out) {
     out->point[0] = 1.5f;
     out->point[1] = -2.0f;
     out->point[2] = 0.25f;
+    out->overlay = 1;
     return true;
 }
 static void fake_request_snap_in(CadaclysmView*, uint32_t viewport, uint32_t x, uint32_t y) {
@@ -471,11 +472,12 @@ static void test_pick() {
     CHECK(drawn == 1, "drawn not set");
     CHECK(out.size == sizeof out && out.item == 7 && out.node == 3 && out.face == 11, "the pick %u %u %u", out.item,
           out.node, out.face);
-    // 1.8's fields come through whole: a 36-byte answer, the clicks and the point.
-    CHECK(sizeof out == 36 && out.clicks == 2 && out.has_point == 1 && out.point[0] == 1.5f && out.point[1] == -2.0f &&
-              out.point[2] == 0.25f,
-          "the pick's 1.8 fields: size %u, clicks %u, has_point %u", static_cast<unsigned>(sizeof out), out.clicks,
-          out.has_point);
+    // 1.8's and 1.24's fields come through whole: a 40-byte answer, the clicks, the point and
+    // the overlay flag.
+    CHECK(sizeof out == 40 && out.clicks == 2 && out.has_point == 1 && out.point[0] == 1.5f && out.point[1] == -2.0f &&
+              out.point[2] == 0.25f && out.overlay == 1,
+          "the pick's fields: size %u, clicks %u, has_point %u, overlay %u", static_cast<unsigned>(sizeof out), out.clicks,
+          out.has_point, out.overlay);
     CHECK(fake::log == "draw;request_pick_in 1 10 20;draw;pick_result;draw;pick_result;draw;pick_result;", "%s",
           fake::log.c_str());
 
@@ -761,18 +763,19 @@ static void test_snap() {
     CHECK(fake::snap_waits == 800, "%d waits answered, not 200", 1000 - fake::snap_waits);
 }
 
-// ---- the ABI the table needs: 1.22 (parse_colour 1.5; load_font, show_text, set_text 1.6; set_double_click_frames,
+// ---- the ABI the table needs: 1.25 (parse_colour 1.5; load_font, show_text, set_text 1.6; set_double_click_frames,
 // focus, navigation 1.8; set_lighting, lighting 1.9; the viewport cameras 1.10; show_points 1.11; set_occluded 1.13;
-// set_finish 1.18; set_occluded_style, occluded_style 1.20; show_solid_faces 1.21; the six snap calls 1.22) ---
+// set_finish 1.18; set_occluded_style, occluded_style 1.20; show_solid_faces 1.21; the six snap calls 1.22;
+// set_line_colour, line_colour, set_item_line_colour 1.23; show_overlay, show_overlay_image, move_overlay 1.24; stats 1.25) ---
 
 static void test_abi() {
     std::vector<char> err(CVL_ERROR, 0);
-    CHECK(cvl_check_abi(0x10016u, "lib", err.data(), err.size()), "1.22 refused: %s", err.data());
-    CHECK(cvl_check_abi(0x10017u, "lib", err.data(), err.size()), "1.23 refused: %s", err.data());
-    CHECK(!cvl_check_abi(0x10015u, "lib", err.data(), err.size()), "1.21 accepted");
-    CHECK(std::string(err.data()) == "lib: view ABI 1.21, this SDK needs 1.22 or a later 1.x", "%s", err.data());
-    CHECK(!cvl_check_abi(0x20016u, "lib", err.data(), err.size()), "2.22 accepted");
-    CHECK(std::string(err.data()) == "lib: view ABI 2.22, this SDK needs 1.22 or a later 1.x", "%s", err.data());
+    CHECK(cvl_check_abi(0x10019u, "lib", err.data(), err.size()), "1.25 refused: %s", err.data());
+    CHECK(cvl_check_abi(0x1001Au, "lib", err.data(), err.size()), "1.26 refused: %s", err.data());
+    CHECK(!cvl_check_abi(0x10018u, "lib", err.data(), err.size()), "1.24 accepted");
+    CHECK(std::string(err.data()) == "lib: view ABI 1.24, this SDK needs 1.25 or a later 1.x", "%s", err.data());
+    CHECK(!cvl_check_abi(0x20019u, "lib", err.data(), err.size()), "2.25 accepted");
+    CHECK(std::string(err.data()) == "lib: view ABI 2.25, this SDK needs 1.25 or a later 1.x", "%s", err.data());
 }
 
 // ---- a real (stand-in) library through cvl_open --------------------------------------------
@@ -784,7 +787,7 @@ static void test_fake_library(const char* path) {
     CHECK(cvl_open(&t, path, err.data(), err.size()), "%s", err.data());
     CHECK(t.label[0] == 0 && !cvl_is_terminal(&t) && !cvl_is_wgpu(&t), "label '%s'", t.label);
     CHECK(t.show_solid != nullptr && t.parse_colour != nullptr && t.set_text != nullptr && t.standard_in != nullptr &&
-          t.abi_version() == 0x10016u,
+          t.abi_version() == 0x10019u,
           "the table is not bound");
     CHECK(t.set_double_click_frames != nullptr && t.focus != nullptr && t.navigation != nullptr,
           "1.8's calls are not bound");
@@ -797,20 +800,26 @@ static void test_fake_library(const char* path) {
     CHECK(t.set_lighting != nullptr && t.lighting != nullptr, "1.9's calls are not bound");
     CHECK(t.show_points != nullptr, "1.11's show_points is not bound");
     CHECK(t.set_occluded != nullptr, "1.13's set_occluded is not bound");
+    CHECK(t.set_item_layer != nullptr && t.set_user_layer != nullptr, "1.16's user layers are not bound");
     CHECK(t.set_finish != nullptr, "1.18's set_finish is not bound");
     CHECK(t.set_occluded_style != nullptr && t.occluded_style != nullptr, "1.20's occluded style is not bound");
     CHECK(t.show_solid_faces != nullptr, "1.21's show_solid_faces is not bound");
     CHECK(t.set_snap != nullptr && t.request_snap_in != nullptr && t.snap_result != nullptr && t.clear_snap != nullptr &&
               t.set_work_plane != nullptr && t.clear_work_plane != nullptr,
           "1.22's snapping is not bound");
-    // A library older than the table (1.21: no snapping) is refused before any call is
+    CHECK(t.set_line_colour != nullptr && t.line_colour != nullptr && t.set_item_line_colour != nullptr,
+          "1.23's line colours are not bound");
+    CHECK(t.show_overlay != nullptr && t.show_overlay_image != nullptr && t.move_overlay != nullptr,
+          "1.24's overlays are not bound");
+    CHECK(t.stats != nullptr, "1.25's stats is not bound");
+    // A library older than the table (1.24: no stats) is refused before any call is
     // bound, in Python's words.
     static CvlTable old;
-    cvl_setenv("CVL_FAKE_ABI_MINOR", "21");
+    cvl_setenv("CVL_FAKE_ABI_MINOR", "24");
     int opened = cvl_open(&old, path, err.data(), err.size());
     cvl_setenv("CVL_FAKE_ABI_MINOR", nullptr);
-    CHECK(!opened, "a view library of ABI 1.21 was opened");
-    CHECK(std::string(err.data()) == std::string(path) + ": view ABI 1.21, this SDK needs 1.22 or a later 1.x", "%s",
+    CHECK(!opened, "a view library of ABI 1.24 was opened");
+    CHECK(std::string(err.data()) == std::string(path) + ": view ABI 1.24, this SDK needs 1.25 or a later 1.x", "%s",
           err.data());
     CHECK(old.library == nullptr && old.show_solid == nullptr, "a refused library filled the table");
     CHECK(std::strcmp(cvl_error(&t), "the view library failed") == 0, "NULL last_error: %s", cvl_error(&t));

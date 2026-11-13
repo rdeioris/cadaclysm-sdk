@@ -146,6 +146,69 @@ func TestOccludedStyleRoundTrips(t *testing.T) {
 	}
 }
 
+// 1.23's line colours: a view-wide colour read back, an item's own curve colour drawn on its
+// segment and cleared with nil.
+func TestLineColoursDrawAndClear(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	v, err := view.Offscreen(160, 120, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer v.Close()
+	if err := v.SetIsocurveColour("#00ff00", true); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := v.IsocurveColour(); err != nil || !s.FromPart || s.Colour != [3]float32{0, 1, 0} {
+		t.Fatalf("got %+v, %v", s, err)
+	}
+	if s, err := v.CurveColour(); err != nil || !s.FromPart {
+		t.Fatalf("curves follow their part by default: %+v, %v", s, err)
+	}
+	if err := v.SetEdgeColour("#202020", false); err != nil {
+		t.Fatal(err)
+	}
+	line, err := v.ShowLines([]float32{-0.8, 0, 0, 0.8, 0, 0}, "red")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Standard("top"); err != nil {
+		t.Fatal(err)
+	}
+	if err := line.Frame(); err != nil {
+		t.Fatal(err)
+	}
+	greens := func() int {
+		img, err := v.Image()
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for k := 0; k < len(img.Pix); k += 4 {
+			if img.Pix[k+1] > 150 && img.Pix[k] < 100 && img.Pix[k+2] < 100 {
+				n++
+			}
+		}
+		return n
+	}
+	if n := greens(); n != 0 {
+		t.Fatalf("%d green pixels before any line colour", n)
+	}
+	if err := line.SetCurveColour("lime"); err != nil {
+		t.Fatal(err)
+	}
+	if greens() == 0 {
+		t.Fatal("the segment's curve colour did not draw")
+	}
+	if err := line.SetCurveColour(nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := greens(); n != 0 {
+		t.Fatalf("%d green pixels after clearing", n)
+	}
+}
+
 func TestABrokenVariableNamesItself(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nothing-here")
 	t.Setenv("CADACLYSM_TERMINAL_LIBRARY", missing)
@@ -241,6 +304,29 @@ func TestOffscreenSolidByHandle(t *testing.T) {
 	pick, err := v.Pick(160, 120, 0)
 	if err != nil || pick.Item != item.ID() {
 		t.Fatalf("pick: %+v %v, want item %d", pick, err, item.ID())
+	}
+	// 1.16's user layers: the solid on layer 3, the layer off (the centre no longer the solid's)
+	// and on again (the solid's again); layer 32 refused, for an item and for the view.
+	if err := item.UserLayer(3); err != nil {
+		t.Fatalf("user layer 3: %v", err)
+	}
+	for _, on := range []bool{false, true} {
+		if err := v.UserLayer(3, on); err != nil {
+			t.Fatalf("user layer 3 %v: %v", on, err)
+		}
+		got, err := v.Image()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (got.RGBAAt(160, 120) == drawn.RGBAAt(160, 120)) != on {
+			t.Fatalf("user layer 3 %v: the centre is %v, the solid's %v", on, got.RGBAAt(160, 120), drawn.RGBAAt(160, 120))
+		}
+	}
+	if err := item.UserLayer(32); err == nil || !strings.Contains(err.Error(), "past 31") {
+		t.Fatalf("item layer 32: %v", err)
+	}
+	if err := v.UserLayer(32, false); err == nil || !strings.Contains(err.Error(), "past 31") {
+		t.Fatalf("user layer 32: %v", err)
 	}
 	// Master's three: levels on and off, the wake answer, node transforms refused on a solid.
 	if err := v.Lod("smooth", 0); err != nil {
@@ -877,24 +963,200 @@ func TestPumpWithNoWindowWaits(t *testing.T) {
 	}
 }
 
-// The loader binds 95 calls of cadaclysm_view.h 1.22 (all but 1.14's analysis calls, 1.16's
-// layers, 1.19's KMS pair and 1.12's texture targets): a 1.21 library (no snapping) is
-// refused before any call is bound, in Python's words; 1.22 and later 1.x are taken.
-func TestTheLoaderNeedsViewABI122(t *testing.T) {
-	for _, ok := range []uint32{0x10016, 0x10017} {
+// The loader binds 104 calls of cadaclysm_view.h 1.25 (all but 1.14's analysis calls,
+// 1.19's KMS pair and 1.12's texture targets): a 1.24 library (no stats) is refused
+// before any call is bound, in Python's words; 1.25 and later 1.x are taken.
+func TestTheLoaderNeedsViewABI125(t *testing.T) {
+	for _, ok := range []uint32{0x10019, 0x1001A} {
 		if err := view.CheckABIForTest(ok, "lib"); err != nil {
 			t.Fatalf("%#x refused: %v", ok, err)
 		}
 	}
 	for version, want := range map[uint32]string{
-		0x10015: "lib: view ABI 1.21, this SDK needs 1.22 or a later 1.x",
-		0x20016: "lib: view ABI 2.22, this SDK needs 1.22 or a later 1.x",
+		0x10018: "lib: view ABI 1.24, this SDK needs 1.25 or a later 1.x",
+		0x20019: "lib: view ABI 2.25, this SDK needs 1.25 or a later 1.x",
 	} {
 		if got := message(view.CheckABIForTest(version, "lib")); got != want {
 			t.Fatalf("%#x: %s, want %s", version, got, want)
 		}
 	}
 }
+
+// The anchors are the header's ALIGN codes, in its order.
+func TestTheAnchorsAreTheHeadersAlignCodes(t *testing.T) {
+	got := []view.Anchor{view.AnchorTopLeft, view.AnchorTop, view.AnchorTopRight, view.AnchorLeft, view.AnchorCentre,
+		view.AnchorRight, view.AnchorBottomLeft, view.AnchorBottom, view.AnchorBottomRight}
+	for k, a := range got {
+		if uint32(a) != uint32(k) {
+			t.Fatalf("anchor %d is %d", k, a)
+		}
+	}
+}
+
+// 1.25's stats on wgpu offscreen: an offscreen view's frames are its images, each counted once
+// with its CPU time, triangles and draw calls; a draw that renders nothing counts none.
+func TestStatsCountTheFramesDrawn(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	sv, err := view.Offscreen(64, 48, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer sv.Close()
+	if s := must(sv.Stats()); s.FramesDrawn != 0 || s.Triangles != 0 {
+		t.Fatalf("a new view drew nothing: %+v", s)
+	}
+	must(sv.ShowSolid(must(blacksmith.Cuboid(20, 20, 20)), 0.05, nil))
+	if err := sv.Draw(); err != nil {
+		t.Fatal(err)
+	}
+	if s := must(sv.Stats()); s.FramesDrawn != 0 {
+		t.Fatalf("an offscreen draw renders nothing: %+v", s)
+	}
+	must(sv.Image())
+	s := must(sv.Stats())
+	if s.FramesDrawn != 1 || s.LastFrameMs <= 0 || s.Triangles < 12 || s.DrawCalls < 1 {
+		t.Fatalf("one frame, with its cost: %+v", s)
+	}
+	if s.LastGpuMs != -1 && (s.LastGpuMs < 0 || s.LastGpuMs >= 1000) {
+		t.Fatalf("the GPU time: %v", s.LastGpuMs)
+	}
+	must(sv.Image())
+	if s := must(sv.Stats()); s.FramesDrawn != 2 {
+		t.Fatalf("each image counts: %+v", s)
+	}
+}
+
+// 1.24's overlays on wgpu offscreen: a holed panel at the centre (its hole picks the part
+// beneath), a stroked crosshair, text at the top right, an image moved from the bottom left
+// to the bottom right, order, an outline, a removed overlay, and the refusals.
+func TestOverlaysDrawPickAndMove(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	ov, err := view.Offscreen(200, 120, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer ov.Close()
+	if err := ov.Background("black"); err != nil {
+		t.Fatal(err)
+	}
+	cube := must(blacksmith.Cuboid(80, 80, 20))
+	under := must(ov.ShowSolid(cube, 0.05, "#808080"))
+	if err := ov.Standard("top"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ov.Frame(); err != nil {
+		t.Fatal(err)
+	}
+	img := func() *image.RGBA { return must(ov.Image()) }
+	is := func(m *image.RGBA, x, y int, r, g, b int) bool {
+		c := m.RGBAAt(x, y)
+		d := func(a uint8, w int) bool { return math.Abs(float64(int(a)-w)) < 40 }
+		return d(c.R, r) && d(c.G, g) && d(c.B, b)
+	}
+	// A rounded panel with a round hole, red by its own colour, at the window's centre.
+	plateShape := must(must(must(must(blacksmith.Rect(60, 40)).Round(6, nil, false)).WithHole(must(blacksmith.Circle(8)))).ColouredText("red"))
+	panel := must(ov.ShowOverlay(plateShape, view.AnchorCentre, 0, 0, nil))
+	m := img()
+	if !is(m, 120, 60, 255, 0, 0) {
+		t.Fatalf("the panel red right of its hole: %v", m.RGBAAt(120, 60))
+	}
+	if is(m, 100, 60, 255, 0, 0) {
+		t.Fatal("the hole is filled")
+	}
+	if p := must(ov.Pick(120, 60, 0)); !p.Overlay || p.HasPoint || p.Item != panel.ID() {
+		t.Fatalf("a pick on the panel: %+v", p)
+	}
+	if p := must(ov.Pick(100, 60, 0)); p.Overlay || p.Item != under.ID() {
+		t.Fatalf("a pick in the hole reaches the part: %+v", p)
+	}
+	// A stroked crosshair of two open profiles, 20 px in from the top left.
+	across := must(blacksmith.Polyline([][2]float64{{-8, 0}, {8, 0}}, false))
+	down := must(blacksmith.Polyline([][2]float64{{0, -8}, {0, 8}}, false))
+	cross := must(ov.ShowOverlayProfiles([]view.Profile{across, down}, view.AnchorTopLeft, 20, 20, &view.OverlayStyle{Stroke: "lime", StrokeWidth: 2}))
+	m = img()
+	if !is(m, 20, 20, 0, 255, 0) || !is(m, 26, 20, 0, 255, 0) || !is(m, 20, 14, 0, 255, 0) {
+		t.Fatalf("the crosshair's arms: %v %v %v", m.RGBAAt(20, 20), m.RGBAAt(26, 20), m.RGBAAt(20, 14))
+	}
+	if is(m, 25, 25, 0, 255, 0) {
+		t.Fatal("between the arms")
+	}
+	if p := must(ov.Pick(26, 21, 0)); !p.Overlay || p.Item != cross.ID() {
+		t.Fatalf("a pick on the crosshair: %+v", p)
+	}
+	// Text at the top right, its box's corner 4 px in; SetText changes it.
+	fps := must(ov.ShowOverlayText("FPS 60", view.AnchorTopRight, 4, 4, &view.TextOptions{Colour: "white", Size: 14, Box: "blue"}, 0))
+	m = img()
+	if !is(m, 194, 6, 0, 0, 255) || is(m, 197, 2, 0, 0, 255) {
+		t.Fatalf("the text's box hangs from the top-right corner: %v %v", m.RGBAAt(194, 6), m.RGBAAt(197, 2))
+	}
+	if err := fps.SetText("FPS 120"); err != nil {
+		t.Fatal(err)
+	}
+	if p := must(ov.Pick(194, 6, 0)); !p.Overlay || p.Item != fps.ID() {
+		t.Fatalf("a pick on the text: %+v", p)
+	}
+	// An image, 2 x 2 yellow pixels drawn 10 x 10, at the bottom left; moved to the bottom right.
+	var yellow []byte
+	for k := 0; k < 4; k++ {
+		yellow = append(yellow, 255, 255, 0, 255)
+	}
+	pic := must(ov.ShowOverlayImage(yellow, 2, 2, view.AnchorBottomLeft, 4, 4, &view.OverlayImageOptions{DrawWidth: 10, DrawHeight: 10}))
+	if m = img(); !is(m, 8, 110, 255, 255, 0) {
+		t.Fatalf("the image at the bottom left: %v", m.RGBAAt(8, 110))
+	}
+	if err := pic.MoveToAnchor(view.AnchorBottomRight, 4, 4); err != nil {
+		t.Fatal(err)
+	}
+	if m = img(); pic.Anchor() != view.AnchorBottomRight || !is(m, 190, 110, 255, 255, 0) || is(m, 8, 110, 255, 255, 0) {
+		t.Fatalf("moved to the bottom right: %v %v", m.RGBAAt(190, 110), m.RGBAAt(8, 110))
+	}
+	if err := pic.MoveTo(6, 6); err != nil {
+		t.Fatal(err)
+	}
+	if m = img(); !is(m, 188, 108, 255, 255, 0) {
+		t.Fatalf("moved, the anchor kept: %v", m.RGBAAt(188, 108))
+	}
+	// Order: a green square of order 1 shown first stays over a later blue one of order 0.
+	sq := must(blacksmith.Rect(20, 20))
+	must(ov.ShowOverlay(sq, view.AnchorBottomLeft, 60, 30, &view.OverlayStyle{Fill: "lime", Order: 1}))
+	must(ov.ShowOverlay(sq, view.AnchorBottomLeft, 65, 30, &view.OverlayStyle{Fill: "blue"}))
+	if m = img(); !is(m, 63, 90, 0, 255, 0) {
+		t.Fatalf("order 1 over order 0: %v", m.RGBAAt(63, 90))
+	}
+	// An outline only: "none" fills nothing.
+	outline := must(ov.ShowOverlay(sq, view.AnchorTop, 0, 30, &view.OverlayStyle{Fill: "none", Stroke: "white", StrokeWidth: 2}))
+	if m = img(); !is(m, 110, 30, 255, 255, 255) || is(m, 100, 30, 255, 255, 255) {
+		t.Fatalf("an outline, its inside not filled: %v %v", m.RGBAAt(110, 30), m.RGBAAt(100, 30))
+	}
+	// Removed: gone, and the part is picked there again.
+	if err := panel.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if m = img(); is(m, 120, 60, 255, 0, 0) {
+		t.Fatal("a removed overlay draws")
+	}
+	if p := must(ov.Pick(120, 60, 0)); p.Overlay {
+		t.Fatalf("a removed overlay is picked: %+v", p)
+	}
+	if err := outline.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if msg := message(second3(ov.ShowOverlayCurves(make([]float32, 15), view.AnchorTopLeft, 0, 0, nil))); !strings.HasPrefix(msg, "show_overlay: 16 numbers a curve") {
+		t.Fatalf("15 numbers: %s", msg)
+	}
+	if msg := message(cross.MoveTo(float32(math.NaN()), 0)); !strings.Contains(msg, "finite") {
+		t.Fatalf("a NaN move: %s", msg)
+	}
+	if msg := message(second3(ov.ShowOverlayImage(yellow, 3, 2, view.AnchorTopLeft, 0, 0, nil))); !strings.HasPrefix(msg, "show_overlay_image: 3 x 2 pixels need 24 bytes") {
+		t.Fatalf("image bytes: %s", msg)
+	}
+}
+
+func second3(_ *view.Overlay, err error) error { return err }
 
 // coloursDrawn is one picture of everything that takes a colour, each given as text or as
 // the numbers the text names (in the forms the package took before colour text, so those

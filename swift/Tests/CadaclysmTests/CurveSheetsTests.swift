@@ -539,4 +539,75 @@ final class CurveSheetsTests: XCTestCase {
         XCTAssertEqual(refusal { _ = try sheet.matched("u0", sheet, "y") }, "a side is 'u0', 'u1', 'v0' or 'v1', not 'y'")
         XCTAssertEqual(refusal { _ = try Solid.blendSides(sheet, "z", sheet, "u0") }, "a side is 'u0', 'u1', 'v0' or 'v1', not 'z'")
     }
+
+    func testHolesRibsWebsAndPatternsAgainstTheirClosedForms() throws {
+        let pi = Double.pi
+        // A through hole down the top of a 40 x 30 x 20 block with its corner at the origin.
+        let blk = try Solid.cuboid(40, 30, 20).translate(20, 15, 10)
+        let (drilled, hr) = try blk.hole(P(10, 15, 20), 4)
+        let drilledVolume: Double = 24000 - 80 * pi
+        XCTAssertEqual(try massOf(drilled).volume, drilledVolume, accuracy: 1e-6 * drilledVolume)
+        XCTAssertEqual(try drilled.faces, 7)
+        XCTAssertEqual(hr.holes, 1)
+        XCTAssertEqual(hr.facesAdded, 1)
+        XCTAssertEqual(hr.bottoms.count, 1)
+        XCTAssertEqual(hr.bottoms[0], 20, accuracy: 1e-9)
+        let holeTool = try blk.holeTool(P(10, 15, 20), 4)
+        XCTAssertGreaterThan(try massOf(holeTool).volume, 80 * pi)
+
+        // A 4 x 3 grid of pins cut from a plate: twelve copies, one boolean.
+        let plate = try Solid.cuboid(100, 60, 10).translate(50, 30, 5)
+        let pin = try Solid.cylinder(3, 30).translate(10, 10, -10)
+        let grid = try Pattern.rectangular(P(1, 0, 0), 4, 20, P(0, 1, 0), 3, 20)
+        XCTAssertEqual(grid.count, 12)
+        let (pierced, pr) = try plate.patternFeature(pin, .cut, grid)
+        let piercedVolume: Double = 60000 - 1080 * pi
+        XCTAssertEqual(try massOf(pierced).volume, piercedVolume, accuracy: 1e-6 * piercedVolume)
+        XCTAssertEqual(pr.instances, 12)
+        XCTAssertEqual(pr.booleans, 1)
+        XCTAssertEqual(pr.missed, 0)
+
+        // Placements: instance 0 the identity, the next one 10 along x, row-major.
+        let row = try Pattern.rectangular(P(1, 0, 0), 3, 10)
+        XCTAssertEqual(row.count, 3)
+        XCTAssertEqual(row[0].rows, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+        XCTAssertEqual(row[1].rows, [1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+        // Two blocks 8 apart overlap: one join.
+        let (two, tr) = try blk.pattern(Array(try Pattern.rectangular(P(1, 0, 0), 2, 8).prefix(2)))
+        XCTAssertEqual(tr.instances, 2)
+        XCTAssertEqual(tr.booleans, 1)
+        let twoVolume: Double = 28800
+        XCTAssertEqual(try massOf(two).volume, twoVolume, accuracy: 1e-6 * twoVolume)
+        let turn = try Pattern.circular(P(0, 0, 0), P(0, 0, 1), 6)
+        XCTAssertEqual(turn.count, 6)
+        XCTAssertEqual(turn[1].rows[0], 0.5, accuracy: 1e-12)
+        let along = try Pattern.along(line(P(0, 0, 0), P(30, 0, 0)), 4)
+        XCTAssertEqual(along.count, 4)
+        XCTAssertEqual(along[3].rows[3], 30, accuracy: 1e-9)
+
+        // A rib across the inside corner of an L, in the L's middle plane y = 15.
+        let foot = try Solid.cuboid(40, 30, 5).translate(20, 15, 2.5)
+        let upright = try Solid.cuboid(5, 30, 40).translate(2.5, 15, 20)
+        let l = try foot.join(upright, tolerance: nil)
+        let lVolume: Double = 11250
+        XCTAssertEqual(try massOf(l).volume, lVolume, accuracy: 1e-6 * lVolume)
+        let diag = try line(P(30, 15, 5), P(5, 15, 30))
+        let plane = try Frame(P(0, 15, 0), P(1, 0, 0), P(0, 0, 1), P(0, -1, 0))
+        let ribbedVolume: Double = 11250 + 1250
+        XCTAssertEqual(try massOf(l.rib(diag, plane, 4)).volume, ribbedVolume, accuracy: 1e-6 * ribbedVolume)
+        let slabVolume: Double = 1250
+        XCTAssertEqual(try massOf(l.ribTool(diag, plane, 4, side: .front)).volume, slabVolume, accuracy: 1e-6 * slabVolume)
+
+        // A web across a tray, run down from the rim to the floor.
+        let tray = try Solid.cuboid(60, 40, 20).translate(30, 20, 10).cut(Solid.cuboid(56, 36, 18).translate(30, 20, 11))
+        let down = try Frame(P(0, 0, 10), P(1, 0, 0), P(0, -1, 0), P(0, 0, -1))
+        let alongX = try line(P(10, 20, 10), P(50, 20, 10))
+        let webVolume: Double = 1344   // 56 x 3 x 8
+        let added = try massOf(tray.web([alongX], down, 3)).volume - massOf(tray).volume
+        XCTAssertEqual(added, webVolume, accuracy: 1e-6 * webVolume)
+        XCTAssertGreaterThan(try massOf(tray.webTool(alongX, down, 3, depth: 6)).volume, 0)
+
+        XCTAssertEqual(refusal { _ = try blk.hole(P(10, 15, 20), 0) }?.hasPrefix("hole: diameter 0 is not positive and finite"), true)
+        XCTAssertEqual(refusal { _ = try Pattern.rectangular(P(1, 0, 0), 0, 10) }?.hasPrefix("pattern_rectangular: count1 is 0"), true)
+    }
 }

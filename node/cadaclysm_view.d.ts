@@ -1,5 +1,5 @@
 import type { Scene, Node } from './cadaclysm';
-import type { Solid } from './cadaclysm_blacksmith';
+import type { Solid, Profile } from './cadaclysm_blacksmith';
 
 export class ViewError extends Error {}
 /** A colour: text -- '#rgb', '#rrggbb' (the '#' optional) or one of the 148 CSS colour names, any case,
@@ -38,7 +38,15 @@ export interface NativeWindow { kind: 'win32' | 'xlib' | 'xcb' | 'wayland' | 'ap
 export type ViewName = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom' | 'iso';
 export interface ShowOptions { view?: ViewName | [azimuth: number, elevation: number]; azimuth?: number; elevation?: number; zoom?: number; up?: 'z' | 'y'; edges?: boolean; width?: number; height?: number; title?: string; tolerance?: number; rgb?: Colour; }
 /** A pick answer: `clicks` 2 for a double click, else 1; `point` where the ray met the model, null where no depth was read. */
-export interface Pick { item: number; node: number; face: number; clicks: number; point: [number, number, number] | null; }
+export interface Pick { item: number; node: number; face: number; clicks: number; point: [number, number, number] | null; /** 1.24: the item is an overlay, picked before anything beneath it. */ overlay: boolean; }
+/** Where an overlay hangs in the window (view ABI 1.24); its offset is measured inward from it. */
+export type Anchor = 'top-left' | 'top' | 'top-right' | 'left' | 'centre' | 'center' | 'right' | 'bottom-left' | 'bottom' | 'bottom-right';
+/** `View.showOverlay`'s style: `fill` a colour or 'none' (unset: the profile's own colour, else white unless a stroke is set). */
+export interface OverlayStyle { fill?: ColourAlpha | 'none' | null; stroke?: ColourAlpha | null; strokeWidth?: number; order?: number; }
+/** `View.showOverlayText`'s options: showText's, in pixels, plus the overlay order. */
+export interface OverlayTextOptions { size?: number; colour?: Colour; box?: ColourAlpha | null; padding?: number; font?: number; order?: number; }
+/** `View.showOverlayImage`'s options: the size drawn (0: its own), the opacity, the overlay order. */
+export interface OverlayImageOptions { drawWidth?: number; drawHeight?: number; opacity?: number; order?: number; }
 /** What a snap lands on (view ABI 1.22). */
 export type SnapKind = 'vertex' | 'midpoint' | 'centre' | 'quadrant' | 'edge' | 'face' | 'grid' | 'plane';
 /** A snap answer: the point snapped to, in the coordinates the items were shown in; `edge` null for a face, grid or plane snap; `clicks` 0 for snap() and a hover, 1 or 2 for a click's. */
@@ -46,7 +54,8 @@ export interface Snap { kind: SnapKind; point: [number, number, number]; item: n
 export interface Camera { eye: number[]; target: number[]; up: number[]; orthographic: boolean; azimuth: number; elevation: number; pick: Pick | null; }
 export interface Image { width: number; height: number; rgba: Uint8Array; }
 export interface ViewEvent { type: 'pointer_down' | 'pointer_move' | 'pointer_up' | 'pointer_cancel' | 'wheel' | 'key'; x?: number; y?: number; button?: number; shift?: boolean; pointerId?: number; pointer?: 'mouse' | 'touch' | 'pen'; wheelY?: number; key?: string; keyDown?: boolean; timeMs?: number; }
-export interface Viewport { rect: number[]; view: ArrayLike<number>; projection: ArrayLike<number>; eye: ArrayLike<number>; grid?: 'none' | 'top' | 'front' | 'right'; }
+/** `layerMask`: the user layers drawn here, bit n for layer n (`Item.userLayer`); every layer when absent. */
+export interface Viewport { rect: number[]; view: ArrayLike<number>; projection: ArrayLike<number>; eye: ArrayLike<number>; grid?: 'none' | 'top' | 'front' | 'right'; layerMask?: number; }
 export interface MeshData { positions: ArrayLike<number>; indices: ArrayLike<number>; normals?: ArrayLike<number> | null; edges?: ArrayLike<number> | null; rgb?: Colour | null; }
 
 export class Item {
@@ -66,6 +75,14 @@ export class Item {
   occluded(mode: 'off' | 'solid' | 'dashed'): void;
   /** Its finish under the lighting: 'gloss' (an item shows with it until set; under the showroom lighting a clear coat), 'satin' (a weaker, blurred coat) or 'matte' (no mirror). */
   finish(finish: 'gloss' | 'satin' | 'matte'): void;
+  /** Its edges in `rgb` (view ABI 1.23), over the view's `setEdgeColour`, its colour and a solid's own edge paint; null takes the view's colour again. */
+  setEdgeColour(rgb: Colour | null): void;
+  /** Its curves in `rgb` (view ABI 1.23), over the view's `setCurveColour` and its colour; null takes the view's colour again. */
+  setCurveColour(rgb: Colour | null): void;
+  /** Its isocurves in `rgb` (view ABI 1.23), over the view's `setIsocurveColour` and its colour; null takes the view's colour again. */
+  setIsocurveColour(rgb: Colour | null): void;
+  /** The user layer it is on, 0..31 (every item starts on 0): drawn while the layer is on (`View.userLayer`) and in viewports whose `layerMask` has its bit. */
+  userLayer(layer: number): void;
   nodeVisible(node: number, on: boolean): void;
   nodeColour(node: number, rgba: ColourAlpha | null): void;
   nodeHighlight(node: number, rgba: ColourAlpha | null): void;
@@ -74,9 +91,29 @@ export class Item {
 
 export interface MachiningTool { number: number; shape: 'flat' | 'ball' | 'drill' | 'vbit' | 'bullnose'; diameter: number; flute_length?: number; angle?: number; corner_radius?: number; }
 export type MachiningProgram = [MachiningTool, string] | { tool: MachiningTool; gcode: string };
+/** What a view has drawn (View.stats, view ABI 1.25). */
+export interface ViewStats {
+  /** Frames drawn: every frame drawn to the window and every image() rendered; a pump or draw that owes nothing adds none. */
+  framesDrawn: number;
+  /** The last frame's CPU time, ms. */
+  lastFrameMs: number;
+  /** The last frame's GPU time, ms; -1 where it cannot be measured. */
+  lastGpuMs: number;
+  /** Triangles the last frame drew. */
+  triangles: number;
+  /** Draw calls the last frame recorded. */
+  drawCalls: number;
+}
 export interface MachiningInfo { moves: number; move: number; nx: number; ny: number; cell: number; min: [number, number]; cycleTime: number; }
 
 /** A CAM job shown in a View (`View.showMachining`): the stock is this item; the view's timeline plays it. */
+/** An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the window. */
+export class Overlay extends Item {
+  /** The anchor it hangs from now. */
+  readonly anchor: Anchor;
+  /** Moved to `x`, `y` pixels inward from its anchor, or hung from `anchor` instead. */
+  moveTo(x: number, y: number, anchor?: Anchor): void;
+}
 export class Machining extends Item {
   /** Jump the timeline to the end of move `move` (0: the untouched stock). */
   seekMove(move: number): void;
@@ -90,12 +127,16 @@ export class Machining extends Item {
 }
 
 export interface OccludedStyle { dash: number; gap: number; dim: number; colour: [number, number, number] | null; }
+/** The colour every edge, curve or isocurve draws in: one colour, or each part's own where `fromPart`. */
+export interface LineColour { colour: [number, number, number]; fromPart: boolean; }
 export class View {
   constructor(options?: ViewOptions);
   static inWindow(window: NativeWindow, options?: ViewOptions): View;
   static offscreen(width: number, height: number, options?: ViewOptions): View;
   readonly closed: boolean;
   readonly needsDraw: boolean;
+  /** What the view has drawn (view ABI 1.25): an FPS counter read from it stays right while the scene is still. */
+  stats(): ViewStats;
   readonly size: [number, number];
   readonly wakeMs: number | null;
   surfaces: 'exact' | 'triangles';
@@ -104,6 +145,18 @@ export class View {
   /** How every 'dashed' item's hidden lines and points look, view-wide (view ABI 1.20): dash and gap in points (6, 4), dim the coverage kept (0.5), one colour or null. Set a partial style (unset keys take the default) or null for the defaults. */
   get occludedStyle(): OccludedStyle;
   set occludedStyle(style: Partial<Omit<OccludedStyle, 'colour'>> & { colour?: Colour | null } | null);
+  /** The colour every edge draws in (view ABI 1.23): `rgb`, or with `fromPart` each part's own colour, brightened. An item's `setEdgeColour` draws over it. */
+  setEdgeColour(rgb: Colour, fromPart?: boolean): void;
+  /** The edges' colour in use. */
+  edgeColour(): LineColour;
+  /** The colour every curve draws in (view ABI 1.23): `rgb`, or with `fromPart` each part's own colour (the default). */
+  setCurveColour(rgb: Colour, fromPart?: boolean): void;
+  /** The curves' colour in use. */
+  curveColour(): LineColour;
+  /** The colour every isocurve draws in (view ABI 1.23): `rgb`, or with `fromPart` each part's own colour. */
+  setIsocurveColour(rgb: Colour, fromPart?: boolean): void;
+  /** The isocurves' colour in use. */
+  isocurveColour(): LineColour;
   lod(motion?: 'detailed' | 'smooth' | null, minTriangles?: number): void;
   show(obj: Solid | Scene | Node, rgb?: Colour | null, tolerance?: number): Item;
   /** A kernel solid, read in place; `options` (view ABI 1.21) a material, an opacity 0..1 (1 opaque) and the solid's face numbers to show alone, with no edges (null: every face). */
@@ -129,6 +182,12 @@ export class View {
   /** One line per track at the clock's time. */
   status(): string[];
   showCurves(beziers: ArrayLike<number>, rgb?: Colour | null): Item;
+  /** A 2D shape over the window (view ABI 1.24): a profile, profiles, or Beziers (16 numbers each), in pixels, hung `x`, `y` pixels inward from `anchor`. */
+  showOverlay(shape: Profile | Profile[] | ArrayLike<number>, anchor: Anchor, x: number, y: number, style?: OverlayStyle): Overlay;
+  /** Text over the window (view ABI 1.24): its box hangs from `anchor` by the same point, `x`, `y` pixels inward. */
+  showOverlayText(text: string, anchor: Anchor, x: number, y: number, options?: OverlayTextOptions): Overlay;
+  /** An image over the window (view ABI 1.24): `rgba` rows from the top, its box hanging from `anchor`, `x`, `y` pixels inward. */
+  showOverlayImage(rgba: Uint8Array, width: number, height: number, anchor: Anchor, x: number, y: number, options?: OverlayImageOptions): Overlay;
   showImage(corners: ArrayLike<number>, rgba: Uint8Array, width: number, height: number, opacity?: number): Item;
   orbit(dx: number, dy: number): void;
   pan(dx: number, dy: number): void;
@@ -146,6 +205,8 @@ export class View {
   readonly navigation: 'orbit' | 'fly';
   viewports(list: Viewport[]): void;
   layer(name: 'surfaces' | 'edges' | 'curves' | 'isocurves' | 'grid' | 'text', on: boolean): void;
+  /** User layer `layer`, 0..31, on or off in every viewport (all start on). */
+  userLayer(layer: number, on: boolean): void;
   background(rgb: Colour): void;
   pick(x: number, y: number, viewport?: number): Pick | null;
   /** The newest pick answer that landed (a click, a double click), without waiting: undefined while none has, null for a click on nothing; each read once. */

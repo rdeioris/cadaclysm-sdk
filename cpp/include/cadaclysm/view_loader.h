@@ -77,14 +77,14 @@ extern "C" {
 #define CVL_PATH 4096
 #define CVL_ERROR 8192
 #define CVL_NO_NODE 0xFFFFFFFFu
-#define CVL_ABI_MINOR 22u
+#define CVL_ABI_MINOR 25u
 #define CVL_PI 3.14159265358979323846
 #define CVL_RADIANS_PER_PIXEL 0.01 /* cadaclysm_view::view::ORBIT_PER_PIXEL */
 #define CVL_ZOOM_PER_STEP 0.9      /* cadaclysm_view::view::ZOOM_PER_STEP */
 
-/* name, return type, parameters: 95 calls of cadaclysm_view.h 1.22 -- every one but 1.14's analysis calls,
- * 1.16's layers, 1.19's KMS pair and 1.12's texture targets, which no linked wrapper uses yet -- in the
- * header's order (a binding test counts them against the header). */
+/* name, return type, parameters: 104 calls of cadaclysm_view.h 1.25 -- every one but 1.14's analysis calls,
+ * 1.19's KMS pair and 1.12's texture targets, which no linked wrapper uses yet -- in the header's
+ * order (a binding test counts them against the header). */
 #define CVL_CALLS(X) \
     X(abi_version, uint32_t, (void))                                                               \
     X(last_error, const char *, (void))                                                            \
@@ -110,11 +110,15 @@ extern "C" {
     X(standard, bool, (CadaclysmView *, uint32_t))                                                 \
     X(set_orthographic, void, (CadaclysmView *, bool))                                             \
     X(set_layer, bool, (CadaclysmView *, uint32_t, bool))                                          \
+    X(set_item_layer, bool, (CadaclysmView *, uint32_t, uint32_t))                                 \
+    X(set_user_layer, bool, (CadaclysmView *, uint32_t, bool))                                     \
     X(set_background, void, (CadaclysmView *, const float *))                                      \
     X(set_lighting, bool, (CadaclysmView *, uint32_t))                                             \
     X(lighting, uint32_t, (const CadaclysmView *))                                                 \
     X(set_occluded_style, bool, (CadaclysmView *, const CadaclysmViewOccludedStyle *))             \
     X(occluded_style, bool, (const CadaclysmView *, CadaclysmViewOccludedStyle *))                 \
+    X(set_line_colour, bool, (CadaclysmView *, uint32_t, const float *, uint32_t))                 \
+    X(line_colour, bool, (const CadaclysmView *, uint32_t, float *, uint32_t *))                   \
     X(set_lod, bool, (CadaclysmView *, const CadaclysmViewLod *))                                  \
     X(wake_ms, uint32_t, (const CadaclysmView *))                                                  \
     X(set_node_visible, bool, (CadaclysmView *, uint32_t, uint32_t, bool))                         \
@@ -139,6 +143,7 @@ extern "C" {
     X(set_colour, bool, (CadaclysmView *, uint32_t, const float *))                                \
     X(set_xray, bool, (CadaclysmView *, uint32_t, bool))                                           \
     X(set_occluded, bool, (CadaclysmView *, uint32_t, uint32_t))                                   \
+    X(set_item_line_colour, bool, (CadaclysmView *, uint32_t, uint32_t, const float *))            \
     X(set_finish, bool, (CadaclysmView *, uint32_t, uint32_t))                                     \
     X(set_face_colours, bool, (CadaclysmView *, uint32_t, const uint32_t *, const float *, uint32_t)) \
     X(set_placement, bool, (CadaclysmView *, uint32_t, const double *))                            \
@@ -181,7 +186,11 @@ extern "C" {
     X(snap_result, bool, (CadaclysmView *, CadaclysmViewSnap *))                                  \
     X(clear_snap, void, (CadaclysmView *))                                                        \
     X(set_work_plane, bool, (CadaclysmView *, const double *, const double *, const double *, double)) \
-    X(clear_work_plane, bool, (CadaclysmView *))
+    X(clear_work_plane, bool, (CadaclysmView *))                                                  \
+    X(show_overlay, uint32_t, (CadaclysmView *, const CadaclysmViewOverlay *))                    \
+    X(show_overlay_image, uint32_t, (CadaclysmView *, const CadaclysmViewOverlayImage *))         \
+    X(move_overlay, bool, (CadaclysmView *, uint32_t, uint32_t, float, float))                    \
+    X(stats, bool, (CadaclysmView *, CadaclysmViewStats *))
 
 typedef struct CvlTable {
     void *library;
@@ -443,7 +452,7 @@ CVL_API int cvl_symbol(void *library, const char *name, void *slot) {
 /* ---- finding and opening ----------------------------------------------------------- */
 
 /* Where the library `stem` is, without opening it for the table: `variable` (the library
- * or its directory) when set; else beside the loaded reader, beside the executable, each
+ * or its directory) when set; else beside the loaded cadaclysm library (any flavour), beside the executable, each
  * of `dirs`; else the bare file name, if the platform loader finds it. 1 and `out`, or 0
  * and the message in `err`: "no view library: ..." where nothing was found (Python's
  * wording: `what` "terminal" names "the terminal library", anything else the file), the
@@ -482,7 +491,16 @@ CVL_API int cvl_find(const char *stem, const char *variable, const char *what, c
     searched[0] = 0;
     for (step = 0; step < 2 + dir_count; ++step) {
         int have;
-        if (step == 0) have = cvl_loaded_dir("cadaclysm_capi", dir, sizeof dir);
+        if (step == 0) {
+            /* Beside the cadaclysm library the process loaded, whichever flavour, in the order
+             * of cadaclysm-capi-rt's loaded.rs (READER_STEMS, then KERNEL_STEMS' others). */
+            static const char *const loaded[] = {"cadaclysm", "cadaclysm_kernel_reader", "cadaclysm_reader",
+                                                 "cadaclysm_capi", "cadaclysm_kernel", "cadaclysm_blacksmith"};
+            size_t i;
+            have = 0;
+            for (i = 0; !have && i < sizeof loaded / sizeof loaded[0]; ++i)
+                have = cvl_loaded_dir(loaded[i], dir, sizeof dir);
+        }
         else if (step == 1) have = cvl_exe_dir(dir, sizeof dir);
         else {
             const char *given = dirs ? dirs[step - 2] : NULL;

@@ -1677,6 +1677,176 @@ static void plate_case(const std::string& start, const std::string& cwd_start) {
     CHECK(made->close(), "close");
 }
 
+// The anchors are the header's ALIGN codes, in its order.
+static_assert(static_cast<std::uint32_t>(cadaclysm::Anchor::top_left) == 0 && static_cast<std::uint32_t>(cadaclysm::Anchor::top) == 1 &&
+                  static_cast<std::uint32_t>(cadaclysm::Anchor::top_right) == 2 && static_cast<std::uint32_t>(cadaclysm::Anchor::left) == 3 &&
+                  static_cast<std::uint32_t>(cadaclysm::Anchor::centre) == 4 && static_cast<std::uint32_t>(cadaclysm::Anchor::right) == 5 &&
+                  static_cast<std::uint32_t>(cadaclysm::Anchor::bottom_left) == 6 && static_cast<std::uint32_t>(cadaclysm::Anchor::bottom) == 7 &&
+                  static_cast<std::uint32_t>(cadaclysm::Anchor::bottom_right) == 8,
+              "Anchor is CADACLYSM_VIEW_ALIGN_*'s 0..8");
+static_assert(std::is_base_of<cadaclysm::Item, cadaclysm::Overlay>::value, "an Overlay is an Item");
+
+// 1.25's stats on wgpu offscreen: an offscreen view's frames are its images, each counted once
+// with its CPU time, triangles and draw calls; a draw that renders nothing counts none.
+static void stats_case() {
+    auto made = View::offscreen(64, 48);
+    CHECK(made, "a view for stats: %s", refused(made).c_str());
+    if (!made) return;
+    View& sv = *made;
+    cadaclysm::Result<cadaclysm::ViewStats> none = sv.stats();
+    CHECK(none && none->frames_drawn == 0 && none->triangles == 0, "a new view drew nothing: %s", refused(none).c_str());
+    auto cube = bs::Solid::cuboid(20, 20, 20);
+    CHECK(cube, "cuboid");
+    if (!cube) return;
+    CHECK(sv.show(*cube), "show");
+    CHECK(sv.draw(), "draw");
+    cadaclysm::Result<cadaclysm::ViewStats> drew = sv.stats();
+    CHECK(drew && drew->frames_drawn == 0, "an offscreen draw renders nothing");
+    frame_of(sv);
+    cadaclysm::Result<cadaclysm::ViewStats> s = sv.stats();
+    CHECK(s && s->frames_drawn == 1 && s->last_frame_ms > 0.0f && s->triangles >= 12 && s->draw_calls >= 1,
+          "one frame, with its cost: frames %llu, %.3f ms, %llu triangles, %u draw calls", s ? (unsigned long long)s->frames_drawn : 0ull,
+          s ? s->last_frame_ms : 0.0f, s ? (unsigned long long)s->triangles : 0ull, s ? s->draw_calls : 0u);
+    CHECK(s && (s->last_gpu_ms == -1.0f || (s->last_gpu_ms >= 0.0f && s->last_gpu_ms < 1000.0f)), "the GPU time");
+    frame_of(sv);
+    cadaclysm::Result<cadaclysm::ViewStats> again = sv.stats();
+    CHECK(again && again->frames_drawn == 2, "each image counts");
+    std::printf("view: stats checked\n");
+}
+
+// 1.24's overlays on wgpu offscreen: a holed panel at the centre (its hole picks the part
+// beneath), a stroked crosshair, text at the top right, an image moved from the bottom left to
+// the bottom right, order, an outline, a removed overlay, and the refusals.
+static void overlay_case() {
+    auto made = View::offscreen(200, 120);
+    CHECK(made, "a view for overlays: %s", refused(made).c_str());
+    if (!made) return;
+    View& ov = *made;
+    CHECK(ov.background("black"), "background");
+    auto cube = bs::Solid::cuboid(80, 80, 20);
+    CHECK(cube, "cuboid");
+    if (!cube) return;
+    auto under = ov.show(*cube, 0.05, cadaclysm::Colour("#808080"));
+    CHECK(under, "show: %s", refused(under).c_str());
+    CHECK(ov.standard("top") && ov.frame(), "from the top");
+    auto is = [](const ViewImage& img, std::uint32_t x, std::uint32_t y, int r, int g, int b) {
+        std::array<std::uint8_t, 4> p = at(img, x, y);
+        return std::abs(p[0] - r) < 40 && std::abs(p[1] - g) < 40 && std::abs(p[2] - b) < 40;
+    };
+    auto px = [](const ViewImage& img, std::uint32_t x, std::uint32_t y) {
+        std::array<std::uint8_t, 4> p = at(img, x, y);
+        return std::to_string(p[0]) + "," + std::to_string(p[1]) + "," + std::to_string(p[2]);
+    };
+    // A rounded panel with a round hole, red by its own colour, at the window's centre.
+    cadaclysm::Result<bs::Profile> plate = bs::Profile::rect(60, 40);
+    cadaclysm::Result<bs::Profile> hole = bs::Profile::circle(8);
+    CHECK(plate && hole, "profiles");
+    if (!plate || !hole) return;
+    cadaclysm::Result<bs::Profile> rounded = plate->round(6);
+    CHECK(rounded, "round: %s", refused(rounded).c_str());
+    if (!rounded) return;
+    cadaclysm::Result<bs::Profile> holed = rounded->with_hole(*hole);
+    CHECK(holed, "with_hole: %s", refused(holed).c_str());
+    if (!holed) return;
+    cadaclysm::Result<bs::Profile> panel_shape = holed->coloured("red");
+    CHECK(panel_shape, "the panel: %s", refused(panel_shape).c_str());
+    if (!panel_shape) return;
+    cadaclysm::Result<cadaclysm::Overlay> panel = ov.show_overlay(*panel_shape, cadaclysm::Anchor::centre, 0, 0);
+    CHECK(panel, "show_overlay: %s", refused(panel).c_str());
+    if (!panel) return;
+    ViewImage img = frame_of(ov);
+    CHECK(is(img, 120, 60, 255, 0, 0), "the panel red right of its hole: %s", px(img, 120, 60).c_str());
+    CHECK(!is(img, 100, 60, 255, 0, 0), "the hole is filled");
+    cadaclysm::Result<cadaclysm::ViewPick> on_panel = ov.pick(120, 60);
+    CHECK(on_panel && on_panel->overlay && !on_panel->point && on_panel->item == panel->id(), "a pick on the panel: item %u overlay %d",
+          on_panel ? on_panel->item : 0u, on_panel ? int(on_panel->overlay) : -1);
+    cadaclysm::Result<cadaclysm::ViewPick> in_hole = ov.pick(100, 60);
+    CHECK(in_hole && !in_hole->overlay && in_hole->item == under->id(), "a pick in the hole reaches the part: item %u",
+          in_hole ? in_hole->item : 0u);
+    // A stroked crosshair of two open profiles, 20 px in from the top left.
+    auto across = bs::Profile::polyline({{-8.0, 0.0}, {8.0, 0.0}});
+    auto down = bs::Profile::polyline({{0.0, -8.0}, {0.0, 8.0}});
+    CHECK(across && down, "the crosshair's profiles");
+    if (!across || !down) return;
+    cadaclysm::OverlayStyle lime;
+    lime.stroke = cadaclysm::Colour("lime");
+    lime.stroke_width = 2;
+    cadaclysm::Result<cadaclysm::Overlay> cross = ov.show_overlay({std::cref(*across), std::cref(*down)}, cadaclysm::Anchor::top_left, 20, 20, lime);
+    CHECK(cross, "the crosshair: %s", refused(cross).c_str());
+    if (!cross) return;
+    img = frame_of(ov);
+    CHECK(is(img, 20, 20, 0, 255, 0) && is(img, 26, 20, 0, 255, 0) && is(img, 20, 14, 0, 255, 0), "the crosshair's arms: %s %s %s",
+          px(img, 20, 20).c_str(), px(img, 26, 20).c_str(), px(img, 20, 14).c_str());
+    CHECK(!is(img, 25, 25, 0, 255, 0), "between the arms");
+    cadaclysm::Result<cadaclysm::ViewPick> c = ov.pick(26, 21);
+    CHECK(c && c->overlay && c->item == cross->id(), "a pick on the crosshair");
+    // Text at the top right, its box's corner 4 px in; set_text changes it.
+    cadaclysm::TextOptions fps_options;
+    fps_options.colour = "white";
+    fps_options.size = 14;
+    fps_options.box = cadaclysm::Colour("blue");
+    cadaclysm::Result<cadaclysm::Overlay> fps = ov.show_overlay_text("FPS 60", cadaclysm::Anchor::top_right, 4, 4, fps_options);
+    CHECK(fps, "show_overlay_text: %s", refused(fps).c_str());
+    if (!fps) return;
+    img = frame_of(ov);
+    CHECK(is(img, 194, 6, 0, 0, 255) && !is(img, 197, 2, 0, 0, 255), "the text's box hangs from the top-right corner: %s %s",
+          px(img, 194, 6).c_str(), px(img, 197, 2).c_str());
+    CHECK(fps->set_text("FPS 120"), "set_text");
+    cadaclysm::Result<cadaclysm::ViewPick> t = ov.pick(194, 6);
+    CHECK(t && t->overlay && t->item == fps->id(), "a pick on the text");
+    // An image, 2 x 2 yellow pixels drawn 10 x 10, at the bottom left; moved to the bottom right.
+    std::vector<std::uint8_t> yellow;
+    for (int k = 0; k < 4; ++k) yellow.insert(yellow.end(), {255, 255, 0, 255});
+    cadaclysm::Result<cadaclysm::Overlay> pic = ov.show_overlay_image(yellow, 2, 2, cadaclysm::Anchor::bottom_left, 4, 4, 10, 10);
+    CHECK(pic, "show_overlay_image: %s", refused(pic).c_str());
+    if (!pic) return;
+    img = frame_of(ov);
+    CHECK(is(img, 8, 110, 255, 255, 0), "the image at the bottom left: %s", px(img, 8, 110).c_str());
+    CHECK(pic->move_to(cadaclysm::Anchor::bottom_right, 4, 4), "move_to bottom right");
+    img = frame_of(ov);
+    CHECK(pic->anchor() == cadaclysm::Anchor::bottom_right && is(img, 190, 110, 255, 255, 0) && !is(img, 8, 110, 255, 255, 0),
+          "moved to the bottom right: %s %s", px(img, 190, 110).c_str(), px(img, 8, 110).c_str());
+    CHECK(pic->move_to(6, 6), "move_to, the anchor kept");
+    img = frame_of(ov);
+    CHECK(is(img, 188, 108, 255, 255, 0), "moved, the anchor kept: %s", px(img, 188, 108).c_str());
+    // Order: a green square of order 1 shown first stays over a later blue one of order 0.
+    auto sq = bs::Profile::rect(20, 20);
+    CHECK(sq, "square");
+    if (!sq) return;
+    cadaclysm::OverlayStyle green;
+    green.fill = cadaclysm::Colour("lime");
+    green.order = 1;
+    cadaclysm::OverlayStyle blue;
+    blue.fill = cadaclysm::Colour("blue");
+    CHECK(ov.show_overlay(*sq, cadaclysm::Anchor::bottom_left, 60, 30, green) && ov.show_overlay(*sq, cadaclysm::Anchor::bottom_left, 65, 30, blue),
+          "the squares");
+    img = frame_of(ov);
+    CHECK(is(img, 63, 90, 0, 255, 0), "order 1 over order 0: %s", px(img, 63, 90).c_str());
+    // An outline only: "none" fills nothing.
+    cadaclysm::OverlayStyle outline_style;
+    outline_style.fill = cadaclysm::Colour("none");
+    outline_style.stroke = cadaclysm::Colour("white");
+    outline_style.stroke_width = 2;
+    cadaclysm::Result<cadaclysm::Overlay> outline = ov.show_overlay(*sq, cadaclysm::Anchor::top, 0, 30, outline_style);
+    CHECK(outline, "the outline: %s", refused(outline).c_str());
+    img = frame_of(ov);
+    CHECK(is(img, 110, 30, 255, 255, 255) && !is(img, 100, 30, 255, 255, 255), "an outline, its inside not filled: %s %s",
+          px(img, 110, 30).c_str(), px(img, 100, 30).c_str());
+    // Removed: gone, and the part is picked there again.
+    CHECK(panel->remove(), "remove");
+    img = frame_of(ov);
+    CHECK(!is(img, 120, 60, 255, 0, 0), "a removed overlay draws nothing");
+    cadaclysm::Result<cadaclysm::ViewPick> after = ov.pick(120, 60);
+    CHECK(after && !after->overlay, "a removed overlay is not picked");
+    if (outline) CHECK(outline->remove(), "remove the outline");
+    CHECK(starts(refused(ov.show_overlay(std::vector<float>(15), cadaclysm::Anchor::top_left, 0, 0)), "show_overlay: 16 numbers a curve"),
+          "%s", refused(ov.show_overlay(std::vector<float>(15), cadaclysm::Anchor::top_left, 0, 0)).c_str());
+    CHECK(has(refused(cross->move_to(std::nanf(""), 0)), "finite"), "a NaN move: %s", refused(cross->move_to(std::nanf(""), 0)).c_str());
+    CHECK(starts(refused(ov.show_overlay_image(yellow, 3, 2, cadaclysm::Anchor::top_left, 0, 0)), "show_overlay_image: 3 x 2 pixels need 24 bytes"),
+          "%s", refused(ov.show_overlay_image(yellow, 3, 2, cadaclysm::Anchor::top_left, 0, 0)).c_str());
+    std::printf("view: overlays checked\n");
+}
+
 int main(int argc, char** argv) {
     const std::string scratch = argc > 1 ? argv[1] : ".";
     const std::string mechanism = argc > 2 ? argv[2] : "";  // samples/mechanism-solid.stp
@@ -1768,6 +1938,8 @@ int main(int argc, char** argv) {
     text_case(font_path);
     double_click_case();
     snap_case();
+    overlay_case();
+    stats_case();
     plate_case(mechanism, ".");
 
     // A solid by handle: its item keeps it alive after the Solid is gone.
@@ -1798,6 +1970,20 @@ int main(int argc, char** argv) {
     CHECK(!drawn.rgba.empty() && at(drawn, 1, 1) == at(empty, 1, 1), "a corner outside the sphere changed");
     auto pick = view.pick(160, 120);
     CHECK(pick && item && pick->item == item->id(), "pick: %s", pick ? "another item" : refused(pick).c_str());
+    // 1.16's user layers: the sphere on layer 3, the layer off (the centre no longer the
+    // sphere's) and on again (the sphere's again); layer 32 refused, for an item and for the view.
+    if (item) {
+        CHECK(item->user_layer(3), "user_layer 3");
+        CHECK(view.user_layer(3, false), "user layer 3 off");
+        ViewImage hidden = frame_of(view);
+        CHECK(!hidden.rgba.empty() && at(hidden, 160, 120) != at(drawn, 160, 120), "an item on a layer switched off drew");
+        CHECK(view.user_layer(3, true), "user layer 3 on");
+        ViewImage shown = frame_of(view);
+        CHECK(!shown.rgba.empty() && at(shown, 160, 120) == at(drawn, 160, 120), "an item on a layer switched on again did not draw");
+        CHECK(has(refused(item->user_layer(32)), "past 31"), "%s", refused(item->user_layer(32)).c_str());
+        CHECK(has(refused(view.user_layer(32, false)), "past 31"), "%s", refused(view.user_layer(32, false)).c_str());
+        CHECK(item->user_layer(0), "user_layer 0");
+    }
     std::string png = scratch + "/view_test.png";
     CHECK(view.save(png), "save");
     if (std::FILE* f = std::fopen(png.c_str(), "rb")) {
@@ -1854,6 +2040,23 @@ int main(int argc, char** argv) {
         CHECK(view.occluded_style(cadaclysm::OccludedStyle()), "occluded style defaults");
         back = view.occluded_style();
         CHECK(back && back->dash == 6.0f && !back->colour.has_value(), "the defaults were not restored");
+    }
+    // 1.23's line colours: a view-wide isocurve colour read back, an item's own edge and
+    // curve colours set and cleared.
+    {
+        CHECK(view.set_isocurve_colour("#00ff00", true), "isocurve colour set");
+        cadaclysm::Result<cadaclysm::LineColour> iso = view.isocurve_colour();
+        CHECK(iso && iso->from_part && iso->colour[0] == 0.0f && iso->colour[1] == 1.0f && iso->colour[2] == 0.0f,
+              "isocurve colour read back: %s", iso ? "other values" : refused(iso).c_str());
+        cadaclysm::Result<cadaclysm::LineColour> curves = view.curve_colour();
+        CHECK(curves && curves->from_part, "curves do not follow their part by default");
+        CHECK(view.set_isocurve_colour(std::array<float, 3>{0.54f, 0.56f, 0.6f}), "isocurve colour back");
+        CHECK(view.set_edge_colour("#202020"), "edge colour set");
+        if (item) {
+            CHECK(item->set_edge_colour(cadaclysm::Colour("red")), "an item's edge colour set");
+            CHECK(item->set_edge_colour(std::nullopt), "an item's edge colour cleared");
+            CHECK(item->set_curve_colour(cadaclysm::Colour("red")) && item->set_curve_colour(std::nullopt), "an item's curve colour");
+        }
     }
     if (item) {
         auto posed = item->node_transforms(std::vector<std::array<double, 16>>{});

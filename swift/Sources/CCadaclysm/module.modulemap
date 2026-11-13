@@ -1,8 +1,12 @@
 // The reader ABI. cadaclysm.h here is a copy of crates/cadaclysm-capi/include/cadaclysm.h,
 // kept identical by crates/cadaclysm-capi/tests/bindings.rs: a module map has no fallback
 // path, and the repository and the SDK keep the canonical header at different depths.
+// cadaclysm_flavour.h is likewise a copy of crates/cadaclysm-lib/include/'s: the two calls
+// every flavour of the single library answers (the separate cadaclysm_capi does not, and
+// the Swift calls them only when the build links a flavour).
 // The library is linked by Package.swift, which knows which file name to ask for.
 module CCadaclysm [system] {
     header "cadaclysm.h"
+    header "cadaclysm_flavour.h"
     export *
 }

@@ -10,8 +10,22 @@
 //
 // It uses cgo and the published header, the way any Go program would — no generated
 // bindings, no Rust, no build system beyond a C toolchain for cgo itself. Point
-// CGO_LDFLAGS at the shared library's directory if it is not where the #cgo lines below
-// already look.
+// CGO_LDFLAGS at the shared library's directory if it is not where the #cgo lines in
+// link.go already look.
+//
+// # Which library it links
+//
+// A linked binary cannot leave a symbol out, so the library is chosen when the program is
+// built, by build tag:
+//
+//   - no tag: the single library's full flavour, cadaclysm — what this package and the
+//     kernel's link by default, one library for both;
+//   - cadaclysm_reader: the reader flavour, cadaclysm_reader, for a program that imports
+//     this package alone (the kernel package refuses to build under it);
+//   - cadaclysm_separate: the separate cadaclysm_capi of earlier releases (and
+//     cadaclysm_blacksmith for the kernel).
+//
+// [Flavour] and [Features] say which it is.
 //
 // # Everything borrows from the scene
 //
@@ -65,7 +79,8 @@
 // properties to give them.
 package cadaclysm
 
-// The first -I/-L pair is the SDK checkout's own layout: go/cadaclysm/ sits beside
+// The #cgo LDFLAGS lines are in link.go, link_reader.go and link_separate.go, one per
+// build tag (see the package comment). The first -I/-L pair is the SDK checkout's own layout: go/cadaclysm/ sits beside
 // include/ and lib/ at the checkout root, two levels up from this file. The second is
 // this repository's: crates/cadaclysm-capi/examples/go/cadaclysm/ under the crate's own
 // include/ (three levels up) and the workspace's target/release (five levels up to the
@@ -87,8 +102,6 @@ package cadaclysm
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../include -I${SRCDIR}/../../../include
-#cgo windows LDFLAGS: -L${SRCDIR}/../../lib -L${SRCDIR}/../../../../../target/release -l:cadaclysm_capi.dll
-#cgo !windows LDFLAGS: -L${SRCDIR}/../../lib -L${SRCDIR}/../../../../../target/release -lcadaclysm_capi
 #include <stdlib.h>
 // <...>, not "...": on Windows cgo compiles its probes from %TEMP%, and a quoted
 // include would read any stray cadaclysm.h there before the -I directories.

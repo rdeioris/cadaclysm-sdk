@@ -1,6 +1,6 @@
 # cadaclysm for C++
 
-A header-only C++17 wrapper over the two C libraries: `cadaclysm.hpp` (the reader) and
+A header-only C++17 wrapper over the cadaclysm library's two C APIs: `cadaclysm.hpp` (the reader) and
 `cadaclysm_blacksmith.hpp` (the kernel), with `result.hpp` beside them. The object model
 is `cadaclysm.py`'s, in its spelling: `scene.metres_per_unit()`,
 `Workplane::xy().extrude(profile, 6).solid()`.
@@ -8,8 +8,7 @@ is `cadaclysm.py`'s, in its spelling: `scene.metres_per_unit()`,
 ## Install
 
 Header-only means there is no wrapper to compile, not that there is nothing to link:
-you link `cadaclysm_capi` (and `cadaclysm_blacksmith` for the kernel), from a release
-archive or a build of this repository.
+you link one `cadaclysm` library, from a release archive or a build of this repository.
 
 With CMake and an unpacked release archive:
 
@@ -18,9 +17,33 @@ find_package(cadaclysm CONFIG REQUIRED)          # -DCMAKE_PREFIX_PATH=<archive>
 target_link_libraries(app PRIVATE cadaclysm::blacksmith)   # or cadaclysm::reader
 ```
 
+`CADACLYSM_FLAVOUR` picks the library behind both targets:
+
+- `full` (the default): `cadaclysm`, the reader and the kernel in one library;
+- `reader`: `cadaclysm_reader`, the reader alone. Linking `cadaclysm::blacksmith` then fails
+  to generate, naming `cadaclysm::the_reader_flavour_has_no_kernel__configure_with_CADACLYSM_FLAVOUR_full`;
+- `kernel-reader`: `cadaclysm_kernel_reader` behind all three targets; a kernel writer or
+  parts call it leaves out fails to link;
+- `kernel`: `cadaclysm_kernel` behind `cadaclysm::blacksmith` and `cadaclysm::cadaclysm`;
+  linking `cadaclysm::reader` or `cadaclysm::view` fails to generate;
+- `separate`: `cadaclysm_capi` and `cadaclysm_blacksmith`, the two libraries of earlier
+  releases.
+
+In a release archive the default is that archive's own flavour, so `find_package` needs no
+flag. `cadaclysm-<v>-<platform>` (full) and `-kernel-reader` provide `cadaclysm::cadaclysm`,
+`cadaclysm::reader` and `cadaclysm::blacksmith`; `-kernel` provides `cadaclysm::cadaclysm`
+and `cadaclysm::blacksmith`; `-reader` provides `cadaclysm::cadaclysm` and
+`cadaclysm::reader`. Every archive adds `cadaclysm::view_loader` and `cadaclysm::view`;
+`-kernel` refuses `cadaclysm::view` when CMake generates, since the view needs the reader.
+
+`cadaclysm::flavour()` and `cadaclysm::features()` (and their `cadaclysm::blacksmith` twins)
+say which library is linked: `"full"`, `"kernel-reader"`, `"kernel"` or `"reader"` and its
+features, or `"reader"` / `"kernel"` and no features for the separate pair.
+
 Without CMake, add `<archive>/include` to the include path and link
-`cadaclysm_capi.lib` / `libcadaclysm_capi.so` / `libcadaclysm_capi.dylib` (and the
-blacksmith one). Ship the shared libraries beside your executable. C++17: MSVC 2019+,
+`cadaclysm.lib` / `libcadaclysm.so` / `libcadaclysm.dylib` (or another flavour's library).
+For the separate libraries, link `cadaclysm_capi` and `cadaclysm_blacksmith` and define
+`CADACLYSM_SEPARATE`. Ship the shared library beside your executable. C++17: MSVC 2019+,
 GCC 9+, Clang 9+, AppleClang 11+ (macOS 10.15+).
 
 ## Errors: `Result<T>`, never exceptions
@@ -90,7 +113,7 @@ other with `cadaclysm::view::use(path)` or `CADACLYSM_VIEW`. Link `cadaclysm::vi
 **and** `cadaclysm::blacksmith` (the view library is not linked: `view_loader` compiles in
 where to look). `cadaclysm::view` is the linked C library itself, for a host that calls
 `cadaclysm_view.h` directly. A missing library is refused with "no view library: ...", naming
-where it looked, and the view library must speak ABI 1.22.
+where it looked, and the view library must speak ABI 1.25.
 
 ```cpp
 #include <cadaclysm/view.hpp>
@@ -231,9 +254,12 @@ name of yours, `#undef` it after the include.
 ## The smoke
 
 `smoke.cpp` is the scenario every wrapper's smoke runs. It builds against a cargo build
-of the two libraries:
+of the full library (add `-DCADACLYSM_FLAVOUR=separate` for the two separate ones):
 
 ```
 cmake -S . -B build -DCADACLYSM_LIBRARY_DIR=<repo>/target/release
 cmake --build build && ctest --test-dir build --output-on-failure
 ```
+
+With `-DCADACLYSM_FLAVOUR=reader` only the tests that need no kernel are built: the smoke
+and the kernel tests are left out.

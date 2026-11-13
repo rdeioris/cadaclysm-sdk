@@ -52,8 +52,19 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
  * 1.22 appended snapping: `CadaclysmViewSnapSettings`, `CadaclysmViewSnap`, the
  * `CADACLYSM_VIEW_SNAP_*` kinds and six calls -- the vertex, midpoint, arc centre, quadrant,
  * edge, face, grid or plane point under the cursor, and the marker the view draws there.
+ * 1.23 appended `cadaclysm_view_set_line_colour`, `_line_colour` and `_set_item_line_colour`:
+ * the colour of the edges, curves and isocurves (`CADACLYSM_VIEW_LAYER_EDGES`, `_CURVES`,
+ * `_ISOCURVES`), view-wide and per item.
+ * 1.24 appended overlays -- a HUD over the whole window, untouched by the camera:
+ * `cadaclysm_view_show_overlay` (2D shapes as Beziers, filled and stroked),
+ * `_show_overlay_image`, `_move_overlay`, `CadaclysmViewOverlay`,
+ * `CadaclysmViewOverlayImage` and `CADACLYSM_VIEW_TEXT_SCREEN`; grew `CadaclysmViewText`
+ * (`order`) and `CadaclysmViewPick` (`overlay`).
+ * 1.25 appended `cadaclysm_view_stats` and `CadaclysmViewStats`: the frames a view has
+ * drawn and the last one's CPU and GPU time, triangles and draw calls -- an FPS counter that
+ * stays right while the scene is still.
  */
-#define CADACLYSM_VIEW_ABI_MINOR 22
+#define CADACLYSM_VIEW_ABI_MINOR 25
 
 #define CADACLYSM_VIEW_WINDOW_WIN32 1
 
@@ -276,6 +287,16 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
 #define CADACLYSM_VIEW_TEXT_LABEL 0
 
 #define CADACLYSM_VIEW_TEXT_WORLD 1
+
+/**
+ * An overlay's text (1.24): placed in the window, not at a point -- `align` is the anchor
+ * (`CADACLYSM_VIEW_ALIGN_*`, a corner, an edge's middle or the centre of the window, and
+ * the same point of the text's box), `offset` the pixels inward from it (as
+ * `cadaclysm_view_move_overlay` says), `order` its place among the overlays. Drawn after
+ * everything else, never hidden by the scene; `at`, `right`, `up` and `on_top` are not
+ * read.
+ */
+#define CADACLYSM_VIEW_TEXT_SCREEN 2
 
 /**
  * What an item's lines and points draw where a surface is in front of them
@@ -662,6 +683,12 @@ typedef struct CadaclysmViewPick {
    * 1.8: the point hit, in the coordinates the items were shown in (world).
    */
   float point[3];
+  /**
+   * 1.24: 1 where `item` is an overlay (`cadaclysm_view_show_overlay` and the rest): it was
+   * over the pixel, so nothing of the scene beneath it was picked (`has_point` 0, `node` 0,
+   * `face` a text overlay's line, else 0).
+   */
+  uint32_t overlay;
 } CadaclysmViewPick;
 
 /**
@@ -1054,7 +1081,7 @@ typedef struct CadaclysmViewText {
    */
   const char *text;
   /**
-   * `CADACLYSM_VIEW_TEXT_LABEL` or `_WORLD`.
+   * `CADACLYSM_VIEW_TEXT_LABEL`, `_WORLD` or (1.24) `_SCREEN`.
    */
   uint32_t mode;
   /**
@@ -1101,6 +1128,10 @@ typedef struct CadaclysmViewText {
    * 0: the bundled font; else from `cadaclysm_view_load_font`.
    */
   uint32_t font;
+  /**
+   * 1.24, screen only: its place among the overlays -- lower first, equal in show order.
+   */
+  int32_t order;
 } CadaclysmViewText;
 
 /**
@@ -1515,6 +1546,146 @@ typedef struct CadaclysmViewSnap {
    */
   uint32_t clicks;
 } CadaclysmViewSnap;
+
+/**
+ * A 2D shape over the window (`cadaclysm_view_show_overlay`, 1.24): a blacksmith profile's
+ * Beziers, in pixels, y up, its origin at the anchor plus the offset. Fields past the
+ * caller's `size` take their defaults (zero).
+ *
+ * The curves are split into loops where one does not start where the one before it ended,
+ * and a loop is closed where it ends where it started (both within a ten-thousandth of the
+ * shape's extent): a profile's outline and each hole. Closed loops are filled together by
+ * the even-odd rule -- a loop inside another is a hole; every loop is stroked, centred on the
+ * curve, round at its joins and ends. An open loop is never filled.
+ */
+typedef struct CadaclysmViewOverlay {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.24 struct's.
+   */
+  uint32_t size;
+  /**
+   * `CADACLYSM_VIEW_ALIGN_*`: the window's corner, edge middle or centre the shape hangs
+   * from.
+   */
+  uint32_t anchor;
+  /**
+   * Rational cubic Beziers, sixteen floats each -- four control points as x, y, z, weight
+   * (z is not read): a profile's `beziers`. One unit is one pixel (times the screen
+   * density where the host set one).
+   */
+  const float *beziers;
+  uint32_t curve_count;
+  /**
+   * Lower first; equal orders in show order. Text and images share the order.
+   */
+  int32_t order;
+  /**
+   * Pixels inward from the anchor: x away from the left edge for a left anchor and from
+   * the right edge for a right one (rightward for the middle column); y down from the
+   * top edge for a top anchor and up from the bottom for a bottom one (upward for the
+   * middle row).
+   */
+  float offset[2];
+  /**
+   * 1: the closed loops filled in `fill_rgba`.
+   */
+  uint32_t has_fill;
+  /**
+   * Straight alpha, 0..1 (clamped).
+   */
+  float fill_rgba[4];
+  /**
+   * 1: every loop stroked in `stroke_rgba`, `stroke_width` pixels wide.
+   */
+  uint32_t has_stroke;
+  float stroke_rgba[4];
+  /**
+   * Pixels; 0 or less is 1.
+   */
+  float stroke_width;
+} CadaclysmViewOverlay;
+
+/**
+ * An image over the window (`cadaclysm_view_show_overlay_image`, 1.24), copied in when
+ * shown. Its box hangs from the anchor as text's does: the anchor's own point of the box
+ * (its top-right corner for a top-right anchor) sits at the anchor plus the offset.
+ */
+typedef struct CadaclysmViewOverlayImage {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.24 struct's.
+   */
+  uint32_t size;
+  /**
+   * `CADACLYSM_VIEW_ALIGN_*`.
+   */
+  uint32_t anchor;
+  /**
+   * `width * height` pixels, four bytes each, rows top first, straight alpha.
+   */
+  const uint8_t *rgba;
+  uint32_t width;
+  uint32_t height;
+  /**
+   * Pixels inward from the anchor, as `CadaclysmViewOverlay::offset`.
+   */
+  float offset[2];
+  /**
+   * The pixels it is drawn across and down; 0 for its own `width` and `height`.
+   */
+  float extent[2];
+  /**
+   * 0..1 (clamped); 0 in a zeroed struct means 1, as `CadaclysmViewImage`'s.
+   */
+  float opacity;
+  /**
+   * As `CadaclysmViewOverlay::order`.
+   */
+  int32_t order;
+} CadaclysmViewOverlayImage;
+
+/**
+ * What a view has drawn (`cadaclysm_view_stats`, 1.25). Laid out with no implicit padding:
+ * 40 bytes, every field at its natural alignment.
+ */
+typedef struct CadaclysmViewStats {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.25 struct's.
+   */
+  uint32_t size;
+  /**
+   * Zero; keeps `frames_drawn` on its 8 bytes.
+   */
+  uint32_t pad0;
+  /**
+   * The frames this view has drawn: each frame drawn to its window or texture (an own
+   * window's pump, a host's draw), and each picture `cadaclysm_view_image` rendered -- an
+   * offscreen view draws only there. A pump or draw that owes or draws nothing does not
+   * count; nor does `cadaclysm_view_image` of a texture view, which only reads back.
+   */
+  uint64_t frames_drawn;
+  /**
+   * The CPU time of the last frame drawn, milliseconds; 0 before the first.
+   */
+  float last_frame_ms;
+  /**
+   * The GPU time of the latest frame the GPU's clock measured, milliseconds, read back
+   * without waiting (a frame or two behind); -1 where it cannot be measured: a device
+   * without timestamp queries, WebGL2, the terminal, a host's device, before the first.
+   */
+  float last_gpu_ms;
+  /**
+   * The triangles the last frame drew.
+   */
+  uint64_t triangles;
+  /**
+   * The draw calls the last frame recorded; 0 on the terminal, which issues none.
+   */
+  uint32_t draw_calls;
+  /**
+   * Zero; rounds the struct to its 8-byte alignment.
+   */
+  uint32_t pad1;
+} CadaclysmViewStats;
 
 #ifdef __cplusplus
 extern "C" {
@@ -1948,6 +2119,38 @@ bool cadaclysm_view_occluded_style(const struct CadaclysmView *view,
                                    struct CadaclysmViewOccludedStyle *out);
 
 /**
+ * The colour of every line on `layer` (1.23): `CADACLYSM_VIEW_LAYER_EDGES` (a body's edges),
+ * `_CURVES` (curves and lines items) or `_ISOCURVES`, in `rgb` -- three floats 0..1 as
+ * `cadaclysm_view_set_colour` takes them (clamped) -- or, with `from_part` nonzero, in each
+ * part's own colour (a body's edges brightened so they read over its faces; `rgb` is kept
+ * for when it is turned off). The defaults: edges near-black, curves each part's own,
+ * isocurves grey. An item's own line colour (`cadaclysm_view_set_item_line_colour`) and a
+ * kernel solid's edge paint draw over it. No upload. The terminal library draws it too; the
+ * render view library keeps it and reads it back but draws its lines as before. False,
+ * changing nothing, with `cadaclysm_view_last_error` naming the call, for any other layer, a
+ * NULL `rgb` or a component not finite.
+ *
+ * `view` must be NULL or a live view; `rgb` NULL or three floats.
+ */
+bool cadaclysm_view_set_line_colour(struct CadaclysmView *view,
+                                    uint32_t layer,
+                                    const float *rgb,
+                                    uint32_t from_part);
+
+/**
+ * The colour of the lines on `layer` in use (1.23): its colour into `out_rgb` (three floats)
+ * and whether they take each part's colour into `out_from_part` (0 or 1); either may be NULL.
+ * False for a NULL view or a layer other than EDGES, CURVES and ISOCURVES.
+ *
+ * `view` must be NULL or a live view; `out_rgb` NULL or room for three floats,
+ * `out_from_part` NULL or one `uint32_t`.
+ */
+bool cadaclysm_view_line_colour(const struct CadaclysmView *view,
+                                uint32_t layer,
+                                float *out_rgb,
+                                uint32_t *out_from_part);
+
+/**
  * The view's level-of-detail policy, for the device the host runs on (1.4). NULL -- the
  * default -- builds no levels and draws every frame whole. Otherwise the view builds coarser
  * levels for every part of `lod->min_triangles` or more, in the background after each show,
@@ -2295,6 +2498,25 @@ bool cadaclysm_view_set_xray(struct CadaclysmView *view, uint32_t item, bool on)
 bool cadaclysm_view_set_occluded(struct CadaclysmView *view, uint32_t item, uint32_t mode);
 
 /**
+ * Draws item `item`'s lines on `layer` (1.23) -- `CADACLYSM_VIEW_LAYER_EDGES`, `_CURVES` or
+ * `_ISOCURVES` -- in `rgb` (three floats 0..1, clamped), over the view-wide
+ * `cadaclysm_view_set_line_colour`, the item's colour (`cadaclysm_view_set_colour`) and a
+ * kernel solid's own edge paint; NULL takes the view-wide colour again. A DASHED item's
+ * hidden lines still take the occluded style's colour where it has one. The exact
+ * surfaces' edges and curves too. Kept across uploads, removes of other items, moves and
+ * surface switches. No upload. The terminal library draws it too; the render view library
+ * accepts NULL and refuses a colour: it draws no item's own line colour yet. False, with
+ * `cadaclysm_view_last_error` naming the call, where the item is not shown, the layer is
+ * not one of the three, a component is not finite, or the render view library refuses it.
+ *
+ * `view` must be NULL or a live view; `rgb` NULL or three floats.
+ */
+bool cadaclysm_view_set_item_line_colour(struct CadaclysmView *view,
+                                         uint32_t item,
+                                         uint32_t layer,
+                                         const float *rgb);
+
+/**
  * The item's finish (1.18): `CADACLYSM_VIEW_FINISH_GLOSS` (the default), `_SATIN` or
  * `_MATTE`, for its triangles and its exact faces. Under `CADACLYSM_VIEW_LIGHTING_SHOWROOM`
  * gloss is the clear coat mirroring the room, sharp and silver at a grazing angle; satin a
@@ -2562,14 +2784,18 @@ uint32_t cadaclysm_view_show_solid_faces(struct CadaclysmView *view,
 uint32_t cadaclysm_view_load_font(const uint8_t *bytes, size_t length);
 
 /**
- * Text shown as one item (a label or world text, as `text->mode` says); its id, 0 on
- * failure (NULL or non-UTF-8 text, an unknown mode, align or font, a height not finite
- * and positive, a number not finite, world `right` and `up` parallel), with the reason.
+ * Text shown as one item (a label, world text or -- 1.24 -- an overlay's screen text, as
+ * `text->mode` says); its id, 0 on failure (NULL or non-UTF-8 text, an unknown mode, align
+ * or font, a height not finite and positive, a number not finite, world `right` and `up`
+ * parallel), with the reason. Screen text is an overlay (`cadaclysm_view_show_overlay`):
+ * hung from the window's `align` anchor, `offset` pixels inward, in `order`, picked before
+ * anything beneath it, moved by `cadaclysm_view_move_overlay`.
  *
  * The terminal library: accepted with a difference -- a label is printed as terminal
  * characters over the picture, one character row a line whatever its `height`, at the
  * cell under its anchor (`offset` and `box_padding` turned into whole cells, alignment
- * counted in characters), and picked on those cells; world text draws into the picture.
+ * counted in characters), and picked on those cells; world text draws into the picture;
+ * screen text is printed as a label is, at the cell under its anchor.
  *
  * `view` must be NULL or a live view; `text` NULL or a `CadaclysmViewText` of
  * `text->size` bytes whose `text` is NULL or a NUL-terminated string.
@@ -2950,6 +3176,77 @@ bool cadaclysm_view_set_work_plane(struct CadaclysmView *view,
  * `view` must be NULL or a live view.
  */
 bool cadaclysm_view_clear_work_plane(struct CadaclysmView *view);
+
+/**
+ * A 2D shape over the window, as one item: `shape->beziers` (a blacksmith profile's,
+ * sixteen floats a curve) in pixels, y up, its origin at the anchor plus the offset --
+ * closed loops filled even-odd, every loop stroked, as `has_fill` and `has_stroke` say.
+ * Drawn after everything else over the whole window (once, whatever the viewports), in
+ * `order`; never moved by the camera; kept where it is as the window resizes. A click on
+ * its fill, or within a few pixels of its stroke, picks it (`CadaclysmViewPick.overlay`),
+ * and nothing beneath it. `cadaclysm_view_move_overlay` moves it, `cadaclysm_view_remove`
+ * takes it away, `cadaclysm_view_set_item_layer` puts it on a user layer. The item's id;
+ * 0 on failure: no curves, a number not finite, a weight not positive, an unknown anchor,
+ * with the reason.
+ *
+ * The terminal library: accepted with a difference -- it prints the shape as characters
+ * over the picture: a cell whose centre is inside the fill a full block in the fill's
+ * colour, a cell the stroke crosses a box-drawing line in the stroke's.
+ *
+ * `view` must be NULL or a live view; `shape` NULL or a `CadaclysmViewOverlay` of
+ * `shape->size` bytes whose `beziers` holds `curve_count * 16` floats.
+ */
+uint32_t cadaclysm_view_show_overlay(struct CadaclysmView *view,
+                                     const struct CadaclysmViewOverlay *shape);
+
+/**
+ * An image over the window, as one item: `image->rgba` copied in, drawn `extent` pixels
+ * across and down (0: its own size) at `opacity`, its box hanging from the anchor as text's
+ * does (its top-right corner at a top-right anchor), plus the offset. Drawn, picked, moved
+ * and removed as `cadaclysm_view_show_overlay`'s shapes are. The item's id; 0 on failure: no
+ * pixels, bytes that do not make the size, an extent not finite or negative, an unknown
+ * anchor, with the reason.
+ *
+ * The terminal library: refuses (0, nothing shown), as it refuses `cadaclysm_view_show_image`.
+ *
+ * `view` must be NULL or a live view; `image` NULL or a `CadaclysmViewOverlayImage` of
+ * `image->size` bytes whose `rgba` holds `width * height * 4` bytes.
+ */
+uint32_t cadaclysm_view_show_overlay_image(struct CadaclysmView *view,
+                                           const struct CadaclysmViewOverlayImage *image);
+
+/**
+ * Overlay `item` -- a shape, an image or screen text -- hung from another anchor at another
+ * offset (pixels inward, as `CadaclysmViewOverlay::offset`), its order kept. Cheap: a HUD
+ * element may move every frame. False for an item that is no overlay, an unknown anchor or
+ * an offset not finite.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_move_overlay(struct CadaclysmView *view,
+                                 uint32_t item,
+                                 uint32_t anchor,
+                                 float x,
+                                 float y);
+
+/**
+ * Fills `out` with what the view has drawn (1.25): `frames_drawn`, the frames drawn so far --
+ * each frame drawn to its window or texture (an own window's pump, a host's
+ * `cadaclysm_view_draw`) and each picture `cadaclysm_view_image` rendered; an offscreen view's
+ * `cadaclysm_view_draw` renders nothing, so its frames are its images. A pump or draw that owes
+ * or draws nothing does not count, so a still scene's count stays put. Then the last frame's
+ * `last_frame_ms` (CPU), `last_gpu_ms` (the GPU's clock, the latest frame it has answered for,
+ * read back without waiting; -1 where the device has no timestamp queries, on WebGL2, on a
+ * host's device or before the first), `triangles` and `draw_calls`. `out->size` is left as the
+ * caller set it. False for a NULL or undersized `out`.
+ *
+ * The terminal library: `frames_drawn` counts the pictures it rendered, `last_frame_ms` their
+ * time, `triangles` those a picture showed; `last_gpu_ms` -1 and `draw_calls` 0.
+ *
+ * `view` must be NULL or a live view; `out` NULL or a `CadaclysmViewStats` of at least
+ * `out->size` bytes.
+ */
+bool cadaclysm_view_stats(struct CadaclysmView *view, struct CadaclysmViewStats *out);
 
 #ifdef __cplusplus
 }  // extern "C"

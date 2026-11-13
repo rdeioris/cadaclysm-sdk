@@ -1,5 +1,9 @@
 # The C++ wrapper's own tests. Not needed to *use* the headers -- a customer links
 # cadaclysm::reader / cadaclysm::blacksmith from cmake/cadaclysmConfig.cmake instead.
+# CADACLYSM_FLAVOUR (full, kernel-reader, reader or separate) picks the library they link, as
+# that file says; under reader only the tests that need no kernel are built, and under
+# kernel-reader the tests that call a kernel writer it leaves out are not built. The kernel
+# flavour has no reader, which most of these tests open files through: it is not built here.
 cmake_minimum_required(VERSION 3.16)
 project(cadaclysm_cpp LANGUAGES CXX)
 
@@ -38,7 +42,7 @@ target_include_directories(cadaclysm_header_result PRIVATE "${CADACLYSM_CPP_INCL
 
 # ---- against the built libraries ------------------------------------------------------
 set(CADACLYSM_LIBRARY_DIR "" CACHE PATH
-    "A cargo target directory holding cadaclysm_capi and cadaclysm_blacksmith (e.g. target/release)")
+    "A cargo target directory holding the library CADACLYSM_FLAVOUR names (e.g. target/release)")
 set(_cadaclysm_sample "${CMAKE_CURRENT_SOURCE_DIR}/../../../../samples/cube.scad")
 if(NOT EXISTS "${_cadaclysm_sample}")  # the SDK layout: cpp/ sits beside samples/
   set(_cadaclysm_sample "${CMAKE_CURRENT_SOURCE_DIR}/../samples/cube.scad")
@@ -52,14 +56,81 @@ set(CADACLYSM_LICENSE "" CACHE FILEPATH "A license file for the smoke, or empty"
 if(CADACLYSM_LIBRARY_DIR)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../include/cadaclysm.h")
     set(_cadaclysm_c_headers "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-lib/include"
                              "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-blacksmith-capi/include"
                              "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-view-capi/include")
-  else()  # the SDK repository: cpp/ sits beside include/, which holds cadaclysm_view.h too
+  else()  # the SDK repository: cpp/ sits beside include/, which holds cadaclysm_view.h and
+          # cadaclysm_flavour.h too
     set(_cadaclysm_c_headers "${CMAKE_CURRENT_SOURCE_DIR}/../include")
   endif()
   set(CADACLYSM_INCLUDE_DIRS "${CADACLYSM_CPP_INCLUDE}" ${_cadaclysm_c_headers})
   include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/cadaclysmConfig.cmake")
   find_package(Threads REQUIRED)
+
+  add_library(cadaclysm_header_reader OBJECT tests/include_reader.cpp)
+  target_link_libraries(cadaclysm_header_reader PRIVATE cadaclysm::reader)
+
+  # Scene::links() / joints(): the mechanism facts against samples/mechanism.stp,
+  # found beside whichever sample CADACLYSM_SAMPLE names.
+  if(CADACLYSM_SAMPLE)
+    add_executable(cadaclysm_kinematics_test tests/kinematics_test.cpp)
+    target_link_libraries(cadaclysm_kinematics_test PRIVATE cadaclysm::reader)
+    add_custom_command(TARGET cadaclysm_kinematics_test POST_BUILD
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE_DIR:cadaclysm_kinematics_test>")
+    add_test(NAME kinematics COMMAND cadaclysm_kinematics_test "${CADACLYSM_SAMPLE}")
+  endif()
+
+  # view_loader.h alone: the search, its messages, the camera maths and the PNG writer,
+  # and cvl_draw_object/cvl_pick over a table of fakes; cvl_open over a stand-in library
+  # that answers zero. No view library and no GPU; the build directory is the empty place
+  # it searches.
+  add_library(cadaclysm_view_loader_fake SHARED tests/view_loader_fake.cpp)
+  target_include_directories(cadaclysm_view_loader_fake PRIVATE ${CADACLYSM_INCLUDE_DIRS})
+  add_executable(cadaclysm_view_loader_test tests/view_loader_test.cpp)
+  target_include_directories(cadaclysm_view_loader_test PRIVATE ${CADACLYSM_INCLUDE_DIRS})
+  target_link_libraries(cadaclysm_view_loader_test PRIVATE ${CMAKE_DL_LIBS})
+  add_dependencies(cadaclysm_view_loader_test cadaclysm_view_loader_fake)
+  add_test(NAME view_loader COMMAND cadaclysm_view_loader_test "${CMAKE_CURRENT_BINARY_DIR}"
+                                    "$<TARGET_FILE:cadaclysm_view_loader_fake>")
+
+  # cadaclysm::flavour()/features() and blacksmith::flavour()/features(): the linked library
+  # answers for itself, the separate pair as "reader"/"kernel" with no features.
+  add_executable(cadaclysm_flavour_test tests/flavour_test.cpp)
+  set(_cadaclysm_flavour_files "$<TARGET_FILE:cadaclysm::reader>")
+  if(cadaclysm_FLAVOUR STREQUAL "reader")
+    target_link_libraries(cadaclysm_flavour_test PRIVATE cadaclysm::reader)
+    target_compile_definitions(cadaclysm_flavour_test PRIVATE CADACLYSM_FLAVOUR_TEST_READER)
+  else()
+    target_link_libraries(cadaclysm_flavour_test PRIVATE cadaclysm::blacksmith)
+    list(APPEND _cadaclysm_flavour_files "$<TARGET_FILE:cadaclysm::blacksmith>")
+  endif()
+  add_custom_command(TARGET cadaclysm_flavour_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            ${_cadaclysm_flavour_files} "$<TARGET_FILE_DIR:cadaclysm_flavour_test>")
+  add_test(NAME flavour COMMAND cadaclysm_flavour_test ${cadaclysm_FLAVOUR})
+
+  # The configuration's refusals, generated in a project of their own (tests/refuse): an
+  # unknown flavour stops at the include; under reader, linking cadaclysm::blacksmith fails
+  # to generate, naming the missing kernel.
+  set(_cadaclysm_refuse
+    "${CMAKE_COMMAND}" -S "${CMAKE_CURRENT_SOURCE_DIR}/tests/refuse" -G "${CMAKE_GENERATOR}"
+    "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}" "-DCADACLYSM_LIBRARY_DIR=${CADACLYSM_LIBRARY_DIR}")
+  add_test(NAME flavour_unknown COMMAND ${_cadaclysm_refuse}
+           -B "${CMAKE_CURRENT_BINARY_DIR}/refuse-unknown" -DCADACLYSM_FLAVOUR=bogus)
+  set_tests_properties(flavour_unknown PROPERTIES PASS_REGULAR_EXPRESSION
+    "CADACLYSM_FLAVOUR=bogus: use full, kernel-reader, kernel")
+  if(cadaclysm_FLAVOUR STREQUAL "reader")
+    add_test(NAME flavour_reader_has_no_kernel COMMAND ${_cadaclysm_refuse}
+             -B "${CMAKE_CURRENT_BINARY_DIR}/refuse-reader" -DCADACLYSM_FLAVOUR=reader)
+    set_tests_properties(flavour_reader_has_no_kernel PROPERTIES PASS_REGULAR_EXPRESSION
+      "cadaclysm::the_reader_flavour_has_no_kernel__configure_with_CADACLYSM_FLAVOUR_full")
+  endif()
+
+  # Everything below links the kernel, which the reader flavour does not have.
+  if(cadaclysm_FLAVOUR STREQUAL "reader")
+    return()
+  endif()
 
   # The smoke twice: checked (the stale-view traps run) and unchecked (the release
   # layout of every class compiles and passes the same scenario).
@@ -194,6 +265,17 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_curve_closest_test>")
   add_test(NAME curve_closest COMMAND cadaclysm_curve_closest_test ${CADACLYSM_LICENSE})
+
+  # Closest points against a triangle mesh: a face, a shared edge and a vertex foot in closed form,
+  # a line through a tetrahedron, the max distance, a solid's measuring mesh and the nearest object,
+  # at parity with the Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_mesh_closest_test tests/mesh_closest_test.cpp)
+  target_link_libraries(cadaclysm_mesh_closest_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_mesh_closest_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_mesh_closest_test>")
+  add_test(NAME mesh_closest COMMAND cadaclysm_mesh_closest_test ${CADACLYSM_LICENSE})
 
   # Point at length, divide by count and divide by length on edges and a profile's outer loop,
   # at parity with the Python reference's arc-length tests. Needs a license, no sample file.
@@ -374,35 +456,8 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_silhouette_test>")
   add_test(NAME silhouette COMMAND cadaclysm_silhouette_test "${_cadaclysm_rhino}" ${CADACLYSM_LICENSE})
 
-  add_library(cadaclysm_header_reader OBJECT tests/include_reader.cpp)
-  target_link_libraries(cadaclysm_header_reader PRIVATE cadaclysm::reader)
-
-  # Scene::links() / joints(): the mechanism facts against samples/mechanism.stp,
-  # found beside whichever sample CADACLYSM_SAMPLE names.
-  if(CADACLYSM_SAMPLE)
-    add_executable(cadaclysm_kinematics_test tests/kinematics_test.cpp)
-    target_link_libraries(cadaclysm_kinematics_test PRIVATE cadaclysm::reader)
-    add_custom_command(TARGET cadaclysm_kinematics_test POST_BUILD
-      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-              "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE_DIR:cadaclysm_kinematics_test>")
-    add_test(NAME kinematics COMMAND cadaclysm_kinematics_test "${CADACLYSM_SAMPLE}")
-  endif()
-
   add_library(cadaclysm_header_kernel OBJECT tests/include_kernel.cpp)
   target_link_libraries(cadaclysm_header_kernel PRIVATE cadaclysm::blacksmith)
-
-  # view_loader.h alone: the search, its messages, the camera maths and the PNG writer,
-  # and cvl_draw_object/cvl_pick over a table of fakes; cvl_open over a stand-in library
-  # that answers zero. No view library and no GPU; the build directory is the empty place
-  # it searches.
-  add_library(cadaclysm_view_loader_fake SHARED tests/view_loader_fake.cpp)
-  target_include_directories(cadaclysm_view_loader_fake PRIVATE ${CADACLYSM_INCLUDE_DIRS})
-  add_executable(cadaclysm_view_loader_test tests/view_loader_test.cpp)
-  target_include_directories(cadaclysm_view_loader_test PRIVATE ${CADACLYSM_INCLUDE_DIRS})
-  target_link_libraries(cadaclysm_view_loader_test PRIVATE ${CMAKE_DL_LIBS})
-  add_dependencies(cadaclysm_view_loader_test cadaclysm_view_loader_fake)
-  add_test(NAME view_loader COMMAND cadaclysm_view_loader_test "${CMAKE_CURRENT_BINARY_DIR}"
-                                    "$<TARGET_FILE:cadaclysm_view_loader_fake>")
 
   # cadaclysm/view.hpp: View offscreen over a solid, a scene, a pose and a node, the
   # refusals, the release on Scene::close, show() on the terminal, and the missing-library
@@ -442,4 +497,22 @@ if(CADACLYSM_LIBRARY_DIR)
   # optimiser-only warnings in it.
   add_library(cadaclysm_user_calls OBJECT tests/user_calls.cpp)
   target_link_libraries(cadaclysm_user_calls PRIVATE cadaclysm::blacksmith)
+
+  # The kernel-reader flavour leaves out the kernel's B-rep writers: these tests call
+  # Solid::step or Assembly::step, which then fail to link, so they are neither built nor run.
+  if(cadaclysm_FLAVOUR STREQUAL "kernel-reader")
+    foreach(_cadaclysm_test smoke smoke_fast assembly mechanism pair subd curve_sheets identity
+                            posed document view)
+      set(_cadaclysm_target cadaclysm_${_cadaclysm_test})
+      if(NOT _cadaclysm_test MATCHES "^smoke")
+        set(_cadaclysm_target cadaclysm_${_cadaclysm_test}_test)
+      endif()
+      set_target_properties(${_cadaclysm_target} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    endforeach()
+    set_tests_properties(assembly mechanism pair subd curve_sheets identity posed document view
+                         PROPERTIES DISABLED TRUE)
+    if(CADACLYSM_SAMPLE)
+      set_tests_properties(cadaclysm_smoke cadaclysm_smoke_fast PROPERTIES DISABLED TRUE)
+    endif()
+  endif()
 endif()

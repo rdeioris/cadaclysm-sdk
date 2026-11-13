@@ -1,8 +1,8 @@
 # cadaclysm-sdk (Rust)
 
 The cadaclysm C ABIs as Rust types: open a CAD file, walk its parts and borrow
-their meshes (the reader, `cadaclysm_capi`), and build, combine, fillet and write
-exact solids (the kernel, `cadaclysm_blacksmith`, in the `blacksmith` module). The
+their meshes (the reader), and build, combine, fillet and write exact solids (the
+kernel, in the `blacksmith` module), both from one library, `cadaclysm`. The
 same object model as the Python, C#, Go, Java and Node wrappers -- `Scene`,
 `Node`, `Placement`, `Mesh`; `Profile`, `Solid`, `Frame`, `Workplane` -- over the
 same prebuilt libraries.
@@ -21,7 +21,8 @@ platform's libraries for its own version from the
 [SDK](https://github.com/rdeioris/cadaclysm-sdk)'s release (Windows x64, macOS 11+,
 Linux x64 and arm64), checks them against the release's `SHA256SUMS`, and copies
 them beside your binaries in `target/debug` or `target/release` -- so `cargo run`
-works as it is, and shipping is copying those two files with your executable.
+works as it is, and shipping is copying the library (`cadaclysm`, its full flavour)
+and the two view libraries with your executable.
 The download happens once per build directory; `curl` and `tar`, which Windows 10+,
 macOS and Linux all carry, do the work.
 
@@ -213,7 +214,7 @@ or set `CADACLYSM_VIEW` to `terminal`, `wgpu` or a path. `CADACLYSM_TERMINAL_LIB
 Built for `wasm32-unknown-unknown`, the crate runs the kernel in a web page: the same
 `blacksmith` API -- `Profile`, `Solid`, `Workplane`, STEP text -- answered by the cadaclysm
 web package instead of a native library, and the same `view::View`, drawing through the
-package's `View`. Download `cadaclysm-<version>-web-pro.zip` from the
+package's `View`. Download the web package, `cadaclysm-<version>-web.zip`, from the
 [SDK's releases](https://github.com/rdeioris/cadaclysm-sdk/releases) and serve its `pkg/`
 beside your app; nothing is downloaded when the crate builds for the web. Then:
 

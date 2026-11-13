@@ -71,6 +71,10 @@ export function svgOptionsDefaults(): Required<Pick<SvgOptions, 'view' | 'fov' |
   & Pick<SvgOptions, 'azimuth' | 'elevation' | 'up' | 'background'>;
 
 export function libraryPath(): string;
+/** Which library this is: `'full'`, `'kernel-reader'` or `'reader'`; `'reader'` for the separate `cadaclysm_capi`. */
+export function flavour(): string;
+/** The features the library was built with, comma-separated; `''` for the separate `cadaclysm_capi`. */
+export function features(): string;
 export function version(): string;
 export function buildDate(): string;
 export function license(textOrPath: string): void;

@@ -38,7 +38,11 @@ const ABI_MAJOR = 1;
 // 1.20: cadaclysm_view_set_occluded_style and _occluded_style (View.occludedStyle).
 // 1.21: cadaclysm_view_show_solid_faces (a solid in a material and an opacity, all or some faces).
 // 1.22: snapping -- cadaclysm_view_set_snap, _request_snap_in, _snap_result, _clear_snap, _set_work_plane, _clear_work_plane.
-const ABI_MINOR = 22;
+// 1.23: cadaclysm_view_set_line_colour, _line_colour (View.setEdgeColour, View.edgeColour and the curve and isocurve pairs) and _set_item_line_colour (Item.setEdgeColour, setCurveColour, setIsocurveColour).
+// 1.24: overlays -- cadaclysm_view_show_overlay, _show_overlay_image, _move_overlay and screen text (View.showOverlay,
+// showOverlayText, showOverlayImage, Overlay.moveTo), and the pick's `overlay` flag.
+// 1.25: cadaclysm_view_stats (View.stats: frames drawn, the last frame's CPU and GPU time, triangles, draw calls).
+const ABI_MINOR = 25;
 const OPEN = 1;
 const CLOSED = 2;
 const SURFACES = Object.freeze({ exact: 0, triangles: 1 });
@@ -46,6 +50,8 @@ const TOOL_SHAPES = Object.freeze({ flat: 0, ball: 1, drill: 2, vbit: 3, bullnos
 const COLOUR_BY = Object.freeze({ height: 0, tool: 1, deviation: 2 });
 const LIGHTING = Object.freeze({ headlight: 0, studio: 1 });
 const OCCLUDED = Object.freeze({ off: 0, solid: 1, dashed: 2 });
+// CADACLYSM_VIEW_LAYER_EDGES, _CURVES and _ISOCURVES: the layers the line colours take.
+const LINE_LAYERS = Object.freeze({ edges: 1, curves: 2, isocurves: 3 });
 const FINISH = Object.freeze({ gloss: 0, satin: 1, matte: 2 });
 const MATERIAL = Object.freeze({ default: 0, plastic: 1, metal: 2, matte: 3, paint: 4, brushed: 5, glass: 6 });
 // The CADACLYSM_VIEW_SNAP_* bits by the names setSnap takes and a snap's `kind` reports.
@@ -55,6 +61,7 @@ const STANDARD = Object.freeze({ top: 0, front: 1, right: 2, iso: 3 });
 const ALIGN = Object.freeze({ 'top-left': 0, top: 1, 'top-right': 2, left: 3, centre: 4, center: 4, right: 5,
   'bottom-left': 6, bottom: 7, 'bottom-right': 8 });
 const TEXT_MODES = Object.freeze({ label: 0, world: 1 });
+const TEXT_SCREEN = 2;   // CADACLYSM_VIEW_TEXT_SCREEN (1.24): an overlay's text
 const LAYER = Object.freeze({ surfaces: 0, edges: 1, curves: 2, isocurves: 3, grid: 4, text: 5 });
 const EVENT = Object.freeze({ pointer_down: 1, pointer_move: 2, pointer_up: 3, pointer_cancel: 4, wheel: 5, key: 6 });
 const GRID = Object.freeze({ none: 0, top: 1, front: 2, right: 3 });
@@ -110,6 +117,7 @@ koffi.struct('CadaclysmViewPick', {
   clicks: 'uint32_t',
   has_point: 'uint32_t',
   point: koffi.array('float', 3),
+  overlay: 'uint32_t',
 });
 koffi.struct('CadaclysmViewLod', {
   size: 'uint32_t',
@@ -204,6 +212,31 @@ koffi.struct('CadaclysmViewText', {
   box_padding: 'float',
   on_top: 'uint32_t',
   font: 'uint32_t',
+  order: 'int32_t',
+});
+koffi.struct('CadaclysmViewOverlay', {
+  size: 'uint32_t',
+  anchor: 'uint32_t',
+  beziers: 'const float *',
+  curve_count: 'uint32_t',
+  order: 'int32_t',
+  offset: koffi.array('float', 2),
+  has_fill: 'uint32_t',
+  fill_rgba: koffi.array('float', 4),
+  has_stroke: 'uint32_t',
+  stroke_rgba: koffi.array('float', 4),
+  stroke_width: 'float',
+});
+koffi.struct('CadaclysmViewOverlayImage', {
+  size: 'uint32_t',
+  anchor: 'uint32_t',
+  rgba: 'const uint8_t *',
+  width: 'uint32_t',
+  height: 'uint32_t',
+  offset: koffi.array('float', 2),
+  extent: koffi.array('float', 2),
+  opacity: 'float',
+  order: 'int32_t',
 });
 koffi.struct('CadaclysmViewViewportCamera', {
   size: 'uint32_t',
@@ -260,6 +293,17 @@ koffi.struct('CadaclysmViewMachiningInfo', {
   min: koffi.array('float', 2),
   cycle_time: 'double',
 });
+// CadaclysmViewStats, 1.25: 40 bytes, padded explicitly.
+koffi.struct('CadaclysmViewStats', {
+  size: 'uint32_t',
+  pad0: 'uint32_t',
+  frames_drawn: 'uint64_t',
+  last_frame_ms: 'float',
+  last_gpu_ms: 'float',
+  triangles: 'uint64_t',
+  draw_calls: 'uint32_t',
+  pad1: 'uint32_t',
+});
 const SIZE = (name) => koffi.sizeof(name);
 
 // ---- the function table: every call of the header ------------------------------------
@@ -291,11 +335,15 @@ function _bind(l) {
     standard: f('bool cadaclysm_view_standard(CadaclysmView *view, uint32_t which)'),
     set_orthographic: f('void cadaclysm_view_set_orthographic(CadaclysmView *view, bool on)'),
     set_layer: f('bool cadaclysm_view_set_layer(CadaclysmView *view, uint32_t layer, bool on)'),
+    set_item_layer: f('bool cadaclysm_view_set_item_layer(CadaclysmView *view, uint32_t item, uint32_t layer)'),
+    set_user_layer: f('bool cadaclysm_view_set_user_layer(CadaclysmView *view, uint32_t layer, bool on)'),
     set_background: f('void cadaclysm_view_set_background(CadaclysmView *view, const float *rgb)'),
     set_lighting: f('bool cadaclysm_view_set_lighting(CadaclysmView *view, uint32_t lighting)'),
     lighting: f('uint32_t cadaclysm_view_lighting(const CadaclysmView *view)'),
     set_occluded_style: f('bool cadaclysm_view_set_occluded_style(CadaclysmView *view, const CadaclysmViewOccludedStyle *style)'),
     occluded_style: f('bool cadaclysm_view_occluded_style(const CadaclysmView *view, _Inout_ CadaclysmViewOccludedStyle *style)'),
+    set_line_colour: f('bool cadaclysm_view_set_line_colour(CadaclysmView *view, uint32_t layer, const float *rgb, uint32_t from_part)'),
+    line_colour: f('bool cadaclysm_view_line_colour(const CadaclysmView *view, uint32_t layer, _Out_ float *rgb, _Out_ uint32_t *from_part)'),
     set_lod: f('bool cadaclysm_view_set_lod(CadaclysmView *view, const CadaclysmViewLod *lod)'),
     wake_ms: f('uint32_t cadaclysm_view_wake_ms(const CadaclysmView *view)'),
     set_node_visible: f('bool cadaclysm_view_set_node_visible(CadaclysmView *view, uint32_t item, uint32_t node, bool visible)'),
@@ -323,6 +371,10 @@ function _bind(l) {
     load_font: f('uint32_t cadaclysm_view_load_font(const uint8_t *bytes, size_t length)'),
     show_text: f('uint32_t cadaclysm_view_show_text(CadaclysmView *view, const CadaclysmViewText *text)'),
     set_text: f('bool cadaclysm_view_set_text(CadaclysmView *view, uint32_t item, const char *text)'),
+    show_overlay: f('uint32_t cadaclysm_view_show_overlay(CadaclysmView *view, const CadaclysmViewOverlay *shape)'),
+    show_overlay_image: f('uint32_t cadaclysm_view_show_overlay_image(CadaclysmView *view, const CadaclysmViewOverlayImage *image)'),
+    move_overlay: f('bool cadaclysm_view_move_overlay(CadaclysmView *view, uint32_t item, uint32_t anchor, float x, float y)'),
+    stats: f('bool cadaclysm_view_stats(CadaclysmView *view, _Inout_ CadaclysmViewStats *out)'),
     viewport_camera: f('bool cadaclysm_view_viewport_camera(const CadaclysmView *view, uint32_t viewport, _Inout_ CadaclysmViewViewportCamera *out)'),
     set_viewport_camera: f('bool cadaclysm_view_set_viewport_camera(CadaclysmView *view, uint32_t viewport, const CadaclysmViewViewportCamera *camera)'),
     set_viewport_rects: f('bool cadaclysm_view_set_viewport_rects(CadaclysmView *view, const uint32_t *rects, uint32_t count)'),
@@ -339,6 +391,7 @@ function _bind(l) {
     set_colour: f('bool cadaclysm_view_set_colour(CadaclysmView *view, uint32_t item, const float *rgb)'),
     set_xray: f('bool cadaclysm_view_set_xray(CadaclysmView *view, uint32_t item, bool on)'),
     set_occluded: f('bool cadaclysm_view_set_occluded(CadaclysmView *view, uint32_t item, uint32_t mode)'),
+    set_item_line_colour: f('bool cadaclysm_view_set_item_line_colour(CadaclysmView *view, uint32_t item, uint32_t layer, const float *rgb)'),
     set_finish: f('bool cadaclysm_view_set_finish(CadaclysmView *view, uint32_t item, uint32_t finish)'),
     set_face_colours: f('bool cadaclysm_view_set_face_colours(CadaclysmView *view, uint32_t item, const uint32_t *faces, const float *rgba, uint32_t count)'),
     set_placement: f('bool cadaclysm_view_set_placement(CadaclysmView *view, uint32_t item, const double *matrix)'),
@@ -786,11 +839,48 @@ class Item {
     if (typeof finish !== 'string' || !Object.hasOwn(FINISH, finish)) throw new TypeError(`finish: '${finish}' is not 'gloss', 'satin' or 'matte'`);
     this._ok(this.view._lib.fn.set_finish(this.view._live('cadaclysm_view_set_finish'), this.id, FINISH[finish]), 'finish');
   }
+  /**
+   * Draws its edges in `rgb` (text, or three numbers in 0..1), over the view's `setEdgeColour`,
+   * the item's colour and a solid's own edge paint; null takes the view's colour again.
+   */
+  setEdgeColour(rgb) { this._lineColour(LINE_LAYERS.edges, rgb, 'setEdgeColour'); }
+  /** Its curves in `rgb`, over the view's `setCurveColour` and its colour; null clears. */
+  setCurveColour(rgb) { this._lineColour(LINE_LAYERS.curves, rgb, 'setCurveColour'); }
+  /** Its isocurves in `rgb`, over the view's `setIsocurveColour` and its colour; null clears. */
+  setIsocurveColour(rgb) { this._lineColour(LINE_LAYERS.isocurves, rgb, 'setIsocurveColour'); }
+  _lineColour(layer, rgb, what) {
+    this._ok(this.view._lib.fn.set_item_line_colour(this.view._live('cadaclysm_view_set_item_line_colour'), this.id, layer, _rgb(rgb, what, this.view._lib)), what);
+  }
+  /**
+   * The user layer it is on, 0..31 (every item starts on 0): it draws while the layer is on
+   * (`View.userLayer`) and in the viewports whose `layerMask` has its bit. A layer past 31 is refused.
+   */
+  userLayer(layer) { this._ok(this.view._lib.fn.set_item_layer(this.view._live('cadaclysm_view_set_item_layer'), this.id, layer), 'userLayer'); }
   nodeVisible(node, on) { this._ok(this.view._lib.fn.set_node_visible(this.view._live('cadaclysm_view_set_node_visible'), this.id, node, Boolean(on)), 'nodeVisible'); }
   nodeColour(node, rgba) { this._ok(this.view._lib.fn.set_node_color(this.view._live('cadaclysm_view_set_node_color'), this.id, node, _rgba(rgba, 'nodeColour', this.view._lib)), 'nodeColour'); }
   /** Tint `node` toward `rgba`'s colour by its alpha; null clears. */
   nodeHighlight(node, rgba) { this._ok(this.view._lib.fn.set_node_highlight(this.view._live('cadaclysm_view_set_node_highlight'), this.id, node, _rgba(rgba, 'nodeHighlight', this.view._lib)), 'nodeHighlight'); }
   frameNode(node) { this._ok(this.view._lib.fn.frame_node(this.view._live('cadaclysm_view_frame_node'), this.id, node), 'frameNode'); }
+}
+
+/**
+ * An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the window
+ * ('top-left', 'top', 'top-right', 'left', 'centre', 'right', 'bottom-left', 'bottom' or
+ * 'bottom-right'), drawn over everything, untouched by the camera. `remove`, `userLayer` and (text)
+ * `setText` work as on any item.
+ */
+class Overlay extends Item {
+  constructor(v, id, shown, anchor) { super(v, id, shown); this.anchor = anchor; }
+  /**
+   * Moved to `x`, `y` pixels inward from its anchor (cadaclysm_view_move_overlay) -- cheap, for a
+   * HUD element that moves every frame -- or hung from `anchor` instead where one is given.
+   */
+  moveTo(x, y, anchor = null) {
+    const a = anchor ?? this.anchor;
+    const code = _name(ALIGN, a, 'anchor');
+    this._ok(this.view._lib.fn.move_overlay(this.view._live('cadaclysm_view_move_overlay'), this.id, code, _finite(x, 'moveTo x'), _finite(y, 'moveTo y')), 'moveTo');
+    this.anchor = a;
+  }
 }
 
 /** A CAM job shown in a View (`View.showMachining`): the stock is this item; the view's timeline plays it. */
@@ -1060,17 +1150,47 @@ class View {
    * the key is let go; Tab toggles it; `frame`, `standard` and `focus` leave it.
    */
   get navigation() { return this._lib.fn.navigation(this._live('cadaclysm_view_navigation')) === NAVIGATION_FLY ? 'fly' : 'orbit'; }
-  /** `[{ rect: [x, y, w, h], view: 16, projection: 16, eye: 3, grid: 'none'|'top'|'front'|'right' }]`, matrices column-major. */
+  /**
+   * `[{ rect: [x, y, w, h], view: 16, projection: 16, eye: 3, grid: 'none'|'top'|'front'|'right', layerMask }]`,
+   * matrices column-major; `layerMask` the user layers drawn, bit n for layer n (`Item.userLayer`), every one when absent.
+   */
   viewports(list) {
     const exact = (a, n, what) => { const v = Array.from(a ?? []); if (v.length !== n) throw new ViewError(`viewport ${what}: ${n} numbers, not ${v.length}`); return v; };
-    const raw = list.map((v) => ({ size: SIZE('CadaclysmViewViewport'), rect: exact(v.rect, 4, 'rect'), view: exact(v.view, 16, 'view'), projection: exact(v.projection, 16, 'projection'), eye: exact(v.eye, 3, 'eye'), grid: _name(GRID, v.grid ?? 'none', 'grid'), layer_mask: 0xFFFFFFFF }));
+    const raw = list.map((v) => ({ size: SIZE('CadaclysmViewViewport'), rect: exact(v.rect, 4, 'rect'), view: exact(v.view, 16, 'view'), projection: exact(v.projection, 16, 'projection'), eye: exact(v.eye, 3, 'eye'), grid: _name(GRID, v.grid ?? 'none', 'grid'), layer_mask: v.layerMask ?? 0xFFFFFFFF }));
     this._ok(this._lib.fn.set_viewports(this._live('cadaclysm_view_set_viewports'), raw, raw.length), 'viewports');
   }
   layer(name, on) { this._ok(this._lib.fn.set_layer(this._live('cadaclysm_view_set_layer'), _name(LAYER, name, 'layer'), Boolean(on)), 'layer'); }
+  /** User layer `layer`, 0..31, on or off in every viewport (all start on); see `Item.userLayer`. A layer past 31 is refused. */
+  userLayer(layer, on) { this._ok(this._lib.fn.set_user_layer(this._live('cadaclysm_view_set_user_layer'), layer, Boolean(on)), 'userLayer'); }
   /** The clear colour: text ('#rgb', '#rrggbb', a CSS name) or three numbers in 0..1. */
   background(rgb) { this._void('set_background', _rgb(rgb ?? [], 'background', this._lib)); }
   get surfaces() { return this._lib.fn.surfaces(this._live('cadaclysm_view_surfaces')) === 1 ? 'triangles' : 'exact'; }
   set surfaces(name) { this._ok(this._lib.fn.set_surfaces(this._live('cadaclysm_view_set_surfaces'), _name(SURFACES, name, 'surfaces')), 'surfaces'); }
+  /**
+   * The colour every edge draws in: `rgb` (text, or three numbers in 0..1), or with `fromPart`
+   * each part's own colour, brightened so an edge reads over its faces. An item's
+   * `setEdgeColour` draws over it.
+   */
+  setEdgeColour(rgb, fromPart = false) { this._setLineColour(LINE_LAYERS.edges, rgb, fromPart, 'setEdgeColour'); }
+  /** The edges' colour in use: { colour: [r, g, b], fromPart }. */
+  edgeColour() { return this._lineColour(LINE_LAYERS.edges); }
+  /** The colour every curve (a curves or lines item's) draws in: `rgb`, or with `fromPart` each part's own colour -- the default. */
+  setCurveColour(rgb, fromPart = false) { this._setLineColour(LINE_LAYERS.curves, rgb, fromPart, 'setCurveColour'); }
+  /** The curves' colour in use: { colour: [r, g, b], fromPart }. */
+  curveColour() { return this._lineColour(LINE_LAYERS.curves); }
+  /** The colour every isocurve draws in: `rgb`, or with `fromPart` each part's own colour. */
+  setIsocurveColour(rgb, fromPart = false) { this._setLineColour(LINE_LAYERS.isocurves, rgb, fromPart, 'setIsocurveColour'); }
+  /** The isocurves' colour in use: { colour: [r, g, b], fromPart }. */
+  isocurveColour() { return this._lineColour(LINE_LAYERS.isocurves); }
+  _setLineColour(layer, rgb, fromPart, what) {
+    if (rgb == null) throw new ViewError(`${what}: a colour, not none`);
+    this._ok(this._lib.fn.set_line_colour(this._live('cadaclysm_view_set_line_colour'), layer, _rgb(rgb, what, this._lib), fromPart ? 1 : 0), what);
+  }
+  _lineColour(layer) {
+    const rgb = new Float32Array(3), fromPart = [0];
+    this._ok(this._lib.fn.line_colour(this._live('cadaclysm_view_line_colour'), layer, rgb, fromPart), 'lineColour');
+    return { colour: Array.from(rgb), fromPart: fromPart[0] !== 0 };
+  }
   /** How every 'dashed' item's hidden lines and points look, view-wide: { dash, gap } in points (6, 4), dim the coverage kept (0.5), colour [r, g, b] or null. Set null for the default; set keys are all optional. */
   get occludedStyle() {
     const out = { size: SIZE('CadaclysmViewOccludedStyle'), dash: 0, gap: 0, dim: 0, has_colour: 0, colour: [0, 0, 0] };
@@ -1109,6 +1229,18 @@ class View {
     return [];
   }
   get needsDraw() { return Boolean(this._lib.fn.needs_draw(this._live('cadaclysm_view_needs_draw'))); }
+  /**
+   * What the view has drawn (cadaclysm_view_stats, 1.25): `{ framesDrawn, lastFrameMs, lastGpuMs, triangles, drawCalls }`.
+   * `framesDrawn` counts every frame drawn to the window and every `image()` rendered -- a pump or draw that owes
+   * nothing adds none, so an FPS counter read from it stays right while the scene is still; `lastGpuMs` is -1 where
+   * the GPU's time cannot be measured.
+   */
+  stats() {
+    const out = { size: SIZE('CadaclysmViewStats') };
+    this._ok(this._lib.fn.stats(this._live('cadaclysm_view_stats'), out), 'stats');
+    return { framesDrawn: Number(out.frames_drawn), lastFrameMs: out.last_frame_ms, lastGpuMs: out.last_gpu_ms,
+      triangles: Number(out.triangles), drawCalls: out.draw_calls };
+  }
   // -- the rest
   /** What is under pixel (x, y) of `viewport`: `{ item, node, face, clicks, point }`, or null for nothing. */
   // A view never drawn is drawn first: the library answers a pick from the frame it has drawn.
@@ -1246,6 +1378,101 @@ class View {
     };
     return this._item(this._lib.fn.show_text(this._live('cadaclysm_view_show_text'), raw), null, 'showText');
   }
+  // -- overlays (1.24): a HUD over the whole window
+  _overlay(id, shown, anchor, what) {
+    if (!id) throw this._lib.failure(what);
+    const item = new Overlay(this, id, shown, anchor);
+    this._items.set(id, item);
+    return item;
+  }
+  /**
+   * A 2D shape over the window: `shape` -- a blacksmith Profile, an array of them (one overlay, their
+   * fills together by the even-odd rule: a crosshair's two strokes, a frame's two loops), or rational
+   * cubic Beziers, sixteen numbers each (a profile's `beziers()`) -- in pixels (one profile unit a
+   * pixel, y up), its origin hung `x`, `y` pixels inward from `anchor`. Closed loops are filled (holes
+   * cut), every loop stroked where a stroke is set. `style.fill`: a colour, or 'none'; unset, the
+   * first coloured profile's own colour, else white -- unless a stroke is set, when an uncoloured
+   * shape is not filled. `style.stroke` a colour, `style.strokeWidth` pixels (1), `style.order`
+   * (lower draws first; shapes, text and images share it). A click on it picks it (`pick.overlay`)
+   * and nothing beneath.
+   */
+  showOverlay(shape, anchor, x, y, style = {}) {
+    const s = style ?? {};
+    let beziers, own = null;
+    const isProfile = (p) => p != null && typeof p === 'object' && typeof p.beziers === 'function';
+    if (isProfile(shape) || (Array.isArray(shape) && shape.length && shape.every(isProfile))) {
+      const list = isProfile(shape) ? [shape] : shape;
+      beziers = Float32Array.from(list.flatMap((p) => Array.from(p.beziers())));
+      const coloured = list.map((p) => p.colour).find((c) => c != null);
+      if (coloured) own = Float32Array.from([coloured[0], coloured[1], coloured[2], 1]);
+    } else {
+      if (shape == null) throw new ViewError('showOverlay: a profile, profiles or Beziers, not null');
+      beziers = _f32(shape);
+    }
+    if (beziers.length === 0 || beziers.length % 16) throw new ViewError(`showOverlay: 16 numbers a curve, at least one, not ${beziers.length}`);
+    const code = _name(ALIGN, anchor, 'anchor');
+    const stroke = _rgba(s.stroke, 'showOverlay stroke', this._lib);
+    let fill;
+    if (typeof s.fill === 'string' && s.fill.trim().toLowerCase() === 'none') fill = null;
+    else fill = _rgba(s.fill, 'showOverlay fill', this._lib) ?? own ?? (stroke == null ? Float32Array.from([1, 1, 1, 1]) : null);
+    const raw = {
+      size: SIZE('CadaclysmViewOverlay'), anchor: code, beziers, curve_count: beziers.length / 16,
+      order: Math.trunc(_finite(s.order ?? 0, 'showOverlay order')),
+      offset: [_finite(x, 'showOverlay x'), _finite(y, 'showOverlay y')],
+      has_fill: fill ? 1 : 0, fill_rgba: fill ? Array.from(fill) : [0, 0, 0, 0],
+      has_stroke: stroke ? 1 : 0, stroke_rgba: stroke ? Array.from(stroke) : [0, 0, 0, 0],
+      stroke_width: _finite(s.strokeWidth ?? 1, 'showOverlay strokeWidth'),
+    };
+    return this._overlay(this._lib.fn.show_overlay(this._live('cadaclysm_view_show_overlay'), raw), shape, anchor, 'showOverlay');
+  }
+  /**
+   * Text over the window: its box hangs from `anchor` by the same point (its top-right corner for
+   * 'top-right'), `x`, `y` pixels inward -- the box's padding included where it has one. `options` as
+   * showText's (`size`, `colour`, `box`, `padding`, `font`), in pixels, and `order`; its mode, align,
+   * offset, onTop, right and up are not read. `setText` changes it cheaply (a frame counter).
+   */
+  showOverlayText(text, anchor, x, y, options = {}) {
+    const o = options ?? {};
+    const raw = {
+      size: SIZE('CadaclysmViewText'),
+      text: _textOf(text, 'showOverlayText'),
+      mode: TEXT_SCREEN,
+      at: [0, 0, 0], right: [0, 0, 0], up: [0, 0, 0],
+      height: _finite(o.size ?? 12, 'showOverlayText size'),
+      rgb: Array.from(_rgb(o.colour ?? 'white', 'showOverlayText colour', this._lib)),
+      align: _name(ALIGN, anchor, 'anchor'),
+      offset: [_finite(x, 'showOverlayText x'), _finite(y, 'showOverlayText y')],
+      box_rgba: o.box == null ? [0, 0, 0, 0] : Array.from(_rgba(o.box, 'showOverlayText box', this._lib)),
+      box_padding: _finite(o.padding ?? 4, 'showOverlayText padding'),
+      on_top: 1,
+      font: _fontId(o.font ?? 0),
+      order: Math.trunc(_finite(o.order ?? 0, 'showOverlayText order')),
+    };
+    return this._overlay(this._lib.fn.show_text(this._live('cadaclysm_view_show_text'), raw), text, anchor, 'showOverlayText');
+  }
+  /**
+   * An image over the window: `rgba` (`width * height * 4` bytes, rows from the top, straight alpha),
+   * its box hanging from `anchor` by the same point, `x`, `y` pixels inward; `options.drawWidth` x
+   * `options.drawHeight` pixels (0: its own size), `options.opacity` (1) and `options.order`.
+   */
+  showOverlayImage(rgba, width, height, anchor, x, y, options = {}) {
+    const o = options ?? {};
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 0 || height < 0 || width > 0xFFFFFFFF || height > 0xFFFFFFFF) {
+      throw new ViewError(`showOverlayImage: a size of ${width} x ${height} pixels`);
+    }
+    const pixels = rgba instanceof Uint8Array ? rgba : Uint8Array.from(rgba ?? []);
+    const need = BigInt(width) * BigInt(height) * 4n;
+    if (need !== BigInt(pixels.length)) throw new ViewError(`showOverlayImage: ${width} x ${height} pixels need ${need} bytes (w * h * 4), not ${pixels.length}`);
+    const opacity = _finite(o.opacity ?? 1, 'showOverlayImage opacity');
+    if (opacity <= 0) throw new ViewError(`showOverlayImage: opacity ${opacity}: more than 0, at most 1 (0 would be the library's 1)`);
+    const raw = {
+      size: SIZE('CadaclysmViewOverlayImage'), anchor: _name(ALIGN, anchor, 'anchor'), rgba: _nonNull(pixels), width, height,
+      offset: [_finite(x, 'showOverlayImage x'), _finite(y, 'showOverlayImage y')],
+      extent: [_finite(o.drawWidth ?? 0, 'showOverlayImage drawWidth'), _finite(o.drawHeight ?? 0, 'showOverlayImage drawHeight')],
+      opacity, order: Math.trunc(_finite(o.order ?? 0, 'showOverlayImage order')),
+    };
+    return this._overlay(this._lib.fn.show_overlay_image(this._live('cadaclysm_view_show_overlay_image'), raw), null, anchor, 'showOverlayImage');
+  }
   /** One frame read back: `{ width, height, rgba }`, RGBA8, rows from the top. */
   image() {
     const p = this._live('cadaclysm_view_image');
@@ -1342,18 +1569,20 @@ function _camera(cam, pick, yUp) {
 
 /** A CadaclysmViewPick for the library to fill: `size` set, every other field zero. */
 function _rawPick() {
-  return { size: SIZE('CadaclysmViewPick'), item: 0, node: 0, face: 0, clicks: 0, has_point: 0, point: [0, 0, 0] };
+  return { size: SIZE('CadaclysmViewPick'), item: 0, node: 0, face: 0, clicks: 0, has_point: 0, point: [0, 0, 0], overlay: 0 };
 }
 
 /**
  * A hit as every pick answer carries it (cadaclysm_view.py's `_pick_dict`): the item, node and
  * face, `clicks` (2 for a double click, else 1) and `point` -- where the ray met the model, in the
  * coordinates the items were shown in -- or null where the library read no depth (no hit to
- * place, a machining stock, the terminal library).
+ * place, a machining stock, the terminal library); `overlay` (1.24) true where the item is an
+ * overlay: it was over the pixel, so nothing of the scene beneath it was picked (`face` is a text
+ * overlay's line, else 0).
  */
 function _pick(raw) {
   return { item: raw.item, node: raw.node, face: raw.face, clicks: raw.clicks,
-    point: raw.has_point ? Array.from(raw.point) : null };
+    point: raw.has_point ? Array.from(raw.point) : null, overlay: Boolean(raw.overlay) };
 }
 
 /** A CadaclysmViewSnap for the library to fill: `size` set, every other field zero. */
@@ -1463,6 +1692,6 @@ function _present(obj, options = {}, mode = 'show', transforms = null) {
 }
 
 module.exports = {
-  ViewError, View, Item, Machining, Library, useTerminal, useWgpu, use, current, pump, loadFont,
+  ViewError, View, Item, Overlay, Machining, Library, useTerminal, useWgpu, use, current, pump, loadFont,
   OPEN, CLOSED, VIEWS, _find, _camera, _pick, _png, _reset, _open, _release, _views, _present, _aim, _shared,
 };

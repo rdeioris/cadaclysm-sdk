@@ -125,8 +125,13 @@ package blacksmith
 // cadaclysm-blacksmith-capi/include) and the workspace's target/release (five levels up
 // to the repo root, then down into target/release).
 //
-// Windows links straight against the DLL by name (-l:cadaclysm_blacksmith.dll) rather
-// than through -lcadaclysm_blacksmith, for the reason cad.go gives: a `cargo build`
+// The #cgo LDFLAGS lines are in link.go and link_separate.go, one per build tag: the
+// single library's full flavour by default, the separate cadaclysm_blacksmith of earlier
+// releases under cadaclysm_separate. Under cadaclysm_reader this package refuses to build
+// (refuse_reader.go): the reader flavour has no kernel.
+//
+// Windows links straight against the DLL by name (-l:cadaclysm.dll) rather than through
+// -lcadaclysm, for the reason cad.go gives: a `cargo build`
 // targeting *-pc-windows-gnu drops a static cadaclysm_blacksmith.lib next to the DLL's
 // own import library, and plain -l's search order picks the static one, which this MinGW
 // gcc cannot link.
@@ -139,8 +144,6 @@ package blacksmith
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../include -I${SRCDIR}/../../../../cadaclysm-blacksmith-capi/include
-#cgo windows LDFLAGS: -L${SRCDIR}/../../lib -L${SRCDIR}/../../../../../target/release -l:cadaclysm_blacksmith.dll
-#cgo !windows LDFLAGS: -L${SRCDIR}/../../lib -L${SRCDIR}/../../../../../target/release -lcadaclysm_blacksmith
 #include <stdlib.h>
 // <...>, not "...": on Windows cgo compiles its probes from %TEMP%, and a quoted
 // include would read any stray cadaclysm_blacksmith.h there before the -I directories.
@@ -886,6 +889,10 @@ type SvgOptions struct {
 	// this those two draw a blank page. A line set in its own right — set it with Edges
 	// false for the outline alone, or clear it for the lines alone.
 	Silhouettes bool
+	// Hidden is "" (every line drawn), "removed" (only what is seen of each solid, the
+	// solids hiding one another) or "dashed" (that, and the hidden lines dashed in a
+	// solid-<i>-hidden group).
+	Hidden string
 }
 
 // NewSvgOptions is the defaults cadaclysm_blacksmith_svg_options_init fills: the
@@ -990,6 +997,15 @@ func buildSvgOptions(opts *SvgOptions) (C.CadaclysmBlacksmithSvgOptions, error) 
 	}
 	if o.Silhouettes {
 		flags |= uint32(C.CADACLYSM_BLACKSMITH_SVG_SILHOUETTES)
+	}
+	switch o.Hidden {
+	case "":
+	case "removed":
+		flags |= uint32(C.CADACLYSM_BLACKSMITH_SVG_HIDDEN_REMOVED)
+	case "dashed":
+		flags |= uint32(C.CADACLYSM_BLACKSMITH_SVG_HIDDEN_DASHED)
+	default:
+		return raw, &BuildError{Message: fmt.Sprintf(`svg: hidden %q: "", "removed" or "dashed"`, o.Hidden)}
 	}
 	raw.flags = C.uint32_t(flags)
 	return raw, nil
@@ -4271,6 +4287,9 @@ func FromBeziers(beziers []float64, recognise bool) (*Profile, error) {
 	return out, err
 }
 
+// ProfileBeziers is Beziers(nil): what view.View.ShowOverlay draws the profile from.
+func (p *Profile) ProfileBeziers() ([]float64, error) { return p.Beziers(nil) }
+
 // Beziers is the profile drawn as cubic Béziers, 16 doubles each (four control points of
 // x, y, z, w) -- Python's Profile.beziers. With a frame the sketch is carried onto that
 // plane; nil leaves it in the sketch's own xy.
@@ -6697,6 +6716,118 @@ func (s *Solid) Intersect(other *Solid, tolerance float64) (*Intersection, error
 	}
 	defer C.cadaclysm_blacksmith_intersection_free(found)
 	return intersectionOf(found)
+}
+
+// SelfIntersections is where this solid passes through itself, at tolerance, as an
+// Intersection -- Intersect's result with this solid on both sides, so each IntersectionChain
+// and Overlap names two faces of this solid. Never along its own topology: faces meeting at
+// their shared edges and vertices are not a crossing, so a clean solid is an empty result,
+// never an error. A chain whose two faces are one face is that face folding through itself,
+// and has no Curve. The solid is not changed; it may be an open sheet.
+//
+// The solid is meshed once and crossed against itself, the exact face-pair engine refining
+// each crossing of two faces, so the mesh route's known limit holds: a crossing narrower than
+// tolerance -- two faces passing within it without their meshes crossing -- can be missed.
+//
+// Fails for a tolerance not positive and finite, a solid with no faces, or one that meshes
+// to nothing. Python's self_intersections at its default tolerance is 0.05.
+func (s *Solid) SelfIntersections(tolerance float64) (*Intersection, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.KeepAlive(s)
+	found := C.cadaclysm_blacksmith_self_intersect(h, C.double(tolerance), nil, nil)
+	if found == nil {
+		return nil, failure("self_intersect")
+	}
+	defer C.cadaclysm_blacksmith_intersection_free(found)
+	return intersectionOf(found)
+}
+
+// Finding is one thing wrong with one argument (Solid.Check): Kind names it, Argument is 0
+// for the solid checked and 1 for other, and Index, Other and Size are what the kind gives
+// (nil, nil and 0 where it gives none): "open" -- the edge (nil for a trim naming none), its
+// face, its length; "face_kind" -- the face; "short_edge" -- the edge, its length;
+// "collapsed_edge" -- the trim; "sliver_face" -- the face, its width; "tiny_face" -- the
+// face, its area; "tiny_body" -- its diagonal; "small_hole" -- the loop, its area or width;
+// "loose_edge" -- the edge, how far its sides part; "self_intersection" -- the two faces
+// (one face twice for a fold), the crossing's length; "self_overlap" -- the two faces.
+type Finding struct {
+	Kind     string
+	Argument uint32
+	Index    *uint32
+	Other    *uint32
+	Size     float64
+}
+
+// Check is what is wrong with this solid (and other, if not nil) as the arguments of
+// operation, at tolerance, as a list of Finding -- OCCT's BRepAlgoAPI_Check, gathered from
+// what the kernel already measures. An empty list is a valid pair; nothing is changed.
+//
+// Each argument is checked alone whatever the operation: no faces ("no_faces"), features
+// smaller than tolerance as Health finds them ("short_edge", "collapsed_edge",
+// "sliver_face", "tiny_face", "tiny_body", "small_hole"), shared edges whose sides part
+// ("loose_edge"), and where it passes through itself as SelfIntersections finds it
+// ("self_intersection", "self_overlap", or "unmeshable" where it could not be meshed to
+// look). operation -- "join", "cut", "common", "split_sheet", "trim", "merge" or
+// "intersect"; "" for none -- adds what that verb refuses each argument for: a boolean wants
+// both closed ("open", one finding per free edge) and holding no region wall
+// ("region_wall", a merge's body); a split or trim only its tool (other) closed; a merge
+// closed manifolds ("non_manifold") of planes, cylinders, cones, spheres and tori
+// ("face_kind", per face). With other nil, this solid is held to what the operation asks of
+// its first argument. A free edge is no fault without an operation that asks for a closed
+// solid: an open sheet is a fine body.
+//
+// Not checked: an edge's curve leaving its face's surface, a surface only C0 inside a face,
+// sub-shapes a boolean would merge.
+//
+// Fails for an unknown operation or a tolerance not positive and finite. Python's check at
+// its default tolerance is 0.05.
+func (s *Solid) Check(other *Solid, operation string, tolerance float64) ([]Finding, error) {
+	defer pin()()
+	a, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	var b *C.CadaclysmBlacksmithSolid
+	if other != nil {
+		if b, err = other.h(); err != nil {
+			return nil, err
+		}
+	}
+	defer runtime.KeepAlive(s)
+	defer runtime.KeepAlive(other)
+	var cop *C.char
+	if operation != "" {
+		cop = C.CString(operation)
+		defer C.free(unsafe.Pointer(cop))
+	}
+	found := C.cadaclysm_blacksmith_check(a, b, cop, C.double(tolerance), nil, nil)
+	if found == nil {
+		return nil, failure("check")
+	}
+	defer C.cadaclysm_blacksmith_check_free(found)
+	n := uint32(C.cadaclysm_blacksmith_check_count(found))
+	out := make([]Finding, 0, n)
+	for i := uint32(0); i < n; i++ {
+		var raw C.CadaclysmBlacksmithFinding
+		if !bool(C.cadaclysm_blacksmith_check_finding(found, C.uint32_t(i), &raw)) {
+			return nil, failure("check_finding")
+		}
+		f := Finding{Kind: C.GoString(raw.kind), Argument: uint32(raw.argument), Size: float64(raw.size)}
+		if raw.index != C.CADACLYSM_BLACKSMITH_NONE {
+			index := uint32(raw.index)
+			f.Index = &index
+		}
+		if raw.other != C.CADACLYSM_BLACKSMITH_NONE {
+			o := uint32(raw.other)
+			f.Other = &o
+		}
+		out = append(out, f)
+	}
+	return out, nil
 }
 
 // intersectionOf reads an intersection handle out into an Intersection, copied; the caller
@@ -9307,10 +9438,85 @@ func curveBodyFootOf(raw *C.CadaclysmBlacksmithCurveBodyFoot) *CurveBodyFoot {
 	return f
 }
 
+// MeshPoint is the nearest point of a TriangleMesh to a query point (TriangleMesh.ClosestPoint).
+// Exact: no tolerance, no Refined figure. Point lies on the mesh, Distance from the query point.
+// Triangle is the lowest-numbered triangle holding the point: on an edge or a vertex several
+// triangles share, the lower triangle answers. Barycentric are the point's three weights on that
+// triangle's corners, in index order, summing to 1. Kind is what the point lies on, "face"
+// (inside Triangle), "edge" or "vertex", and Vertices names it: an edge's two vertex indices
+// ascending, a vertex's one, none for a face.
+type MeshPoint struct {
+	Point       [3]float64
+	Distance    float64
+	Triangle    uint32
+	Barycentric [3]float64
+	Kind        string
+	Vertices    []uint32
+}
+
+func meshPointOf(raw *C.CadaclysmBlacksmithMeshPoint) (*MeshPoint, error) {
+	p := &MeshPoint{Distance: float64(raw.distance), Triangle: uint32(raw.triangle)}
+	switch raw.kind {
+	case 0:
+		p.Kind = "face"
+	case 1:
+		p.Kind = "edge"
+	case 2:
+		p.Kind = "vertex"
+	default:
+		return nil, &BuildError{Message: fmt.Sprintf("triangle mesh: the library answered kind %d, not 0, 1 or 2", uint32(raw.kind))}
+	}
+	for i := 0; i < 3; i++ {
+		p.Point[i] = float64(raw.point[i])
+		p.Barycentric[i] = float64(raw.barycentric[i])
+	}
+	// UINT32_MAX marks an unused slot: a face has none, a vertex one, an edge two.
+	p.Vertices = make([]uint32, 0, 2)
+	for _, v := range raw.vertices {
+		if uint32(v) != math.MaxUint32 {
+			p.Vertices = append(p.Vertices, uint32(v))
+		}
+	}
+	return p, nil
+}
+
+// CurveMeshFoot is the nearest points of a curve and a TriangleMesh
+// (TriangleMesh.CurveClosestPoints, and a NearestObject's answer for a mesh): PointOnCurve at
+// the curve's parameter T, and PointOnMesh, Distance apart. Exact. Crossing is true where the
+// curve passes through a triangle: Distance is then exactly 0, at the earliest crossing in T; a
+// curve that touches without passing through is distance 0 and false. The mesh's side is named
+// as MeshPoint names it, flat.
+type CurveMeshFoot struct {
+	Distance     float64
+	T            float64
+	PointOnCurve [3]float64
+	PointOnMesh  [3]float64
+	Triangle     uint32
+	Barycentric  [3]float64
+	Kind         string
+	Vertices     []uint32
+	Crossing     bool
+}
+
+func curveMeshFootOf(raw *C.CadaclysmBlacksmithCurveMeshFoot) (*CurveMeshFoot, error) {
+	mesh, err := meshPointOf(&raw.mesh)
+	if err != nil {
+		return nil, err
+	}
+	f := &CurveMeshFoot{
+		Distance: float64(raw.distance), T: float64(raw.t), PointOnMesh: mesh.Point, Triangle: mesh.Triangle,
+		Barycentric: mesh.Barycentric, Kind: mesh.Kind, Vertices: mesh.Vertices, Crossing: raw.crossing != 0,
+	}
+	for i := 0; i < 3; i++ {
+		f.PointOnCurve[i] = float64(raw.point_on_curve[i])
+	}
+	return f, nil
+}
+
 // NearestObject is the nearest of a list of things to a curve (NurbsCurve.ClosestObject):
 // Which the item's index in the list, Distance from PointOnCurve (at the curve's parameter T)
 // to PointOnItem. The item's own answer is Body for a solid or a projector, Pair (side a the
-// curve asked) for a curve, and neither (both nil) for a point.
+// curve asked) for a curve, Mesh for a TriangleMesh, and none of them (all nil) for a point.
 type NearestObject struct {
 	Which        int
 	Distance     float64
@@ -9319,22 +9525,30 @@ type NearestObject struct {
 	PointOnItem  [3]float64
 	Body         *CurveBodyFoot
 	Pair         *CurvePair
+	Mesh         *CurveMeshFoot
 }
 
-func nearestObjectOf(raw *C.CadaclysmBlacksmithNearestObject) *NearestObject {
+func nearestObjectOf(raw *C.CadaclysmBlacksmithNearestObject) (*NearestObject, error) {
 	n := &NearestObject{Which: int(raw.which), Distance: float64(raw.distance), T: float64(raw.t)}
 	for i := 0; i < 3; i++ {
 		n.PointOnCurve[i] = float64(raw.point_on_curve[i])
 		n.PointOnItem[i] = float64(raw.point_on_item[i])
 	}
-	// Only the member answer_kind names is read: the other is zero bytes (a nil kind).
+	// Only the member answer_kind names is read: the others are zero bytes (a nil kind, a
+	// mesh's vertices 0 rather than UINT32_MAX).
 	switch raw.answer_kind {
 	case 0:
 		n.Body = curveBodyFootOf(&raw.body)
 	case 1:
 		n.Pair = curvePairOf(&raw.pair)
+	case 3:
+		mesh, err := curveMeshFootOf(&raw.mesh)
+		if err != nil {
+			return nil, err
+		}
+		n.Mesh = mesh
 	}
-	return n
+	return n, nil
 }
 
 // OrientedBox is the solid's oriented bounding box. accuracy 0 or negative: the library's
@@ -10252,8 +10466,9 @@ func (c *NurbsCurve) ClosestPoints(other *NurbsCurve, maxDistance float64) (*Cur
 
 // ClosestObject is the item of items nearest to this curve -- Which its index -- or nil where
 // none lies within maxDistance (NaN or +Inf: no limit) or items is empty. Each item is a
-// *Solid, a *NurbsCurve, a *Projector or a point ([3]float64). Items are asked in order, each
-// with the best distance so far as its limit; equal distances go to the earlier item.
+// *Solid, a *NurbsCurve, a *Projector, a *TriangleMesh (answered exactly) or a point
+// ([3]float64). Items are asked in order, each with the best distance so far as its limit;
+// equal distances go to the earlier item.
 // tolerance (0 or NaN: each solid's effective tolerance) sizes each solid's search; a projector
 // keeps its own, and its lock is held for the whole curve query.
 func (c *NurbsCurve) ClosestObject(items []any, maxDistance, tolerance float64) (*NearestObject, error) {
@@ -10269,6 +10484,7 @@ func (c *NurbsCurve) ClosestObject(items []any, maxDistance, tolerance float64) 
 	solids := make([]*C.CadaclysmBlacksmithSolid, 0, len(items)+1)
 	curves := make([]*C.CadaclysmBlacksmithNurbsCurve, 0, len(items)+1)
 	projectors := make([]*C.CadaclysmBlacksmithProjector, 0, len(items)+1)
+	meshes := make([]*C.CadaclysmBlacksmithTriangleMesh, 0, len(items)+1)
 	points := make([]float64, 0, 3*len(items)+1)
 	for i, item := range items {
 		switch it := item.(type) {
@@ -10292,19 +10508,28 @@ func (c *NurbsCurve) ClosestObject(items []any, maxDistance, tolerance float64) 
 			}
 			kinds = append(kinds, 3)
 			projectors = append(projectors, it.handle)
+		case *TriangleMesh:
+			mh, err := it.h()
+			if err != nil {
+				return nil, err
+			}
+			kinds = append(kinds, 4)
+			meshes = append(meshes, mh)
 		case [3]float64:
 			kinds = append(kinds, 2)
 			points = append(points, it[0], it[1], it[2])
 		default:
-			return nil, &BuildError{Message: fmt.Sprintf("%s: item %d: not a Solid, a NurbsCurve, a Projector or a point of 3 numbers, got %v", what, i, item)}
+			return nil, &BuildError{Message: fmt.Sprintf("%s: item %d: not a Solid, a NurbsCurve, a Projector, a TriangleMesh or a point of 3 numbers, got %v", what, i, item)}
 		}
 	}
 	nKinds, nSolids, nCurves, nPoints, nProjectors := len(kinds), len(solids), len(curves), len(points)/3, len(projectors)
+	nMeshes := len(meshes)
 	kinds, solids, curves, projectors, points = append(kinds, 0), append(solids, nil), append(curves, nil), append(projectors, nil), append(points, 0)
+	meshes = append(meshes, nil)
 	var raw C.CadaclysmBlacksmithNearestObject
 	found := int32(C.cadaclysm_blacksmith_nurbs_curve_closest_object(h, &kinds[0], C.uint32_t(nKinds),
 		&solids[0], C.uint32_t(nSolids), &curves[0], C.uint32_t(nCurves), doubles(&points[0]), C.uint32_t(nPoints),
-		&projectors[0], C.uint32_t(nProjectors), C.double(maxDistance), C.double(tolerance), &raw))
+		&projectors[0], C.uint32_t(nProjectors), &meshes[0], C.uint32_t(nMeshes), C.double(maxDistance), C.double(tolerance), &raw))
 	runtime.KeepAlive(c)
 	runtime.KeepAlive(items)
 	for _, item := range items {
@@ -10316,7 +10541,7 @@ func (c *NurbsCurve) ClosestObject(items []any, maxDistance, tolerance float64) 
 	if found == 0 {
 		return nil, nil
 	}
-	return nearestObjectOf(&raw), nil
+	return nearestObjectOf(&raw)
 }
 
 // PointAtLength is the point at arc length s from the curve's start.
@@ -11573,6 +11798,442 @@ func (s *Solid) MirrorJoin(plane Frame, snap, tolerance float64) (*Solid, Symmet
 	}, nil
 }
 
+// ---- holes, ribs and webs, patterns ---------------------------------------------------
+
+// HoleExtent is how far Hole drills, the C ABI's CADACLYSM_BLACKSMITH_HOLE_* extent codes.
+type HoleExtent uint32
+
+const (
+	// HoleThrough drills through everything ahead of the point: Python's default "through".
+	HoleThrough HoleExtent = iota
+	// HoleBlind drills Depth of full bore from the point, then a drill point of TipAngle.
+	HoleBlind
+	// HoleToFace drills until the axis first meets face Face, the bore ending on it.
+	HoleToFace
+	// HoleToNext drills until the bore first leaves the material.
+	HoleToNext
+)
+
+// HoleHead is the head a Hole's bore opens with, the C ABI's CADACLYSM_BLACKSMITH_HOLE_* head codes.
+type HoleHead uint32
+
+const (
+	// HoleSimple is no head: Python's default (None).
+	HoleSimple HoleHead = iota
+	// HoleCounterbore is a wider bore HeadDiameter across and HeadDepth deep.
+	HoleCounterbore
+	// HoleCountersink is a cone HeadDiameter across at the point, included angle HeadAngle.
+	HoleCountersink
+)
+
+// FeatureOp is how PatternFeature applies its tool, the C ABI's CADACLYSM_BLACKSMITH_FEATURE_* codes.
+type FeatureOp uint32
+
+const (
+	// FeatureCut cuts the tool from the body.
+	FeatureCut FeatureOp = iota
+	// FeatureJoin joins the tool to the body.
+	FeatureJoin
+)
+
+// RibSide is where Rib's thickness lies, the C ABI's CADACLYSM_BLACKSMITH_RIB_* codes.
+type RibSide uint32
+
+const (
+	// RibBoth is half the thickness each side of the plane: Python's default.
+	RibBoth RibSide = iota
+	// RibFront is the thickness on the plane's +z side.
+	RibFront
+	// RibBack is the thickness on the plane's -z side.
+	RibBack
+)
+
+// WebSide is where Web's thickness lies, the C ABI's CADACLYSM_BLACKSMITH_WEB_* codes.
+type WebSide uint32
+
+const (
+	// WebBoth is half the thickness each side of the curve: Python's default.
+	WebBoth WebSide = iota
+	// WebLeft is the thickness left of the curve's run, the plane's normal up.
+	WebLeft
+	// WebRight is the thickness right of the curve's run.
+	WebRight
+)
+
+// PatternOrient is how PatternAlong turns its copies, the C ABI's CADACLYSM_BLACKSMITH_ORIENT_* codes.
+type PatternOrient uint32
+
+const (
+	// OrientFixed translates each copy only: Python's default.
+	OrientFixed PatternOrient = iota
+	// OrientPath also turns each copy by the curve's rotation-minimising frame from the first
+	// instance's.
+	OrientPath
+)
+
+// PatternReport is what Pattern or PatternFeature did: the Instances placed (after the
+// skips), the Booleans run (copies apart from each other share one), and the copies of a
+// feature's tool Missed -- sharing no volume with the body, dropped for a cut and kept as a
+// body of their own for a join.
+type PatternReport struct {
+	Instances int
+	Booleans  int
+	Missed    int
+}
+
+// HoleReport is what Hole did: the Holes drilled (one a point), per hole the Bottoms -- the
+// distance along the axis from the point to where the bore ends, the drill point excluded
+// (Depth for a blind hole; for the others the deepest point of the material it passes, rim
+// included) -- and FacesAdded, the result's faces on no surface of the body.
+type HoleReport struct {
+	Holes      int
+	Bottoms    []float64
+	FacesAdded int
+}
+
+// HoleOptions are Hole's and HoleTool's optional arguments, Go's spelling of Python's keyword
+// arguments; the zero value is Python's defaults. Direction is the drilling direction, into
+// the material, shared by every point; nil drills each point along the inward normal of the
+// face it lies on (on an edge, the lowest-numbered face's). Extent (HoleThrough by default)
+// with Depth (nil: none; HoleBlind only) and Face (nil: none; HoleToFace only); TipAngle nil
+// is 118 degrees (0 or pi: a flat bottom). Head (HoleSimple by default) with HeadDiameter,
+// HeadDepth and HeadAngle (nil: 90 degrees), measured from the point. Angles in radians.
+// Tolerance 0: the inputs' effective tolerance.
+type HoleOptions struct {
+	Direction    *[3]float64
+	Extent       HoleExtent
+	Depth        *float64
+	TipAngle     *float64
+	Face         *int
+	Head         HoleHead
+	HeadDiameter float64
+	HeadDepth    float64
+	HeadAngle    *float64
+	Tolerance    float64
+}
+
+// skipIndices is skip as the C ABI's index array (nil for none) and its count.
+func skipIndices(skip []int) (*C.uint32_t, C.uint32_t, error) {
+	if len(skip) == 0 {
+		return nil, 0, nil
+	}
+	s := make([]C.uint32_t, len(skip))
+	for i, v := range skip {
+		if v < 0 {
+			return nil, 0, &BuildError{Message: fmt.Sprintf("skip: instance index %d is negative", v)}
+		}
+		u, err := curveU32(v, "skip: instance index")
+		if err != nil {
+			return nil, 0, err
+		}
+		s[i] = u
+	}
+	return &s[0], C.uint32_t(len(s)), nil
+}
+
+// placements runs a pattern call twice -- once for the count, once to fill 16 doubles a
+// placement -- and reads the placements back as Transforms; a *BuildError when it refused.
+func placements(what string, call func(out *C.double) C.uint32_t) ([]Transform, error) {
+	n := int(call(nil))
+	if n == 0 {
+		return nil, failure(what)
+	}
+	out := make([]float64, 16*n)
+	if int(call(doubles(&out[0]))) != n {
+		return nil, failure(what)
+	}
+	ts := make([]Transform, n)
+	for i := range ts {
+		t, err := TransformFromRows(out[16*i : 16*i+16])
+		if err != nil {
+			return nil, err
+		}
+		ts[i] = t
+	}
+	return ts, nil
+}
+
+// flatTransforms is transforms as the flat C array of 16 doubles each, padded by one so an
+// empty list still has an address to pass (the C call refuses it by name).
+func flatTransforms(transforms []Transform) []float64 {
+	flat := make([]float64, 0, 16*len(transforms)+1)
+	for _, t := range transforms {
+		r := t.Rows()
+		flat = append(flat, r[:]...)
+	}
+	return append(flat, 0)
+}
+
+// PatternRectangular is Python's Pattern.rectangular: count1 instances spacing1 apart along
+// direction1, times count2 spacing2 apart along direction2 (nil: one row; Python's defaults
+// count2 1, spacing2 0); row-major, direction 1 fastest, instance 0 the identity. symmetric
+// puts count on each side of the original along each direction (2 count - 1, at offsets 0,
+// +s, -s, +2s, ...). skip leaves instances out by index (Fusion's suppressed instances), 0
+// included. A *BuildError for a count of 0, a spacing not finite, a zero direction, a skip
+// past the count, or every instance skipped.
+func PatternRectangular(direction1 [3]float64, count1 int, spacing1 float64, direction2 *[3]float64, count2 int,
+	spacing2 float64, symmetric bool, skip []int) ([]Transform, error) {
+	defer pin()()
+	c1, err := curveU32(count1, "pattern_rectangular: count1")
+	if err != nil {
+		return nil, err
+	}
+	c2, err := curveU32(count2, "pattern_rectangular: count2")
+	if err != nil {
+		return nil, err
+	}
+	s, n, err := skipIndices(skip)
+	if err != nil {
+		return nil, err
+	}
+	d1 := direction1
+	return placements("pattern_rectangular", func(out *C.double) C.uint32_t {
+		return C.cadaclysm_blacksmith_pattern_rectangular(doubles(&d1[0]), c1, C.double(spacing1), optVec(direction2), c2,
+			C.double(spacing2), C.bool(symmetric), s, n, out)
+	})
+}
+
+// PatternCircular is Python's Pattern.circular: count instances about the line through
+// axisPoint along axisDirection. A full turn (angle 2 pi, Python's default) spaces them
+// evenly; less spreads them over angle with both ends occupied. symmetric spreads count over
+// angle on each side (not with a full turn). Radians, right-handed about the direction. skip
+// as PatternRectangular's. A *BuildError for count 0, a zero axis, an angle not in (0, 2 pi],
+// or the skips.
+func PatternCircular(axisPoint, axisDirection [3]float64, count int, angle float64, symmetric bool, skip []int) ([]Transform, error) {
+	defer pin()()
+	c, err := curveU32(count, "pattern_circular: count")
+	if err != nil {
+		return nil, err
+	}
+	s, n, err := skipIndices(skip)
+	if err != nil {
+		return nil, err
+	}
+	axis := [6]float64{axisPoint[0], axisPoint[1], axisPoint[2], axisDirection[0], axisDirection[1], axisDirection[2]}
+	return placements("pattern_circular", func(out *C.double) C.uint32_t {
+		return C.cadaclysm_blacksmith_pattern_circular(doubles(&axis[0]), c, C.double(angle), C.bool(symmetric), s, n, out)
+	})
+}
+
+// PatternAlong is Python's Pattern.along: count instances along curve by arc length from its
+// start, spacing apart, or spread over its whole length with both ends occupied (spacing
+// nil, Python's default). orient OrientFixed translates each copy; OrientPath also turns it
+// by the curve's rotation-minimising frame from the first instance's. skip as
+// PatternRectangular's. A *BuildError for count 0, a spacing not positive, count - 1
+// spacings past the curve's length, a curve of zero length, or the skips.
+func PatternAlong(curve *NurbsCurve, count int, spacing *float64, orient PatternOrient, skip []int) ([]Transform, error) {
+	defer pin()()
+	h, err := curve.h()
+	if err != nil {
+		return nil, err
+	}
+	c, err := curveU32(count, "pattern_along: count")
+	if err != nil {
+		return nil, err
+	}
+	s, n, err := skipIndices(skip)
+	if err != nil {
+		return nil, err
+	}
+	out, err := placements("pattern_along", func(out *C.double) C.uint32_t {
+		return C.cadaclysm_blacksmith_pattern_along(h, c, orNaN(spacing), C.uint32_t(orient), s, n, out)
+	})
+	runtime.KeepAlive(curve)
+	return out, err
+}
+
+// Pattern is this body and its copies at transforms (rigid, typically from PatternRectangular,
+// PatternCircular or PatternAlong; instance 0 the identity keeps the original) as one body --
+// a pattern of bodies -- and a PatternReport. Copies apart from each other are put together
+// with no boolean at all; copies that overlap are joined, one boolean a group. tolerance 0:
+// the inputs' effective tolerance. A *BuildError for no transforms or one that is not rigid.
+func (s *Solid) Pattern(transforms []Transform, tolerance float64) (*Solid, PatternReport, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, PatternReport{}, err
+	}
+	flat := flatTransforms(transforms)
+	var r [3]C.double
+	out, err := newSolid(C.cadaclysm_blacksmith_pattern(h, doubles(&flat[0]), C.uint32_t(len(transforms)), C.double(tolerance), &r[0]), "pattern")
+	runtime.KeepAlive(s)
+	if err != nil {
+		return nil, PatternReport{}, err
+	}
+	return out, PatternReport{Instances: int(r[0]), Booleans: int(r[1]), Missed: int(r[2])}, nil
+}
+
+// PatternFeature is tool (any closed solid, typically a ...Tool method's result) placed at
+// each of transforms and applied to this body by op, FeatureCut or FeatureJoin -- a pattern
+// of features (Fusion's compute type identical) -- and a PatternReport. Copies apart from each
+// other go into one multi-lump tool and one boolean; overlapping copies fall into a few
+// groups. A copy that shares no volume with the body is Missed: dropped for a cut, kept as a
+// body of its own for a join. tolerance 0: the inputs' effective tolerance. A *BuildError for
+// no transforms, one not rigid, a tool that is not closed, or an unknown op.
+func (s *Solid) PatternFeature(tool *Solid, op FeatureOp, transforms []Transform, tolerance float64) (*Solid, PatternReport, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, PatternReport{}, err
+	}
+	th, err := tool.h()
+	if err != nil {
+		return nil, PatternReport{}, err
+	}
+	flat := flatTransforms(transforms)
+	var r [3]C.double
+	out, err := newSolid(C.cadaclysm_blacksmith_pattern_feature(h, th, C.uint32_t(op), doubles(&flat[0]), C.uint32_t(len(transforms)),
+		C.double(tolerance), &r[0]), "pattern_feature")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(tool)
+	if err != nil {
+		return nil, PatternReport{}, err
+	}
+	return out, PatternReport{Instances: int(r[0]), Booleans: int(r[1]), Missed: int(r[2])}, nil
+}
+
+// holeCall is Hole's and HoleTool's call: their arguments past the solid checked and
+// resolved (face nil to CADACLYSM_BLACKSMITH_NONE, depth nil to NaN, the angles' defaults).
+func (s *Solid) holeCall(what string, points [][3]float64, opts HoleOptions,
+	call func(h *C.CadaclysmBlacksmithSolid, xyz *C.double, face C.uint32_t, depth, tip, headAngle C.double) *C.CadaclysmBlacksmithSolid) (*Solid, error) {
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	face := C.uint32_t(none)
+	if opts.Face != nil {
+		if face, err = curveU32(*opts.Face, what+": face"); err != nil {
+			return nil, err
+		}
+	}
+	tip, headAngle := C.double(118*math.Pi/180), C.double(math.Pi/2)
+	if opts.TipAngle != nil {
+		tip = C.double(*opts.TipAngle)
+	}
+	if opts.HeadAngle != nil {
+		headAngle = C.double(*opts.HeadAngle)
+	}
+	xyz := flatPoints(points)
+	out, err := newSolid(call(h, doubles(&xyz[0]), face, orNaN(opts.Depth), tip, headAngle), what)
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// Hole is this body drilled at points (one hole each, all one spec, one cut) with a bore of
+// diameter -- the bore an exact cylinder, a counterbore an exact cylinder, a countersink and a
+// drill point exact cones -- and a HoleReport. opts: see [HoleOptions] (its zero value is
+// Python's defaults: through, no head). A *BuildError for a diameter not positive, a depth or
+// face its extent does not take, a head not wider than the bore, an angle out of range, a
+// point not on a face with no direction, a hole that removes nothing, or a face the axis
+// never meets.
+func (s *Solid) Hole(points [][3]float64, diameter float64, opts HoleOptions) (*Solid, HoleReport, error) {
+	defer pin()()
+	var r [2]C.double
+	bottoms := make([]float64, len(points)+1)
+	out, err := s.holeCall("hole", points, opts, func(h *C.CadaclysmBlacksmithSolid, xyz *C.double, face C.uint32_t, depth, tip, headAngle C.double) *C.CadaclysmBlacksmithSolid {
+		return C.cadaclysm_blacksmith_hole(h, xyz, C.uint32_t(len(points)), C.double(diameter), optVec(opts.Direction), C.uint32_t(opts.Extent),
+			depth, tip, face, C.uint32_t(opts.Head), C.double(opts.HeadDiameter), C.double(opts.HeadDepth), headAngle,
+			C.double(opts.Tolerance), &r[0], doubles(&bottoms[0]))
+	})
+	if err != nil {
+		return nil, HoleReport{}, err
+	}
+	return out, HoleReport{Holes: int(r[0]), Bottoms: bottoms[:len(points)], FacesAdded: int(r[1])}, nil
+}
+
+// HoleTool is the tool Hole cuts with, from the same arguments: a closed solid, one lump a
+// point -- for PatternFeature or a boolean of your own. Refused as Hole is, but for a hole
+// that removes nothing.
+func (s *Solid) HoleTool(points [][3]float64, diameter float64, opts HoleOptions) (*Solid, error) {
+	defer pin()()
+	return s.holeCall("hole_tool", points, opts, func(h *C.CadaclysmBlacksmithSolid, xyz *C.double, face C.uint32_t, depth, tip, headAngle C.double) *C.CadaclysmBlacksmithSolid {
+		return C.cadaclysm_blacksmith_hole_tool(h, xyz, C.uint32_t(len(points)), C.double(diameter), optVec(opts.Direction), C.uint32_t(opts.Extent),
+			depth, tip, face, C.uint32_t(opts.Head), C.double(opts.HeadDiameter), C.double(opts.HeadDepth), headAngle,
+			C.double(opts.Tolerance))
+	})
+}
+
+// ribCall is Rib's and RibTool's call.
+func (s *Solid) ribCall(what string, curve *NurbsCurve, plane Frame,
+	call func(h *C.CadaclysmBlacksmithSolid, c *C.CadaclysmBlacksmithNurbsCurve, f *C.double) *C.CadaclysmBlacksmithSolid) (*Solid, error) {
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	c, err := curve.h()
+	if err != nil {
+		return nil, err
+	}
+	f := plane
+	out, err := newSolid(call(h, c, doubles(&f[0])), what)
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(curve)
+	return out, err
+}
+
+// Rib is this body with a rib along curve, an open curve lying in plane: the region of the
+// plane between the curve and the body on the toward side (a direction in the plane; nil:
+// toward the body's nearest point), the curve's ends carried on along their tangents to the
+// body, thickened thickness along the plane's normal -- side RibBoth (half each side, Python's
+// default), RibFront (+z) or RibBack (-z) -- and joined. tolerance 0: the inputs' effective
+// tolerance. A *BuildError for a curve closed or not in the plane, a thickness not positive,
+// an unknown side, a slab that meets nothing, or a region not closed by the body.
+func (s *Solid) Rib(curve *NurbsCurve, plane Frame, thickness float64, side RibSide, toward *[3]float64, tolerance float64) (*Solid, error) {
+	defer pin()()
+	return s.ribCall("rib", curve, plane, func(h *C.CadaclysmBlacksmithSolid, c *C.CadaclysmBlacksmithNurbsCurve, f *C.double) *C.CadaclysmBlacksmithSolid {
+		return C.cadaclysm_blacksmith_rib(h, c, f, C.double(thickness), C.uint32_t(side), optVec(toward), C.double(tolerance))
+	})
+}
+
+// RibTool is the slab Rib joins, alone, from the same arguments.
+func (s *Solid) RibTool(curve *NurbsCurve, plane Frame, thickness float64, side RibSide, toward *[3]float64, tolerance float64) (*Solid, error) {
+	defer pin()()
+	return s.ribCall("rib_tool", curve, plane, func(h *C.CadaclysmBlacksmithSolid, c *C.CadaclysmBlacksmithNurbsCurve, f *C.double) *C.CadaclysmBlacksmithSolid {
+		return C.cadaclysm_blacksmith_rib_tool(h, c, f, C.double(thickness), C.uint32_t(side), optVec(toward), C.double(tolerance))
+	})
+}
+
+// webCall is Web's and WebTool's call.
+func (s *Solid) webCall(what string, curves []*NurbsCurve, plane Frame,
+	call func(h *C.CadaclysmBlacksmithSolid, cs **C.CadaclysmBlacksmithNurbsCurve, n C.uint32_t, f *C.double) *C.CadaclysmBlacksmithSolid) (*Solid, error) {
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	handles, err := curveHandles(curves)
+	if err != nil {
+		return nil, err
+	}
+	f := plane
+	out, err := newSolid(call(h, &handles[0], C.uint32_t(len(curves)), doubles(&f[0])), what)
+	runtime.KeepAlive(s)
+	keepCurves(curves)
+	return out, err
+}
+
+// Web is this body with a web along each of curves (open curves in plane): each offset in the
+// plane to thickness -- side WebBoth (Python's default), WebLeft or WebRight of the curve's
+// run, the plane's normal up -- its ends carried along their tangents to the body, its walls
+// run along the plane's normal until they meet the body (depth nil, Python's default) or for
+// depth, one way (the normal's; bothWays false, Python's default) or both. All the webs are
+// one tool and one join; crossing curves make a network. tolerance 0: the inputs' effective
+// tolerance. A *BuildError for no curves, one closed or not in the plane, a thickness not
+// positive, an unknown side, or walls that meet nothing or are not closed by the body.
+func (s *Solid) Web(curves []*NurbsCurve, plane Frame, thickness float64, side WebSide, depth *float64, bothWays bool, tolerance float64) (*Solid, error) {
+	defer pin()()
+	return s.webCall("web", curves, plane, func(h *C.CadaclysmBlacksmithSolid, cs **C.CadaclysmBlacksmithNurbsCurve, n C.uint32_t, f *C.double) *C.CadaclysmBlacksmithSolid {
+		return C.cadaclysm_blacksmith_web(h, cs, n, f, C.double(thickness), C.uint32_t(side), orNaN(depth), C.bool(bothWays), C.double(tolerance))
+	})
+}
+
+// WebTool is the walls Web joins, alone, from the same arguments.
+func (s *Solid) WebTool(curves []*NurbsCurve, plane Frame, thickness float64, side WebSide, depth *float64, bothWays bool, tolerance float64) (*Solid, error) {
+	defer pin()()
+	return s.webCall("web_tool", curves, plane, func(h *C.CadaclysmBlacksmithSolid, cs **C.CadaclysmBlacksmithNurbsCurve, n C.uint32_t, f *C.double) *C.CadaclysmBlacksmithSolid {
+		return C.cadaclysm_blacksmith_web_tool(h, cs, n, f, C.double(thickness), C.uint32_t(side), orNaN(depth), C.bool(bothWays), C.double(tolerance))
+	})
+}
+
 // FilletVarying is Fillet with the radius running linearly from radius to radiusEnd in arc
 // length along each edge, radius at the end where the edge's curve starts: spline edges only
 // (a *BuildError otherwise). tolerance as Fillet's.
@@ -11865,6 +12526,23 @@ func (s *Solid) Projector(tolerance float64) (*Projector, error) {
 	return p, nil
 }
 
+// TriangleMesh is this solid's **measuring** tessellation: the mesh the measuring queries
+// search, within a third of tolerance of the surface -- finer than the display mesh Mesh gives
+// at the same tolerance. Answers against it are exact for the mesh, not for the body.
+// tolerance -- absolute, in model units; 0 or NaN is unset, which the tolerance policy resolves
+// to the solid's effective tolerance. The mesh is a copy: it answers on after this solid is
+// closed. A negative or infinite tolerance, or a body that meshes to nothing, is a *BuildError.
+func (s *Solid) TriangleMesh(tolerance float64) (*TriangleMesh, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_solid_triangle_mesh(h, C.double(tolerance))
+	runtime.KeepAlive(s)
+	return adoptTriangleMesh(raw, "solid_triangle_mesh")
+}
+
 func (p *Projector) finalize() {
 	if p.handle != nil {
 		C.cadaclysm_blacksmith_projector_free(p.handle)
@@ -11927,6 +12605,166 @@ func (p *Projector) CurveClosestPoints(curve *NurbsCurve, maxDistance float64) (
 		return nil, nil
 	}
 	return curveBodyFootOf(&raw), nil
+}
+
+// TriangleMesh is a triangle mesh and its search tree, built once and immutable: nearest
+// points (ClosestPoint) and nearest points to a curve (CurveClosestPoints) are answered exactly
+// against it -- no tolerance, no Refined figure. NewTriangleMesh copies the vertices and the
+// triangles (three vertex indices each, any winding); a zero-area triangle is accepted and
+// answers as its longest edge. Solid.TriangleMesh gives a solid's own. Nothing in it changes
+// after it is built, so calls from several goroutines at once are safe and do not take turns.
+// Close frees this handle; the finalizer does so otherwise.
+type TriangleMesh struct {
+	handle *C.CadaclysmBlacksmithTriangleMesh
+	_      noTiny // see noTiny
+}
+
+// NewTriangleMesh is the mesh of positions and triangles (three vertex indices each). No
+// triangles, an index past the vertex count, or a coordinate that is not finite is a
+// *BuildError.
+func NewTriangleMesh(positions [][3]float64, triangles [][3]uint32) (*TriangleMesh, error) {
+	defer pin()()
+	nv, nt := len(positions), len(triangles)
+	if uint64(nv) > math.MaxUint32 || uint64(nt) > math.MaxUint32 {
+		return nil, &BuildError{Message: "triangle_mesh_new: too many vertices or triangles"}
+	}
+	// One spare slot each, so &x[0] is valid for an empty list; the counts say how many are real.
+	flat := make([]float64, 0, 3*nv+1)
+	for _, p := range positions {
+		flat = append(flat, p[0], p[1], p[2])
+	}
+	ids := make([]C.uint32_t, 0, 3*nt+1)
+	for _, t := range triangles {
+		ids = append(ids, C.uint32_t(t[0]), C.uint32_t(t[1]), C.uint32_t(t[2]))
+	}
+	flat, ids = append(flat, 0), append(ids, 0)
+	return adoptTriangleMesh(C.cadaclysm_blacksmith_triangle_mesh_new(doubles(&flat[0]), C.uint32_t(nv), &ids[0], C.uint32_t(nt)),
+		"triangle_mesh_new")
+}
+
+// adoptTriangleMesh takes a new handle (nil: the call's refusal, named what), freed by the
+// finalizer if Close never runs. Called under pin, so failure reads this thread's last error.
+func adoptTriangleMesh(raw *C.CadaclysmBlacksmithTriangleMesh, what string) (*TriangleMesh, error) {
+	if raw == nil {
+		return nil, failure(what)
+	}
+	m := &TriangleMesh{handle: raw}
+	runtime.SetFinalizer(m, (*TriangleMesh).finalize)
+	return m, nil
+}
+
+func (m *TriangleMesh) finalize() {
+	if m.handle != nil {
+		C.cadaclysm_blacksmith_triangle_mesh_free(m.handle)
+		m.handle = nil
+	}
+}
+
+// Close gives the mesh back. Idempotent.
+func (m *TriangleMesh) Close() {
+	if m == nil {
+		return
+	}
+	m.finalize()
+	runtime.SetFinalizer(m, nil)
+}
+
+// Closed is whether Close has already run. A nil TriangleMesh counts as closed.
+func (m *TriangleMesh) Closed() bool { return m == nil || m.handle == nil }
+
+func (m *TriangleMesh) h() (*C.CadaclysmBlacksmithTriangleMesh, error) {
+	if m == nil || m.handle == nil {
+		return nil, fmt.Errorf("triangle_mesh: %w", ErrClosed)
+	}
+	return m.handle, nil
+}
+
+// VertexCount is how many vertices the mesh holds.
+func (m *TriangleMesh) VertexCount() (int, error) {
+	h, err := m.h()
+	if err != nil {
+		return 0, err
+	}
+	n := int(C.cadaclysm_blacksmith_triangle_mesh_vertex_count(h))
+	runtime.KeepAlive(m)
+	return n, nil
+}
+
+// TriangleCount is how many triangles the mesh holds.
+func (m *TriangleMesh) TriangleCount() (int, error) {
+	h, err := m.h()
+	if err != nil {
+		return 0, err
+	}
+	n := int(C.cadaclysm_blacksmith_triangle_mesh_triangle_count(h))
+	runtime.KeepAlive(m)
+	return n, nil
+}
+
+// Bounds is the box of every vertex.
+func (m *TriangleMesh) Bounds() (cadaclysm.Bounds, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return cadaclysm.Bounds{}, err
+	}
+	var out [6]float64
+	ok := bool(C.cadaclysm_blacksmith_triangle_mesh_bounds(h, doubles(&out[0])))
+	runtime.KeepAlive(m)
+	if !ok {
+		return cadaclysm.Bounds{}, failure("triangle_mesh_bounds")
+	}
+	return cadaclysm.Bounds{Min: [3]float64{out[0], out[1], out[2]}, Max: [3]float64{out[3], out[4], out[5]}}, nil
+}
+
+// ClosestPoint is the nearest point of the mesh to p -- exact, the lower triangle where several
+// share the point -- or nil where it lies beyond maxDistance (NaN or +Inf: no limit; a point on
+// the mesh is within 0). Go has no default arguments: pass math.NaN() for no limit. A point not
+// finite or a negative limit is a *BuildError.
+func (m *TriangleMesh) ClosestPoint(p [3]float64, maxDistance float64) (*MeshPoint, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	var raw C.CadaclysmBlacksmithMeshPoint
+	found := int32(C.cadaclysm_blacksmith_triangle_mesh_closest_point(h, doubles(&p[0]), C.double(maxDistance), &raw))
+	runtime.KeepAlive(m)
+	if found < 0 {
+		return nil, failure("triangle_mesh_closest_point")
+	}
+	if found == 0 {
+		return nil, nil
+	}
+	return meshPointOf(&raw)
+}
+
+// CurveClosestPoints is the nearest points of curve and the mesh -- exact; Crossing true and
+// distance 0 at the earliest crossing in T; among equal distances the lower triangle, then the
+// lower T -- or nil where the mesh lies farther than maxDistance (NaN or +Inf: no limit). A
+// mesh has no inside: a curve within a closed mesh answers its distance to the triangles. A
+// curve that is not valid or a negative limit is a *BuildError.
+func (m *TriangleMesh) CurveClosestPoints(curve *NurbsCurve, maxDistance float64) (*CurveMeshFoot, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	ch, err := curve.h()
+	if err != nil {
+		return nil, err
+	}
+	var raw C.CadaclysmBlacksmithCurveMeshFoot
+	found := int32(C.cadaclysm_blacksmith_triangle_mesh_curve_closest_points(h, ch, C.double(maxDistance), &raw))
+	runtime.KeepAlive(m)
+	runtime.KeepAlive(curve)
+	if found < 0 {
+		return nil, failure("triangle_mesh_curve_closest_points")
+	}
+	if found == 0 {
+		return nil, nil
+	}
+	return curveMeshFootOf(&raw)
 }
 
 // ---- the R-tree -----------------------------------------------------------------------
@@ -18410,4 +19248,492 @@ func (p *Profile) DocumentPath() (string, error) {
 	raw := C.cadaclysm_blacksmith_document_profile_path(h)
 	runtime.KeepAlive(p)
 	return ownedText(raw, "document_profile_path")
+}
+
+// ---- mechanical drawings: hidden lines, the projected outline, pages, DXF profiles ----
+
+// HlrKinds names HlrLine.Kind, as CADACLYSM_BLACKSMITH_HLR_SHARP .. _BOUNDARY number them.
+var HlrKinds = [...]string{"sharp", "smooth", "outline", "iso", "boundary"}
+
+// hlrSources names HlrLine.SourceKind, as CADACLYSM_BLACKSMITH_HLR_SOURCE_EDGE .. _MESH_EDGE
+// number them.
+var hlrSources = [...]string{"edge", "face", "mesh_edge"}
+
+// PageUnits are the units Page takes, as the DXF unit codes cadaclysm_blacksmith_page_new reads.
+var PageUnits = map[string]uint32{"unitless": 0, "in": 1, "ft": 2, "mm": 4, "cm": 5, "m": 6}
+
+// HlrOptions is how a hidden-line view sees the solids -- Python's hlr keywords. The zero
+// value is not the defaults: start from NewHlrOptions. Eye set (non-nil) is a perspective
+// from Eye toward Target; otherwise a parallel view along Direction, from the eye toward the
+// model.
+type HlrOptions struct {
+	// Direction is the parallel view's direction, from the eye toward the model; any length
+	// but 0. Default (0, 1, 0): the front, looking from -Y.
+	Direction [3]float64
+	// Up is the page's up, any vector not along the view. Default (0, 0, 1).
+	Up [3]float64
+	// Eye, when set, makes the view a perspective standing there.
+	Eye *[3]float64
+	// Target is what the perspective looks at. Default the origin.
+	Target [3]float64
+	// Tolerance is how far a line may stray from the true curve, model units; 0 (the
+	// default) is the solids' effective tolerance.
+	Tolerance float64
+	// Iso is how many isocurves each way on every face; 0 (the default) draws none.
+	Iso uint32
+	// SmoothAngle is how near tangent (radians) two faces are for the edge between them to
+	// be "smooth". Default one degree.
+	SmoothAngle float64
+	// FeatureAngle is, for meshes, how far (radians) two triangles turn for the edge between
+	// them to be drawn. Default thirty degrees.
+	FeatureAngle float64
+}
+
+// NewHlrOptions is the defaults cadaclysm_blacksmith_hlr_options_init fills: the front view,
+// parallel, at the effective tolerance, smooth within one degree, mesh features past thirty,
+// no isocurves.
+func NewHlrOptions() HlrOptions {
+	var raw C.CadaclysmBlacksmithHlrOptions
+	C.cadaclysm_blacksmith_hlr_options_init(&raw)
+	o := HlrOptions{Tolerance: float64(raw.tolerance), Iso: uint32(raw.iso),
+		SmoothAngle: float64(raw.smooth_angle), FeatureAngle: float64(raw.feature_angle)}
+	for i := 0; i < 3; i++ {
+		o.Direction[i] = float64(raw.direction[i])
+		o.Up[i] = float64(raw.up[i])
+		o.Target[i] = float64(raw.target[i])
+	}
+	return o
+}
+
+// buildHlrOptions packs opts (nil for NewHlrOptions()'s defaults) into the C struct.
+func buildHlrOptions(opts *HlrOptions) C.CadaclysmBlacksmithHlrOptions {
+	o := NewHlrOptions()
+	if opts != nil {
+		o = *opts
+	}
+	var raw C.CadaclysmBlacksmithHlrOptions
+	C.cadaclysm_blacksmith_hlr_options_init(&raw)
+	for i := 0; i < 3; i++ {
+		raw.direction[i] = C.double(o.Direction[i])
+		raw.up[i] = C.double(o.Up[i])
+		raw.target[i] = C.double(o.Target[i])
+	}
+	if o.Eye != nil {
+		raw.projection = C.CADACLYSM_BLACKSMITH_HLR_PERSPECTIVE
+		for i := 0; i < 3; i++ {
+			raw.eye[i] = C.double(o.Eye[i])
+		}
+	}
+	raw.tolerance = C.double(o.Tolerance)
+	raw.iso = C.uint32_t(o.Iso)
+	raw.smooth_angle = C.double(o.SmoothAngle)
+	raw.feature_angle = C.double(o.FeatureAngle)
+	return raw
+}
+
+// HlrSource is what a line is a span of: Kind "edge" (Index the edge id), "face" (Index
+// the face index, an outline or isocurve) or "mesh_edge" (Index and Index2 its two vertices).
+type HlrSource struct {
+	Kind   string
+	Index  uint32
+	Index2 uint32
+}
+
+// HlrLine is one line of a hidden-line view: Kind one of HlrKinds, whether it is Visible,
+// the Solid (or mesh) it belongs to, its Source, and its curve as rational cubic Béziers on
+// the view plane (Beziers2D, z 0) and in space (Beziers3D), Bézier for Bézier the same span.
+type HlrLine struct {
+	Kind      string
+	Visible   bool
+	Solid     int
+	Source    HlrSource
+	Beziers2D cadaclysm.BeziersData64
+	Beziers3D cadaclysm.BeziersData64
+	Length2D  float64
+	Length3D  float64
+}
+
+// Hlr is a hidden-line view of solids or meshes (HlrOf, HlrMesh): its Lines, what the
+// removal did (Report, counts and lengths by name) and the Tolerance it worked at. Placed on
+// a drawing with Page.AddView. Immutable; Close frees the handle, the finalizer does
+// otherwise.
+type Hlr struct {
+	handle    *C.CadaclysmBlacksmithHlr
+	Lines     []HlrLine
+	Report    map[string]float64
+	Tolerance float64
+	_         noTiny // see noTiny
+}
+
+func (v *Hlr) finalize() {
+	if v.handle != nil {
+		C.cadaclysm_blacksmith_hlr_free(v.handle)
+		v.handle = nil
+	}
+}
+
+// Close gives the view back. Idempotent; the lines read stay.
+func (v *Hlr) Close() {
+	if v == nil {
+		return
+	}
+	v.finalize()
+	runtime.SetFinalizer(v, nil)
+}
+
+// Closed is whether Close has already run. A nil Hlr counts as closed.
+func (v *Hlr) Closed() bool { return v == nil || v.handle == nil }
+
+func (v *Hlr) h() (*C.CadaclysmBlacksmithHlr, error) {
+	if v == nil || v.handle == nil {
+		return nil, fmt.Errorf("hlr: %w", ErrClosed)
+	}
+	return v.handle, nil
+}
+
+// Visible is the lines seen.
+func (v *Hlr) Visible() []HlrLine { return v.filter(true) }
+
+// Hidden is the lines hidden.
+func (v *Hlr) Hidden() []HlrLine { return v.filter(false) }
+
+func (v *Hlr) filter(seen bool) []HlrLine {
+	var out []HlrLine
+	for _, l := range v.Lines {
+		if l.Visible == seen {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// flatBeziers is n Béziers of sixteen doubles each (x y z w per control point) as
+// BeziersData64.
+func flatBeziers(block []float64, n int) cadaclysm.BeziersData64 {
+	out := cadaclysm.BeziersData64{Points: make([]float64, 0, n*12), Weights: make([]float64, 0, n*4)}
+	for i := 0; i < n; i++ {
+		for k := 0; k < 4; k++ {
+			out.Points = append(out.Points, block[i*16+k*4:i*16+k*4+3]...)
+			out.Weights = append(out.Weights, block[i*16+k*4+3])
+		}
+	}
+	return out
+}
+
+// adoptHlr reads a new view handle (nil: the call's refusal, named what) out into an Hlr.
+// Called under pin.
+func adoptHlr(raw *C.CadaclysmBlacksmithHlr, what string) (*Hlr, error) {
+	if raw == nil {
+		return nil, failure(what)
+	}
+	v := &Hlr{handle: raw}
+	runtime.SetFinalizer(v, (*Hlr).finalize)
+	n := uint32(C.cadaclysm_blacksmith_hlr_line_count(raw))
+	v.Lines = make([]HlrLine, 0, n)
+	for i := uint32(0); i < n; i++ {
+		var line C.CadaclysmBlacksmithHlrLine
+		if !bool(C.cadaclysm_blacksmith_hlr_line(raw, C.uint32_t(i), &line)) {
+			v.Close()
+			return nil, failure("hlr_line")
+		}
+		m := int(line.bezier_count)
+		b2 := make([]float64, 16*m+1)
+		b3 := make([]float64, 16*m+1)
+		if !bool(C.cadaclysm_blacksmith_hlr_line_beziers2d(raw, C.uint32_t(i), doubles(&b2[0]))) {
+			v.Close()
+			return nil, failure("hlr_line_beziers2d")
+		}
+		if !bool(C.cadaclysm_blacksmith_hlr_line_beziers3d(raw, C.uint32_t(i), doubles(&b3[0]))) {
+			v.Close()
+			return nil, failure("hlr_line_beziers3d")
+		}
+		kind := hlrSources[line.source_kind]
+		source := HlrSource{Kind: kind, Index: uint32(line.source), Index2: uint32(line.source2)}
+		v.Lines = append(v.Lines, HlrLine{Kind: HlrKinds[line.kind], Visible: line.visible != 0, Solid: int(line.solid),
+			Source: source, Beziers2D: flatBeziers(b2, m), Beziers3D: flatBeziers(b3, m),
+			Length2D: float64(line.length2d), Length3D: float64(line.length3d)})
+	}
+	var r C.CadaclysmBlacksmithHlrReport
+	if !bool(C.cadaclysm_blacksmith_hlr_report(raw, &r)) {
+		v.Close()
+		return nil, failure("hlr_report")
+	}
+	v.Report = map[string]float64{
+		"candidates": float64(r.candidates), "segments": float64(r.segments), "crossings": float64(r.crossings),
+		"pieces": float64(r.pieces), "degenerate": float64(r.degenerate), "rays": float64(r.rays),
+		"mesh_hits": float64(r.mesh_hits), "rejected": float64(r.rejected), "grazes": float64(r.grazes),
+		"unsettled": float64(r.unsettled), "mesh_only": float64(r.mesh_only), "fallback_edges": float64(r.fallback_edges),
+		"failed_solids": float64(r.failed_solids), "candidate_length": float64(r.candidate_length),
+		"degenerate_length": float64(r.degenerate_length),
+	}
+	v.Tolerance = float64(r.tolerance)
+	return v, nil
+}
+
+// HlrOf is the hidden-line removal of solids, each where it stands, every solid hiding the
+// others: what a drawing of them shows, and what it shows only dashed (Python's hlr). Each
+// line is a span of an edge's own curve or a silhouette, exact as rational cubic Béziers.
+// View coordinates are the camera's (x right, y up), the origin on the sight line through
+// the solids' box centre. opts nil is NewHlrOptions(). A *BuildError for no solids and
+// refused options, in the library's words ("hlr: up is along the view ...").
+func HlrOf(solids []*Solid, opts *HlrOptions) (*Hlr, error) {
+	defer pin()()
+	handles, err := solidHandles(solids)
+	if err != nil {
+		return nil, err
+	}
+	raw := buildHlrOptions(opts)
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	found := C.cadaclysm_blacksmith_hlr(first, C.size_t(len(handles)), &raw)
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	return adoptHlr(found, "hlr")
+}
+
+// HlrMesh is HlrOf over triangle meshes, each a solid of flat triangles: its lines are the
+// edges whose triangles turn by more than FeatureAngle, the edges of one triangle, and the
+// edges between a triangle facing the eye and one facing away (outlines); the triangles
+// hide exactly. Each line's Source is "mesh_edge" with its two vertices.
+func HlrMesh(meshes []*TriangleMesh, opts *HlrOptions) (*Hlr, error) {
+	defer pin()()
+	handles := make([]*C.CadaclysmBlacksmithTriangleMesh, len(meshes))
+	for i, m := range meshes {
+		h, err := m.h()
+		if err != nil {
+			return nil, err
+		}
+		handles[i] = h
+	}
+	raw := buildHlrOptions(opts)
+	var first **C.CadaclysmBlacksmithTriangleMesh
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	found := C.cadaclysm_blacksmith_hlr_mesh(first, C.size_t(len(handles)), &raw)
+	for _, m := range meshes {
+		runtime.KeepAlive(m)
+	}
+	return adoptHlr(found, "hlr_mesh")
+}
+
+// ProjectedOutline is the boundary of the union of the solids' projections, as closed
+// profiles in view coordinates (as HlrOf's): each outer loop counter-clockwise with its holes
+// clockwise inside it -- a through hole seen along its axis is a hole. HlrOf's options.
+func ProjectedOutline(solids []*Solid, opts *HlrOptions) ([]*Profile, error) {
+	defer pin()()
+	handles, err := solidHandles(solids)
+	if err != nil {
+		return nil, err
+	}
+	raw := buildHlrOptions(opts)
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	list := C.cadaclysm_blacksmith_projected_outline(first, C.size_t(len(handles)), &raw)
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	return profileList(list, "projected_outline")
+}
+
+// Page is a flat drawing page: hidden-line views, profiles, hatches and text placed on it,
+// written as SVG (SVG) or DXF R2000 (DXF). Layers are made on first use: a view's own --
+// visible, outline, smooth, iso, hidden (dashed) -- and any other name continuous, colour 7.
+// Mutable: each Add changes the page. Close frees it; the finalizer does otherwise.
+type Page struct {
+	handle *C.CadaclysmBlacksmithPage
+	_      noTiny // see noTiny
+}
+
+// NewPage is an empty page in units: "mm", "cm", "m", "in", "ft" or "unitless" ("" is mm).
+func NewPage(units string) (*Page, error) {
+	defer pin()()
+	if units == "" {
+		units = "mm"
+	}
+	code, known := PageUnits[units]
+	if !known {
+		return nil, &BuildError{Message: fmt.Sprintf("units %q: one of unitless, in, ft, mm, cm, m", units)}
+	}
+	raw := C.cadaclysm_blacksmith_page_new(C.uint32_t(code))
+	if raw == nil {
+		return nil, failure("page_new")
+	}
+	p := &Page{handle: raw}
+	runtime.SetFinalizer(p, (*Page).finalize)
+	return p, nil
+}
+
+func (p *Page) finalize() {
+	if p.handle != nil {
+		C.cadaclysm_blacksmith_page_free(p.handle)
+		p.handle = nil
+	}
+}
+
+// Close gives the page back. Idempotent.
+func (p *Page) Close() {
+	if p == nil {
+		return
+	}
+	p.finalize()
+	runtime.SetFinalizer(p, nil)
+}
+
+// Closed is whether Close has already run. A nil Page counts as closed.
+func (p *Page) Closed() bool { return p == nil || p.handle == nil }
+
+func (p *Page) h() (*C.CadaclysmBlacksmithPage, error) {
+	if p == nil || p.handle == nil {
+		return nil, fmt.Errorf("page: %w", ErrClosed)
+	}
+	return p.handle, nil
+}
+
+// AddView places view's lines on the page, a view point q landing at at + scale * q: each
+// line as the entities that draw it best (lines, arcs, circles, elliptical arcs, splines).
+func (p *Page) AddView(view *Hlr, at [2]float64, scale float64) error {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return err
+	}
+	vh, err := view.h()
+	if err != nil {
+		return err
+	}
+	ok := bool(C.cadaclysm_blacksmith_page_add_view(h, vh, C.double(at[0]), C.double(at[1]), C.double(scale)))
+	runtime.KeepAlive(p)
+	runtime.KeepAlive(view)
+	if !ok {
+		return failure("page_add_view")
+	}
+	return nil
+}
+
+// AddProfile places profile's outline and holes on layer ("": layer 0), moved by at.
+func (p *Page) AddProfile(profile *Profile, at [2]float64, layer string) error {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return err
+	}
+	ph, err := profile.h()
+	if err != nil {
+		return err
+	}
+	cl, free := cOptional(layer)
+	defer free()
+	ok := bool(C.cadaclysm_blacksmith_page_add_profile(h, ph, cl, C.double(at[0]), C.double(at[1])))
+	runtime.KeepAlive(p)
+	runtime.KeepAlive(profile)
+	if !ok {
+		return failure("page_add_profile")
+	}
+	return nil
+}
+
+// AddHatch places profile hatched (its holes left out) on layer ("": hatch), moved by at:
+// pattern "SOLID", "ANSI31", "ANSI37" or "ANSI32"/"STEEL" ("" is ANSI31), turned angle
+// radians, its spacing times scale.
+func (p *Page) AddHatch(profile *Profile, pattern string, angle, scale float64, at [2]float64, layer string) error {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return err
+	}
+	ph, err := profile.h()
+	if err != nil {
+		return err
+	}
+	if pattern == "" {
+		pattern = "ANSI31"
+	}
+	cl, free := cOptional(layer)
+	defer free()
+	cp := C.CString(pattern)
+	defer C.free(unsafe.Pointer(cp))
+	ok := bool(C.cadaclysm_blacksmith_page_add_hatch(h, ph, cl, cp, C.double(angle), C.double(scale), C.double(at[0]), C.double(at[1])))
+	runtime.KeepAlive(p)
+	runtime.KeepAlive(profile)
+	if !ok {
+		return failure("page_add_hatch")
+	}
+	return nil
+}
+
+// AddText places one line of text on layer ("": text) at at, height tall, turned angle
+// radians; halign "left"/"center"/"right" and valign "baseline"/"bottom"/"middle"/"top" say
+// where at sits on it ("" is left and baseline).
+func (p *Page) AddText(text string, at [2]float64, height, angle float64, halign, valign, layer string) error {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return err
+	}
+	ct := C.CString(text)
+	defer C.free(unsafe.Pointer(ct))
+	cl, freeL := cOptional(layer)
+	defer freeL()
+	ch, freeH := cOptional(halign)
+	defer freeH()
+	cv, freeV := cOptional(valign)
+	defer freeV()
+	ok := bool(C.cadaclysm_blacksmith_page_add_text(h, ct, cl, C.double(at[0]), C.double(at[1]), C.double(height), C.double(angle), ch, cv))
+	runtime.KeepAlive(p)
+	if !ok {
+		return failure("page_add_text")
+	}
+	return nil
+}
+
+// EntityCount is how many entities the page holds.
+func (p *Page) EntityCount() (int, error) {
+	h, err := p.h()
+	if err != nil {
+		return 0, err
+	}
+	n := int(C.cadaclysm_blacksmith_page_entity_count(h))
+	runtime.KeepAlive(p)
+	return n, nil
+}
+
+// SVG is the page as an SVG document, one group per layer.
+func (p *Page) SVG() (string, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return "", err
+	}
+	raw := C.cadaclysm_blacksmith_page_svg_text(h)
+	runtime.KeepAlive(p)
+	return ownedText(raw, "page_svg_text")
+}
+
+// DXF is the page as DXF R2000 (AC1015) text: the same text for the same page.
+func (p *Page) DXF() (string, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return "", err
+	}
+	raw := C.cadaclysm_blacksmith_page_dxf_text(h)
+	runtime.KeepAlive(p)
+	return ownedText(raw, "page_dxf_text")
+}
+
+// DxfProfiles is a DXF file's closed loops as profiles: its lines, arcs, circles, ellipses,
+// polylines and splines (blocks inserted) chained end to end within tolerance (0: the
+// effective tolerance over the drawing's extents) into closed loops, holes nested in the
+// loops around them. A *BuildError for text that is not DXF, naming the line it stopped at.
+func DxfProfiles(text string, tolerance float64) ([]*Profile, error) {
+	defer pin()()
+	ct := C.CString(text)
+	defer C.free(unsafe.Pointer(ct))
+	return profileList(C.cadaclysm_blacksmith_dxf_profiles(ct, C.double(tolerance)), "dxf_profiles")
 }

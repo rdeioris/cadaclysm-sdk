@@ -310,6 +310,16 @@ public func loadFont(path: String) throws -> UInt32 {
 
 // ---- values ----------------------------------------------------------------------------------
 
+/// The colour every edge, curve or isocurve draws in (view ABI 1.23), as Python's
+/// `LineColour`: `colour` (0..1 RGB), or each part's own colour where `fromPart`.
+public struct LineColour: Equatable {
+    public var colour: SIMD3<Float>
+    public var fromPart: Bool
+    public init(colour: SIMD3<Float>, fromPart: Bool) {
+        self.colour = colour; self.fromPart = fromPart
+    }
+}
+
 /// How every "dashed" item's hidden lines and points look, as Python's `OccludedStyle`: a
 /// dash and a gap in points, the share of coverage kept (above 0, at most 1), and optionally
 /// one colour (0..1 RGB).
@@ -326,17 +336,19 @@ public struct OccludedStyle: Equatable {
 /// What is under a pixel: the item, the scene node (or a solid's 0) and the face; `clicks` 2
 /// for a double click's pick, else 1; `point` where the ray met the model, in the coordinates
 /// the items were shown in -- nil where the library read no depth (no hit, a machining stock,
-/// the terminal library).
+/// the terminal library). `overlay` (1.24): the item is an overlay -- it was over the pixel,
+/// so nothing of the scene beneath it was picked (`face` a text overlay's line, else 0).
 public struct ViewPick: Equatable {
     public let item: UInt32, node: UInt32, face: UInt32
     public let clicks: UInt32
     public let point: SIMD3<Float>?
+    public let overlay: Bool
 }
 
 /// A library's pick answer as a ViewPick.
 func pickOf(_ p: CadaclysmViewPick) -> ViewPick {
     ViewPick(item: p.item, node: p.node, face: p.face, clicks: p.clicks,
-             point: p.has_point != 0 ? SIMD3(p.point.0, p.point.1, p.point.2) : nil)
+             point: p.has_point != 0 ? SIMD3(p.point.0, p.point.1, p.point.2) : nil, overlay: p.overlay != 0)
 }
 
 /// What a snap may land on, and what it landed on: Python's names, the `CADACLYSM_VIEW_SNAP_*`
@@ -543,6 +555,25 @@ public class Item {
     /// again, as a show does: set it as each item is shown rather than over a finished scene item by
     /// item.
     public func finish(_ finish: Finish) throws { try ok("cadaclysm_view_set_finish") { t, v in t.pointee.set_finish!(v, id, finish.rawValue) } }
+    /// Draws the item's edges in `rgb` (see Colour), over the view's `setEdgeColour`, the item's
+    /// colour and a solid's own edge paint; nil takes the view's colour again.
+    public func setEdgeColour(_ rgb: (any Colour)?) throws { try lineColour(UInt32(CADACLYSM_VIEW_LAYER_EDGES), rgb) }
+    /// Draws the item's curves in `rgb`, over the view's `setCurveColour` and the item's colour;
+    /// nil takes the view's colour again.
+    public func setCurveColour(_ rgb: (any Colour)?) throws { try lineColour(UInt32(CADACLYSM_VIEW_LAYER_CURVES), rgb) }
+    /// Draws the item's isocurves in `rgb`, over the view's `setIsocurveColour` and the item's
+    /// colour; nil takes the view's colour again.
+    public func setIsocurveColour(_ rgb: (any Colour)?) throws { try lineColour(UInt32(CADACLYSM_VIEW_LAYER_ISOCURVES), rgb) }
+    private func lineColour(_ layer: UInt32, _ rgb: (any Colour)?) throws {
+        let c = try view.paint("cadaclysm_view_set_item_line_colour", rgb)
+        try ok("cadaclysm_view_set_item_line_colour") { t, v in withColour(c) { t.pointee.set_item_line_colour!(v, id, layer, $0) } }
+    }
+    /// Puts the item on user layer `layer`, 0...31 (every item starts on 0): it draws while the
+    /// layer is on (`View.userLayer`) and in the viewports whose `layerMask` has its bit. A
+    /// layer past 31 is refused.
+    public func userLayer(_ layer: UInt32) throws {
+        try ok("cadaclysm_view_set_item_layer") { t, v in t.pointee.set_item_layer!(v, id, layer) }
+    }
     /// Shows or hides a scene node (the reader's index) and its subtree.
     public func nodeVisible(_ node: UInt32, _ on: Bool) throws {
         try ok("cadaclysm_view_set_node_visible") { t, v in t.pointee.set_node_visible!(v, id, node, on) }
@@ -626,6 +657,18 @@ public struct MachiningOptions: Sendable {
         self.cell = cell; self.tolerance = tolerance; self.skin = skin; self.rapidRate = rapidRate
     }
 }
+/// What a view has drawn (`View.stats()`, view ABI 1.25): the frames drawn so far -- each frame
+/// drawn to the window, and each `image()` rendered; a pump or draw that owes nothing adds none --
+/// and the last frame's CPU time, GPU time (-1: not measurable), triangles and draw calls.
+public struct ViewStats: Equatable {
+    public var framesDrawn: UInt64
+    public var lastFrameMs: Float
+    /// -1: unknown (no timestamps on the device, the terminal).
+    public var lastGpuMs: Float
+    public var triangles: UInt64
+    public var drawCalls: UInt32
+}
+
 /// A machining's facts: `moves` in the job, `move` done as of the last draw, the heights'
 /// grid (`nx`, `ny`, `cell` mm, `min` the corner of cell (0, 0)) and the `cycleTime` in seconds.
 public struct MachiningInfo {
@@ -679,6 +722,57 @@ public final class Machining: Item {
     }
 }
 
+// ---- overlays (view ABI 1.24) ------------------------------------------------------------
+
+/// Where an overlay hangs in the window (view ABI 1.24): a corner, the middle of an edge, or
+/// the centre -- the `CADACLYSM_VIEW_ALIGN_*` codes as raw values. An overlay's offset is
+/// measured inward from it: x away from the left edge for the left column and from the right
+/// edge for the right one (rightward for the middle column); y down from the top edge for the
+/// top row and up from the bottom edge for the bottom one (upward for the middle row). So
+/// (`.topRight`, 10, 10) is 10 pixels in from the right and from the top.
+public enum Anchor: UInt32, CaseIterable, Sendable {
+    case topLeft = 0, top = 1, topRight = 2, left = 3, centre = 4, right = 5, bottomLeft = 6, bottom = 7, bottomRight = 8
+}
+
+/// How `View.showOverlay` draws a shape. `fill`: where set, its colour (see Colour; four
+/// numbers for an alpha), or "none" for no fill; nil, the profile's own colour
+/// (`Profile.coloured`), else white -- unless a `stroke` is set, when an uncoloured profile is
+/// not filled. `stroke`: only where set, `strokeWidth` pixels wide; an open profile, never
+/// filled, draws only with one. `order`: lower draws first, equal orders in show order
+/// (shapes, text and images share it).
+public struct OverlayStyle {
+    public var fill: (any Colour)?
+    public var stroke: (any Colour)?
+    public var strokeWidth: Float
+    public var order: Int32
+    public init(fill: (any Colour)? = nil, stroke: (any Colour)? = nil, strokeWidth: Float = 1, order: Int32 = 0) {
+        self.fill = fill
+        self.stroke = stroke
+        self.strokeWidth = strokeWidth
+        self.order = order
+    }
+}
+
+/// An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the
+/// window, drawn over everything, untouched by the camera. Every `Item` member works on it too
+/// (`remove`, `userLayer`, and `setText` on text).
+public final class Overlay: Item {
+    /// The anchor it hangs from now.
+    public private(set) var anchor: Anchor
+    init(view: View, id: UInt32, anchor: Anchor) {
+        self.anchor = anchor
+        super.init(view: view, id: id)
+    }
+    /// Moved to `x`, `y` pixels inward from its anchor (cadaclysm_view_move_overlay): cheap,
+    /// for a HUD element that moves every frame.
+    public func moveTo(x: Float, y: Float) throws { try moveTo(anchor, x: x, y: y) }
+    /// Hung from `anchor` instead, `x`, `y` pixels inward from it.
+    public func moveTo(_ anchor: Anchor, x: Float, y: Float) throws {
+        try ok("cadaclysm_view_move_overlay") { t, v in t.pointee.move_overlay!(v, id, anchor.rawValue, x, y) }
+        self.anchor = anchor
+    }
+}
+
 // ---- views -----------------------------------------------------------------------------------
 
 /// One view: a window of its own, an offscreen one, or one in a host's window.
@@ -700,15 +794,19 @@ public final class View {
     }
 
     /// One pane of `viewports`: its rectangle (x, y, width, height in physical pixels from the
-    /// top left), its camera's column-major view and projection, the eye, and a
-    /// `CADACLYSM_VIEW_GRID_*` grid.
+    /// top left), its camera's column-major view and projection, the eye, a
+    /// `CADACLYSM_VIEW_GRID_*` grid, and the user layers drawn in it (`layerMask`: bit n for
+    /// layer n, see `Item.userLayer`; every layer by default).
     public struct Viewport {
         public var rect: SIMD4<UInt32>
         public var view: [Float], projection: [Float]
         public var eye: SIMD3<Float>
         public var grid: UInt32
-        public init(rect: SIMD4<UInt32>, view: [Float], projection: [Float], eye: SIMD3<Float>, grid: UInt32 = 0) {
+        public var layerMask: UInt32
+        public init(rect: SIMD4<UInt32>, view: [Float], projection: [Float], eye: SIMD3<Float>, grid: UInt32 = 0,
+                    layerMask: UInt32 = 0xFFFF_FFFF) {
             self.rect = rect; self.view = view; self.projection = projection; self.eye = eye; self.grid = grid
+            self.layerMask = layerMask
         }
     }
 
@@ -1169,6 +1267,111 @@ public final class View {
         }
     }
 
+    // -- overlays (1.24): a HUD over the whole window
+
+    /// Rational cubic Beziers, sixteen floats each (x, y, z, w per control point, z not read:
+    /// a profile's `beziers()`), in pixels (y up), as one overlay hung `x`, `y` pixels inward
+    /// from `anchor`: loops split where a curve does not start where the last ended, closed
+    /// where one ends where it started; closed loops filled together by the even-odd rule,
+    /// stroked where `style` says. Drawn after everything else, never moved by the camera,
+    /// kept in place as the window resizes; a click on it picks it (`ViewPick.overlay`) and
+    /// nothing beneath. `showOverlay(_:anchor:x:y:style:)` takes a Profile (Blacksmith).
+    public func showOverlay(curves beziers: [Float], anchor: Anchor, x: Float, y: Float,
+                            style: OverlayStyle = OverlayStyle()) throws -> Overlay {
+        try showOverlayCurves(beziers, own: nil, anchor: anchor, x: x, y: y, style: style)
+    }
+    /// `showOverlay(curves:)` with the profile's own colour, `own` (r, g, b, a), for the fill
+    /// rule: what Blacksmith's `showOverlay` of a Profile builds on.
+    package func showOverlayCurves(_ beziers: [Float], own: [Float]?, anchor: Anchor, x: Float, y: Float,
+                                   style: OverlayStyle) throws -> Overlay {
+        if beziers.isEmpty || beziers.count % 16 != 0 {
+            throw ViewError("show_overlay: 16 numbers a curve, at least one, not \(beziers.count)")
+        }
+        let n = try count(beziers.count / 16, "show_overlay")
+        let stroke = try paint("cadaclysm_view_show_overlay", style.stroke)
+        var fill: [Float]?
+        if let text = style.fill as? String, text.trimmingCharacters(in: .whitespaces).lowercased() == "none" {
+            fill = nil
+        } else if let given = style.fill {
+            fill = try colourValues(library.table, given)
+        } else {
+            fill = own ?? (stroke == nil ? [1, 1, 1, 1] : nil)
+        }
+        return try add("cadaclysm_view_show_overlay", owner: nil, make: { Overlay(view: $0, id: $1, anchor: anchor) }) { t, v in
+            withFloats(beziers) { b -> UInt32 in
+                var o = CadaclysmViewOverlay()
+                o.size = UInt32(MemoryLayout<CadaclysmViewOverlay>.size)
+                o.anchor = anchor.rawValue
+                o.beziers = b
+                o.curve_count = n
+                o.order = style.order
+                o.offset = (x, y)
+                if let fill { o.has_fill = 1; o.fill_rgba = (fill[0], fill[1], fill[2], fill.count > 3 ? fill[3] : 1) }
+                if let stroke { o.has_stroke = 1; o.stroke_rgba = (stroke[0], stroke[1], stroke[2], stroke.count > 3 ? stroke[3] : 1) }
+                o.stroke_width = style.strokeWidth
+                return t.pointee.show_overlay!(v, &o)
+            }
+        }
+    }
+    /// Text over the window: its box hangs from `anchor` by the same point (its top-right
+    /// corner for `.topRight`), `x`, `y` pixels inward -- the box's padding included where it
+    /// has one. `size`, `colour`, `box`, `padding` and `font` as `showText`'s, in pixels;
+    /// `order` its place among the overlays. `Item.setText` changes it cheaply (a frame counter).
+    public func showOverlayText(_ text: String, anchor: Anchor, x: Float, y: Float, size: Float = 12,
+                                colour: any Colour = "white", box: (any Colour)? = nil, padding: Float = 4,
+                                font: UInt32 = 0, order: Int32 = 0) throws -> Overlay {
+        let s = try checkedText(text)
+        let rgb = try paint("cadaclysm_view_show_text", colour)!
+        let rgba = try box.map { try colourValues(library.table, $0) }
+        return try add("cadaclysm_view_show_text", owner: nil, make: { Overlay(view: $0, id: $1, anchor: anchor) }) { t, v in
+            s.withCString { chars -> UInt32 in
+                var x_ = CadaclysmViewText()
+                x_.size = UInt32(MemoryLayout<CadaclysmViewText>.size)
+                x_.text = chars
+                x_.mode = UInt32(CADACLYSM_VIEW_TEXT_SCREEN)
+                x_.height = size
+                x_.rgb = (rgb[0], rgb[1], rgb[2])
+                x_.align = anchor.rawValue
+                x_.offset = (x, y)
+                if let rgba { x_.box_rgba = (rgba[0], rgba[1], rgba[2], rgba[3]) }
+                x_.box_padding = padding
+                x_.on_top = 1
+                x_.font = font
+                x_.order = order
+                return t.pointee.show_text!(v, &x_)
+            }
+        }
+    }
+    /// An image over the window: `rgba` (width x height x 4 bytes, rows from the top, straight
+    /// alpha), its box hanging from `anchor` by the same point, `x`, `y` pixels inward, drawn
+    /// `drawWidth` x `drawHeight` pixels (0: its own size) at `opacity` (above 0, at most 1).
+    public func showOverlayImage(_ rgba: [UInt8], width: UInt32, height: UInt32, anchor: Anchor, x: Float, y: Float,
+                                 drawWidth: Float = 0, drawHeight: Float = 0, opacity: Float = 1,
+                                 order: Int32 = 0) throws -> Overlay {
+        let need = try pixelBytes(width, height, "show_overlay_image")
+        if rgba.count != need {
+            throw ViewError("show_overlay_image: \(width) x \(height) pixels need \(need) bytes (w * h * 4), not \(rgba.count)")
+        }
+        if !(opacity > 0) {
+            throw ViewError("show_overlay_image: opacity \(opacity): more than 0, at most 1 (0 would be the library's 1)")
+        }
+        return try add("cadaclysm_view_show_overlay_image", owner: nil, make: { Overlay(view: $0, id: $1, anchor: anchor) }) { t, v in
+            withBytes(rgba) { px -> UInt32 in
+                var image = CadaclysmViewOverlayImage()
+                image.size = UInt32(MemoryLayout<CadaclysmViewOverlayImage>.size)
+                image.anchor = anchor.rawValue
+                image.rgba = px
+                image.width = width
+                image.height = height
+                image.offset = (x, y)
+                image.extent = (drawWidth, drawHeight)
+                image.opacity = opacity
+                image.order = order
+                return t.pointee.show_overlay_image!(v, &image)
+            }
+        }
+    }
+
     // -- the camera
 
     /// Turns the camera by a drag of dx, dy pixels.
@@ -1235,7 +1438,7 @@ public final class View {
             withUnsafeMutableBytes(of: &r.projection) { _ = $0.bindMemory(to: Float.self).update(from: p.projection) }
             r.eye = (p.eye.x, p.eye.y, p.eye.z)
             r.grid = p.grid
-            r.layer_mask = 0xFFFF_FFFF  // every user layer
+            r.layer_mask = p.layerMask
             raw.append(r)
         }
         try ok("cadaclysm_view_set_viewports") { t, v in
@@ -1323,6 +1526,11 @@ public final class View {
     public func layer(_ which: UInt32, _ on: Bool) throws {
         try ok("cadaclysm_view_set_layer") { t, v in t.pointee.set_layer!(v, which, on) }
     }
+    /// Switches user layer `layer`, 0...31, on or off in every viewport (all start on); see
+    /// `Item.userLayer`. A layer past 31 is refused.
+    public func userLayer(_ layer: UInt32, _ on: Bool) throws {
+        try ok("cadaclysm_view_set_user_layer") { t, v in t.pointee.set_user_layer!(v, layer, on) }
+    }
     /// Levels of detail, as Python's `View.lod`: parts of `minTriangles` or more (0: the
     /// library's default, 2,048) get coarser levels, and a moving frame draws as `motion`
     /// says -- "detailed" or "smooth" (see wakeMs); nil turns them off (the default).
@@ -1336,6 +1544,38 @@ public final class View {
         lod.min_triangles = minTriangles
         lod.motion = UInt32(motion == "smooth" ? CADACLYSM_VIEW_LOD_SMOOTH : CADACLYSM_VIEW_LOD_DETAILED)
         try ok("cadaclysm_view_set_lod") { t, v in t.pointee.set_lod!(v, &lod) }
+    }
+    /// The colour every edge draws in: `rgb` (see Colour), or with `fromPart` each part's own
+    /// colour, brightened so an edge reads over its faces. An item's `setEdgeColour` draws over it.
+    public func setEdgeColour(_ rgb: any Colour, fromPart: Bool = false) throws {
+        try setLineColour(UInt32(CADACLYSM_VIEW_LAYER_EDGES), rgb, fromPart)
+    }
+    /// The edges' colour in use.
+    public func edgeColour() throws -> LineColour { try lineColour(UInt32(CADACLYSM_VIEW_LAYER_EDGES)) }
+    /// The colour every curve (a curves or lines item's) draws in: `rgb`, or with `fromPart` each
+    /// part's own colour -- the default.
+    public func setCurveColour(_ rgb: any Colour, fromPart: Bool = false) throws {
+        try setLineColour(UInt32(CADACLYSM_VIEW_LAYER_CURVES), rgb, fromPart)
+    }
+    /// The curves' colour in use.
+    public func curveColour() throws -> LineColour { try lineColour(UInt32(CADACLYSM_VIEW_LAYER_CURVES)) }
+    /// The colour every isocurve draws in: `rgb`, or with `fromPart` each part's own colour.
+    public func setIsocurveColour(_ rgb: any Colour, fromPart: Bool = false) throws {
+        try setLineColour(UInt32(CADACLYSM_VIEW_LAYER_ISOCURVES), rgb, fromPart)
+    }
+    /// The isocurves' colour in use.
+    public func isocurveColour() throws -> LineColour { try lineColour(UInt32(CADACLYSM_VIEW_LAYER_ISOCURVES)) }
+    private func setLineColour(_ layer: UInt32, _ rgb: any Colour, _ fromPart: Bool) throws {
+        let c = try paint("cadaclysm_view_set_line_colour", rgb)
+        try ok("cadaclysm_view_set_line_colour") { t, v in withColour(c) { t.pointee.set_line_colour!(v, layer, $0, fromPart ? 1 : 0) } }
+    }
+    private func lineColour(_ layer: UInt32) throws -> LineColour {
+        var rgb: [Float] = [0, 0, 0]
+        var fromPart: UInt32 = 0
+        try ok("cadaclysm_view_line_colour") { t, v in
+            rgb.withUnsafeMutableBufferPointer { t.pointee.line_colour!(v, layer, $0.baseAddress, &fromPart) }
+        }
+        return LineColour(colour: SIMD3<Float>(rgb[0], rgb[1], rgb[2]), fromPart: fromPart != 0)
     }
     /// The view-wide occluded style; nil sets the default back. "solid" and "off" items never use it.
     public func setOccludedStyle(_ style: OccludedStyle?) throws {
@@ -1523,6 +1763,15 @@ public final class View {
     public func needsDraw() throws -> Bool {
         let (t, v) = try live("cadaclysm_view_needs_draw")
         return t.pointee.needs_draw!(v)
+    }
+    /// What the view has drawn (cadaclysm_view_stats, 1.25): an FPS counter read from it stays
+    /// right while the scene is still.
+    public func stats() throws -> ViewStats {
+        var out = CadaclysmViewStats()
+        out.size = UInt32(MemoryLayout<CadaclysmViewStats>.size)
+        try ok("cadaclysm_view_stats") { t, v in t.pointee.stats!(v, &out) }
+        return ViewStats(framesDrawn: out.frames_drawn, lastFrameMs: out.last_frame_ms, lastGpuMs: out.last_gpu_ms,
+                         triangles: out.triangles, drawCalls: out.draw_calls)
     }
 
     // -- pump and release

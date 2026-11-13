@@ -918,6 +918,9 @@ func kernel(license string) {
 	machining()
 	edgeCurves()
 	intersections()
+	selfIntersections()
+	drawings()
+	check()
 	collider()
 	clash()
 	sweptClash()
@@ -4686,6 +4689,317 @@ func intersections() {
 	fmt.Printf("intersect: %v (%d ellipses); %v\n", found, ellipses, shared.Overlaps[0])
 }
 
+// selfIntersections: a thin rectangle swept open along a path that comes back across its own
+// start (a line to (10, 0, 0), a 270-degree turn about (10, 3, 0), a line down to (7, -5, 0))
+// crosses itself at (7, 0) in lines between two walls, never along its own edges; a cube
+// crosses nothing; a negative tolerance is refused in the kernel's words.
+func selfIntersections() {
+	const tol = 1e-3
+	back := blacksmith.NewSweepPath(0, 0, 0).LineTo([3]float64{10, 0, 0}).Arc([3]float64{10, 3, 0}, [3]float64{0, 0, 1}, 1.5*math.Pi).LineTo([3]float64{7, -5, 0})
+	defer back.Close()
+	slab, err := blacksmith.Rect(0.2, 5)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer slab.Close()
+	tube, err := blacksmith.SweepOpen(slab, blacksmith.Frame{0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0}, back)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer tube.Close()
+	faces, err := tube.Faces()
+	if err != nil {
+		fail(err.Error())
+	}
+	crossed, err := tube.SelfIntersections(tol)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(crossed.Chains) == 0 {
+		fail("self_intersections: the tube passes through itself at (7, 0)")
+	}
+	for _, c := range crossed.Chains {
+		if c.FaceA == c.FaceB || c.FaceA >= faces || c.FaceB >= faces {
+			fail(fmt.Sprintf("self_intersections: a chain reads %v", c))
+		}
+		if c.Curve == nil || c.Curve.Kind != "line" {
+			fail(fmt.Sprintf("self_intersections: two planar walls cross in a line: %v", c))
+		}
+		for _, p := range c.Points {
+			if math.Abs(p[0]-7) > 0.1+tol || math.Abs(p[1]) > 0.1+tol || math.Abs(p[2]) > 2.5+tol {
+				fail(fmt.Sprintf("self_intersections: a chain off the crossing: %v", c))
+			}
+		}
+	}
+	cube, err := blacksmith.Cuboid(4, 6, 8)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer cube.Close()
+	clean, err := cube.SelfIntersections(tol)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(clean.Chains) != 0 || len(clean.Overlaps) != 0 {
+		fail(fmt.Sprintf("self_intersections: a cube reads %v", clean))
+	}
+	if _, err := tube.SelfIntersections(-1.0); err == nil || !strings.Contains(err.Error(), "self_intersect: tolerance must be positive and finite") {
+		fail(fmt.Sprintf("self_intersections: a negative tolerance was accepted or refused in other words: %v", err))
+	}
+	fmt.Printf("self_intersections: %v\n", crossed)
+}
+
+// check: two clean cubes are a valid join; the tube selfIntersections sweeps, alone, has only
+// its crossing to report (an open sheet is no fault alone); as a cut's first argument it is
+// open, as a trim's tool too; a thin slab's edges are short; an unknown operation and a
+// negative tolerance are refused in the kernel's words.
+func check() {
+	const tol = 1e-3
+	back := blacksmith.NewSweepPath(0, 0, 0).LineTo([3]float64{10, 0, 0}).Arc([3]float64{10, 3, 0}, [3]float64{0, 0, 1}, 1.5*math.Pi).LineTo([3]float64{7, -5, 0})
+	defer back.Close()
+	slab, err := blacksmith.Rect(0.2, 5)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer slab.Close()
+	tube, err := blacksmith.SweepOpen(slab, blacksmith.Frame{0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0}, back)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer tube.Close()
+	cube, err := blacksmith.Cuboid(1, 1, 1)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer cube.Close()
+	ball, err := blacksmith.Sphere(2)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer ball.Close()
+	alone, err := cube.Check(nil, "", 0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	joined, err := cube.Check(ball, "join", tol)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(alone) != 0 || len(joined) != 0 {
+		fail(fmt.Sprintf("check: a cube alone reads %v, joined to a sphere %v", alone, joined))
+	}
+	crossing, err := tube.Check(nil, "", tol)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(crossing) == 0 {
+		fail("check: the tube passes through itself at (7, 0)")
+	}
+	for _, f := range crossing {
+		if f.Kind != "self_intersection" || f.Argument != 0 || f.Index == nil || f.Other == nil || *f.Index == *f.Other || f.Size <= 0.1 {
+			fail(fmt.Sprintf("check: the tube alone has only its crossing, not %+v", f))
+		}
+	}
+	asCut, err := tube.Check(cube, "cut", tol)
+	if err != nil {
+		fail(err.Error())
+	}
+	open := 0
+	for _, f := range asCut {
+		if f.Argument != 0 {
+			fail(fmt.Sprintf("check: the cube is fine as a cut's tool, not %+v", f))
+		}
+		if f.Kind == "open" {
+			if f.Other == nil || f.Size <= 0 {
+				fail(fmt.Sprintf("check: a free edge names its face and length, not %+v", f))
+			}
+			open++
+		}
+	}
+	if open == 0 {
+		fail("check: the open tube is no cut's first argument")
+	}
+	asTool, err := cube.Check(tube, "trim", tol)
+	if err != nil {
+		fail(err.Error())
+	}
+	toolOpen := false
+	for _, f := range asTool {
+		toolOpen = toolOpen || (f.Kind == "open" && f.Argument == 1)
+	}
+	if !toolOpen {
+		fail("check: a trim's tool must be closed")
+	}
+	thin, err := blacksmith.Cuboid(4, 4, 0.01)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer thin.Close()
+	small, err := thin.Check(nil, "", 0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	short := false
+	for _, f := range small {
+		short = short || (f.Kind == "short_edge" && f.Index != nil && f.Other == nil && f.Size < 0.05)
+	}
+	if !short {
+		fail(fmt.Sprintf("check: a 0.01 slab has short edges, not %+v", small))
+	}
+	const unknown = `check: unknown operation "union" (join, cut, common, split_sheet, trim, merge or intersect)`
+	if _, err := cube.Check(cube, "union", 0.05); err == nil || err.Error() != unknown {
+		fail(fmt.Sprintf("check: an unknown operation was accepted or refused in other words: %v", err))
+	}
+	if _, err := cube.Check(nil, "", -1.0); err == nil || err.Error() != "check: tolerance must be positive and finite" {
+		fail(fmt.Sprintf("check: a negative tolerance was accepted or refused in other words: %v", err))
+	}
+	fmt.Printf("check: %d crossings, %d free edges for a cut\n", len(crossing), open)
+}
+
+// drawings: the 10-cube on its diagonal shows nine edges and hides three (90 and 30 long), in
+// parallel, in perspective and as a triangle mesh; a plate with a through hole outlines as one
+// profile with one hole; a page of the view, a profile, a hatch and a text writes R2000 DXF,
+// and a page of the rectangle alone reads back through DxfProfiles where it was put.
+func drawings() {
+	cube, err := blacksmith.Cuboid(10, 10, 10)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer cube.Close()
+	o := blacksmith.NewHlrOptions()
+	o.Direction = [3]float64{-1, -1, -1}
+	view, err := blacksmith.HlrOf([]*blacksmith.Solid{cube}, &o)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer view.Close()
+	sum := func(lines []blacksmith.HlrLine) float64 {
+		total := 0.0
+		for _, l := range lines {
+			if l.Kind != "sharp" || l.Source.Kind != "edge" {
+				fail(fmt.Sprintf("hlr: a cube line reads %+v", l))
+			}
+			total += l.Length3D
+		}
+		return total
+	}
+	if len(view.Visible()) != 9 || len(view.Hidden()) != 3 || math.Abs(sum(view.Visible())-90) > 1e-6 || math.Abs(sum(view.Hidden())-30) > 1e-6 {
+		fail(fmt.Sprintf("hlr: %d visible, %d hidden", len(view.Visible()), len(view.Hidden())))
+	}
+	p := blacksmith.NewHlrOptions()
+	p.Eye = &[3]float64{30, 25, 20}
+	persp, err := blacksmith.HlrOf([]*blacksmith.Solid{cube}, &p)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer persp.Close()
+	if len(persp.Visible()) != 9 || len(persp.Hidden()) != 3 {
+		fail(fmt.Sprintf("hlr in perspective: %d visible, %d hidden", len(persp.Visible()), len(persp.Hidden())))
+	}
+	mesh, err := blacksmith.NewTriangleMesh(
+		[][3]float64{{-5, -5, -5}, {5, -5, -5}, {5, 5, -5}, {-5, 5, -5}, {-5, -5, 5}, {5, -5, 5}, {5, 5, 5}, {-5, 5, 5}},
+		[][3]uint32{{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4}, {3, 7, 6}, {3, 6, 2}, {0, 4, 7}, {0, 7, 3}, {1, 2, 6}, {1, 6, 5}})
+	if err != nil {
+		fail(err.Error())
+	}
+	defer mesh.Close()
+	mv, err := blacksmith.HlrMesh([]*blacksmith.TriangleMesh{mesh}, &o)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer mv.Close()
+	if len(mv.Visible()) != 9 || len(mv.Hidden()) != 3 || mv.Lines[0].Source.Kind != "mesh_edge" {
+		fail(fmt.Sprintf("hlr_mesh: %d visible, %d hidden", len(mv.Visible()), len(mv.Hidden())))
+	}
+	up := o
+	up.Direction = [3]float64{0, 0, -1}
+	if _, err := blacksmith.HlrOf([]*blacksmith.Solid{cube}, &up); err == nil || !strings.Contains(err.Error(), "hlr: up is along the view") {
+		fail(fmt.Sprintf("hlr: up along the view: %v", err))
+	}
+
+	plate, err := blacksmith.Cuboid(40, 30, 5)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer plate.Close()
+	pin, err := blacksmith.Cylinder(5, 20)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer pin.Close()
+	drill, err := pin.Translate(0, 0, -10)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer drill.Close()
+	holed, err := plate.Cut(drill, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer holed.Close()
+	top := blacksmith.NewHlrOptions()
+	top.Direction, top.Up = [3]float64{0, 0, -1}, [3]float64{0, 1, 0}
+	outline, err := blacksmith.ProjectedOutline([]*blacksmith.Solid{holed}, &top)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(outline) != 1 {
+		fail(fmt.Sprintf("projected_outline: %d profiles", len(outline)))
+	}
+	for _, q := range outline {
+		q.Close()
+	}
+
+	rect, err := blacksmith.Rect(40, 20)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer rect.Close()
+	page, err := blacksmith.NewPage("mm")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer page.Close()
+	for _, step := range []error{
+		page.AddView(view, [2]float64{50, 50}, 2),
+		page.AddProfile(rect, [2]float64{150, 50}, "parts"),
+		page.AddHatch(rect, "ANSI31", 0, 1, [2]float64{150, 50}, ""),
+		page.AddText("PLATE", [2]float64{150, 30}, 3.5, 0, "center", "", ""),
+	} {
+		if step != nil {
+			fail(step.Error())
+		}
+	}
+	if n, _ := page.EntityCount(); n != 15 {
+		fail(fmt.Sprintf("page: %d entities, want 15", n))
+	}
+	dxf, err := page.DXF()
+	if err != nil || !strings.HasPrefix(dxf, "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n") {
+		fail(fmt.Sprintf("page_dxf_text: %v", err))
+	}
+	alone, err := blacksmith.NewPage("")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer alone.Close()
+	if err := alone.AddProfile(rect, [2]float64{150, 50}, ""); err != nil {
+		fail(err.Error())
+	}
+	text, err := alone.DXF()
+	if err != nil {
+		fail(err.Error())
+	}
+	back, err := blacksmith.DxfProfiles(text, 0)
+	if err != nil || len(back) != 1 {
+		fail(fmt.Sprintf("dxf_profiles: %d profiles, %v", len(back), err))
+	}
+	defer back[0].Close()
+	if err := page.AddHatch(rect, "BRICK", 0, 1, [2]float64{}, ""); err == nil || !strings.Contains(err.Error(), "page_add_hatch: pattern") {
+		fail(fmt.Sprintf("page_add_hatch: BRICK: %v", err))
+	}
+	fmt.Printf("drawings: %d lines, page of 15 entities, DXF %d bytes\n", len(view.Lines), len(dxf))
+}
+
 // collider: two cuboids overlapping by 2 along x, plus one far away -> one hit (0, 1),
 // depth 2, Solid() non-null.
 func collider() {
@@ -7671,6 +7985,83 @@ func curveSheets() {
 	check(math.Abs(body.Area-2*one.Area) < 0.01*one.Area, fmt.Sprintf("mirror_join area %g against %g", body.Area, one.Area))
 	_, _, err = smooth.MirrorJoin(mirror, 0, 0)
 	refused(err, "mirror_join: the half lies on both sides of the plane")
+
+	// 6b'': holes, ribs and webs, patterns -- the literals Python's suite pins.
+	{
+		volume := func(s *blacksmith.Solid) float64 {
+			m, err := s.Mass(0)
+			must(err)
+			return m.Volume
+		}
+		near := func(got, want, rel float64) bool { return math.Abs(got-want) <= rel*math.Abs(want) }
+		box := func(w, d, h, x, y, z float64) *blacksmith.Solid {
+			c := solid(blacksmith.Cuboid(w, d, h))
+			return solid(c.Translate(x, y, z))
+		}
+		frame := func(o, x, y, z [3]float64) blacksmith.Frame {
+			f, err := blacksmith.NewFrame(o, x, y, z)
+			must(err)
+			return f
+		}
+		blk := box(40, 30, 20, 20, 15, 10)
+		drilled, hr, err := blk.Hole([][3]float64{{10, 15, 20}}, 4, blacksmith.HoleOptions{})
+		must(err)
+		check(near(volume(drilled), 24000-80*math.Pi, 1e-6) && faces(drilled) == 7, fmt.Sprintf("hole: volume %g, %d faces", volume(drilled), faces(drilled)))
+		check(hr.Holes == 1 && hr.FacesAdded == 1 && len(hr.Bottoms) == 1 && math.Abs(hr.Bottoms[0]-20) < 1e-9, fmt.Sprintf("hole report %+v", hr))
+		_, _, err = blk.Hole([][3]float64{{10, 15, 20}}, 0, blacksmith.HoleOptions{})
+		refused(err, "hole: diameter 0 is not positive and finite")
+		bit := solid(blk.HoleTool([][3]float64{{10, 15, 20}}, 4, blacksmith.HoleOptions{}))
+		check(volume(bit) > 80*math.Pi, fmt.Sprintf("hole_tool volume %g", volume(bit)))
+
+		plate := box(100, 60, 10, 50, 30, 5)
+		cyl := solid(blacksmith.Cylinder(3, 30))
+		tool := solid(cyl.Translate(10, 10, -10))
+		dir2 := [3]float64{0, 1, 0}
+		grid, err := blacksmith.PatternRectangular([3]float64{1, 0, 0}, 4, 20, &dir2, 3, 20, false, nil)
+		must(err)
+		check(len(grid) == 12, fmt.Sprintf("pattern_rectangular: %d placements", len(grid)))
+		holed, pr, err := plate.PatternFeature(tool, blacksmith.FeatureCut, grid, 0)
+		must(err)
+		check(near(volume(holed), 60000-1080*math.Pi, 1e-6), fmt.Sprintf("pattern_feature volume %g", volume(holed)))
+		check(pr == blacksmith.PatternReport{Instances: 12, Booleans: 1, Missed: 0}, fmt.Sprintf("pattern_feature report %+v", pr))
+
+		row, err := blacksmith.PatternRectangular([3]float64{1, 0, 0}, 3, 10, nil, 1, 0, false, nil)
+		must(err)
+		check(len(row) == 3 && row[0].Rows() == [16]float64{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1} &&
+			row[1].Rows() == [16]float64{1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}, fmt.Sprintf("pattern_rectangular row %v", row))
+		_, err = blacksmith.PatternRectangular([3]float64{1, 0, 0}, 0, 10, nil, 1, 0, false, nil)
+		refused(err, "pattern_rectangular: count1 is 0")
+		pair, err := blacksmith.PatternRectangular([3]float64{1, 0, 0}, 2, 8, nil, 1, 0, false, nil)
+		must(err)
+		bodies, pr, err := blk.Pattern(pair[:2], 0)
+		must(err)
+		check(pr.Instances == 2 && pr.Booleans == 1 && near(volume(bodies), 28800, 1e-6), fmt.Sprintf("pattern: %+v, volume %g", pr, volume(bodies)))
+
+		ring, err := blacksmith.PatternCircular([3]float64{}, [3]float64{0, 0, 1}, 6, 2*math.Pi, false, nil)
+		must(err)
+		check(len(ring) == 6 && math.Abs(ring[1].Rows()[0]-0.5) < 1e-12, fmt.Sprintf("pattern_circular %v", ring))
+		along, err := blacksmith.PatternAlong(line([3]float64{}, [3]float64{30, 0, 0}), 4, nil, blacksmith.OrientFixed, nil)
+		must(err)
+		check(len(along) == 4 && math.Abs(along[3].Rows()[3]-30) < 1e-9, fmt.Sprintf("pattern_along %v", along))
+
+		l := solid(box(40, 30, 5, 20, 15, 2.5).Join(box(5, 30, 40, 2.5, 15, 20), blacksmith.DefaultTolerance))
+		check(near(volume(l), 11250, 1e-6), fmt.Sprintf("L volume %g", volume(l)))
+		diag := line([3]float64{30, 15, 5}, [3]float64{5, 15, 30})
+		side := frame([3]float64{0, 15, 0}, [3]float64{1, 0, 0}, [3]float64{0, 0, 1}, [3]float64{0, -1, 0})
+		ribbed := solid(l.Rib(diag, side, 4, blacksmith.RibBoth, nil, 0))
+		check(near(volume(ribbed), 11250+1250, 1e-6), fmt.Sprintf("rib volume %g", volume(ribbed)))
+		slab := solid(l.RibTool(diag, side, 4, blacksmith.RibFront, nil, 0))
+		check(near(volume(slab), 1250, 1e-6), fmt.Sprintf("rib_tool volume %g", volume(slab)))
+
+		tray := solid(box(60, 40, 20, 30, 20, 10).Cut(box(56, 36, 18, 30, 20, 11), blacksmith.DefaultTolerance))
+		top := frame([3]float64{0, 0, 10}, [3]float64{1, 0, 0}, [3]float64{0, -1, 0}, [3]float64{0, 0, -1})
+		spine := line([3]float64{10, 20, 10}, [3]float64{50, 20, 10})
+		webbed := solid(tray.Web(curves(spine), top, 3, blacksmith.WebBoth, nil, false, 0))
+		check(near(volume(webbed)-volume(tray), 1344, 1e-6), fmt.Sprintf("web added %g", volume(webbed)-volume(tray)))
+		six := 6.0
+		walls := solid(tray.WebTool(curves(spine), top, 3, blacksmith.WebBoth, &six, false, 0))
+		check(volume(walls) > 0, fmt.Sprintf("web_tool volume %g", volume(walls)))
+	}
 
 	// 6c: curves on a sheet -- a ring on a square offset along it, split along it, parted by a panel gap.
 	sq := rect([3]float64{}, x, y, 40, 40)

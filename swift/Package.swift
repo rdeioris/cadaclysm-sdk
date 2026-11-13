@@ -1,8 +1,8 @@
 // swift-tools-version:5.9
 //
-// cadaclysm for Swift: the CAD readers (`Cadaclysm`, over cadaclysm_capi) and the
-// blacksmith B-rep kernel (`Blacksmith`, over cadaclysm_blacksmith), with the same object
-// model as the Python, C#, Go, Java and Node.js wrappers.
+// cadaclysm for Swift: the CAD readers (`Cadaclysm`) and the blacksmith B-rep kernel
+// (`Blacksmith`), over the single cadaclysm library, with the same object model as the
+// Python, C#, Go, Java and Node.js wrappers.
 //
 //   swift build
 //   swift run cadaclysm-smoke [model] [license]
@@ -16,7 +16,22 @@
 //   2. in an SDK checkout (fetch.py beside this package's directory), ../lib -- where
 //      `python fetch.py` puts them;
 //   3. in the cadaclysm repository, its target/release -- after
-//      `cargo build --release -p cadaclysm-capi -p cadaclysm-blacksmith-capi`.
+//      `cargo build --release -p cadaclysm-lib-full` (CADACLYSM_FLAVOUR=reader:
+//      `-p cadaclysm-lib-reader`; separate: `-p cadaclysm-capi -p cadaclysm-blacksmith-capi`).
+//
+// Which library, by CADACLYSM_FLAVOUR (a linked program cannot leave a symbol out, so the
+// choice is made when the package is built):
+//
+//   - unset or `full`: the single library's full flavour, `cadaclysm`, for both modules --
+//     one library, one licence, one error slot;
+//   - `reader`: the reader flavour, `cadaclysm_reader`, for a program that uses
+//     `Cadaclysm` alone. The flavour has no kernel, so this package then has no
+//     `Blacksmith` module, no smoke (it builds both) and none of the tests that import
+//     `Blacksmith`: `import Blacksmith` fails with no such module;
+//   - `separate`: the separate `cadaclysm_capi` and `cadaclysm_blacksmith` of earlier
+//     releases.
+//
+// `flavour()` and `features()` in each module say which it is.
 //
 // The choice is made from the layout, never from whether the libraries are there yet:
 // SwiftPM caches this manifest's result until its text or the environment changes, so a
@@ -50,58 +65,104 @@ let viewDir = libDir.replacingOccurrences(of: "\\", with: "/")
 let viewDirSettings: [CSetting] = viewDir.contains(where: { $0 == " " || $0 == "\"" || $0 == "'" })
     ? [] : [.define("CVL_SWIFT_LIBRARY_DIR", to: "\"\(viewDir)\"")]
 
-// Windows: a cargo target/ holds cadaclysm_capi.dll.lib (the import library) beside
-// cadaclysm_capi.lib, which there is the STATIC library; an SDK's lib/ holds only the
-// import library, renamed cadaclysm_capi.lib. The layout says which; a directory named by
+let flavour = ProcessInfo.processInfo.environment["CADACLYSM_FLAVOUR"].flatMap { $0.isEmpty ? nil : $0 } ?? "full"
+// The library each module links, and the compilation condition the sources and tests read
+// (CADACLYSM_READER, CADACLYSM_SEPARATE; neither for full). The kernel links nothing of its
+// own unless it is the separate library: it uses the reader's.
+let (readerStem, kernelStem, conditions): (String, String?, [SwiftSetting]) = {
+    switch flavour {
+    case "full": return ("cadaclysm", nil, [])
+    case "reader": return ("cadaclysm_reader", nil, [.define("CADACLYSM_READER")])
+    case "separate": return ("cadaclysm_capi", "cadaclysm_blacksmith", [.define("CADACLYSM_SEPARATE")])
+    default: fatalError("CADACLYSM_FLAVOUR=\(flavour): use full (the default), reader or separate")
+    }
+}()
+let withKernel = flavour != "reader"
+
+// Windows: a cargo target/ holds cadaclysm.dll.lib (the import library) beside
+// cadaclysm.lib, which there is the STATIC library; an SDK's lib/ holds only the import
+// library, renamed cadaclysm.lib. The layout says which; a directory named by
 // CADACLYSM_LIB_DIR is asked, being one the caller has already filled.
-let cargoTarget = environment.map { FileManager.default.fileExists(atPath: $0 + "/cadaclysm_capi.dll.lib") } ?? inRepository
+let cargoTarget = environment.map { FileManager.default.fileExists(atPath: $0 + "/\(readerStem).dll.lib") } ?? inRepository
 let windowsSuffix = cargoTarget ? ".dll" : ""
 
 // The search path and rpath go on the reader alone: the kernel depends on it, so anything
 // linking the kernel links through the reader too, and a second copy of the flags makes
 // the macOS linker warn about a duplicate -rpath.
 let readerLinks: [LinkerSetting] = [
-    .linkedLibrary("cadaclysm_capi", .when(platforms: [.macOS, .linux])),
-    .linkedLibrary("cadaclysm_capi" + windowsSuffix, .when(platforms: [.windows])),
+    .linkedLibrary(readerStem, .when(platforms: [.macOS, .linux])),
+    .linkedLibrary(readerStem + windowsSuffix, .when(platforms: [.windows])),
     .unsafeFlags(["-L", libDir], .when(platforms: [.macOS, .linux, .windows])),
     .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", libDir], .when(platforms: [.macOS, .linux])),
 ]
-let kernelLinks: [LinkerSetting] = [
-    .linkedLibrary("cadaclysm_blacksmith", .when(platforms: [.macOS, .linux])),
-    .linkedLibrary("cadaclysm_blacksmith" + windowsSuffix, .when(platforms: [.windows])),
-]
+let kernelLinks: [LinkerSetting] = kernelStem.map { stem in [
+    .linkedLibrary(stem, .when(platforms: [.macOS, .linux])),
+    .linkedLibrary(stem + windowsSuffix, .when(platforms: [.windows])),
+] } ?? []
+
+// The tests that import Blacksmith, left out with the kernel (the reader flavour).
+let testsDir = here.appendingPathComponent("Tests/CadaclysmTests")
+let kernelTests = withKernel ? [] : ((try? FileManager.default.contentsOfDirectory(atPath: testsDir.path)) ?? [])
+    .filter { $0.hasSuffix(".swift") }
+    .filter { (try? String(contentsOf: testsDir.appendingPathComponent($0), encoding: .utf8))?.contains("import Blacksmith") ?? false }
+    .sorted()
 
 let readerFramework = "Frameworks/CadaclysmCapi.xcframework"
 let haveReaderFramework = FileManager.default.fileExists(atPath: here.appendingPathComponent(readerFramework).path)
 
+// The package is built in typed pieces: one expression holding every conditional list
+// takes Swift 6.1's type checker past its time limit ("unable to type-check this expression
+// in reasonable time").
+var products: [Product] = [
+    .library(name: "Cadaclysm", targets: ["Cadaclysm"]),
+    .library(name: "CadaclysmView", targets: ["CadaclysmView"]),
+]
+if withKernel {
+    products.append(.library(name: "Blacksmith", targets: ["Blacksmith"]))
+    products.append(.executable(name: "cadaclysm-smoke", targets: ["cadaclysm-smoke"]))
+}
+
+var readerDependencies: [Target.Dependency] = ["CCadaclysm", "CadaclysmView"]
+if haveReaderFramework {
+    readerDependencies.append(.target(name: "CadaclysmCapi", condition: .when(platforms: [.iOS])))
+}
+var testDependencies: [Target.Dependency] = ["Cadaclysm", "CadaclysmView"]
+if withKernel {
+    testDependencies.append("Blacksmith")
+}
+
+var targets: [Target] = [
+    .systemLibrary(name: "CCadaclysm", path: "Sources/CCadaclysm"),
+    .systemLibrary(name: "CCadaclysmBlacksmith", path: "Sources/CCadaclysmBlacksmith"),
+    // The view library is opened at run time (the library choice demands it): a C
+    // target holds the table (view_loader.h, a copy kept by bindings.rs), and links
+    // nothing of the view -- only libdl and libm on Linux (dlopen; the camera's atan2,
+    // asin, hypot, log).
+    .target(name: "CCadaclysmView", path: "Sources/CCadaclysmView",
+            cSettings: viewDirSettings,
+            linkerSettings: [.linkedLibrary("dl", .when(platforms: [.linux])),
+                             .linkedLibrary("m", .when(platforms: [.linux]))]),
+    .target(name: "CadaclysmView", dependencies: ["CCadaclysmView"]),
+    .target(name: "Cadaclysm",
+            dependencies: readerDependencies,
+            swiftSettings: conditions,
+            linkerSettings: readerLinks),
+    .testTarget(name: "CadaclysmTests", dependencies: testDependencies,
+                exclude: kernelTests, swiftSettings: conditions),
+]
+if withKernel {
+    targets.append(.target(name: "Blacksmith", dependencies: ["CCadaclysmBlacksmith", "Cadaclysm", "CadaclysmView"],
+                           swiftSettings: conditions,
+                           linkerSettings: kernelLinks))
+    targets.append(.executableTarget(name: "cadaclysm-smoke", dependencies: ["Cadaclysm", "Blacksmith"]))
+}
+if haveReaderFramework {
+    targets.append(.binaryTarget(name: "CadaclysmCapi", path: readerFramework))
+}
+
 let package = Package(
     name: "Cadaclysm",
     platforms: [.macOS(.v13), .iOS(.v16)],
-    products: [
-        .library(name: "Cadaclysm", targets: ["Cadaclysm"]),
-        .library(name: "Blacksmith", targets: ["Blacksmith"]),
-        .library(name: "CadaclysmView", targets: ["CadaclysmView"]),
-        .executable(name: "cadaclysm-smoke", targets: ["cadaclysm-smoke"]),
-    ],
-    targets: [
-        .systemLibrary(name: "CCadaclysm", path: "Sources/CCadaclysm"),
-        .systemLibrary(name: "CCadaclysmBlacksmith", path: "Sources/CCadaclysmBlacksmith"),
-        // The view library is opened at run time (the library choice demands it): a C
-        // target holds the table (view_loader.h, a copy kept by bindings.rs), and links
-        // nothing of the view -- only libdl and libm on Linux (dlopen; the camera's atan2,
-        // asin, hypot, log).
-        .target(name: "CCadaclysmView", path: "Sources/CCadaclysmView",
-                cSettings: viewDirSettings,
-                linkerSettings: [.linkedLibrary("dl", .when(platforms: [.linux])),
-                                 .linkedLibrary("m", .when(platforms: [.linux]))]),
-        .target(name: "CadaclysmView", dependencies: ["CCadaclysmView"]),
-        .target(name: "Cadaclysm",
-                dependencies: ["CCadaclysm", "CadaclysmView"]
-                    + (haveReaderFramework ? [.target(name: "CadaclysmCapi", condition: .when(platforms: [.iOS]))] : []),
-                linkerSettings: readerLinks),
-        .target(name: "Blacksmith", dependencies: ["CCadaclysmBlacksmith", "Cadaclysm", "CadaclysmView"],
-                linkerSettings: kernelLinks),
-        .executableTarget(name: "cadaclysm-smoke", dependencies: ["Cadaclysm", "Blacksmith"]),
-        .testTarget(name: "CadaclysmTests", dependencies: ["Cadaclysm", "Blacksmith", "CadaclysmView"]),
-    ] + (haveReaderFramework ? [.binaryTarget(name: "CadaclysmCapi", path: readerFramework)] : [])
+    products: products,
+    targets: targets
 )

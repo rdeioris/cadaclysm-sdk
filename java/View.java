@@ -66,8 +66,12 @@ public final class View implements AutoCloseable {
      * 1.21: {@code cadaclysm_view_show_solid_faces} (a solid in a material and an opacity, all or some faces).
      * 1.22: snapping -- {@code cadaclysm_view_set_snap}, {@code _request_snap_in}, {@code _snap_result},
      * {@code _clear_snap}, {@code _set_work_plane}, {@code _clear_work_plane}.
+     * 1.23: {@code cadaclysm_view_set_line_colour}, {@code _line_colour} and {@code _set_item_line_colour}.
+     * 1.24: overlays -- {@code cadaclysm_view_show_overlay}, {@code _show_overlay_image}, {@code _move_overlay},
+     * screen text and the pick's overlay flag.
+     * 1.25: {@code cadaclysm_view_stats} (frames drawn, the last frame's CPU and GPU time, triangles, draw calls).
      */
-    static final int ABI_MINOR = 22;
+    static final int ABI_MINOR = 25;
     /** CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0). */
     static final int NAVIGATION_FLY = 1;
     static final int OPEN = 1;
@@ -144,7 +148,8 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("face"),
             ValueLayout.JAVA_INT.withName("clicks"),
             ValueLayout.JAVA_INT.withName("has_point"),
-            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("point"));
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("point"),
+            ValueLayout.JAVA_INT.withName("overlay"));
     static final MemoryLayout LOD = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
             ValueLayout.JAVA_INT.withName("min_triangles"),
@@ -171,6 +176,13 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_DOUBLE.withName("radius"),
             ValueLayout.JAVA_FLOAT.withName("distance_px"),
             ValueLayout.JAVA_INT.withName("clicks"));
+
+    /** CADACLYSM_VIEW_LAYER_EDGES, _CURVES and _ISOCURVES: the layers the line colours take. */
+    static final int LAYER_EDGES = 1, LAYER_CURVES = 2, LAYER_ISOCURVES = 3;
+
+    /** The colour every edge, curve or isocurve draws in ({@link View#edgeColour()} and its siblings): {@code colour} (3 numbers in 0..1), or each part's own colour where {@code fromPart}. */
+    public record LineColour(float[] colour, boolean fromPart) {
+    }
 
     /** How every "dashed" item's hidden lines and points look: dash and gap in points, the coverage kept (0..1, above 0), an optional colour (3 numbers in 0..1). */
     public record OccludedStyle(float dash, float gap, float dim, float[] colour) {
@@ -251,6 +263,16 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_FLOAT.withName("cell"),
             MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_FLOAT).withName("min"),
             ValueLayout.JAVA_DOUBLE.withName("cycle_time"));
+    /** CadaclysmViewStats, 1.25: 40 bytes, padded explicitly. */
+    static final MemoryLayout STATS = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("pad0"),
+            ValueLayout.JAVA_LONG.withName("frames_drawn"),
+            ValueLayout.JAVA_FLOAT.withName("last_frame_ms"),
+            ValueLayout.JAVA_FLOAT.withName("last_gpu_ms"),
+            ValueLayout.JAVA_LONG.withName("triangles"),
+            ValueLayout.JAVA_INT.withName("draw_calls"),
+            ValueLayout.JAVA_INT.withName("pad1"));
     /** CADACLYSM_VIEW_TOOL_FLAT .. _BULLNOSE, in order. */
     static final List<String> TOOL_SHAPES = List.of("flat", "ball", "drill", "vbit", "bullnose");
     /** The machining's colour modes, in CADACLYSM_VIEW_MACHINING_COLOUR_* order. */
@@ -281,7 +303,34 @@ public final class View implements AutoCloseable {
             MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_FLOAT).withName("box_rgba"),
             ValueLayout.JAVA_FLOAT.withName("box_padding"),
             ValueLayout.JAVA_INT.withName("on_top"),
-            ValueLayout.JAVA_INT.withName("font"));
+            ValueLayout.JAVA_INT.withName("font"),
+            ValueLayout.JAVA_INT.withName("order"),
+            MemoryLayout.paddingLayout(4));
+    /** CADACLYSM_VIEW_TEXT_SCREEN (1.24): an overlay's text, hung from a window anchor. */
+    static final int TEXT_SCREEN = 2;
+    static final MemoryLayout OVERLAY = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("anchor"),
+            ValueLayout.ADDRESS.withName("beziers"),
+            ValueLayout.JAVA_INT.withName("curve_count"),
+            ValueLayout.JAVA_INT.withName("order"),
+            MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_FLOAT).withName("offset"),
+            ValueLayout.JAVA_INT.withName("has_fill"),
+            MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_FLOAT).withName("fill_rgba"),
+            ValueLayout.JAVA_INT.withName("has_stroke"),
+            MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_FLOAT).withName("stroke_rgba"),
+            ValueLayout.JAVA_FLOAT.withName("stroke_width"),
+            MemoryLayout.paddingLayout(4));
+    static final MemoryLayout OVERLAY_IMAGE = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("anchor"),
+            ValueLayout.ADDRESS.withName("rgba"),
+            ValueLayout.JAVA_INT.withName("width"),
+            ValueLayout.JAVA_INT.withName("height"),
+            MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_FLOAT).withName("offset"),
+            MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_FLOAT).withName("extent"),
+            ValueLayout.JAVA_FLOAT.withName("opacity"),
+            ValueLayout.JAVA_INT.withName("order"));
     static final MemoryLayout VIEWPORT_CAMERA = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
             ValueLayout.JAVA_INT.withName("kind"),
@@ -343,11 +392,12 @@ public final class View implements AutoCloseable {
         private final String name;
         private final String path;
         MethodHandle lastError, create, destroy, pump, run, resize, needsDraw, draw, show, remove, setSurfaces,
-                surfaces, orbit, pan, zoom, frame, standard, setOrthographic, setLayer, setBackground, setNodeVisible,
+                surfaces, orbit, pan, zoom, frame, standard, setOrthographic, setLayer, setItemLayer, setUserLayer, setBackground, setNodeVisible,
                 setNodeColor, setNodeHighlight, setViewports, requestPick, requestPickIn, pickResult, frameNode, look,
                 dolly, input, showMesh, showLines, showPoints, showCurves, showImage, setColour, setXray, setOccluded, setFinish, setFaceColours,
                 setPlacement, showSolid, showSolidFaces, image, size, setLod, wakeMs, setNodeTransforms, parseColour, loadFont, showText,
                 setText, setDoubleClickFrames, focus, navigation, setLighting, lighting, setOccludedStyle, occludedStyle,
+                setLineColour, lineColour, setItemLineColour, showOverlay, showOverlayImage, moveOverlay, stats,
                 setSnap, requestSnapIn, snapResult, clearSnap, setWorkPlane, clearWorkPlane, viewportCamera,
                 setViewportCamera, setViewportRects, aim, setPivot, setTap, orbitIn, panIn, zoomIn, lookIn, dollyIn,
                 frameIn, standardIn, showMachining, machiningSeek, machiningColourBy, machiningOverlays, machiningInfo,
@@ -391,6 +441,8 @@ public final class View implements AutoCloseable {
             standard = bind(linker, lib, "cadaclysm_view_standard", FunctionDescriptor.of(B, A, I));
             setOrthographic = bind(linker, lib, "cadaclysm_view_set_orthographic", FunctionDescriptor.ofVoid(A, B));
             setLayer = bind(linker, lib, "cadaclysm_view_set_layer", FunctionDescriptor.of(B, A, I, B));
+            setItemLayer = bind(linker, lib, "cadaclysm_view_set_item_layer", FunctionDescriptor.of(B, A, I, I));
+            setUserLayer = bind(linker, lib, "cadaclysm_view_set_user_layer", FunctionDescriptor.of(B, A, I, B));
             setBackground = bind(linker, lib, "cadaclysm_view_set_background", FunctionDescriptor.ofVoid(A, A));
             setLod = bind(linker, lib, "cadaclysm_view_set_lod", FunctionDescriptor.of(B, A, A));
             wakeMs = bind(linker, lib, "cadaclysm_view_wake_ms", FunctionDescriptor.of(I, A));
@@ -431,6 +483,15 @@ public final class View implements AutoCloseable {
             lighting = bind(linker, lib, "cadaclysm_view_lighting", FunctionDescriptor.of(I, A));
             setOccludedStyle = bind(linker, lib, "cadaclysm_view_set_occluded_style", FunctionDescriptor.of(B, A, A));
             occludedStyle = bind(linker, lib, "cadaclysm_view_occluded_style", FunctionDescriptor.of(B, A, A));
+            setLineColour = bind(linker, lib, "cadaclysm_view_set_line_colour", FunctionDescriptor.of(B, A, I, A, I));
+            lineColour = bind(linker, lib, "cadaclysm_view_line_colour", FunctionDescriptor.of(B, A, I, A, A));
+            setItemLineColour = bind(linker, lib, "cadaclysm_view_set_item_line_colour", FunctionDescriptor.of(B, A, I, I, A));
+            // 1.24: overlays -- shapes, images and (show_text, SCREEN) text over the whole window.
+            showOverlay = bind(linker, lib, "cadaclysm_view_show_overlay", FunctionDescriptor.of(I, A, A));
+            showOverlayImage = bind(linker, lib, "cadaclysm_view_show_overlay_image", FunctionDescriptor.of(I, A, A));
+            moveOverlay = bind(linker, lib, "cadaclysm_view_move_overlay", FunctionDescriptor.of(B, A, I, I, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT));
+            // 1.25: frame statistics.
+            stats = bind(linker, lib, "cadaclysm_view_stats", FunctionDescriptor.of(B, A, A));
             setSnap = bind(linker, lib, "cadaclysm_view_set_snap", FunctionDescriptor.of(B, A, A));
             requestSnapIn = bind(linker, lib, "cadaclysm_view_request_snap_in", FunctionDescriptor.ofVoid(A, I, I, I));
             snapResult = bind(linker, lib, "cadaclysm_view_snap_result", FunctionDescriptor.of(B, A, A));
@@ -710,8 +771,15 @@ public final class View implements AutoCloseable {
                         float wheelY, String key, boolean keyDown, double timeMs) {
     }
 
-    /** One viewport: rect is x, y, w, h in physical pixels, the matrices column-major, grid none, top, front or right. */
-    public record Viewport(int[] rect, float[] view, float[] projection, float[] eye, String grid) {
+    /**
+     * One viewport: rect is x, y, w, h in physical pixels, the matrices column-major, grid none, top, front or right;
+     * layerMask the user layers drawn in it, bit n for layer n ({@link Item#userLayer}), -1 (every layer) unless given.
+     */
+    public record Viewport(int[] rect, float[] view, float[] projection, float[] eye, String grid, int layerMask) {
+        /** Every user layer. */
+        public Viewport(int[] rect, float[] view, float[] projection, float[] eye, String grid) {
+            this(rect, view, projection, eye, grid, -1);
+        }
     }
 
     /** A CAM tool: {@code shape} is flat, ball, drill, vbit or bullnose; the flute length, a V-bit's angle and a bull-nose's corner radius are 0 where they mean nothing. */
@@ -730,6 +798,14 @@ public final class View implements AutoCloseable {
     public record MachiningOptions(Double cell, Double tolerance, Double skin, Double rapidRate) {
     }
 
+    /**
+     * What a view has drawn ({@link #stats()}, 1.25): the frames drawn so far -- each frame drawn to the
+     * window, and each {@link #image()} rendered; a pump or draw that owes nothing adds none -- and the
+     * last frame's CPU time, GPU time (-1 where it cannot be measured), triangles and draw calls.
+     */
+    public record Stats(long framesDrawn, float lastFrameMs, float lastGpuMs, long triangles, int drawCalls) {
+    }
+
     /** {@link Machining#info()}: the move the timeline is at of the job's moves, the height grid and the cycle time. */
     public record MachiningInfo(int moves, int move, int nx, int ny, float cell, float[] min, double cycleTime) {
     }
@@ -737,9 +813,67 @@ public final class View implements AutoCloseable {
     /**
      * A pick answer: the item, node and face hit; {@code clicks} 2 for a double click, else 1;
      * {@code point} where the ray met the model (x, y, z, in the coordinates the items were shown
-     * in), or null where the library read no depth (a machining stock, the terminal library).
+     * in), or null where the library read no depth (a machining stock, the terminal library);
+     * {@code overlay} (1.24) true where the item is an overlay: it was over the pixel, so nothing of
+     * the scene beneath it was picked ({@code face} is a text overlay's line, else 0).
      */
-    public record Pick(int item, int node, int face, int clicks, float[] point) {
+    public record Pick(int item, int node, int face, int clicks, float[] point, boolean overlay) {
+        /** A pick of the scene: no overlay. */
+        public Pick(int item, int node, int face, int clicks, float[] point) {
+            this(item, node, face, clicks, point, false);
+        }
+    }
+
+    /**
+     * Where an overlay hangs in the window (view ABI 1.24, {@code CADACLYSM_VIEW_ALIGN_*}): a corner,
+     * the middle of an edge, or the centre. An overlay's offset is measured inward from it: x away from
+     * the left edge for the left column and from the right edge for the right one (rightward for the
+     * middle column); y down from the top edge for the top row and up from the bottom edge for the
+     * bottom one (upward for the middle row). So (TOP_RIGHT, 10, 10) is 10 pixels in from the right
+     * and from the top.
+     */
+    public enum Anchor {
+        TOP_LEFT(0), TOP(1), TOP_RIGHT(2), LEFT(3), CENTRE(4), RIGHT(5), BOTTOM_LEFT(6), BOTTOM(7), BOTTOM_RIGHT(8);
+
+        final int code;
+
+        Anchor(int code) {
+            this.code = code;
+        }
+
+        /** The header's CADACLYSM_VIEW_ALIGN_* value. */
+        public int code() {
+            return code;
+        }
+    }
+
+    /**
+     * How {@link View#showOverlay(Blacksmith.Profile, Anchor, float, float, OverlayStyle)} draws a shape.
+     * The fill: {@link #fillText} or {@link #fill} where set ("none" for no fill), else the profile's
+     * own colour ({@code Profile.coloured}), else white -- unless a stroke is set, when an uncoloured
+     * profile is not filled. The stroke only where {@link #strokeText} or {@link #stroke} is set: an
+     * open profile, never filled, draws only with one.
+     */
+    public static final class OverlayStyle {
+        /** The fill as text ("#rgb", "#rrggbb", a CSS name, or "none"); it wins over {@link #fill}. */
+        public String fillText;
+        /** The fill as 3 or 4 numbers in 0..1 (alpha 1 where 3). */
+        public float[] fill;
+        /** The stroke as text ("#rgb", "#rrggbb", a CSS name); it wins over {@link #stroke}. */
+        public String strokeText;
+        /** The stroke as 3 or 4 numbers in 0..1 (alpha 1 where 3). */
+        public float[] stroke;
+        /** The stroke's width in pixels. */
+        public float strokeWidth = 1f;
+        /** Lower draws first; equal orders in show order. Shapes, text and images share it. */
+        public int order;
+
+        public OverlayStyle fill(String value) { fillText = value; fill = null; return this; }
+        public OverlayStyle fill(float[] value) { fill = value; fillText = null; return this; }
+        public OverlayStyle stroke(String value) { strokeText = value; stroke = null; return this; }
+        public OverlayStyle stroke(float[] value) { stroke = value; strokeText = null; return this; }
+        public OverlayStyle strokeWidth(float value) { strokeWidth = value; return this; }
+        public OverlayStyle order(int value) { order = value; return this; }
     }
 
     /** A CadaclysmViewPick as the answer: null for no item; the point only where has_point is set (Python's _pick_dict). */
@@ -752,7 +886,8 @@ public final class View implements AutoCloseable {
         float[] point = raw.get(ValueLayout.JAVA_INT, off(PICK, "has_point")) != 0
                 ? raw.asSlice(off(PICK, "point"), 12).toArray(ValueLayout.JAVA_FLOAT) : null;
         return new Pick(raw.get(ValueLayout.JAVA_INT, off(PICK, "item")), raw.get(ValueLayout.JAVA_INT, off(PICK, "node")),
-                raw.get(ValueLayout.JAVA_INT, off(PICK, "face")), raw.get(ValueLayout.JAVA_INT, off(PICK, "clicks")), point);
+                raw.get(ValueLayout.JAVA_INT, off(PICK, "face")), raw.get(ValueLayout.JAVA_INT, off(PICK, "clicks")), point,
+                raw.get(ValueLayout.JAVA_INT, off(PICK, "overlay")) != 0);
     }
 
     /**
@@ -790,7 +925,7 @@ public final class View implements AutoCloseable {
 
     /**
      * Why the library at {@code path}, answering {@code version} from cadaclysm_view_abi_version,
-     * is refused -- null when this wrapper takes it (1.22 or a later 1.x).
+     * is refused -- null when this wrapper takes it (1.24 or a later 1.x).
      */
     static String abiRefusal(String path, int version) {
         int major = version >>> 16, minor = version & 0xFFFF;
@@ -1360,6 +1495,190 @@ public final class View implements AutoCloseable {
         }
     }
 
+    // ---- overlays (1.24): a HUD over the whole window
+
+    private Overlay overlay(int id, Object shown, Anchor anchor, String what) {
+        if (id == 0) throw lib.failure(what);
+        Overlay item = new Overlay(this, id, shown, anchor);
+        items.put(id, item);
+        return item;
+    }
+
+    static Anchor anchorOf(Anchor anchor, String what) {
+        if (anchor == null) throw new ViewException(what + ": an anchor, not null");
+        return anchor;
+    }
+
+    /** {@link #showOverlay(Blacksmith.Profile, Anchor, float, float, OverlayStyle)} in the default style. */
+    public Overlay showOverlay(Blacksmith.Profile shape, Anchor anchor, float x, float y) {
+        return showOverlay(shape, anchor, x, y, null);
+    }
+
+    /**
+     * A 2D shape over the window: {@code shape} in pixels (one profile unit a pixel, y up), its origin
+     * hung {@code x}, {@code y} pixels inward from {@code anchor} -- a closed profile filled (holes cut,
+     * even-odd), stroked where the style says ({@link OverlayStyle}). Drawn after everything else, never
+     * moved by the camera, kept in place as the window resizes; a click on it picks it
+     * ({@link Pick#overlay()}) and nothing beneath.
+     */
+    public Overlay showOverlay(Blacksmith.Profile shape, Anchor anchor, float x, float y, OverlayStyle style) {
+        if (shape == null) throw new ViewException("showOverlay: a profile, not null");
+        return showOverlay(List.of(shape), anchor, x, y, style);
+    }
+
+    /** {@link #showOverlay(List, Anchor, float, float, OverlayStyle)} in the default style. */
+    public Overlay showOverlay(List<Blacksmith.Profile> shapes, Anchor anchor, float x, float y) {
+        return showOverlay(shapes, anchor, x, y, null);
+    }
+
+    /**
+     * Several profiles as one overlay -- a crosshair's two strokes, a frame's two loops: their fills
+     * together by the even-odd rule. The fill falls back on the first coloured profile's colour.
+     */
+    public Overlay showOverlay(List<Blacksmith.Profile> shapes, Anchor anchor, float x, float y, OverlayStyle style) {
+        if (shapes == null) throw new ViewException("showOverlay: shapes, not null");
+        if (shapes.isEmpty()) throw new ViewException("showOverlay: at least one profile");
+        List<double[]> parts = new ArrayList<>();
+        float[] own = null;
+        int n = 0;
+        for (Blacksmith.Profile p : shapes) {
+            if (p == null) throw new ViewException("showOverlay: a profile, not null");
+            double[] b = p.beziers();
+            parts.add(b);
+            n += b.length;
+            if (own == null) {
+                double[] c = p.colour();
+                if (c != null) own = new float[]{(float) c[0], (float) c[1], (float) c[2], 1f};
+            }
+        }
+        float[] beziers = new float[n];
+        int k = 0;
+        for (double[] b : parts) for (double v : b) beziers[k++] = (float) v;
+        return showOverlayCurves(beziers, own, anchor, x, y, style, shapes.size() == 1 ? shapes.get(0) : shapes);
+    }
+
+    /** {@link #showOverlay(float[], Anchor, float, float, OverlayStyle)} in the default style. */
+    public Overlay showOverlay(float[] beziers, Anchor anchor, float x, float y) {
+        return showOverlay(beziers, anchor, x, y, null);
+    }
+
+    /**
+     * Rational cubic Beziers, sixteen floats each (x, y, z, w per control point, z not read: a
+     * profile's {@code beziers()}), in pixels, as one overlay: loops split where a curve does not
+     * start where the last ended, closed where one ends where it started.
+     */
+    public Overlay showOverlay(float[] beziers, Anchor anchor, float x, float y, OverlayStyle style) {
+        return showOverlayCurves(beziers, null, anchor, x, y, style, null);
+    }
+
+    private Overlay showOverlayCurves(float[] beziers, float[] own, Anchor anchor, float x, float y, OverlayStyle style, Object shown) {
+        if (beziers == null || beziers.length == 0 || beziers.length % 16 != 0) {
+            throw new ViewException("showOverlay: 16 numbers a curve, at least one, not " + (beziers == null ? 0 : beziers.length));
+        }
+        Anchor a = anchorOf(anchor, "showOverlay");
+        OverlayStyle s = style == null ? new OverlayStyle() : style;
+        float[] stroke = s.strokeText != null ? rgba(lib, s.strokeText) : rgba(s.stroke, "showOverlay stroke");
+        float[] fill;
+        if (s.fillText != null) {
+            fill = s.fillText.trim().equalsIgnoreCase("none") ? null : rgba(lib, s.fillText);
+        } else {
+            fill = rgba(s.fill, "showOverlay fill");
+            if (fill == null) fill = own != null ? own : stroke == null ? new float[]{1, 1, 1, 1} : null;
+        }
+        MemorySegment p = live(c("show_overlay"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment o = arena.allocate(OVERLAY);
+            o.set(ValueLayout.JAVA_INT, off(OVERLAY, "size"), (int) OVERLAY.byteSize());
+            o.set(ValueLayout.JAVA_INT, off(OVERLAY, "anchor"), a.code);
+            o.set(ValueLayout.ADDRESS, off(OVERLAY, "beziers"), arena.allocateFrom(ValueLayout.JAVA_FLOAT, beziers));
+            o.set(ValueLayout.JAVA_INT, off(OVERLAY, "curve_count"), beziers.length / 16);
+            o.set(ValueLayout.JAVA_INT, off(OVERLAY, "order"), s.order);
+            MemorySegment.copy(new float[]{x, y}, 0, o, ValueLayout.JAVA_FLOAT, off(OVERLAY, "offset"), 2);
+            o.set(ValueLayout.JAVA_INT, off(OVERLAY, "has_fill"), fill == null ? 0 : 1);
+            if (fill != null) MemorySegment.copy(fill, 0, o, ValueLayout.JAVA_FLOAT, off(OVERLAY, "fill_rgba"), 4);
+            o.set(ValueLayout.JAVA_INT, off(OVERLAY, "has_stroke"), stroke == null ? 0 : 1);
+            if (stroke != null) MemorySegment.copy(stroke, 0, o, ValueLayout.JAVA_FLOAT, off(OVERLAY, "stroke_rgba"), 4);
+            o.set(ValueLayout.JAVA_FLOAT, off(OVERLAY, "stroke_width"), s.strokeWidth);
+            return overlay(call(() -> (int) lib.showOverlay.invoke(p, o)), shown, a, "showOverlay");
+        }
+    }
+
+    /** {@link #showOverlayText(String, Anchor, float, float, TextOptions, int)} with the default options, order 0. */
+    public Overlay showOverlayText(String text, Anchor anchor, float x, float y) {
+        return showOverlayText(text, anchor, x, y, null, 0);
+    }
+
+    /** {@link #showOverlayText(String, Anchor, float, float, TextOptions, int)} at order 0. */
+    public Overlay showOverlayText(String text, Anchor anchor, float x, float y, TextOptions options) {
+        return showOverlayText(text, anchor, x, y, options, 0);
+    }
+
+    /**
+     * Text over the window: its box hangs from {@code anchor} by the same point (its top-right corner
+     * for TOP_RIGHT), {@code x}, {@code y} pixels inward -- the box's padding included where it has
+     * one. {@code options} as {@link #showText}'s, in pixels; its mode, align, onTop, right, up and
+     * offset are not read. {@link Item#setText(String)} changes it cheaply (a frame counter).
+     */
+    public Overlay showOverlayText(String text, Anchor anchor, float x, float y, TextOptions options, int order) {
+        TextOptions o = options == null ? new TextOptions() : options;
+        String shown = textOf(text);
+        Anchor a = anchorOf(anchor, "showOverlayText");
+        float[] rgb = exact(o.colourText != null ? lib.colour(o.colourText) : o.colour != null ? o.colour : lib.colour("white"), 3, "showOverlayText colour");
+        float[] box = o.boxText != null ? rgba(lib, o.boxText) : rgba(o.box, "showOverlayText box");
+        MemorySegment p = live(c("show_text"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment t = arena.allocate(TEXT);
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "size"), (int) TEXT.byteSize());
+            t.set(ValueLayout.ADDRESS, off(TEXT, "text"), arena.allocateFrom(shown));
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "mode"), TEXT_SCREEN);
+            t.set(ValueLayout.JAVA_FLOAT, off(TEXT, "height"), o.size);
+            put(t, "rgb", rgb);
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "align"), a.code);
+            put(t, "offset", new float[]{x, y});
+            if (box != null) put(t, "box_rgba", box);
+            t.set(ValueLayout.JAVA_FLOAT, off(TEXT, "box_padding"), o.padding);
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "on_top"), 1);
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "font"), o.font);
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "order"), order);
+            return overlay(call(() -> (int) lib.showText.invoke(p, t)), text, a, "showOverlayText");
+        }
+    }
+
+    /** {@link #showOverlayImage(byte[], int, int, Anchor, float, float, float, float, float, int)} at its own size, opaque, order 0. */
+    public Overlay showOverlayImage(byte[] rgba, int width, int height, Anchor anchor, float x, float y) {
+        return showOverlayImage(rgba, width, height, anchor, x, y, 0, 0, 1, 0);
+    }
+
+    /**
+     * An image over the window: {@code rgba} (width x height x 4 bytes, rows from the top, straight
+     * alpha), its box hanging from {@code anchor} by the same point, {@code x}, {@code y} pixels
+     * inward, drawn {@code drawWidth} x {@code drawHeight} pixels (0: its own size) at {@code opacity}.
+     */
+    public Overlay showOverlayImage(byte[] rgba, int width, int height, Anchor anchor, float x, float y,
+                                    float drawWidth, float drawHeight, float opacity, int order) {
+        long need = pixelBytes(width, height, "showOverlayImage");
+        if (rgba == null || need != rgba.length) {
+            throw new ViewException("showOverlayImage: " + width + " x " + height + " pixels need " + need + " bytes (w * h * 4), not "
+                    + (rgba == null ? 0 : rgba.length));
+        }
+        if (!(opacity > 0)) throw new ViewException("showOverlayImage: opacity " + opacity + ": more than 0, at most 1 (0 would be the library's 1)");
+        Anchor a = anchorOf(anchor, "showOverlayImage");
+        MemorySegment p = live(c("show_overlay_image"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment img = arena.allocate(OVERLAY_IMAGE);
+            img.set(ValueLayout.JAVA_INT, off(OVERLAY_IMAGE, "size"), (int) OVERLAY_IMAGE.byteSize());
+            img.set(ValueLayout.JAVA_INT, off(OVERLAY_IMAGE, "anchor"), a.code);
+            img.set(ValueLayout.ADDRESS, off(OVERLAY_IMAGE, "rgba"), arena.allocateFrom(ValueLayout.JAVA_BYTE, rgba));
+            img.set(ValueLayout.JAVA_INT, off(OVERLAY_IMAGE, "width"), width);
+            img.set(ValueLayout.JAVA_INT, off(OVERLAY_IMAGE, "height"), height);
+            MemorySegment.copy(new float[]{x, y}, 0, img, ValueLayout.JAVA_FLOAT, off(OVERLAY_IMAGE, "offset"), 2);
+            MemorySegment.copy(new float[]{drawWidth, drawHeight}, 0, img, ValueLayout.JAVA_FLOAT, off(OVERLAY_IMAGE, "extent"), 2);
+            img.set(ValueLayout.JAVA_FLOAT, off(OVERLAY_IMAGE, "opacity"), opacity);
+            img.set(ValueLayout.JAVA_INT, off(OVERLAY_IMAGE, "order"), order);
+            return overlay(call(() -> (int) lib.showOverlayImage.invoke(p, img)), null, a, "showOverlayImage");
+        }
+    }
+
     /** The text, or a ViewException for null or for one holding a NUL (the C string would end there). */
     static String textOf(String text) {
         if (text == null) throw new ViewException("text: a string, not null");
@@ -1510,7 +1829,7 @@ public final class View implements AutoCloseable {
                 MemorySegment.copy(v.projection(), 0, one, ValueLayout.JAVA_FLOAT, off(VIEWPORT, "projection"), 16);
                 MemorySegment.copy(v.eye(), 0, one, ValueLayout.JAVA_FLOAT, off(VIEWPORT, "eye"), 3);
                 one.set(ValueLayout.JAVA_INT, off(VIEWPORT, "grid"), grids.get(i));
-                one.set(ValueLayout.JAVA_INT, off(VIEWPORT, "layer_mask"), -1); // every user layer
+                one.set(ValueLayout.JAVA_INT, off(VIEWPORT, "layer_mask"), v.layerMask());
             }
             ok(call(() -> (boolean) lib.setViewports.invoke(p, all, list.size())), "viewports");
         }
@@ -1521,6 +1840,12 @@ public final class View implements AutoCloseable {
         int which = named(LAYERS, name, "layer");
         MemorySegment p = live(c("set_layer"));
         ok(call(() -> (boolean) lib.setLayer.invoke(p, which, on)), "layer");
+    }
+
+    /** User layer {@code layer}, 0..31, on or off in every viewport (all start on); see {@link Item#userLayer}. A layer past 31 is refused. */
+    public void userLayer(int layer, boolean on) {
+        MemorySegment p = live(c("set_user_layer"));
+        ok(call(() -> (boolean) lib.setUserLayer.invoke(p, layer, on)), "userLayer");
     }
 
     /** The clear colour as text: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour name. */
@@ -1567,6 +1892,62 @@ public final class View implements AutoCloseable {
         int which = named(LIGHTING, name, "lighting");
         MemorySegment p = live(c("set_lighting"));
         ok(call(() -> (boolean) lib.setLighting.invoke(p, which)), "lighting");
+    }
+
+    /**
+     * The colour every edge draws in: {@code rgb} ({@code "#rgb"}, {@code "#rrggbb"} or a CSS colour
+     * name), or with {@code fromPart} each part's own colour, brightened so an edge reads over its
+     * faces. An item's {@link Item#setEdgeColour(String)} draws over it.
+     */
+    public void setEdgeColour(String rgb, boolean fromPart) { setLineColour(LAYER_EDGES, "setEdgeColour", rgb, fromPart); }
+    /** {@link #setEdgeColour(String, boolean)}, not each part's own colour. */
+    public void setEdgeColour(String rgb) { setEdgeColour(rgb, false); }
+    /** {@link #setEdgeColour(String, boolean)} with three numbers in 0..1. */
+    public void setEdgeColour(float[] rgb, boolean fromPart) { setLineColour(LAYER_EDGES, "setEdgeColour", rgb, fromPart); }
+    /** The edges' colour in use. */
+    public LineColour edgeColour() { return lineColourOf(LAYER_EDGES); }
+
+    /** The colour every curve (a curves or lines item's) draws in: {@code rgb}, or with {@code fromPart} each part's own colour -- the default. */
+    public void setCurveColour(String rgb, boolean fromPart) { setLineColour(LAYER_CURVES, "setCurveColour", rgb, fromPart); }
+    /** {@link #setCurveColour(String, boolean)}, not each part's own colour. */
+    public void setCurveColour(String rgb) { setCurveColour(rgb, false); }
+    /** {@link #setCurveColour(String, boolean)} with three numbers in 0..1. */
+    public void setCurveColour(float[] rgb, boolean fromPart) { setLineColour(LAYER_CURVES, "setCurveColour", rgb, fromPart); }
+    /** The curves' colour in use. */
+    public LineColour curveColour() { return lineColourOf(LAYER_CURVES); }
+
+    /** The colour every isocurve draws in: {@code rgb}, or with {@code fromPart} each part's own colour. */
+    public void setIsocurveColour(String rgb, boolean fromPart) { setLineColour(LAYER_ISOCURVES, "setIsocurveColour", rgb, fromPart); }
+    /** {@link #setIsocurveColour(String, boolean)}, not each part's own colour. */
+    public void setIsocurveColour(String rgb) { setIsocurveColour(rgb, false); }
+    /** {@link #setIsocurveColour(String, boolean)} with three numbers in 0..1. */
+    public void setIsocurveColour(float[] rgb, boolean fromPart) { setLineColour(LAYER_ISOCURVES, "setIsocurveColour", rgb, fromPart); }
+    /** The isocurves' colour in use. */
+    public LineColour isocurveColour() { return lineColourOf(LAYER_ISOCURVES); }
+
+    private void setLineColour(int layer, String what, String rgb, boolean fromPart) {
+        if (rgb == null) throw new ViewException(what + ": a colour, not none");
+        setLineColour(layer, what, lib.colour(rgb), fromPart);
+    }
+
+    private void setLineColour(int layer, String what, float[] rgb, boolean fromPart) {
+        if (rgb == null) throw new ViewException(what + ": 3 numbers, not none");
+        exact(rgb, 3, what);
+        MemorySegment p = live(c("set_line_colour"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment colour = floats(arena, rgb);
+            ok(call(() -> (boolean) lib.setLineColour.invoke(p, layer, colour, fromPart ? 1 : 0)), what);
+        }
+    }
+
+    private LineColour lineColourOf(int layer) {
+        MemorySegment p = live(c("line_colour"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment colour = arena.allocate(ValueLayout.JAVA_FLOAT, 3);
+            MemorySegment fromPart = arena.allocate(ValueLayout.JAVA_INT);
+            ok(call(() -> (boolean) lib.lineColour.invoke(p, layer, colour, fromPart)), "lineColour");
+            return new LineColour(colour.toArray(ValueLayout.JAVA_FLOAT), fromPart.get(ValueLayout.JAVA_INT, 0) != 0);
+        }
     }
 
     /** The view-wide occluded style; "solid" and "off" items never use it. */
@@ -1675,6 +2056,19 @@ public final class View implements AutoCloseable {
     public boolean needsDraw() {
         MemorySegment p = live(c("needs_draw"));
         return call(() -> (boolean) lib.needsDraw.invoke(p));
+    }
+
+    /** What the view has drawn (cadaclysm_view_stats, 1.25): an FPS counter read from it stays right while the scene is still. */
+    public Stats stats() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(STATS);
+            out.set(ValueLayout.JAVA_INT, off(STATS, "size"), (int) STATS.byteSize());
+            MemorySegment p = live(c("stats"));
+            ok(call(() -> (boolean) lib.stats.invoke(p, out)), "stats");
+            return new Stats(out.get(ValueLayout.JAVA_LONG, off(STATS, "frames_drawn")), out.get(ValueLayout.JAVA_FLOAT, off(STATS, "last_frame_ms")),
+                    out.get(ValueLayout.JAVA_FLOAT, off(STATS, "last_gpu_ms")), out.get(ValueLayout.JAVA_LONG, off(STATS, "triangles")),
+                    out.get(ValueLayout.JAVA_INT, off(STATS, "draw_calls")));
+        }
     }
 
     // -- the rest
@@ -2264,6 +2658,40 @@ public final class View implements AutoCloseable {
             view.ok(call(() -> (boolean) view.lib.setFinish.invoke(p, id, (int) f)), "finish");
         }
 
+        /**
+         * Draws the item's edges in {@code rgb} ({@code "#rgb"}, {@code "#rrggbb"} or a CSS colour name),
+         * over the view's {@link View#setEdgeColour(String, boolean)}, the item's colour and a solid's own
+         * edge paint; null takes the view's colour again.
+         */
+        public void setEdgeColour(String rgb) { lineColourOf(LAYER_EDGES, rgb == null ? null : view.lib.colour(rgb)); }
+        /** {@link #setEdgeColour(String)} with three numbers in 0..1. */
+        public void setEdgeColour(float r, float g, float b) { lineColourOf(LAYER_EDGES, new float[]{r, g, b}); }
+        /** The item's curves in {@code rgb}, over the view's curve colour and the item's colour; null takes the view's colour again. */
+        public void setCurveColour(String rgb) { lineColourOf(LAYER_CURVES, rgb == null ? null : view.lib.colour(rgb)); }
+        /** {@link #setCurveColour(String)} with three numbers in 0..1. */
+        public void setCurveColour(float r, float g, float b) { lineColourOf(LAYER_CURVES, new float[]{r, g, b}); }
+        /** The item's isocurves in {@code rgb}, over the view's isocurve colour and the item's colour; null takes the view's colour again. */
+        public void setIsocurveColour(String rgb) { lineColourOf(LAYER_ISOCURVES, rgb == null ? null : view.lib.colour(rgb)); }
+        /** {@link #setIsocurveColour(String)} with three numbers in 0..1. */
+        public void setIsocurveColour(float r, float g, float b) { lineColourOf(LAYER_ISOCURVES, new float[]{r, g, b}); }
+
+        private void lineColourOf(int layer, float[] rgb) {
+            MemorySegment p = view.live(c("set_item_line_colour"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment colour = rgb == null ? MemorySegment.NULL : floats(arena, rgb);
+                view.ok(call(() -> (boolean) view.lib.setItemLineColour.invoke(p, id, layer, colour)), "lineColour");
+            }
+        }
+
+        /**
+         * The user layer the item is on, 0..31 (every item starts on 0): it draws while the layer is on
+         * ({@link View#userLayer}) and in the viewports whose {@code layerMask} has its bit. A layer past 31 is refused.
+         */
+        public void userLayer(int layer) {
+            MemorySegment p = view.live(c("set_item_layer"));
+            view.ok(call(() -> (boolean) view.lib.setItemLayer.invoke(p, id, layer)), "userLayer");
+        }
+
         public void nodeVisible(int node, boolean on) {
             MemorySegment p = view.live(c("set_node_visible"));
             view.ok(call(() -> (boolean) view.lib.setNodeVisible.invoke(p, id, node, on)), "nodeVisible");
@@ -2302,6 +2730,37 @@ public final class View implements AutoCloseable {
         public void frameNode(int node) {
             MemorySegment p = view.live(c("frame_node"));
             view.ok(call(() -> (boolean) view.lib.frameNode.invoke(p, id, node)), "frameNode");
+        }
+    }
+
+    /**
+     * An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the window,
+     * drawn over everything, untouched by the camera. remove, userLayer and (text) text work as on any item.
+     */
+    public static final class Overlay extends Item {
+        private Anchor anchor;
+
+        Overlay(View view, int id, Object shown, Anchor anchor) {
+            super(view, id, shown);
+            this.anchor = anchor;
+        }
+
+        /** The anchor it hangs from now. */
+        public Anchor anchor() {
+            return anchor;
+        }
+
+        /** Moved to {@code x}, {@code y} pixels inward from its anchor (cadaclysm_view_move_overlay): cheap, for a HUD element that moves every frame. */
+        public void moveTo(float x, float y) {
+            moveTo(anchor, x, y);
+        }
+
+        /** Hung from {@code anchor} instead, {@code x}, {@code y} pixels inward from it. */
+        public void moveTo(Anchor anchor, float x, float y) {
+            Anchor a = anchorOf(anchor, "moveTo");
+            MemorySegment p = view.live(c("move_overlay"));
+            view.ok(call(() -> (boolean) view.lib.moveOverlay.invoke(p, id, a.code, x, y)), "moveTo");
+            this.anchor = a;
         }
     }
 

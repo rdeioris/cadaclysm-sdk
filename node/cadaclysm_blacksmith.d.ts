@@ -62,6 +62,12 @@ export interface SvgOptions {
    * own right, so `silhouettes` with `edges: false` draws the outline alone.
    */
   silhouettes?: boolean;
+  /**
+   * Hidden lines: null (the default) draws every line; `'removed'` draws only what is seen of
+   * each solid, the solids hiding one another; `'dashed'` adds the hidden lines, dashed, in a
+   * `solid-<i>-hidden` group.
+   */
+  hidden?: 'removed' | 'dashed' | null;
 }
 /** `SvgOptions`'s own defaults, as `cadaclysm_blacksmith_svg_options_init` fills them. */
 export function svgOptionsDefaults(): SvgOptions;
@@ -77,6 +83,10 @@ export type Progress = (phase: string, done: number, total: number) => void;
 export type DocumentProgress = (node: string, phase: string, done: number, total: number) => void;
 
 export function libraryPath(): string;
+/** Which library this is: `'full'`, `'kernel-reader'` or `'kernel'`; `'kernel'` for the separate `cadaclysm_blacksmith`, `'wasm'` in the browser. */
+export function flavour(): string;
+/** The features the library was built with, comma-separated; `''` for the separate `cadaclysm_blacksmith` and in the browser. */
+export function features(): string;
 /**
  * `schemas/ap203.exp`, found by walking up from this file.
  *
@@ -913,10 +923,48 @@ export class NearestObject {
   readonly t: number;
   readonly pointOnCurve: number[];
   readonly pointOnItem: number[];
-  /** A solid's or a projector's answer; null for a curve or a point. */
+  /** A solid's or a projector's answer; null for a curve, a mesh or a point. */
   readonly body: CurveBodyFoot | null;
-  /** A curve's answer, side `a` the curve asked; null for a solid, a projector or a point. */
+  /** A curve's answer, side `a` the curve asked; null for a solid, a projector, a mesh or a point. */
   readonly pair: CurvePair | null;
+  /** A `TriangleMesh`'s answer; null for any other item. */
+  readonly mesh: CurveMeshFoot | null;
+}
+/** The nearest point of a `TriangleMesh` to a query point (`TriangleMesh.closestPoint`). Exact: no tolerance, no `refined` figure. */
+export class MeshPoint {
+  private constructor();
+  /** The point on the mesh. */
+  readonly point: number[];
+  /** From the query point to `point`. */
+  readonly distance: number;
+  /** The lowest-numbered triangle holding the point: on an edge or a vertex several triangles share, the lower triangle answers. */
+  readonly triangle: number;
+  /** The point's three weights on `triangle`'s corners, in index order, summing to 1. */
+  readonly barycentric: number[];
+  /** What the point lies on: 'face' (inside `triangle`), 'edge' or 'vertex'. */
+  readonly kind: 'face' | 'edge' | 'vertex';
+  /** What `kind` names: an edge's two vertex indices ascending, a vertex's one, none for a face. */
+  readonly vertices: number[];
+}
+/** The nearest points of a curve and a `TriangleMesh` (`TriangleMesh.curveClosestPoints`, a `NearestObject`'s answer for a mesh). The mesh's side is named as `MeshPoint` names its point, flat. Exact. */
+export class CurveMeshFoot {
+  private constructor();
+  /** From `pointOnCurve` to `pointOnMesh`. */
+  readonly distance: number;
+  /** The curve's parameter at `pointOnCurve`. */
+  readonly t: number;
+  readonly pointOnCurve: number[];
+  readonly pointOnMesh: number[];
+  /** The lowest-numbered triangle holding `pointOnMesh`. */
+  readonly triangle: number;
+  /** `pointOnMesh`'s three weights on `triangle`'s corners, in index order, summing to 1. */
+  readonly barycentric: number[];
+  /** What `pointOnMesh` lies on. */
+  readonly kind: 'face' | 'edge' | 'vertex';
+  /** What `kind` names: an edge's two vertex indices ascending, a vertex's one, none for a face. */
+  readonly vertices: number[];
+  /** The curve passes through a triangle: `distance` is exactly 0, at the earliest crossing in `t`. A curve that touches without passing through is distance 0 and false. */
+  readonly crossing: boolean;
 }
 export interface SolidMesh { positions: Float32Array; normals: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number }
 /** `SolidMesh` in `double`: the same tessellation's own unnarrowed positions/normals. */
@@ -1039,6 +1087,22 @@ export class Solid {
   recess(outline: NurbsCurve, depth: number, draft?: number, fillet?: number, pane?: boolean, tolerance?: number | null): [Solid, [number, number, number, number]];
   /** This half and its reflection across `plane` joined into one symmetric body, the half's faces first, and how well the seam meets. */
   mirrorJoin(plane: FrameLike, snap?: number, tolerance?: number | null): [Solid, SymmetryReport];
+  /** This body and its copies at `transforms` (typically from `Pattern`) as one body, and what it did. */
+  pattern(transforms: Iterable<Transform | MatrixLike>, tolerance?: number | null): [Solid, PatternReport];
+  /** `tool` placed at each of `transforms` and cut from or joined to this body, and what it did. */
+  patternFeature(tool: Solid, op: FeatureOp, transforms: Iterable<Transform | MatrixLike>, tolerance?: number | null): [Solid, PatternReport];
+  /** This body drilled at `points` (one point or several), and what it did. */
+  hole(points: Point3 | Iterable<Point3>, diameter: number, options?: HoleOptions): [Solid, HoleReport];
+  /** The tool `hole` cuts with, from the same arguments. */
+  holeTool(points: Point3 | Iterable<Point3>, diameter: number, options?: HoleOptions): Solid;
+  /** This body with a rib along `curve`, an open curve in `plane`, thickened `thickness`. */
+  rib(curve: NurbsCurve, plane: FrameLike, thickness: number, options?: RibOptions): Solid;
+  /** The slab `rib` joins, alone, from the same arguments. */
+  ribTool(curve: NurbsCurve, plane: FrameLike, thickness: number, options?: RibOptions): Solid;
+  /** This body with a web along each of `curves` (open curves in `plane`), `thickness` thick. */
+  web(curves: NurbsCurve | Iterable<NurbsCurve>, plane: FrameLike, thickness: number, options?: WebOptions): Solid;
+  /** The walls `web` joins, alone, from the same arguments. */
+  webTool(curves: NurbsCurve | Iterable<NurbsCurve>, plane: FrameLike, thickness: number, options?: WebOptions): Solid;
   join(other: Solid, tolerance?: number | null, progress?: Progress | null, merge?: boolean): Solid;
   cut(other: Solid, tolerance?: number | null, progress?: Progress | null, merge?: boolean): Solid;
   common(other: Solid, tolerance?: number | null, progress?: Progress | null, merge?: boolean): Solid;
@@ -1062,6 +1126,22 @@ export class Solid {
    * pair coincides. Neither solid is changed; no crossing is an empty result.
    */
   intersect(other: Solid, tolerance?: number | null, progress?: Progress | null): Intersection;
+  /**
+   * Where this solid passes through itself, at `tolerance`: `intersect`'s result with this solid
+   * on both sides, never along its own edges and vertices (a clean solid is an empty result). A
+   * chain on one face is that face folding through itself, with no curve.
+   */
+  selfIntersections(tolerance?: number | null, progress?: Progress | null): Intersection;
+  /**
+   * What is wrong with this solid (and `other`, if given) as the arguments of `operation`, at
+   * `tolerance` -- OCCT's `BRepAlgoAPI_Check`. Each argument is checked alone (no faces, features
+   * smaller than `tolerance`, loose edges, where it passes through itself); `operation` adds what
+   * that verb refuses each argument for (a boolean wants both closed, a split or trim its tool, a
+   * merge closed manifolds of analytic faces). An empty array is a valid pair; nothing is changed.
+   * `progress` hears `health`, then `mesh`, `cull`, `cross`, `snap` and `curve`. Throws for an
+   * unknown operation or a `tolerance` not positive and finite.
+   */
+  check(other?: Solid | null, operation?: CheckOperation | null, tolerance?: number | null, progress?: Progress | null): Finding[];
   /**
    * Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its loops cut
    * into, as a `SolidHits`. Neither is changed.
@@ -1135,6 +1215,8 @@ export class Solid {
   closestPoint(p: Point3, maxDistance?: number | null, tolerance?: number | null): PointFoot | null;
   /** A `Projector` for this solid at `tolerance` (undefined, null, 0 or NaN: unset): meshed once, asked point after point. */
   projector(tolerance?: number | null): Projector;
+  /** This solid's measuring tessellation as a `TriangleMesh` (within a third of `tolerance` of the surface; undefined, null, 0 or NaN: unset): answers against it are exact for the mesh, not for the body. A copy: it answers on after this solid is closed. */
+  triangleMesh(tolerance?: number | null): TriangleMesh;
   /** The nearest point to `p` of face `face` alone, inside its trims or on its boundary: exact, always `refined`. */
   faceClosestPoint(face: number, p: Point3): PointFoot;
   /** The nearest point to `p` of edge `edge` (an index into `edges()`, or the `Edge`) on its own curve over its range. Exact. */
@@ -1570,6 +1652,29 @@ export class Overlap {
   faces: [number, number];
   loops: number[][][];
 }
+/** The verbs `Solid.check` can check a pair for. */
+export type CheckOperation = 'join' | 'cut' | 'common' | 'split_sheet' | 'trim' | 'merge' | 'intersect';
+/** What `Solid.check` can find wrong with an argument. */
+export type FindingKind = 'no_faces' | 'open' | 'region_wall' | 'non_manifold' | 'face_kind' | 'short_edge' | 'collapsed_edge'
+  | 'sliver_face' | 'tiny_face' | 'tiny_body' | 'small_hole' | 'loose_edge' | 'self_intersection' | 'self_overlap' | 'unmeshable';
+/**
+ * One thing wrong with one argument (`Solid.check`): `kind` names it, `argument` is 0 for the
+ * solid checked and 1 for `other`, and `index`, `other` and `size` are what the kind gives (null,
+ * null and 0 where it gives none): `open` -- the edge (null for a trim naming none), its face, its
+ * length; `face_kind` -- the face; `short_edge` -- the edge, its length; `collapsed_edge` -- the
+ * trim; `sliver_face` -- the face, its width; `tiny_face` -- the face, its area; `tiny_body` --
+ * its diagonal; `small_hole` -- the loop, its area or width; `loose_edge` -- the edge, how far its
+ * sides part; `self_intersection` -- the two faces (one face twice for a fold), the crossing's
+ * length; `self_overlap` -- the two faces.
+ */
+export class Finding {
+  private constructor();
+  kind: FindingKind;
+  argument: number;
+  index: number | null;
+  other: number | null;
+  size: number;
+}
 /** An axis-aligned box: `lo` and `hi`, three-tuples. The broad phase's own shape
  *  (`Solid.boundsBox`, `Collider`'s own boxes). */
 export class Box {
@@ -1707,6 +1812,125 @@ export class Projector {
   /** `Solid.curveClosestPoints`' answer at the projector's tolerance; null beyond `maxDistance` (undefined, null, NaN or Infinity: no limit). The projector's lock is held for the whole curve query. */
   curveClosestPoints(curve: NurbsCurve, maxDistance?: number | null): CurveBodyFoot | null;
 }
+/**
+ * A triangle mesh and its search tree, built once and immutable: nearest points and nearest
+ * points to a curve, answered exactly against it. `positions` and `indices` are `[x, y, z]`
+ * triples, one flat list of numbers, or a typed array; both are copied. A zero-area triangle
+ * answers as its longest edge. `close()` frees this handle; so does leaving a `using` block or
+ * the garbage collector. Throws for no triangles, an index past the vertex count or a coordinate
+ * that is not finite.
+ */
+export class TriangleMesh {
+  constructor(positions: Iterable<Point3> | Iterable<number> | Float64Array, indices: Iterable<[number, number, number] | number[]> | Iterable<number> | Uint32Array);
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  readonly vertexCount: number;
+  readonly triangleCount: number;
+  /** The box of every vertex as `[min, max]`. */
+  readonly bounds: [number[], number[]];
+  /** The nearest point of the mesh to `p` (the lower triangle where several share it), or null beyond `maxDistance` (undefined, null, NaN or Infinity: no limit; a point on the mesh is within 0). Exact. */
+  closestPoint(p: Point3, maxDistance?: number | null): MeshPoint | null;
+  /** The nearest points of `curve` and the mesh (`crossing` true, distance 0, at the earliest crossing in `t`), or null beyond `maxDistance` (undefined, null, NaN or Infinity: no limit). A mesh has no inside. Exact. */
+  curveClosestPoints(curve: NurbsCurve, maxDistance?: number | null): CurveMeshFoot | null;
+}
+/** A hidden-line line's kind, `HLR_KINDS[code]`. */
+export type HlrKind = 'sharp' | 'smooth' | 'outline' | 'iso' | 'boundary';
+/** `HlrLine.kind` by its `CADACLYSM_BLACKSMITH_HLR_*` code. */
+export const HLR_KINDS: readonly HlrKind[];
+/** `new Page(units)`: the DXF unit codes. */
+export const PAGE_UNITS: Readonly<{ unitless: 0; in: 1; ft: 2; mm: 4; cm: 5; m: 6 }>;
+/**
+ * How `hlr`, `hlrMesh` and `projectedOutline` see the solids: `direction` (from the eye toward
+ * the model; default `[0, 1, 0]`, the front) and `up` (default `[0, 0, 1]`) for a parallel view,
+ * or `eye` and `target` for a perspective (not both `direction` and `eye`); `tolerance` null or
+ * 0 the inputs' effective tolerance; `iso` isocurves each way on every face (solids);
+ * `smoothAngle` radians, default one degree (solids); `featureAngle` radians, default thirty
+ * degrees (meshes).
+ */
+export interface HlrOptions {
+  direction?: Point3 | null;
+  up?: Point3 | null;
+  eye?: Point3 | null;
+  target?: Point3 | null;
+  tolerance?: number | null;
+  iso?: number | null;
+  smoothAngle?: number | null;
+  featureAngle?: number | null;
+}
+/** One line of a hidden-line view: its Béziers on the view plane (z 0) and in space, the same spans. */
+export class HlrLine {
+  readonly kind: HlrKind;
+  readonly visible: boolean;
+  /** Which of the solids (or meshes) given it belongs to. */
+  readonly solid: number;
+  /** `['edge', id]`, `['face', index]` or `['mesh_edge', a, b]`. */
+  readonly source: readonly ['edge' | 'face', number] | readonly ['mesh_edge', number, number];
+  readonly beziers2d: SilhouetteCurves;
+  readonly beziers3d: SilhouetteCurves;
+  readonly length2d: number;
+  readonly length3d: number;
+}
+/** What a hidden-line removal did. */
+export interface HlrReport {
+  readonly candidates: number; readonly segments: number; readonly crossings: number; readonly pieces: number;
+  readonly degenerate: number; readonly rays: number; readonly meshHits: number; readonly rejected: number;
+  readonly grazes: number; readonly unsettled: number; readonly meshOnly: number; readonly fallbackEdges: number;
+  readonly failedSolids: number; readonly candidateLength: number; readonly degenerateLength: number;
+}
+/**
+ * A hidden-line view of solids or meshes: its lines, what the removal did and the tolerance it
+ * worked at. Placed on a drawing with `Page.addView`. `close()` frees its handle; so does leaving
+ * a `using` block or the garbage collector.
+ */
+export class Hlr {
+  private constructor();
+  readonly lines: readonly HlrLine[];
+  readonly report: HlrReport;
+  readonly tolerance: number;
+  readonly length: number;
+  visible(): HlrLine[];
+  hidden(): HlrLine[];
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+}
+/**
+ * Hidden-line removal of `solids`, each where it stands, every solid hiding the others. View
+ * coordinates are the camera's (x right, y up). Throws for no solids and refused words.
+ */
+export function hlr(solids: Iterable<Solid>, options?: HlrOptions): Hlr;
+/** `hlr` of triangle meshes: feature edges, boundaries and outlines; each `source` a `mesh_edge`. */
+export function hlrMesh(meshes: Iterable<TriangleMesh>, options?: HlrOptions): Hlr;
+/** The boundary of the union of the solids' projections, as closed profiles in view coordinates; a through hole seen along its axis is a hole. */
+export function projectedOutline(solids: Iterable<Solid>, options?: HlrOptions): Profile[];
+/**
+ * A flat drawing page: hidden-line views, profiles, hatches and text, written as SVG or DXF
+ * R2000. Each `add*` changes the page and returns it. `close()` frees its handle; so does leaving
+ * a `using` block or the garbage collector.
+ */
+export class Page {
+  constructor(units?: keyof typeof PAGE_UNITS);
+  readonly entityCount: number;
+  /** `view`'s lines, a view point `p` landing at `at + scale * p`, on the layers `visible`, `outline`, `smooth`, `iso` and `hidden`. */
+  addView(view: Hlr, at?: [number, number], scale?: number): this;
+  /** `profile` on `layer` (null: `0`), moved by `at`. */
+  addProfile(profile: Profile, at?: [number, number], layer?: string | null): this;
+  /** `profile` hatched (`SOLID`, `ANSI31`, `ANSI37`, `ANSI32`/`STEEL`) on `layer` (null: `hatch`), moved by `at`. */
+  addHatch(profile: Profile, pattern?: string, angle?: number, scale?: number, at?: [number, number], layer?: string | null): this;
+  /** One line of text on `layer` (null: `text`). */
+  addText(text: string, at: [number, number], height: number, angle?: number, halign?: 'left' | 'center' | 'right',
+    valign?: 'baseline' | 'bottom' | 'middle' | 'top', layer?: string | null): this;
+  /** The page as SVG, one group per layer. */
+  svg(): string;
+  /** The page as DXF R2000 (`AC1015`) text. */
+  dxf(): string;
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+}
+/** A DXF file's closed loops as profiles, holes nested; `tolerance` null the effective tolerance over the drawing's extents. */
+export function dxfProfiles(text: string, tolerance?: number | null): Profile[];
 /**
  * Parts meshed once, asked pose after pose which of them interfere. `close()` frees this handle;
  * so does leaving a `using` block or the garbage collector.
@@ -2051,6 +2275,57 @@ export class SymmetryReport {
   readonly curvature: number;
   readonly naked: number;
 }
+/** How `Solid.patternFeature` applies the tool. */
+export type FeatureOp = 'cut' | 'join';
+/** How far `Solid.hole` drills. */
+export type HoleExtent = 'through' | 'blind' | 'to_face' | 'to_next';
+/** `Solid.hole`'s head: none (`'simple'` or null), a counterbore or a countersink. */
+export type HoleHead = 'simple' | 'counterbore' | 'countersink';
+/** Which side of the plane `Solid.rib` thickens. */
+export type RibSide = 'both' | 'front' | 'back';
+/** Which side of the curve `Solid.web` thickens. */
+export type WebSide = 'both' | 'left' | 'right';
+/** How `Pattern.along` turns its copies: translated only, or by the curve's frame too. */
+export type PatternOrient = 'fixed' | 'path';
+/** `Solid.hole`'s options; angles in radians (`tipAngle` 118 degrees, `headAngle` 90 by default). */
+export interface HoleOptions {
+  direction?: Point3 | null;
+  extent?: HoleExtent;
+  depth?: number | null;
+  tipAngle?: number;
+  face?: number | null;
+  head?: HoleHead | null;
+  headDiameter?: number;
+  headDepth?: number;
+  headAngle?: number;
+  tolerance?: number | null;
+}
+/** `Solid.rib`'s options. */
+export interface RibOptions { side?: RibSide; toward?: Point3 | null; tolerance?: number | null }
+/** `Solid.web`'s options; `bothWays` false by default. */
+export interface WebOptions { side?: WebSide; depth?: number | null; bothWays?: boolean; tolerance?: number | null }
+/** What `Solid.pattern` or `Solid.patternFeature` did. Frozen. */
+export class PatternReport {
+  private constructor();
+  readonly instances: number;
+  readonly booleans: number;
+  readonly missed: number;
+}
+/** What `Solid.hole` did. Frozen. */
+export class HoleReport {
+  private constructor();
+  readonly holes: number;
+  readonly bottoms: readonly number[];
+  readonly facesAdded: number;
+}
+/** Placements for `Solid.pattern` and `Solid.patternFeature`: rigid `Transform`s, instance 0 the identity. Angles in radians. */
+export class Pattern {
+  private constructor();
+  static rectangular(direction1: Point3, count1: number, spacing1: number, direction2?: Point3 | null, count2?: number, spacing2?: number,
+    symmetric?: boolean, skip?: Iterable<number>): Transform[];
+  static circular(axisPoint: Point3, axisDirection: Point3, count: number, angle?: number, symmetric?: boolean, skip?: Iterable<number>): Transform[];
+  static along(curve: NurbsCurve, count: number, spacing?: number | null, orient?: PatternOrient, skip?: Iterable<number>): Transform[];
+}
 /** How `NurbsCurve.tween` blends: control point by control point, after making the curves compatible, or through arc-length samples. */
 export type TweenMethod = 'plain' | 'matching' | 'sampling';
 /**
@@ -2101,8 +2376,8 @@ export class NurbsCurve {
   closestPoint(p: Point3, maxDistance: number | null | undefined): CurveFoot | null;
   /** The nearest points of this curve and `other` (side `a` this curve; distance 0 where they cross), or null where they lie farther apart than `maxDistance` (undefined, null, NaN or Infinity: no limit). Exact. */
   closestPoints(other: NurbsCurve, maxDistance?: number | null): CurvePair | null;
-  /** The item of `items` nearest to this curve -- each a `Solid`, a `NurbsCurve`, a `Projector` or a point -- or null where none lies within `maxDistance` (undefined, null, NaN or Infinity: no limit) or the list is empty. Equal distances go to the earlier item. `tolerance` (undefined, null, 0 or NaN: each solid's effective tolerance) sizes each solid's search; a projector keeps its own. */
-  closestObject(items: Iterable<Solid | NurbsCurve | Projector | Point3>, maxDistance?: number | null, tolerance?: number | null): NearestObject | null;
+  /** The item of `items` nearest to this curve -- each a `Solid`, a `NurbsCurve`, a `Projector`, a `TriangleMesh` or a point -- or null where none lies within `maxDistance` (undefined, null, NaN or Infinity: no limit) or the list is empty. Equal distances go to the earlier item. `tolerance` (undefined, null, 0 or NaN: each solid's effective tolerance) sizes each solid's search; a projector keeps its own. */
+  closestObject(items: Iterable<Solid | NurbsCurve | Projector | TriangleMesh | Point3>, maxDistance?: number | null, tolerance?: number | null): NearestObject | null;
   /** The point and its derivatives up to `order` (at most 8): `order + 1` points. */
   derivatives(t: number, order?: number): number[][];
   curvature(t: number): Curvature;

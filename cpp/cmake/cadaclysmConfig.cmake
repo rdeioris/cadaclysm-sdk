@@ -1,4 +1,4 @@
-# cadaclysmConfig.cmake -- imported targets cadaclysm::reader, cadaclysm::blacksmith, cadaclysm::view_loader and,
+# cadaclysmConfig.cmake -- imported targets cadaclysm::cadaclysm, cadaclysm::reader, cadaclysm::blacksmith, cadaclysm::view_loader and,
 # where the library is there, cadaclysm::view.
 #
 # In a release archive this file sits at lib/cmake/cadaclysm/ and finds lib/ and
@@ -12,8 +12,31 @@
 # holding the built libraries) and CADACLYSM_INCLUDE_DIRS before including this file,
 # as examples/cpp/CMakeLists.txt does. Neither is set or changed here: what this file
 # works with is private (_cadaclysm_*) and unset again at the end.
+#
+# CADACLYSM_FLAVOUR picks the library every target links:
+#   full      (the default) cadaclysm, the reader and the kernel in one library: cadaclysm::reader,
+#             cadaclysm::blacksmith and cadaclysm::cadaclysm all name it;
+#   reader    cadaclysm_reader, the reader alone: cadaclysm::reader and cadaclysm::cadaclysm name
+#             it, and linking cadaclysm::blacksmith fails to generate;
+#   kernel-reader  cadaclysm_kernel_reader, under the same three names as full; a kernel
+#             writer or parts call the flavour leaves out fails to link;
+#   kernel    cadaclysm_kernel: cadaclysm::blacksmith and cadaclysm::cadaclysm name it, and
+#             linking cadaclysm::reader (or cadaclysm::view, which needs the reader) fails;
+#   separate  cadaclysm_capi and cadaclysm_blacksmith, the two libraries of earlier releases;
+#             cadaclysm::cadaclysm links both.
+# The default is full, or in a release archive that archive's own flavour (archive.py stamps
+# _cadaclysm_default_flavour below). cadaclysm_FLAVOUR is set to the one in use.
 if(TARGET cadaclysm::reader)
   return()
+endif()
+
+set(_cadaclysm_default_flavour full)
+if(NOT CADACLYSM_FLAVOUR)
+  set(_cadaclysm_flavour "${_cadaclysm_default_flavour}")
+elseif(CADACLYSM_FLAVOUR MATCHES "^(full|kernel-reader|kernel|reader|separate)$")
+  set(_cadaclysm_flavour "${CADACLYSM_FLAVOUR}")
+else()
+  message(FATAL_ERROR "cadaclysm: CADACLYSM_FLAVOUR=${CADACLYSM_FLAVOUR}: use full, kernel-reader, kernel, reader or separate (default ${_cadaclysm_default_flavour})")
 endif()
 
 get_filename_component(_cadaclysm_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
@@ -82,9 +105,40 @@ function(_cadaclysm_import_optional target stem)
   endif()
 endfunction()
 
-_cadaclysm_import(cadaclysm::reader cadaclysm_capi)
-_cadaclysm_import(cadaclysm::blacksmith cadaclysm_blacksmith)
-set_property(TARGET cadaclysm::blacksmith APPEND PROPERTY INTERFACE_LINK_LIBRARIES cadaclysm::reader)
+if(_cadaclysm_flavour STREQUAL "full" OR _cadaclysm_flavour STREQUAL "kernel-reader")
+  # One file under every name, so $<TARGET_FILE:...> of any of them is the library to stage.
+  if(_cadaclysm_flavour STREQUAL "full")
+    set(_cadaclysm_stem cadaclysm)
+  else()
+    set(_cadaclysm_stem cadaclysm_kernel_reader)
+  endif()
+  _cadaclysm_import(cadaclysm::cadaclysm ${_cadaclysm_stem})
+  _cadaclysm_import(cadaclysm::reader ${_cadaclysm_stem})
+  _cadaclysm_import(cadaclysm::blacksmith ${_cadaclysm_stem})
+elseif(_cadaclysm_flavour STREQUAL "kernel")
+  _cadaclysm_import(cadaclysm::cadaclysm cadaclysm_kernel)
+  _cadaclysm_import(cadaclysm::blacksmith cadaclysm_kernel)
+  # The refusal: generating anything that links this names the missing target below.
+  add_library(cadaclysm::reader INTERFACE IMPORTED GLOBAL)
+  set_target_properties(cadaclysm::reader PROPERTIES INTERFACE_LINK_LIBRARIES
+    cadaclysm::the_kernel_flavour_has_no_reader__configure_with_CADACLYSM_FLAVOUR_full)
+elseif(_cadaclysm_flavour STREQUAL "reader")
+  _cadaclysm_import(cadaclysm::cadaclysm cadaclysm_reader)
+  _cadaclysm_import(cadaclysm::reader cadaclysm_reader)
+  # The refusal: generating anything that links this names the missing target below.
+  add_library(cadaclysm::blacksmith INTERFACE IMPORTED GLOBAL)
+  set_target_properties(cadaclysm::blacksmith PROPERTIES INTERFACE_LINK_LIBRARIES
+    cadaclysm::the_reader_flavour_has_no_kernel__configure_with_CADACLYSM_FLAVOUR_full)
+else()
+  _cadaclysm_import(cadaclysm::reader cadaclysm_capi)
+  _cadaclysm_import(cadaclysm::blacksmith cadaclysm_blacksmith)
+  set_property(TARGET cadaclysm::blacksmith APPEND PROPERTY INTERFACE_LINK_LIBRARIES cadaclysm::reader)
+  # The separate libraries export no cadaclysm_flavour(): the headers answer for them.
+  set_property(TARGET cadaclysm::reader APPEND PROPERTY INTERFACE_COMPILE_DEFINITIONS CADACLYSM_SEPARATE)
+  add_library(cadaclysm::cadaclysm INTERFACE IMPORTED GLOBAL)
+  set_target_properties(cadaclysm::cadaclysm PROPERTIES INTERFACE_LINK_LIBRARIES cadaclysm::blacksmith)
+endif()
+set(cadaclysm_FLAVOUR "${_cadaclysm_flavour}")
 # The viewer reads scenes through the reader the process has loaded: link both.
 _cadaclysm_import_optional(cadaclysm::view cadaclysm_view)
 if(TARGET cadaclysm::view)
@@ -103,7 +157,10 @@ set_target_properties(cadaclysm::view_loader PROPERTIES
   INTERFACE_COMPILE_DEFINITIONS "CADACLYSM_VIEW_LIBRARY_DIR=\"${_cadaclysm_view_dir}\""
   INTERFACE_LINK_LIBRARIES "${CMAKE_DL_LIBS}")
 set(cadaclysm_FOUND TRUE)
+unset(_cadaclysm_flavour)
 unset(_cadaclysm_prefix)
 unset(_cadaclysm_library_dir)
 unset(_cadaclysm_view_dir)
 unset(_cadaclysm_include_dirs)
+unset(_cadaclysm_default_flavour)
+unset(_cadaclysm_stem)

@@ -1,12 +1,12 @@
-"""Build the Godot extension and put it, with the two cadaclysm libraries, where the
-addon loads them from: project/addons/cadaclysm/bin/<platform>/ (windows-x64,
+"""Build the Godot extension and put it, with the cadaclysm library, where the addon
+loads them from: project/addons/cadaclysm/bin/<platform>/ (windows-x64,
 linux-x64, linux-arm64 or macos-universal, as the release names them).
 
     python build.py [--release] [--libs DIR] [--test [FILTER]]
 
---libs names the directory holding cadaclysm_capi and cadaclysm_blacksmith (an SDK's
-lib/, say). Without it: the directories CADACLYSM_LIBRARY and
-CADACLYSM_BLACKSMITH_LIBRARY name, then the repository's target/release.
+--libs names the directory holding the library's full flavour, cadaclysm (an SDK's
+lib/, say). Without it: CADACLYSM_LIBRARY (the library or its directory), then the
+repository's target/flavours/host and target/release (scripts/build-flavour.py full).
 --test then runs the tests headless; GODOT names the Godot executable.
 CARGO_TARGET_DIR is honoured, as cargo honours it.
 """
@@ -43,20 +43,23 @@ def library(stem: str) -> str:
     return f"lib{stem}.so"
 
 
-def find_lib(stem: str, env: str, given: Path | None) -> Path:
-    name = library(stem)
+def find_lib(given: Path | None) -> Path:
+    """The library to stage: the full flavour, from --libs, CADACLYSM_LIBRARY (the file or
+    its directory) or this repository's own builds of it."""
+    name = library("cadaclysm")
     candidates = []
     if given:
         candidates.append(given / name)
-    if os.environ.get(env):
-        p = Path(os.environ[env])
+    if os.environ.get("CADACLYSM_LIBRARY"):
+        p = Path(os.environ["CADACLYSM_LIBRARY"])
         candidates.append(p / name if p.is_dir() else p)
     if ROOT:
-        candidates.append(ROOT / "target" / "release" / name)
+        candidates += [ROOT / "target" / "flavours" / "host" / name, ROOT / "target" / "release" / name]
     for c in candidates:
         if c.is_file():
             return c
-    sys.exit(f"{name} not found; looked in:\n  " + "\n  ".join(map(str, candidates)) + "\nPass --libs DIR.")
+    sys.exit(f"{name} not found; looked in:\n  " + "\n  ".join(map(str, candidates))
+             + "\nPass --libs DIR, or build it: python scripts/build-flavour.py full")
 
 
 def main() -> int:
@@ -73,10 +76,12 @@ def main() -> int:
     BIN.mkdir(parents=True, exist_ok=True)
     built = target / profile / library("cadaclysm_godot")
     shutil.copy2(built, BIN / built.name)
-    for stem, env in (("cadaclysm_capi", "CADACLYSM_LIBRARY"), ("cadaclysm_blacksmith", "CADACLYSM_BLACKSMITH_LIBRARY")):
-        src = find_lib(stem, env, args.libs)
-        if src.resolve() != (BIN / src.name).resolve():
-            shutil.copy2(src, BIN / src.name)
+    src = find_lib(args.libs)
+    if src.resolve() != (BIN / src.name).resolve():
+        shutil.copy2(src, BIN / src.name)
+    # What a build before the single library staged here: the extension would pass it over.
+    for old in ("cadaclysm_capi", "cadaclysm_blacksmith"):
+        (BIN / library(old)).unlink(missing_ok=True)
     print("staged", ", ".join(sorted(p.name for p in BIN.iterdir())))
 
     if args.test is not None:

@@ -581,6 +581,58 @@ final class KernelTests: XCTestCase {
         XCTAssertEqual(try volume(tray), hollowed, accuracy: 1)
     }
 
+    func testATubeSweptThroughItselfReportsItsCrossingAndACubeNothing() throws {
+        let tol = 1e-3
+        // A thin rectangle swept open along a path that comes back across its own start: a line
+        // to (10, 0, 0), a 270-degree turn about (10, 3, 0), a line down to (7, -5, 0) -- through
+        // the first leg at (7, 0). The profile's x along world y, its y along world z.
+        let back = try SweepPath.at(.zero).lineTo([10, 0, 0]).arc([10, 3, 0], [0, 0, 1], 1.5 * .pi).lineTo([7, -5, 0])
+        let square = try Frame(SIMD3(0, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1), SIMD3(1, 0, 0))
+        let tube = try Solid.sweepOpen(try Profile.rect(0.2, 5), square, back)
+        let faces = try tube.faces
+        let crossed = try tube.selfIntersections(tolerance: tol)
+        XCTAssertFalse(crossed.chains.isEmpty, "the tube passes through itself at (7, 0)")
+        for c in crossed.chains {
+            XCTAssertTrue(c.faceA != c.faceB && c.faceA < faces && c.faceB < faces, "two walls, not a fold: \(c)")
+            XCTAssertEqual(c.curve?.kind, "line", "two planar walls cross in a line")
+            for p in c.points {
+                XCTAssertTrue(abs(p.x - 7) <= 0.1 + tol && abs(p.y) <= 0.1 + tol && abs(p.z) <= 2.5 + tol, "off the crossing: \(p)")
+            }
+        }
+        let clean = try Solid.cuboid(4, 6, 8).selfIntersections(tolerance: tol)
+        XCTAssertTrue(clean.chains.isEmpty && clean.overlaps.isEmpty, clean.description)
+        XCTAssertTrue(refusal { _ = try tube.selfIntersections(tolerance: -1) }?.hasPrefix("self_intersect: tolerance must be positive and finite") ?? false)
+    }
+
+    func testCheckFindsATubeThroughItselfItsFreeEdgesForACutAndNothingWrongWithTwoCubes() throws {
+        let tol = 1e-3
+        // The tube of the test above: an open sheet passing through itself at (7, 0).
+        let back = try SweepPath.at(.zero).lineTo([10, 0, 0]).arc([10, 3, 0], [0, 0, 1], 1.5 * .pi).lineTo([7, -5, 0])
+        let square = try Frame(SIMD3(0, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1), SIMD3(1, 0, 0))
+        let tube = try Solid.sweepOpen(try Profile.rect(0.2, 5), square, back)
+        let cube = try Solid.cuboid(1, 1, 1)
+        XCTAssertEqual(try cube.check(), [])
+        XCTAssertEqual(try cube.check(try Solid.sphere(2), "join", tolerance: tol), [])
+        let alone = try tube.check(tolerance: tol)
+        XCTAssertFalse(alone.isEmpty, "the tube passes through itself")
+        for f in alone {
+            XCTAssertEqual(f.kind, "self_intersection", "an open sheet is no fault alone: \(f)")
+            XCTAssertEqual(f.argument, 0)
+            XCTAssertTrue(f.index != nil && f.other != nil && f.index != f.other && f.size > 0.1, f.description)
+        }
+        let asCut = try tube.check(cube, "cut", tolerance: tol)
+        let open = asCut.filter { $0.kind == "open" }
+        XCTAssertFalse(open.isEmpty, "the tube is open")
+        XCTAssertTrue(open.allSatisfy { $0.argument == 0 && $0.other != nil && $0.size > 0 }, open.description)
+        XCTAssertTrue(asCut.allSatisfy { $0.argument == 0 }, "the cube is fine")
+        XCTAssertTrue(try cube.check(tube, "trim", tolerance: tol).contains { $0.kind == "open" && $0.argument == 1 }, "a trim's tool must be closed")
+        let small = try Solid.cuboid(4, 4, 0.01).check(tolerance: 0.05)
+        XCTAssertTrue(small.contains { $0.kind == "short_edge" && $0.index != nil && $0.other == nil && $0.size < 0.05 }, small.description)
+        XCTAssertEqual(refusal { _ = try cube.check(cube, "union") },
+                       "check: unknown operation \"union\" (join, cut, common, split_sheet, trim, merge or intersect)")
+        XCTAssertEqual(refusal { _ = try cube.check(tolerance: -1) }, "check: tolerance must be positive and finite")
+    }
+
     func testAProfileIsSweptAlongAPathOfLinesAndArcs() throws {
         let xy = try Frame.xy()
         let rect = try Profile.rect(10, 10)
@@ -2298,5 +2350,156 @@ extension KernelTests {
         let other = try Subd.cuboid()
         other.close()
         XCTAssertEqual(refusal { _ = try other.faces }, "subd: closed")
+    }
+
+    // MARK: Mechanical drawings: hidden lines, the projected outline, pages, DXF profiles
+
+    func testACubeOnItsDiagonalShowsNineLinesAndHidesThree() throws {
+        let cube = try Solid.cuboid(10, 10, 10)
+        let diagonal = SIMD3<Double>(-1, -1, -1)
+        let view = try hlr([cube], HlrOptions(direction: diagonal))
+        XCTAssertEqual(view.visible().count, 9)
+        XCTAssertEqual(view.hidden().count, 3)
+        for line in view.lines {
+            XCTAssertEqual(line.kind, .sharp, line.description)
+            XCTAssertEqual(line.solid, 0)
+            if case .edge = line.source {} else { XCTFail("an edge source: \(line)") }
+            XCTAssertTrue(line.beziers2d.count >= 1 && line.beziers2d.count == line.beziers3d.count, line.description)
+            for k in 0..<line.beziers2d.count * 4 { XCTAssertEqual(line.beziers2d.points[k * 3 + 2], 0.0) }
+        }
+        let seen: Double = view.visible().reduce(0.0) { $0 + $1.length3d }
+        let unseen: Double = view.hidden().reduce(0.0) { $0 + $1.length3d }
+        XCTAssertEqual(seen, 90.0, accuracy: 1e-6)
+        XCTAssertEqual(unseen, 30.0, accuracy: 1e-6)
+        // The three hidden edges meet at the far corner.
+        for line in view.hidden() {
+            let p = line.beziers3d.points
+            let n = line.beziers3d.count * 12
+            let ends = [SIMD3(p[0], p[1], p[2]), SIMD3(p[n - 3], p[n - 2], p[n - 1])]
+            let corner = SIMD3<Double>(-5, -5, -5)
+            XCTAssertTrue(ends.contains { (($0 - corner) * ($0 - corner)).sum() < 1e-18 }, line.description)
+        }
+        XCTAssertEqual(view.report.unsettled, 0)
+        XCTAssertEqual(view.tolerance, try effectiveTolerance(cube), accuracy: 1e-12)
+        view.close()
+        XCTAssertTrue(view.isClosed)
+    }
+
+    func testACubeInPerspectiveAndAsAMeshShowsNineAndHidesThree() throws {
+        let cube = try Solid.cuboid(10, 10, 10)
+        let eye = SIMD3<Double>(30, 25, 20)
+        let seen = try hlr([cube], HlrOptions(eye: eye, target: SIMD3<Double>(0, 0, 0)))
+        XCTAssertEqual(seen.visible().count, 9)
+        XCTAssertEqual(seen.hidden().count, 3)
+        let positions: [SIMD3<Double>] = [[-5, -5, -5], [5, -5, -5], [5, 5, -5], [-5, 5, -5],
+                                          [-5, -5, 5], [5, -5, 5], [5, 5, 5], [-5, 5, 5]]
+        let triangles: [(UInt32, UInt32, UInt32)] = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
+                                                     (3, 7, 6), (3, 6, 2), (0, 4, 7), (0, 7, 3), (1, 2, 6), (1, 6, 5)]
+        let mesh = try TriangleMesh(positions, triangles)
+        let view = try hlrMesh([mesh], HlrOptions(direction: SIMD3<Double>(-1, -1, -1)))
+        XCTAssertEqual(view.visible().count, 9)
+        XCTAssertEqual(view.hidden().count, 3)
+        for line in view.lines {
+            if case .meshEdge(let a, let b) = line.source {
+                XCTAssertTrue(a < 8 && b < 8 && a != b, line.description)
+            } else {
+                XCTFail("a mesh edge source: \(line)")
+            }
+        }
+    }
+
+    func testHiddenLineWordsAreRefusedNamingTheCall() throws {
+        let cube = try Solid.cuboid(10, 10, 10)
+        XCTAssertTrue(refusal { _ = try hlr([cube], HlrOptions(direction: SIMD3<Double>(0, 0, -1))) }?.hasPrefix("hlr: up is along the view") ?? false)
+        XCTAssertEqual(refusal { _ = try hlr([]) }, "hlr: no solids")
+        XCTAssertTrue(refusal { _ = try hlr([cube], HlrOptions(tolerance: -1)) }?.hasPrefix("hlr: tolerance must be 0 or more") ?? false)
+        XCTAssertEqual(refusal { _ = try hlr([cube], HlrOptions(direction: SIMD3<Double>(1, 0, 0), eye: SIMD3<Double>(5, 5, 5))) },
+                       "hlr: give direction (parallel) or eye (perspective), not both")
+        XCTAssertTrue(refusal { _ = try Page(units: "furlongs") }?.hasPrefix("page_new: units") ?? false)
+    }
+
+    func testAPlateOutlinesAsOneProfileWithItsHole() throws {
+        let hole = try Solid.cylinder(5, 20).translate(0, 0, -10)
+        let plate = try Solid.cuboid(40, 30, 5).cut(hole, tolerance: nil)
+        let profiles = try projectedOutline([plate], HlrOptions(direction: SIMD3<Double>(0, 0, -1), up: SIMD3<Double>(0, 1, 0)))
+        XCTAssertEqual(profiles.count, 1)
+        let flat = try profiles[0].beziers()
+        var widest = 0.0
+        for k in stride(from: 0, to: flat.count, by: 4) { widest = max(widest, abs(flat[k])) }
+        XCTAssertEqual(widest, 20.0, accuracy: 1e-6)
+        XCTAssertTrue(flat.count / 16 > 4, "the rectangle's four sides, then the hole's pieces")
+        // The hole is a hole: the outline extruded is the plate's area less the hole's.
+        let slab = try Solid.extrude(profiles[0], try Frame.xy(), 1)
+        let mass: Mass = try slab.mass()
+        let expected: Double = 40.0 * 30.0 - Double.pi * 25.0
+        XCTAssertEqual(mass.volume, expected, accuracy: 0.5)
+    }
+
+    func testSvgDrawsHiddenLinesRemovedOrDashed() throws {
+        let cube = try Solid.cuboid(10, 10, 10)
+        let el: Double = atan(1.0 / 2.0.squareRoot()) * 180.0 / Double.pi
+        let options = SvgOptions(azimuth: 45, elevation: el)
+        let removed = try writeSvgText([cube], options: options, hidden: .removed)
+        XCTAssertTrue(removed.contains("<g id=\"solid-0\""))
+        XCTAssertFalse(removed.contains("solid-0-hidden"))
+        let dashed = try writeSvgText([cube], options: options, hidden: .dashed)
+        guard let start = dashed.range(of: "<g id=\"solid-0-hidden\"") else { return XCTFail("no hidden group") }
+        let rest = dashed[start.lowerBound...]
+        guard let end = rest.range(of: "</g>") else { return XCTFail("an unclosed hidden group") }
+        let group = rest[..<end.lowerBound]
+        XCTAssertTrue(group.contains("stroke-dasharray"))
+        XCTAssertEqual(group.filter { $0 == "M" }.count, 3)
+        let drawn = try writeSvgText([cube], options: options, hidden: .drawn)
+        XCTAssertFalse(drawn.contains("solid-0-hidden"))
+        // Removed leaves the three hidden edges out of the solid's own group: it differs from
+        // the group that draws every line, and draws fewer paths.
+        func solidGroup(_ svg: String) -> Substring {
+            guard let start = svg.range(of: "<g id=\"solid-0\"") else { return "" }
+            let rest = svg[start.lowerBound...]
+            guard let end = rest.range(of: "</g>") else { return "" }
+            return rest[..<end.lowerBound]
+        }
+        XCTAssertNotEqual(solidGroup(removed), solidGroup(drawn))
+        XCTAssertLessThan(solidGroup(removed).filter { $0 == "M" }.count, solidGroup(drawn).filter { $0 == "M" }.count)
+    }
+
+    func testAPageWritesR2000DxfThatReadsBackAsItsProfiles() throws {
+        let cube = try Solid.cuboid(10, 10, 10)
+        let plate = try Profile.rect(40, 20)
+        let page = try Page(units: "mm")
+        try page.addView(try hlr([cube], HlrOptions(direction: SIMD3<Double>(-1, -1, -1))), at: SIMD2<Double>(50, 50), scale: 2)
+        XCTAssertEqual(try page.entityCount, 12)
+        let at = SIMD2<Double>(150, 50)
+        try page.addProfile(plate, at: at, layer: "parts")
+            .addHatch(plate, pattern: "ANSI31", at: at)
+            .addText("PLATE", at: SIMD2<Double>(150, 30), height: 3.5, halign: "center")
+        XCTAssertEqual(try page.entityCount, 15)
+        let dxf = try page.dxf()
+        XCTAssertTrue(dxf.hasPrefix("  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n"), String(dxf.prefix(80)))
+        XCTAssertEqual(dxf, try page.dxf())
+        for layer in ["visible", "hidden", "parts", "hatch", "text"] {
+            XCTAssertTrue(dxf.contains("\n  8\n\(layer)\n"), layer)
+        }
+        let svg = try page.svg()
+        XCTAssertTrue(svg.contains("<svg") && svg.contains("PLATE"))
+
+        // The rectangle alone round-trips: one profile, where it was put.
+        let alone = try Page(units: "mm").addProfile(plate, at: at)
+        let back = try dxfProfiles(try alone.dxf())
+        XCTAssertEqual(back.count, 1)
+        let flat = try back[0].beziers()
+        var lo = SIMD2<Double>(.infinity, .infinity), hi = SIMD2<Double>(-.infinity, -.infinity)
+        for k in stride(from: 0, to: flat.count, by: 4) {
+            lo = SIMD2(min(lo.x, flat[k]), min(lo.y, flat[k + 1]))
+            hi = SIMD2(max(hi.x, flat[k]), max(hi.y, flat[k + 1]))
+        }
+        XCTAssertEqual(lo.x, 130.0, accuracy: 1e-6)
+        XCTAssertEqual(lo.y, 40.0, accuracy: 1e-6)
+        XCTAssertEqual(hi.x, 170.0, accuracy: 1e-6)
+        XCTAssertEqual(hi.y, 60.0, accuracy: 1e-6)
+        XCTAssertTrue(refusal { _ = try dxfProfiles("not a DXF file") }?.hasPrefix("dxf_profiles: line ") ?? false)
+        XCTAssertTrue(refusal { try page.addHatch(plate, pattern: "BRICK") }?.hasPrefix("page_add_hatch: pattern") ?? false)
+        page.close()
+        XCTAssertTrue(page.isClosed)
     }
 }

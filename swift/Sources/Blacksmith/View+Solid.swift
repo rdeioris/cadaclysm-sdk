@@ -14,4 +14,30 @@ extension View {
         try showHandle(solid: solid.h(), scene: nil, tolerance: tolerance, rgb: rgb, owner: solid,
                        material: material, opacity: opacity, faces: faces)
     }
+
+    /// A 2D shape over the window (view ABI 1.24): `shape` in pixels (one profile unit a pixel,
+    /// y up), its origin hung `x`, `y` pixels inward from `anchor` -- a closed profile filled
+    /// (holes cut, even-odd), stroked where `style` says (see OverlayStyle). Drawn after
+    /// everything else, never moved by the camera, kept in place as the window resizes; a
+    /// click on it picks it (`ViewPick.overlay`) and nothing beneath.
+    @discardableResult
+    public func showOverlay(_ shape: Profile, anchor: Anchor, x: Float, y: Float,
+                            style: OverlayStyle = OverlayStyle()) throws -> Overlay {
+        try showOverlay([shape], anchor: anchor, x: x, y: y, style: style)
+    }
+    /// Several profiles as one overlay -- a crosshair's two strokes, a frame's two loops: their
+    /// fills together by the even-odd rule. The fill falls back on the first coloured profile's
+    /// colour.
+    @discardableResult
+    public func showOverlay(_ shapes: [Profile], anchor: Anchor, x: Float, y: Float,
+                            style: OverlayStyle = OverlayStyle()) throws -> Overlay {
+        if shapes.isEmpty { throw ViewError("show_overlay: at least one profile") }
+        var beziers: [Float] = []
+        var own: [Float]?
+        for p in shapes {
+            beziers += try p.beziers().map { Float($0) }
+            if own == nil, let c = try p.colour { own = [Float(c.x), Float(c.y), Float(c.z), 1] }
+        }
+        return try showOverlayCurves(beziers, own: own, anchor: anchor, x: x, y: y, style: style)
+    }
 }

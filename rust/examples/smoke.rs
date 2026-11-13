@@ -9,10 +9,10 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cadaclysm_sdk::blacksmith::{
-    self, Assembly, Axis, Collider, Curve, Frame, Intersection, Keep, PairOptions, Path as Outline, Profile, Selector, Solid, SolidHits,
-    SweepPath, Sketch, Subd, SubdSolidOptions, Unit, Workplane, DEFAULT_TOLERANCE, FILLET_TOLERANCE,
+    self, Assembly, Axis, Collider, Curve, Frame, HlrKind, HlrOptions, HlrSource, Intersection, Keep, Page, PageUnits, PairOptions, Path as Outline,
+    Profile, Selector, Solid, SolidHits, SweepPath, Sketch, Subd, SubdSolidOptions, TriangleMesh, Unit, Workplane, DEFAULT_TOLERANCE, FILLET_TOLERANCE,
 };
-use cadaclysm_sdk::{Convention, Link, Node, OpenOptions, Scene, StateValue, SvgOptions};
+use cadaclysm_sdk::{Convention, Link, Node, OpenOptions, Scene, StateValue, SvgHidden, SvgOptions};
 
 fn main() -> ExitCode {
     match run() {
@@ -435,6 +435,74 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     match pipe_a.intersect(&pipe_b, -1.0) {
         Err(err) if err.to_string().contains("intersect: tolerance must be positive and finite") => {}
         other => return Err(format!("intersect: a negative tolerance was accepted or refused in other words: {other:?}")),
+    }
+    // Self-intersections: a thin rectangle swept open along a path that comes back across its
+    // own start (a line to (10, 0, 0), a 270-degree turn about (10, 3, 0), a line down to
+    // (7, -5, 0)) crosses itself at (7, 0) in lines between two walls, never along its own
+    // edges; a cube crosses nothing; a negative tolerance is refused in the kernel's words.
+    let path = SweepPath::at([0.0, 0.0, 0.0])
+        .and_then(|p| p.line_to([10.0, 0.0, 0.0]))
+        .and_then(|p| p.arc([10.0, 3.0, 0.0], [0.0, 0.0, 1.0], 1.5 * std::f64::consts::PI))
+        .and_then(|p| p.line_to([7.0, -5.0, 0.0]))
+        .map_err(e)?;
+    let square = Frame::new([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).map_err(e)?;
+    let tube = Solid::sweep_open(&Profile::rect(0.2, 5.0).map_err(e)?, &square, &path).map_err(e)?;
+    let crossed = tube.self_intersections(tol).map_err(e)?;
+    check(!crossed.chains.is_empty(), "self_intersections: the tube passes through itself at (7, 0)")?;
+    let tube_faces = tube.faces().map_err(e)?;
+    for c in &crossed.chains {
+        check(c.faces.0 != c.faces.1 && c.faces.0 < tube_faces && c.faces.1 < tube_faces, &format!("self_intersections: a chain reads {c:?}"))?;
+        check(c.curve.as_ref().is_some_and(|curve| curve.kind == "line"), &format!("self_intersections: two planar walls cross in a line: {c:?}"))?;
+        check(
+            c.points.iter().all(|p| (p[0] - 7.0).abs() <= 0.1 + tol && p[1].abs() <= 0.1 + tol && p[2].abs() <= 2.5 + tol),
+            &format!("self_intersections: a chain off the crossing: {c:?}"),
+        )?;
+    }
+    let clean = Solid::cuboid(4.0, 6.0, 8.0).map_err(e)?.self_intersections(tol).map_err(e)?;
+    check(clean == Intersection::default(), &format!("self_intersections: a cube reads {clean:?}"))?;
+    match tube.self_intersections(-1.0) {
+        Err(err) if err.to_string().contains("self_intersect: tolerance must be positive and finite") => {}
+        other => return Err(format!("self_intersections: a negative tolerance was accepted or refused in other words: {other:?}")),
+    }
+    drawings()?;
+    // The argument check: two cubes are a fine pair, the tube alone crosses itself (an open
+    // sheet is no fault alone), as a cut's first argument it is open, as a trim's tool too;
+    // a thin plate's short edges show; an unknown operation and a negative tolerance are
+    // refused in the kernel's words.
+    let cube = Solid::cuboid(1.0, 1.0, 1.0).map_err(e)?;
+    let fine = cube.check(None, None, 0.05).map_err(e)?;
+    check(fine.is_empty(), &format!("check: a cube reads {fine:?}"))?;
+    let fine = cube.check(Some(&Solid::sphere(2.0).map_err(e)?), Some("join"), tol).map_err(e)?;
+    check(fine.is_empty(), &format!("check: a cube and a sphere to join read {fine:?}"))?;
+    let alone = tube.check(None, None, tol).map_err(e)?;
+    check(!alone.is_empty(), "check: the tube passes through itself at (7, 0)")?;
+    for f in &alone {
+        check(
+            f.kind == "self_intersection" && f.argument == 0 && f.index.is_some() && f.other.is_some() && f.index != f.other && f.size > 0.1,
+            &format!("check: the tube alone reads {f:?}"),
+        )?;
+    }
+    let as_cut = tube.check(Some(&cube), Some("cut"), tol).map_err(e)?;
+    let open: Vec<_> = as_cut.iter().filter(|f| f.kind == "open").collect();
+    check(
+        !open.is_empty() && open.iter().all(|f| f.argument == 0 && f.other.is_some() && f.size > 0.0),
+        &format!("check: the tube's free edges for a cut read {open:?}"),
+    )?;
+    check(as_cut.iter().all(|f| f.argument == 0), &format!("check: the cube is fine, but {as_cut:?}"))?;
+    let as_trim = cube.check(Some(&tube), Some("trim"), tol).map_err(e)?;
+    check(as_trim.iter().any(|f| f.kind == "open" && f.argument == 1), &format!("check: a trim's tool must be closed: {as_trim:?}"))?;
+    let small = Solid::cuboid(4.0, 4.0, 0.01).map_err(e)?.check(None, None, 0.05).map_err(e)?;
+    check(
+        small.iter().any(|f| f.kind == "short_edge" && f.index.is_some() && f.other.is_none() && f.size < 0.05),
+        &format!("check: a thin plate reads {small:?}"),
+    )?;
+    match cube.check(Some(&cube), Some("union"), 0.05) {
+        Err(err) if err.to_string().contains(r#"check: unknown operation "union" (join, cut, common, split_sheet, trim, merge or intersect)"#) => {}
+        other => return Err(format!("check: an unknown operation was accepted or refused in other words: {other:?}")),
+    }
+    match cube.check(None, None, -1.0) {
+        Err(err) if err.to_string().contains("check: tolerance must be positive and finite") => {}
+        other => return Err(format!("check: a negative tolerance was accepted or refused in other words: {other:?}")),
     }
     let lower = Solid::cylinder(1.0, 4.0).map_err(e)?;
     let upper = Solid::cylinder(1.0, 4.0).map_err(e)?.translate(0.0, 0.0, 2.0).map_err(e)?;
@@ -2306,5 +2374,116 @@ fn rhino3dm_checks() -> Result<(), String> {
     let _ = std::fs::remove_file(&out);
     result?;
     println!("3dm: {} bytes, read back to 6 faces and 6000 mm3; an assembly of 3 placements", data.len());
+    Ok(())
+}
+
+/// Mechanical drawings: hidden-line removal of a cube on its diagonal (9 seen, 3 hidden, all
+/// sharp, lengths 90 and 30), in perspective and as a mesh; a plate's outline (one profile with
+/// its hole); the SVG's hidden-line words; a page's R2000 DXF read back through `dxf_profiles`;
+/// refusals in the kernel's words.
+fn drawings() -> Result<(), String> {
+    let e = |e: cadaclysm_sdk::Error| format!("drawings: {e}");
+    let cube = Solid::cuboid(10.0, 10.0, 10.0).map_err(e)?;
+    let view = blacksmith::hlr(&[&cube], &HlrOptions::along([-1.0, -1.0, -1.0])).map_err(e)?;
+    let (seen, hidden) = (view.visible(), view.hidden());
+    check(seen.len() == 9 && hidden.len() == 3, &format!("hlr: the diagonal cube shows {} and hides {}", seen.len(), hidden.len()))?;
+    check(
+        view.lines().iter().all(|l| l.kind == HlrKind::Sharp && matches!(l.source, HlrSource::Edge(_)) && l.solid == 0),
+        "hlr: every line of a cube is a sharp edge of solid 0",
+    )?;
+    let length = |lines: &[&blacksmith::HlrLine]| lines.iter().map(|l| l.length3d).sum::<f64>();
+    check(
+        (length(&seen) - 90.0).abs() < 1e-6 && (length(&hidden) - 30.0).abs() < 1e-6,
+        &format!("hlr: lengths {} / {}, not 90 / 30", length(&seen), length(&hidden)),
+    )?;
+    for line in view.lines() {
+        check(line.beziers2d.count() >= 1 && line.beziers2d.count() == line.beziers3d.count(), "hlr: a line's Béziers come in matching pairs")?;
+        check(line.beziers2d.points.iter().all(|p| p[2] == 0.0), "hlr: a view-plane Bézier lies at z 0")?;
+    }
+    for line in &hidden {
+        let (first, last) = (line.beziers3d.points[0], line.beziers3d.points[line.beziers3d.points.len() - 1]);
+        check(
+            [first, last].iter().any(|p| p.iter().all(|c| (c + 5.0).abs() < 1e-9)),
+            &format!("hlr: a hidden edge runs {first:?} .. {last:?}, not from the far corner"),
+        )?;
+    }
+    check(view.report().unsettled == 0, "hlr: no piece left unsettled")?;
+    let tol = blacksmith::effective_tolerance(&[&cube]).map_err(e)?;
+    check((view.tolerance() - tol).abs() < 1e-15, &format!("hlr: tolerance {} not the effective {tol}", view.tolerance()))?;
+    let persp = blacksmith::hlr(&[&cube], &HlrOptions::from_eye([30.0, 25.0, 20.0], [0.0; 3])).map_err(e)?;
+    check(persp.visible().len() == 9 && persp.hidden().len() == 3, "hlr: the cube in perspective shows 9 and hides 3")?;
+    let corners = [[-5.0, -5.0, -5.0], [5.0, -5.0, -5.0], [5.0, 5.0, -5.0], [-5.0, 5.0, -5.0], [-5.0, -5.0, 5.0], [5.0, -5.0, 5.0], [5.0, 5.0, 5.0], [-5.0, 5.0, 5.0]];
+    let triangles = [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [3, 7, 6], [3, 6, 2], [0, 4, 7], [0, 7, 3], [1, 2, 6], [1, 6, 5]];
+    let mesh = TriangleMesh::new(&corners, &triangles).map_err(e)?;
+    let meshed = blacksmith::hlr_mesh(&[&mesh], &HlrOptions::along([-1.0, -1.0, -1.0])).map_err(e)?;
+    check(meshed.visible().len() == 9 && meshed.hidden().len() == 3, "hlr_mesh: the cube mesh shows 9 and hides 3")?;
+    check(meshed.lines().iter().all(|l| matches!(l.source, HlrSource::MeshEdge(_, _))), "hlr_mesh: every line is a mesh edge")?;
+    match blacksmith::hlr(&[&cube], &HlrOptions::along([0.0, 0.0, -1.0])) {
+        Err(err) if err.to_string().starts_with("hlr: up is along the view") => {}
+        other => return Err(format!("hlr: up along the view was accepted or refused in other words: {other:?}")),
+    }
+    match blacksmith::hlr(&[], &HlrOptions::default()) {
+        Err(err) if err.to_string().starts_with("hlr: no solids") => {}
+        other => return Err(format!("hlr: no solids was accepted or refused in other words: {other:?}")),
+    }
+
+    let plate = Solid::cuboid(40.0, 30.0, 5.0)
+        .and_then(|p| p.cut(&Solid::cylinder(5.0, 20.0)?.translate(0.0, 0.0, -10.0)?, f64::NAN))
+        .map_err(e)?;
+    let outline = blacksmith::projected_outline(&[&plate], &HlrOptions::along([0.0, 0.0, -1.0]).with_up([0.0, 1.0, 0.0])).map_err(e)?;
+    check(outline.len() == 1, &format!("projected_outline: {} profiles, not 1", outline.len()))?;
+    let flat = outline[0].beziers(None).map_err(e)?;
+    let max_x = flat.chunks_exact(4).map(|p| p[0].abs()).fold(0.0, f64::max);
+    check((max_x - 20.0).abs() < 1e-6, &format!("projected_outline: reaches x {max_x}, not 20"))?;
+    let xy = Frame::new([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]).map_err(e)?;
+    let volume = Solid::extrude(&outline[0], &xy, 1.0).and_then(|s| s.mass(0.0)).map_err(e)?.volume;
+    check((volume - (1200.0 - 25.0 * std::f64::consts::PI)).abs() < 1e-2, &format!("projected_outline: the hole is not a hole ({volume})"))?;
+
+    let el = (1.0f64 / 2f64.sqrt()).atan().to_degrees();
+    let words = |hidden| SvgOptions { azimuth: Some(45.0), elevation: Some(el), hidden, ..SvgOptions::default() };
+    let removed = cube.svg_text(&words(SvgHidden::Removed)).map_err(e)?;
+    check(removed.contains("<g id=\"solid-0\"") && !removed.contains("solid-0-hidden"), "svg: hidden removed draws no hidden group")?;
+    let dashed = cube.svg_text(&words(SvgHidden::Dashed)).map_err(e)?;
+    let group = dashed.find("<g id=\"solid-0-hidden\"").map(|at| &dashed[at..]).ok_or("svg: hidden dashed draws a solid-0-hidden group")?;
+    let group = &group[..group.find("</g>").unwrap_or(group.len())];
+    check(group.contains("stroke-dasharray") && group.matches('M').count() == 3, &format!("svg: the dashed group is {group}"))?;
+
+    let rect = Profile::rect(40.0, 20.0).map_err(e)?;
+    let mut page = Page::new(PageUnits::Millimetres).map_err(e)?;
+    page.add_view(&view, [50.0, 50.0], 2.0).map_err(e)?;
+    check(page.entity_count() == 12, &format!("page: the view is {} entities, not 12", page.entity_count()))?;
+    page.add_profile(&rect, [150.0, 50.0], Some("parts"))
+        .and_then(|p| p.add_hatch(&rect, "ANSI31", 0.0, 1.0, [150.0, 50.0], None))
+        .and_then(|p| p.add_text("PLATE", [150.0, 30.0], 3.5, 0.0, Some("center"), None, None))
+        .map_err(e)?;
+    check(page.entity_count() == 15, &format!("page: {} entities, not 15", page.entity_count()))?;
+    let dxf = page.dxf().map_err(e)?;
+    check(dxf.starts_with("  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n"), "page: the DXF is not R2000")?;
+    check(dxf == page.dxf().map_err(e)?, "page: the same page writes the same DXF")?;
+    for layer in ["visible", "hidden", "parts", "hatch", "text"] {
+        check(dxf.contains(&format!("\n  8\n{layer}\n")), &format!("page: no layer {layer}"))?;
+    }
+    check(page.svg().map_err(e)?.contains("PLATE"), "page: the SVG has the text")?;
+    let mut alone = Page::new(PageUnits::Millimetres).map_err(e)?;
+    alone.add_profile(&rect, [150.0, 50.0], None).map_err(e)?;
+    let back = blacksmith::dxf_profiles(&alone.dxf().map_err(e)?, None).map_err(e)?;
+    check(back.len() == 1, &format!("dxf_profiles: {} profiles, not 1", back.len()))?;
+    let flat = back[0].beziers(None).map_err(e)?;
+    let (xs, ys): (Vec<f64>, Vec<f64>) = flat.chunks_exact(4).map(|p| (p[0], p[1])).unzip();
+    let bound = |v: &[f64], f: fn(f64, f64) -> f64, from: f64| v.iter().copied().fold(from, f);
+    let bounds = [bound(&xs, f64::min, f64::MAX), bound(&ys, f64::min, f64::MAX), bound(&xs, f64::max, f64::MIN), bound(&ys, f64::max, f64::MIN)];
+    check(
+        bounds.iter().zip([130.0, 40.0, 170.0, 60.0]).all(|(a, b)| (a - b).abs() < 1e-9),
+        &format!("dxf_profiles: the rectangle came back at {bounds:?}"),
+    )?;
+    match blacksmith::dxf_profiles("not a DXF file", None) {
+        Err(err) if err.to_string().starts_with("dxf_profiles: line ") => {}
+        other => return Err(format!("dxf_profiles: text that is not DXF was accepted or refused in other words: {other:?}")),
+    }
+    match page.add_hatch(&rect, "BRICK", 0.0, 1.0, [0.0, 0.0], None) {
+        Err(err) if err.to_string().starts_with("page_add_hatch: pattern") => {}
+        other => return Err(format!("page_add_hatch: an unknown pattern was accepted or refused in other words: {other:?}")),
+    }
+    println!("drawings: {} lines, page of {} entities, DXF {} bytes", view.lines().len(), page.entity_count(), dxf.len());
     Ok(())
 }

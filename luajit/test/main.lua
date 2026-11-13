@@ -114,6 +114,25 @@ function t.fixture(rel)
   return p
 end
 
+-- A flavour of the single library that leaves a call out (the writers and parts in the
+-- kernel and kernel-reader flavours, the node API in the kernel flavour) raises the
+-- flavour's own message from it. A case that reaches such a call is skipped, naming the
+-- call; any other failure, on any library, stays a failure. On the full flavour and the
+-- separate libraries no call raises it, and nothing here changes a result.
+local FLAVOUR_ERRORS = {
+  "not in this library's flavour %('[%w%-]+'",
+  "the '[%w%-]+' flavour has no node API; load ",
+  "the '[%w%-]+' flavour has no kernel; load ",
+}
+local function flavour_error(why)
+  for line in (tostring(why) .. "\n"):gmatch("([^\n]*)\n") do
+    for _, pattern in ipairs(FLAVOUR_ERRORS) do
+      if line:find(pattern) then return (line:gsub("^%s+", "")) end
+    end
+  end
+  return nil
+end
+
 -- ---- run ---------------------------------------------------------------------------
 
 local files = {}
@@ -125,7 +144,7 @@ for _, name in ipairs({ "reader_test", "blacksmith_test", "document_test", "view
   end
 end
 
-local passed, failed = 0, 0
+local passed, failed, skipped = 0, 0, 0
 say("host " .. (love and ("LÖVE " .. table.concat({ love.getVersion() }, ".", 1, 3))
   or lovr and ("LÖVR " .. table.concat({ lovr.getVersion() }, ".", 1, 3)) or jit.version))
 for _, name in ipairs(files) do
@@ -141,6 +160,9 @@ for _, name in ipairs(files) do
       if good then
         passed = passed + 1
         say("ok    " .. name .. ": " .. c.name)
+      elseif flavour_error(why) then
+        skipped = skipped + 1
+        say("skip  " .. name .. ": " .. c.name .. " -- not in this flavour: " .. flavour_error(why):sub(1, 200))
       else
         failed = failed + 1
         say("FAIL  " .. name .. ": " .. c.name .. "\n      " .. tostring(why):gsub("\n", "\n      "))
@@ -149,7 +171,8 @@ for _, name in ipairs(files) do
   end
 end
 collectgarbage()
-say(("%d passed, %d failed"):format(passed, failed))
+say(("%d passed, %d failed"):format(passed, failed)
+  .. (skipped > 0 and (", %d skipped (not in this flavour)"):format(skipped) or ""))
 if passed + failed == 0 then say("FAIL  no test ran" .. (filter and (" (filter '" .. filter .. "')") or "")) failed = 1 end
 -- os.exit rather than love/lovr.event.quit: LÖVR 0.19 exits 0 whatever code it is given.
 os.exit(failed == 0 and 0 or 1)

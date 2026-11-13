@@ -31,8 +31,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
@@ -55,11 +57,19 @@
 static_assert(sizeof(CadaclysmViewLod) == 12, "CadaclysmViewLod is size, min_triangles, motion: 12 bytes");
 static_assert(offsetof(CadaclysmViewLod, min_triangles) == 4 && offsetof(CadaclysmViewLod, motion) == 8,
               "CadaclysmViewLod's fields are at 0, 4 and 8");
-// The pick answer as 1.8 writes it: size, item, node, face, clicks, has_point, point[3].
-static_assert(sizeof(CadaclysmViewPick) == 36, "CadaclysmViewPick (1.8) is 36 bytes");
+// The pick answer as 1.24 writes it: size, item, node, face, clicks, has_point, point[3] (1.8),
+// overlay (1.24).
+static_assert(sizeof(CadaclysmViewPick) == 40, "CadaclysmViewPick (1.24) is 40 bytes");
 static_assert(offsetof(CadaclysmViewPick, clicks) == 16 && offsetof(CadaclysmViewPick, has_point) == 20 &&
-                  offsetof(CadaclysmViewPick, point) == 24,
-              "CadaclysmViewPick's 1.8 fields are at 16, 20 and 24");
+                  offsetof(CadaclysmViewPick, point) == 24 && offsetof(CadaclysmViewPick, overlay) == 36,
+              "CadaclysmViewPick's fields are at 16, 20, 24 and (1.24's overlay) 36");
+// The overlay structs as 1.24 reads them: 80 and 48 bytes; CadaclysmViewText's order at 112.
+static_assert(sizeof(CadaclysmViewOverlay) == 80 && offsetof(CadaclysmViewOverlay, offset) == 24 &&
+                  offsetof(CadaclysmViewOverlay, stroke_width) == 72,
+              "CadaclysmViewOverlay (1.24) is 80 bytes, offset at 24, stroke_width at 72");
+static_assert(sizeof(CadaclysmViewOverlayImage) == 48 && offsetof(CadaclysmViewOverlayImage, order) == 44,
+              "CadaclysmViewOverlayImage (1.24) is 48 bytes, order at 44");
+static_assert(offsetof(CadaclysmViewText, order) == 112, "CadaclysmViewText's order (1.24) is at 112");
 // The snap structs as 1.22 reads and writes them: settings size, kinds, aperture_px, marker
 // (16 bytes); the answer size, kind, point[3] (doubles), item, node, face, edge, tangent[3],
 // axis[3], radius, distance_px, clicks (88 bytes).
@@ -104,11 +114,13 @@ struct ShowOptions {
 // What a pick found: the item, the scene node (or the solid's 0) and the face; `clicks` 2
 // for a double click's pick, else 1; `point` where the ray met the model, in the coordinates
 // the items were shown in -- std::nullopt where the library read no depth (no hit, a
-// machining stock, the terminal library).
+// machining stock, the terminal library). `overlay` (1.24): the item is an overlay -- it was over
+// the pixel, so nothing of the scene beneath it was picked (`face` a text overlay's line, else 0).
 struct ViewPick {
     std::uint32_t item = 0, node = 0, face = 0;
     std::uint32_t clicks = 0;
     std::optional<std::array<float, 3>> point;
+    bool overlay = false;
 };
 
 // What a snap found, as Python's Snap: its kind ("vertex", "midpoint", "centre", "quadrant",
@@ -143,6 +155,7 @@ inline ViewPick pick_of(const CadaclysmViewPick& raw) {
     p.face = raw.face;
     p.clicks = raw.clicks;
     if (raw.has_point) p.point = std::array<float, 3>{raw.point[0], raw.point[1], raw.point[2]};
+    p.overlay = raw.overlay != 0;
     return p;
 }
 // The CADACLYSM_VIEW_SNAP_* kinds by the names set_snap takes and ViewSnap::kind reports.
@@ -194,12 +207,14 @@ struct ViewImage {
 };
 
 // One pane of View::viewports: its rectangle (x, y, width, height in pixels), its camera's
-// column-major view and projection, the eye, and a CADACLYSM_VIEW_GRID_* grid.
+// column-major view and projection, the eye, a CADACLYSM_VIEW_GRID_* grid, and which user
+// layers it draws (bit n: layer n, see Item::user_layer; every layer by default).
 struct Viewport {
     std::array<std::uint32_t, 4> rect{};
     std::array<float, 16> view{}, projection{};
     std::array<float, 3> eye{};
     std::uint32_t grid = 0;
+    std::uint32_t layer_mask = 0xFFFFFFFFu;
 };
 
 // A host's event, as CadaclysmViewEvent's fields (kind: CADACLYSM_VIEW_EVENT_*).
@@ -272,6 +287,37 @@ struct TextOptions {
     bool on_top = false;
     std::uint32_t font = 0;
     std::optional<std::array<float, 3>> right, up;
+};
+
+// Where an overlay hangs in the window (view ABI 1.24): a corner, the middle of an edge, or the
+// centre -- the CADACLYSM_VIEW_ALIGN_* codes. An overlay's offset is measured inward from it: x
+// away from the left edge for the left column and from the right edge for the right one
+// (rightward for the middle column); y down from the top edge for the top row and up from the
+// bottom edge for the bottom one (upward for the middle row). So (top_right, 10, 10) is 10 pixels
+// in from the right and from the top.
+enum class Anchor : std::uint32_t {
+    top_left = CADACLYSM_VIEW_ALIGN_TOP_LEFT,
+    top = CADACLYSM_VIEW_ALIGN_TOP,
+    top_right = CADACLYSM_VIEW_ALIGN_TOP_RIGHT,
+    left = CADACLYSM_VIEW_ALIGN_LEFT,
+    centre = CADACLYSM_VIEW_ALIGN_CENTRE,
+    right = CADACLYSM_VIEW_ALIGN_RIGHT,
+    bottom_left = CADACLYSM_VIEW_ALIGN_BOTTOM_LEFT,
+    bottom = CADACLYSM_VIEW_ALIGN_BOTTOM,
+    bottom_right = CADACLYSM_VIEW_ALIGN_BOTTOM_RIGHT,
+};
+
+// How View::show_overlay draws a shape (view ABI 1.24). `fill`: where set, its colour (see
+// Colour; four numbers for an alpha), or the text "none" for no fill; unset, the profile's own
+// colour (Profile::coloured), else white -- unless a stroke is set, when an uncoloured profile is
+// not filled. `stroke`: only where set, `stroke_width` pixels wide; an open profile, never
+// filled, draws only with one. `order`: lower draws first, equal orders in show order (shapes,
+// text and images share it).
+struct OverlayStyle {
+    std::optional<Colour> fill;
+    std::optional<Colour> stroke;
+    float stroke_width = 1.0f;
+    std::int32_t order = 0;
 };
 
 // How View::show draws a solid (view ABI 1.21): `material` "default", "plastic", "metal",
@@ -807,6 +853,18 @@ public:
         }
         return ok("cadaclysm_view_set_finish", [&](detail::ViewState& s) { return s.t->set_finish(s.handle, id_, f); });
     }
+    // The item's edges, curves or isocurves in `rgb` (see Colour), over the view's
+    // set_edge_colour (set_curve_colour, set_isocurve_colour), the item's colour and a solid's
+    // own edge paint; std::nullopt takes the view's colour again.
+    Result<void> set_edge_colour(const std::optional<Colour>& rgb) { return line_colour(CADACLYSM_VIEW_LAYER_EDGES, rgb); }
+    Result<void> set_curve_colour(const std::optional<Colour>& rgb) { return line_colour(CADACLYSM_VIEW_LAYER_CURVES, rgb); }
+    Result<void> set_isocurve_colour(const std::optional<Colour>& rgb) { return line_colour(CADACLYSM_VIEW_LAYER_ISOCURVES, rgb); }
+    // The user layer the item is on, 0..31 (every item starts on 0): it draws while the layer
+    // is on (View::user_layer) and in the viewports whose layer_mask has its bit. A layer past
+    // 31 is refused.
+    Result<void> user_layer(std::uint32_t layer) {
+        return ok("cadaclysm_view_set_item_layer", [&](detail::ViewState& s) { return s.t->set_item_layer(s.handle, id_, layer); });
+    }
     Result<void> node_visible(std::uint32_t node, bool on) {
         return ok("cadaclysm_view_set_node_visible",
                   [&](detail::ViewState& s) { return s.t->set_node_visible(s.handle, id_, node, on); });
@@ -858,6 +916,11 @@ protected:
         if (!f(*s)) return detail::library_error(*s);
         return {};
     }
+    Result<void> line_colour(std::uint32_t layer, const std::optional<Colour>& rgb) {
+        return ok_paint("cadaclysm_view_set_item_line_colour", rgb, [&](detail::ViewState& s, const float* c) {
+            return s.t->set_item_line_colour(s.handle, id_, layer, c);
+        });
+    }
     // ok() with a colour: refused as `call` first, then the colour read (detail::paint).
     template <class F>
     Result<void> ok_paint(const char* call, const std::optional<Colour>& c, F&& f) {
@@ -895,6 +958,16 @@ struct MachiningPart {
 // Absent: the library's own default.
 struct MachiningOptions {
     std::optional<double> cell, tolerance, skin, rapid_rate;
+};
+// What a view has drawn (View::stats, view ABI 1.25): the frames drawn so far -- each frame
+// drawn to the window, and each image() rendered; a pump or draw that owes nothing adds none --
+// and the last frame's CPU time, GPU time (-1: not measurable), triangles and draw calls.
+struct ViewStats {
+    std::uint64_t frames_drawn = 0;
+    float last_frame_ms = 0.0f;
+    float last_gpu_ms = -1.0f;
+    std::uint64_t triangles = 0;
+    std::uint32_t draw_calls = 0;
 };
 struct MachiningInfo {
     std::uint32_t moves = 0, move = 0, nx = 0, ny = 0;
@@ -966,6 +1039,39 @@ public:
 private:
     friend class View;
     explicit Machining(const Item& item) : Item(item) {}
+};
+
+// An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the window,
+// drawn over everything, untouched by the camera. Every Item member works on it too (remove,
+// user_layer, and set_text on text). A copy keeps the anchor it was copied with: move_to through
+// the one you keep.
+class Overlay : public Item {
+public:
+    // The anchor it hangs from now.
+    Anchor anchor() const noexcept { return anchor_; }
+    // Moved to `x`, `y` pixels inward from its anchor (cadaclysm_view_move_overlay): cheap, for a
+    // HUD element that moves every frame.
+    Result<void> move_to(float x, float y) { return move_to(anchor_, x, y); }
+    // Hung from `anchor` instead, `x`, `y` pixels inward from it.
+    Result<void> move_to(Anchor anchor, float x, float y) {
+        Result<void> done = ok("cadaclysm_view_move_overlay", [&](detail::ViewState& s) {
+            return s.t->move_overlay(s.handle, id_, static_cast<std::uint32_t>(anchor), x, y);
+        });
+        if (done) anchor_ = anchor;
+        return done;
+    }
+
+private:
+    friend class View;
+    Overlay(const Item& item, Anchor anchor) : Item(item), anchor_(anchor) {}
+    Anchor anchor_ = Anchor::top_left;
+};
+
+// The colour every edge, curve or isocurve draws in, as Python's LineColour: `colour`
+// (0..1 RGB), or each part's own colour where `from_part`.
+struct LineColour {
+    std::array<float, 3> colour{};
+    bool from_part = false;
 };
 
 // How every "dashed" item's hidden lines and points look, as Python's OccludedStyle: a dash
@@ -1311,6 +1417,109 @@ public:
         return add("cadaclysm_view_show_text", [&](detail::ViewState& s) { return s.t->show_text(s.handle, &raw); }, {});
     }
 
+    // -- overlays (1.24): a HUD over the whole window
+
+    // A 2D shape over the window: `shape` in pixels (one profile unit a pixel, y up), its origin
+    // hung `x`, `y` pixels inward from `anchor` -- a closed profile filled (holes cut, even-odd),
+    // stroked where the style says (OverlayStyle). Drawn after everything else, never moved by
+    // the camera, kept in place as the window resizes; a click on it picks it (ViewPick::overlay)
+    // and nothing beneath.
+    Result<Overlay> show_overlay(const blacksmith::Profile& shape, Anchor anchor, float x, float y,
+                                 const OverlayStyle& style = {}) {
+        std::vector<std::reference_wrapper<const blacksmith::Profile>> one{std::cref(shape)};
+        return show_overlay(one, anchor, x, y, style);
+    }
+    // Several profiles as one overlay -- a crosshair's two strokes, a frame's two loops: their
+    // fills together by the even-odd rule. The fill falls back on the first coloured profile's
+    // colour.
+    Result<Overlay> show_overlay(const std::vector<std::reference_wrapper<const blacksmith::Profile>>& shapes,
+                                 Anchor anchor, float x, float y, const OverlayStyle& style = {}) {
+        if (shapes.empty()) return detail::view_error("show_overlay: at least one profile");
+        std::vector<float> beziers;
+        std::optional<std::array<float, 4>> own;
+        for (const blacksmith::Profile& p : shapes) {
+            Result<std::vector<double>> b = p.beziers();
+            if (!b) return b.error();
+            for (double v : *b) beziers.push_back(static_cast<float>(v));
+            if (own) continue;
+            Result<std::optional<Vec3>> c = p.colour();
+            if (!c) return c.error();
+            if (*c) own = std::array<float, 4>{static_cast<float>((**c)[0]), static_cast<float>((**c)[1]),
+                                               static_cast<float>((**c)[2]), 1.0f};
+        }
+        return show_overlay_curves(beziers, own, anchor, x, y, style);
+    }
+    // Rational cubic Beziers, sixteen floats each (x, y, z, w per control point, z not read: a
+    // profile's beziers()), in pixels, as one overlay: loops split where a curve does not start
+    // where the last ended, closed where one ends where it started.
+    Result<Overlay> show_overlay(const std::vector<float>& beziers, Anchor anchor, float x, float y,
+                                 const OverlayStyle& style = {}) {
+        return show_overlay_curves(beziers, std::nullopt, anchor, x, y, style);
+    }
+    // Text over the window: its box hangs from `anchor` by the same point (its top-right corner
+    // for top_right), `x`, `y` pixels inward -- the box's padding included where it has one.
+    // `o` as show_text's, in pixels; its mode, align, offset, on_top, right and up are not read.
+    // Item::set_text changes it cheaply (a frame counter).
+    Result<Overlay> show_overlay_text(std::string_view text, Anchor anchor, float x, float y,
+                                      const TextOptions& o = {}, std::int32_t order = 0) {
+        Result<std::string> shown = detail::text_of(text);
+        if (!shown) return shown.error();
+        Result<detail::Paint> rgb = detail::paint_for(state_.get(), "cadaclysm_view_show_text", o.colour);
+        if (!rgb) return rgb.error();
+        Result<detail::Paint> box = detail::paint(*state_->t, o.box);
+        if (!box) return box.error();
+        CadaclysmViewText raw{};
+        raw.size = sizeof raw;
+        raw.text = shown->c_str();
+        raw.mode = CADACLYSM_VIEW_TEXT_SCREEN;
+        for (std::size_t i = 0; i < 3; ++i) raw.rgb[i] = rgb->values[i];
+        raw.height = o.size;
+        raw.align = static_cast<std::uint32_t>(anchor);
+        raw.offset[0] = x;
+        raw.offset[1] = y;
+        if (box->given)
+            for (std::size_t i = 0; i < 4; ++i) raw.box_rgba[i] = box->values[i];
+        raw.box_padding = o.padding;
+        raw.on_top = 1u;
+        raw.font = o.font;
+        raw.order = order;
+        Result<Item> item = add("cadaclysm_view_show_text", [&](detail::ViewState& s) { return s.t->show_text(s.handle, &raw); }, {});
+        if (!item) return item.error();
+        return Overlay(*item, anchor);
+    }
+    // An image over the window: `rgba` (width x height x 4 bytes, rows from the top, straight
+    // alpha), its box hanging from `anchor` by the same point, `x`, `y` pixels inward, drawn
+    // `draw_width` x `draw_height` pixels (0: its own size) at `opacity` (above 0, at most 1).
+    Result<Overlay> show_overlay_image(const std::vector<std::uint8_t>& rgba, std::uint32_t width, std::uint32_t height,
+                                       Anchor anchor, float x, float y, float draw_width = 0.0f, float draw_height = 0.0f,
+                                       float opacity = 1.0f, std::int32_t order = 0) {
+        Result<std::uint64_t> need = detail::pixel_bytes(width, height, "show_overlay_image");
+        if (!need) return need.error();
+        if (rgba.size() != *need)
+            return detail::view_error("show_overlay_image: " + std::to_string(width) + " x " + std::to_string(height) +
+                                      " pixels need " + std::to_string(*need) + " bytes (w * h * 4), not " +
+                                      std::to_string(rgba.size()));
+        if (!(opacity > 0.0f))
+            return detail::view_error("show_overlay_image: opacity " + std::to_string(opacity) +
+                                      ": more than 0, at most 1 (0 would be the library's 1)");
+        CadaclysmViewOverlayImage raw{};
+        raw.size = sizeof raw;
+        raw.anchor = static_cast<std::uint32_t>(anchor);
+        raw.rgba = detail::non_null(rgba);
+        raw.width = width;
+        raw.height = height;
+        raw.offset[0] = x;
+        raw.offset[1] = y;
+        raw.extent[0] = draw_width;
+        raw.extent[1] = draw_height;
+        raw.opacity = opacity;
+        raw.order = order;
+        Result<Item> item = add("cadaclysm_view_show_overlay_image",
+                                [&](detail::ViewState& s) { return s.t->show_overlay_image(s.handle, &raw); }, {});
+        if (!item) return item.error();
+        return Overlay(*item, anchor);
+    }
+
     // -- the camera
     Result<void> orbit(float dx, float dy) {
         return act("cadaclysm_view_orbit", [&](detail::ViewState& s) { s.t->orbit(s.handle, dx, dy); });
@@ -1379,7 +1588,7 @@ public:
             }
             for (std::size_t k = 0; k < 3; ++k) raw[i].eye[k] = list[i].eye[k];
             raw[i].grid = list[i].grid;
-            raw[i].layer_mask = 0xFFFFFFFFu;  // every user layer
+            raw[i].layer_mask = list[i].layer_mask;
         }
         return ok("cadaclysm_view_set_viewports", [&](detail::ViewState& s) {
             return s.t->set_viewports(s.handle, raw.empty() ? nullptr : raw.data(), *n);
@@ -1393,6 +1602,11 @@ public:
     // CADACLYSM_VIEW_LAYER_*.
     Result<void> layer(std::uint32_t which, bool on) {
         return ok("cadaclysm_view_set_layer", [&](detail::ViewState& s) { return s.t->set_layer(s.handle, which, on); });
+    }
+    // User layer `layer`, 0..31, on or off in every viewport (all start on); see
+    // Item::user_layer. A layer past 31 is refused.
+    Result<void> user_layer(std::uint32_t layer, bool on) {
+        return ok("cadaclysm_view_set_user_layer", [&](detail::ViewState& s) { return s.t->set_user_layer(s.handle, layer, on); });
     }
     // The clear colour: three numbers or text (see Colour).
     Result<void> background(const Colour& rgb) {
@@ -1414,6 +1628,16 @@ public:
         if (auto no = detail::refusal(state_.get(), "cadaclysm_view_lighting")) return *no;
         return std::string(state_->t->lighting(state_->handle) == CADACLYSM_VIEW_LIGHTING_STUDIO ? "studio" : "headlight");
     }
+    // The colour every edge (curve, isocurve) draws in: `rgb` (see Colour), or with
+    // `from_part` each part's own colour (a body's edges brightened). An item's
+    // set_edge_colour draws over it.
+    Result<void> set_edge_colour(const Colour& rgb, bool from_part = false) { return set_line_colour(CADACLYSM_VIEW_LAYER_EDGES, rgb, from_part); }
+    Result<void> set_curve_colour(const Colour& rgb, bool from_part = false) { return set_line_colour(CADACLYSM_VIEW_LAYER_CURVES, rgb, from_part); }
+    Result<void> set_isocurve_colour(const Colour& rgb, bool from_part = false) { return set_line_colour(CADACLYSM_VIEW_LAYER_ISOCURVES, rgb, from_part); }
+    // The colour in use.
+    Result<LineColour> edge_colour() { return line_colour(CADACLYSM_VIEW_LAYER_EDGES); }
+    Result<LineColour> curve_colour() { return line_colour(CADACLYSM_VIEW_LAYER_CURVES); }
+    Result<LineColour> isocurve_colour() { return line_colour(CADACLYSM_VIEW_LAYER_ISOCURVES); }
     // The view-wide occluded style (see OccludedStyle); "solid" and "off" items never use it.
     Result<void> occluded_style(const OccludedStyle& style) {
         CadaclysmViewOccludedStyle raw{};
@@ -1712,6 +1936,21 @@ public:
         if (auto no = detail::refusal(state_.get(), "cadaclysm_view_needs_draw")) return *no;
         return state_->t->needs_draw(state_->handle);
     }
+    // What the view has drawn (cadaclysm_view_stats, 1.25): an FPS counter read from it stays
+    // right while the scene is still.
+    Result<ViewStats> stats() {
+        CadaclysmViewStats out{};
+        out.size = sizeof out;
+        Result<void> done = ok("cadaclysm_view_stats", [&](detail::ViewState& s) { return s.t->stats(s.handle, &out); });
+        if (!done) return done.error();
+        ViewStats st;
+        st.frames_drawn = out.frames_drawn;
+        st.last_frame_ms = out.last_frame_ms;
+        st.last_gpu_ms = out.last_gpu_ms;
+        st.triangles = out.triangles;
+        st.draw_calls = out.draw_calls;
+        return st;
+    }
 
     // -- show()/view() on the objects: what the member templates Solid::show/view,
     // Scene::show/view, Node::show/view and Pose::show/view call (call those). A fresh view;
@@ -1781,12 +2020,78 @@ private:
         if (!f(*state_)) return detail::library_error(*state_);
         return {};
     }
+    Result<void> set_line_colour(std::uint32_t layer, const Colour& rgb, bool from_part) {
+        auto c = detail::paint_for(state_.get(), "cadaclysm_view_set_line_colour", rgb);
+        if (!c) return c.error();
+        return ok("cadaclysm_view_set_line_colour",
+                  [&](detail::ViewState& s) { return s.t->set_line_colour(s.handle, layer, c->data(), from_part ? 1u : 0u); });
+    }
+    Result<LineColour> line_colour(std::uint32_t layer) {
+        std::uint32_t from_part = 0;
+        LineColour line;
+        Result<void> got = ok("cadaclysm_view_line_colour",
+                              [&](detail::ViewState& s) { return s.t->line_colour(s.handle, layer, line.colour.data(), &from_part); });
+        if (!got) return got.error();
+        line.from_part = from_part != 0;
+        return line;
+    }
     template <class F>
     Result<void> act(const char* call, F&& f) {
         if (auto no = detail::refusal(state_.get(), call)) return *no;
         f(*state_);
         if (said(*state_)) return detail::library_error(*state_);
         return {};
+    }
+    // show_overlay's shared half: the style read (OverlayStyle's fill rule), the struct filled.
+    Result<Overlay> show_overlay_curves(const std::vector<float>& beziers, const std::optional<std::array<float, 4>>& own,
+                                        Anchor anchor, float x, float y, const OverlayStyle& style) {
+        if (beziers.empty() || beziers.size() % 16)
+            return detail::view_error("show_overlay: 16 numbers a curve, at least one, not " + std::to_string(beziers.size()));
+        Result<std::uint32_t> n = detail::count_of(beziers.size() / 16, "show_overlay");
+        if (!n) return n.error();
+        Result<detail::Paint> stroke = detail::paint_for(state_.get(), "cadaclysm_view_show_overlay", style.stroke);
+        if (!stroke) return stroke.error();
+        detail::Paint fill;
+        bool none = false;
+        if (style.fill && style.fill->is_text()) {
+            std::string t = style.fill->text();
+            t.erase(0, t.find_first_not_of(" \t"));
+            t.erase(t.find_last_not_of(" \t") + 1);
+            std::transform(t.begin(), t.end(), t.begin(), [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+            none = t == "none";
+        }
+        if (!none) {
+            if (style.fill) {
+                Result<detail::Paint> f = detail::paint(*state_->t, style.fill);
+                if (!f) return f.error();
+                fill = *f;
+            } else if (own) {
+                fill.values = *own;
+                fill.given = true;
+            } else if (!stroke->given) {
+                fill.values = {1.0f, 1.0f, 1.0f, 1.0f};
+                fill.given = true;
+            }
+        }
+        CadaclysmViewOverlay raw{};
+        raw.size = sizeof raw;
+        raw.anchor = static_cast<std::uint32_t>(anchor);
+        raw.beziers = beziers.data();
+        raw.curve_count = *n;
+        raw.order = style.order;
+        raw.offset[0] = x;
+        raw.offset[1] = y;
+        raw.has_fill = fill.given ? 1u : 0u;
+        raw.has_stroke = stroke->given ? 1u : 0u;
+        for (std::size_t k = 0; k < 4; ++k) {
+            raw.fill_rgba[k] = fill.values[k];
+            raw.stroke_rgba[k] = stroke->values[k];
+        }
+        raw.stroke_width = style.stroke_width;
+        Result<Item> item = add("cadaclysm_view_show_overlay",
+                                [&](detail::ViewState& s) { return s.t->show_overlay(s.handle, &raw); }, {});
+        if (!item) return item.error();
+        return Overlay(*item, anchor);
     }
     template <class F>
     Result<Item> add(const char* call, F&& f, detail::ViewShown what) {

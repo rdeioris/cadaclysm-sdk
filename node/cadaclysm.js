@@ -65,10 +65,18 @@ const ValueKind = Object.freeze({ NONE: 0, TEXT: 1, INTEGER: 2, REAL: 3, BOOLEAN
 
 // ---- finding the library ---------------------------------------------------
 
-function libraryName() {
-  if (process.platform === 'win32') return 'cadaclysm_capi.dll';
-  if (process.platform === 'darwin') return 'libcadaclysm_capi.dylib';
-  return 'libcadaclysm_capi.so';
+/**
+ * The libraries that carry the node API, in the order they are looked for: the single
+ * library's flavours that hold it, then the separate library of earlier releases.
+ * As `cadaclysm-capi-rt`'s `READER_STEMS`.
+ */
+const LIBRARY_STEMS = ['cadaclysm', 'cadaclysm_kernel_reader', 'cadaclysm_reader', 'cadaclysm_capi'];
+
+/** `LIBRARY_STEMS` as this platform names the files. */
+function libraryNames() {
+  if (process.platform === 'win32') return LIBRARY_STEMS.map((s) => `${s}.dll`);
+  const suffix = process.platform === 'darwin' ? 'dylib' : 'so';
+  return LIBRARY_STEMS.map((s) => `lib${s}.${suffix}`);
 }
 
 /** `dir` and every directory above it, nearest first. */
@@ -82,21 +90,20 @@ function ancestors(dir) {
 
 /** The candidates the ladder tries after the environment, in order. */
 function _searchedPaths() {
-  const name = libraryName();
   const here = __dirname;
-  const searched = [path.join(here, name)];
+  const places = [here];
   // An SDK checkout keeps the library in `lib/` beside the wrappers; the
   // repository this example ships in keeps it in `target/release` (or
   // `target/debug`, a fallback for a machine that only built that).
-  for (const a of ancestors(here)) searched.push(path.join(a, 'lib', name));
-  for (const a of ancestors(here)) {
-    searched.push(path.join(a, 'target', 'release', name), path.join(a, 'target', 'debug', name));
-  }
-  return searched;
+  for (const a of ancestors(here)) places.push(path.join(a, 'lib'));
+  for (const a of ancestors(here)) places.push(path.join(a, 'target', 'release'), path.join(a, 'target', 'debug'));
+  // Each place is asked for every name, in order: one library of any flavour
+  // that holds the node API, else the separate library of earlier releases.
+  return places.flatMap((place) => libraryNames().map((name) => path.join(place, name)));
 }
 
 function _notFoundMessage(searched) {
-  return `${libraryName()} not found. Looked in:\n` + searched.map((p) => `    ${p}\n`).join('')
+  return `none of ${libraryNames().join(', ')} found. Looked in:\n` + searched.map((p) => `    ${p}\n`).join('')
     + 'Build it with:\n    cargo build --release -p cadaclysm-capi\n'
     + 'or run fetch.py in an SDK checkout, or point CADACLYSM_LIBRARY at it.';
 }
@@ -105,14 +112,17 @@ function _notFoundMessage(searched) {
  * Where the shared library is, preferring a release build over a debug one.
  * `CADACLYSM_LIBRARY` first (a file, or a directory holding it), then beside
  * this file, then `lib/` in any ancestor (the SDK layout), then `target/release`
- * or `target/debug` in any ancestor (this repository's layout).
+ * or `target/debug` in any ancestor (this repository's layout). Each place is
+ * asked for every name in `LIBRARY_STEMS`, in order.
  */
 function libraryPath() {
   const override = process.env.CADACLYSM_LIBRARY;
   if (override) {
-    let candidate = override;
-    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) candidate = path.join(candidate, libraryName());
-    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(override) && fs.statSync(override).isDirectory()) {
+      for (const name of libraryNames()) if (fs.existsSync(path.join(override, name))) return path.join(override, name);
+    } else if (fs.existsSync(override)) {
+      return override;
+    }
     throw new CadaclysmError(`CADACLYSM_LIBRARY=${override} names nothing that exists`);
   }
   const searched = _searchedPaths();
@@ -387,12 +397,54 @@ const CadaclysmElementState = koffi.struct('CadaclysmElementState', {
 // ---- the function table ----------------------------------------------------
 
 let library = null;
+/** `[flavour, features]` of the loaded library; see `flavour()`. */
+let _flavour = ['', ''];
 
-/** The loaded library's functions, loading on first use. */
+/**
+ * `[flavour, features]` for one of the single library's flavours, or `null` for a
+ * separate library of an earlier release, which exports neither call.
+ */
+function _flavourOf(l) {
+  try {
+    return [l.func('const char *cadaclysm_flavour(void)')(), l.func('const char *cadaclysm_features(void)')()];
+  } catch (e) {
+    if (/^Cannot find function /.test(e.message)) return null;
+    throw e;
+  }
+}
+
+/**
+ * `l.func(proto)`. On a flavour that leaves the function out, a function that
+ * throws naming the flavour -- when called, not at load. A separate library of an
+ * earlier release must have every function, as before (koffi's own error).
+ */
+function _bind(l, proto, flavoured) {
+  try {
+    return l.func(proto);
+  } catch (e) {
+    if (!flavoured || !/^Cannot find function /.test(e.message)) throw e;
+    const name = /(\w+)\s*\(/.exec(proto)[1].replace(/^cadaclysm_(blacksmith_)?/, '');
+    const [flavour, features] = flavoured;
+    return () => {
+      throw new CadaclysmError(`${name}: not in this library's flavour ('${flavour}', features ${features || 'none'}); the full flavour has it`);
+    };
+  }
+}
+
+/**
+ * The loaded library's functions, loading on first use. A flavour of the single
+ * library binds what it has: a function it leaves out throws naming the flavour,
+ * when called. A flavour with no node API (the kernel flavour) is refused here.
+ */
 function _lib() {
   if (library) return library;
-  const l = koffi.load(libraryPath());
-  const f = (proto) => l.func(proto);
+  const found = libraryPath();
+  const l = koffi.load(found);
+  const flavoured = _flavourOf(l);
+  if (flavoured && !flavoured[1].split(',').includes('nodes')) {
+    throw new CadaclysmError(`${found}: the '${flavoured[0]}' flavour has no node API; load cadaclysm, cadaclysm_kernel_reader or cadaclysm_reader`);
+  }
+  const f = (proto) => _bind(l, proto, flavoured);
   library = {
     last_error: f('const char *cadaclysm_last_error(void)'),
     version: f('const char *cadaclysm_version(void)'),
@@ -619,6 +671,7 @@ function _lib() {
     fem_mesh_msh_text: f('const char *cadaclysm_fem_mesh_msh_text(const CadaclysmFemMesh *m)'),
     fem_mesh_save_msh: f('bool cadaclysm_fem_mesh_save_msh(const CadaclysmFemMesh *m, const char *path)'),
   };
+  _flavour = flavoured || ['reader', ''];
   return library;
 }
 
@@ -653,6 +706,19 @@ function _doubles(ptr, n) {
 }
 
 // ---- module-level functions --------------------------------------------------
+
+/**
+ * Which library this is: `'full'`, `'kernel-reader'` or `'reader'` for a flavour
+ * of the single library, `'reader'` for the separate `cadaclysm_capi` of earlier
+ * releases.
+ */
+function flavour() { _lib(); return _flavour[0]; }
+
+/**
+ * The features the library was built with, comma-separated (`'nodes,kernel,bim'`),
+ * or `''` for the separate `cadaclysm_capi` of earlier releases.
+ */
+function features() { _lib(); return _flavour[1]; }
 
 /** The version of the library actually loaded, which is the one worth reporting. */
 function version() { return _text(_lib().version()); }
@@ -2893,9 +2959,9 @@ async function openMemoryAsync(bytes, format, options = {}) {
 
 module.exports = {
   CadaclysmError, NONE, Convention, ValueKind, SvgView,
-  libraryPath, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
+  libraryPath, flavour, features, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
   svgOptionsDefaults,
-  _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage,
+  _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage, _libraryNames: libraryNames,
   Bounds, Bounds64, Attribute, Brep, HealthReport, FreeEdge, FreeWire, SmallFeature, Cracks, HealReport, HealFix, HealRefusal,
   _healthReport, _healReport, _healFlags, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Segment, Sequence, ElementState, TaskTime, TaskLink, Task, WorkSchedule, Pose, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
   Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,

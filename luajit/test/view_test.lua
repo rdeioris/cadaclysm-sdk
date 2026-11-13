@@ -188,6 +188,16 @@ return function(t)
     local hit = v:pick(48, 48)   -- no draw() before: pick must draw first
     t.ok(hit and hit.item == cube.id, "pick on a never-drawn view missed the cube")
     t.eq(v:pick(1, 1), nil, "a corner picked something")
+    -- 1.16's user layers: the cube on layer 3, the layer off (nothing to pick) and on again;
+    -- layer 32 refused, for an item and for the view.
+    cube:user_layer(3)
+    v:user_layer(3, false)
+    t.eq(v:pick(48, 48), nil, "an item on a layer switched off was picked")
+    v:user_layer(3, true)
+    local back = v:pick(48, 48)
+    t.ok(back and back.item == cube.id, "an item on a layer switched on again was not picked")
+    t.raises(function() cube:user_layer(32) end, "past 31")
+    t.raises(function() v:user_layer(32, false) end, "past 31")
     local w, h = v:size()
     t.eq(w * 1000 + h, 96096, "size")
     v:lod("smooth")
@@ -972,11 +982,11 @@ return function(t)
 
   -- ---- view ABI 1.8: the pick's clicks and point, the double-click opt-in, focus, navigation ----
 
-  t.test("CadaclysmViewPick is the header 1.8 layout: clicks 16, has_point 20, point 24, 36 bytes", function()
-    t.eq(ffi.sizeof("CadaclysmViewPick"), 36)
+  t.test("CadaclysmViewPick is the header 1.24 layout: clicks 16, has_point 20, point 24, overlay 36, 40 bytes", function()
+    t.eq(ffi.sizeof("CadaclysmViewPick"), 40)
     local at = {}
-    for _, f in ipairs({ "size", "item", "node", "face", "clicks", "has_point", "point" }) do at[#at + 1] = ffi.offsetof("CadaclysmViewPick", f) end
-    t.eq(table.concat(at, ","), "0,4,8,12,16,20,24")
+    for _, f in ipairs({ "size", "item", "node", "face", "clicks", "has_point", "point", "overlay" }) do at[#at + 1] = ffi.offsetof("CadaclysmViewPick", f) end
+    t.eq(table.concat(at, ","), "0,4,8,12,16,20,24,36")
   end)
 
   t.test("a pick answer and run's pick carry clicks, and the point only where the library set one", function()
@@ -1008,19 +1018,157 @@ return function(t)
     view._reset()
   end)
 
-  t.test("a library answering view ABI 1.8 (1.21 or 2.22) is refused with its version", function()
+  t.test("a library answering view ABI 1.8 (1.24 or 2.25) is refused with its version", function()
     local function answering(version)
       return { cadaclysm_view_abi_version = function() return version end }
     end
     local e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 8)) end, "view ABI 1.8")
-    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.22 or a later 1.x")
-    e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 22)) end, "view ABI 2.22")
-    t.eq(tostring(e), "stand-in: view ABI 2.22, this wrapper needs 1.22 or a later 1.x")
-    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 21)) end, "view ABI 1.21")
-    t.eq(tostring(e), "stand-in: view ABI 1.21, this wrapper needs 1.22 or a later 1.x")
-    -- 1.22 passes the gate (this stand-in then fails a later check, never the version's).
-    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 22))
-    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.22 passes the version gate: " .. tostring(why))
+    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.25 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 25)) end, "view ABI 2.25")
+    t.eq(tostring(e), "stand-in: view ABI 2.25, this wrapper needs 1.25 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 24)) end, "view ABI 1.24")
+    t.eq(tostring(e), "stand-in: view ABI 1.24, this wrapper needs 1.25 or a later 1.x")
+    -- 1.25 passes the gate (this stand-in then fails a later check, never the version's).
+    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 25))
+    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.25 passes the version gate: " .. tostring(why))
+  end)
+
+  t.test("stats: the 1.25 layout; an offscreen view's frames are its images, each with its cost", function()
+    t.eq(ffi.sizeof("CadaclysmViewStats"), 40, "sizeof CadaclysmViewStats")
+    t.eq(ffi.offsetof("CadaclysmViewStats", "frames_drawn"), 8, "frames_drawn")
+    t.eq(ffi.offsetof("CadaclysmViewStats", "last_frame_ms"), 16, "last_frame_ms")
+    t.eq(ffi.offsetof("CadaclysmViewStats", "last_gpu_ms"), 20, "last_gpu_ms")
+    t.eq(ffi.offsetof("CadaclysmViewStats", "triangles"), 24, "triangles")
+    t.eq(ffi.offsetof("CadaclysmViewStats", "draw_calls"), 32, "draw_calls")
+    local v = offscreen(64, 48)
+    if not v then return end
+    local s = v:stats()
+    t.eq(s.frames_drawn, 0, "a new view drew nothing")
+    t.eq(s.triangles, 0, "no triangles yet")
+    v:show_solid(bs.Solid.cuboid(20, 20, 20))
+    v:draw()
+    t.eq(v:stats().frames_drawn, 0, "an offscreen draw renders nothing")
+    v:image()
+    s = v:stats()
+    t.eq(s.frames_drawn, 1, "one frame")
+    t.ok(s.last_frame_ms > 0 and s.triangles >= 12 and s.draw_calls >= 1,
+      ("its cost: %g ms, %d triangles, %d draw calls"):format(s.last_frame_ms, s.triangles, s.draw_calls))
+    t.ok(s.last_gpu_ms == -1 or (s.last_gpu_ms >= 0 and s.last_gpu_ms < 1000), "the GPU time: " .. s.last_gpu_ms)
+    v:image()
+    t.eq(v:stats().frames_drawn, 2, "each image counts")
+    v:close()
+  end)
+
+  t.test("overlays: a holed panel, a crosshair, text and an image over the window, picked before the scene", function()
+    t.eq(ffi.sizeof("CadaclysmViewOverlay"), 80, "sizeof CadaclysmViewOverlay")
+    t.eq(ffi.sizeof("CadaclysmViewOverlayImage"), 48, "sizeof CadaclysmViewOverlayImage")
+    t.eq(ffi.offsetof("CadaclysmViewText", "order"), 112, "CadaclysmViewText.order")
+    t.eq(ffi.offsetof("CadaclysmViewPick", "overlay"), 36, "CadaclysmViewPick.overlay")
+    local v = offscreen(200, 120)
+    if not v then return end
+    v:background("black")
+    local under = v:show_solid(bs.Solid.cuboid(80, 80, 20), 0.05, "#808080")
+    v:standard("top")
+    v:frame()
+    local function near(img, x, y, r, g, b)
+      local pr, pg, pb = pixel(img, x, y)
+      return math.abs(pr - r) < 40 and math.abs(pg - g) < 40 and math.abs(pb - b) < 40
+    end
+    -- A rounded red panel with a round hole, by its own colour, at the window's centre.
+    local shape = bs.Profile.rect(60, 40):round(6):with_hole(bs.Profile.circle(8)):coloured("red")
+    local panel = v:show_overlay(shape, "centre", 0, 0)
+    t.ok(getmetatable(panel) == view.Overlay and panel.anchor == "centre", "an Overlay at the centre")
+    local img = v:image()
+    t.ok(near(img, 120, 60, 255, 0, 0), "the panel red right of its hole")
+    t.ok(not near(img, 100, 60, 255, 0, 0), "the hole is not filled")
+    local hit = v:pick(120, 60)
+    t.ok(hit and hit.overlay == true and hit.item == panel.id and hit.point == nil, "a pick on the panel is the overlay")
+    hit = v:pick(100, 60)
+    t.ok(hit and hit.overlay == false and hit.item == under.id, "a pick in the hole reaches the part")
+    -- Moved 30 px right of the centre: the panel and its hole follow.
+    panel:move_to(30, 0)
+    img = v:image()
+    t.ok(near(img, 155, 60, 255, 0, 0) and not near(img, 85, 60, 255, 0, 0), "the panel moved right")
+    t.ok(not near(img, 130, 60, 255, 0, 0), "its hole moved with it")
+    panel:move_to(0, 0, "centre")
+    -- A stroked crosshair of two open profiles, 20 px in from the top left.
+    local across = bs.Profile.polyline({ { -8, 0 }, { 8, 0 } })
+    local down = bs.Profile.polyline({ { 0, -8 }, { 0, 8 } })
+    local cross = v:show_overlay({ across, down }, "top_left", 20, 20, { stroke = "lime", stroke_width = 2 })
+    img = v:image()
+    t.ok(near(img, 20, 20, 0, 255, 0) and near(img, 26, 20, 0, 255, 0) and near(img, 20, 14, 0, 255, 0), "the crosshair's arms")
+    t.ok(not near(img, 25, 25, 0, 255, 0), "between the arms")
+    hit = v:pick(26, 21)
+    t.ok(hit and hit.overlay and hit.item == cross.id, "a pick on the crosshair")
+    -- Text at the top right, its box's corner 4 px in.
+    local fps = v:show_overlay_text("FPS 60", "top-right", 4, 4, { size = 14, colour = "white", box = "blue" })
+    img = v:image()
+    t.ok(near(img, 194, 6, 0, 0, 255) and not near(img, 197, 2, 0, 0, 255), "the text's box hangs from the top-right corner")
+    fps:set_text("FPS 120")
+    hit = v:pick(194, 6)
+    t.ok(hit and hit.overlay and hit.item == fps.id, "a pick on the text")
+    -- An image, 2 x 2 yellow pixels drawn 10 x 10, at the bottom left; moved to the bottom right.
+    local yellow = string.rep(string.char(255, 255, 0, 255), 4)
+    local pic = v:show_overlay_image(yellow, 2, 2, "bottom-left", 4, 4, { draw_width = 10, draw_height = 10 })
+    t.ok(near(v:image(), 8, 110, 255, 255, 0), "the image at the bottom left")
+    pic:move_to(4, 4, "bottom-right")
+    img = v:image()
+    t.ok(pic.anchor == "bottom-right" and near(img, 190, 110, 255, 255, 0) and not near(img, 8, 110, 255, 255, 0), "moved to the bottom right")
+    pic:move_to(6, 6)
+    t.ok(near(v:image(), 188, 108, 255, 255, 0), "moved, the anchor kept")
+    -- Order: a green square of order 1 shown first stays over a later blue one of order 0.
+    local sq = bs.Profile.rect(20, 20)
+    v:show_overlay(sq, "bottom-left", 60, 30, { fill = "lime", order = 1 })
+    v:show_overlay(sq, "bottom-left", 65, 30, { fill = "blue" })
+    t.ok(near(v:image(), 63, 90, 0, 255, 0), "order 1 over order 0")
+    -- An outline only: "none" fills nothing.
+    local outline = v:show_overlay(sq, "top", 0, 30, { fill = "none", stroke = "white", stroke_width = 2 })
+    img = v:image()
+    t.ok(near(img, 110, 30, 255, 255, 255) and not near(img, 100, 30, 255, 255, 255), "an outline, its inside not filled")
+    -- Removed: gone, and the part picked there again.
+    panel:remove()
+    t.ok(not near(v:image(), 120, 60, 255, 0, 0), "a removed overlay draws nothing")
+    hit = v:pick(120, 60)
+    t.ok(hit and hit.overlay == false, "a removed overlay is not picked")
+    outline:remove()
+    local fifteen = {}
+    for i = 1, 15 do fifteen[i] = 0 end
+    t.raises(function() v:show_overlay(fifteen, "top-left", 0, 0) end, "show_overlay: 16 numbers a curve")
+    t.raises(function() v:show_overlay(sq, "middle", 0, 0) end, "show_overlay anchor \"middle\"")
+    t.raises(function() v:show_overlay(sq, "top-left", 0, 0, { fill = { 1, 0 } }) end, "show_overlay fill: 3 or 4 numbers")
+    t.raises(function() cross:move_to(1 / 0, 0) end, "finite")
+    t.raises(function() v:show_overlay_image(yellow, 3, 2, "top-left", 0, 0) end, "show_overlay_image: 3 x 2 pixels need 24 bytes")
+    v:close()
+  end)
+
+  t.test("line colours: a colour read back, an item's curve colour drawn and cleared", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    v:set_isocurve_colour("#00ff00", true)
+    local s = v:isocurve_colour()
+    t.ok(s.from_part and s.colour[1] == 0 and s.colour[2] == 1 and s.colour[3] == 0, "isocurve colour round trip")
+    t.ok(v:curve_colour().from_part, "curves follow their part by default")
+    v:set_edge_colour("#202020")
+    t.ok(not v:edge_colour().from_part, "edge colour round trip")
+    t.raises(function() v:set_edge_colour(nil) end, "set_edge_colour: a colour")
+    local line = v:show_lines({ -0.8, 0, 0, 0.8, 0, 0 }, "red")
+    v:standard("top")
+    line:frame()
+    local function greens()
+      local img = v:image()
+      local n = 0
+      for k = 0, img.width * img.height - 1 do
+        local r, g, b = img.rgba[4 * k], img.rgba[4 * k + 1], img.rgba[4 * k + 2]
+        if g > 150 and r < 100 and b < 100 then n = n + 1 end
+      end
+      return n
+    end
+    t.eq(greens(), 0, "red first")
+    line:set_curve_colour("lime")
+    t.ok(greens() > 0, "the segment green")
+    line:set_curve_colour(nil)
+    t.eq(greens(), 0, "nil: the view's colour again")
+    v:close()
   end)
 
   t.test("occluded style: set, read back, a bad dim refused by the library, false restores the default", function()

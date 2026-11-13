@@ -130,7 +130,7 @@ fn fetch() -> Result<PathBuf, String> {
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let name = format!("cadaclysm-{version}-{leg}");
     let lib = out.join(&name).join("lib");
-    if has_both(&lib) {
+    if has_library(&lib) {
         return Ok(lib);
     }
 
@@ -160,13 +160,15 @@ fn fetch() -> Result<PathBuf, String> {
         .status()
         .map_err(|e| format!("tar: {e}"))?;
     let _ = fs::remove_file(&archive);
-    if !status.success() || !has_both(&lib) {
+    if !status.success() || !has_library(&lib) {
         return Err(format!("unpacking {archive_name} did not give {}", lib.display()));
     }
     Ok(lib)
 }
 
-/// The four libraries built from the cadaclysm source tree at `repo` -- release profile,
+/// The library (its full flavour) and the two view libraries, built from the cadaclysm
+/// source tree at `repo`, each in a cargo command of its own so their features do not
+/// unify -- release profile,
 /// `--locked` (a git checkout is not to be written to) -- into `<target>/cadaclysm-source`:
 /// a target directory of its own, since the outer build holds the lock on its own, kept
 /// beside it so it outlives `cargo update` and a newer revision builds incrementally.
@@ -189,7 +191,7 @@ fn from_source(repo: &Path, out: &Path) -> Result<PathBuf, String> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     claim(&dir, repo)?;
 
-    for packages in [&["cadaclysm-capi", "cadaclysm-blacksmith-capi", "cadaclysm-view-capi"][..], &["cadaclysm-terminal"][..]] {
+    for packages in [&["cadaclysm-lib-full"][..], &["cadaclysm-view-capi"][..], &["cadaclysm-terminal"][..]] {
         let mut command = Command::new(&cargo);
         command.current_dir(repo).args(["build", "--release", "--locked"]).arg("--target-dir").arg(&dir);
         for package in packages {
@@ -215,7 +217,7 @@ fn from_source(repo: &Path, out: &Path) -> Result<PathBuf, String> {
             return Err(format!("cargo build -p {} failed: {}", packages.join(" -p "), tail.into_iter().rev().collect::<Vec<_>>().join(" | ")));
         }
     }
-    if !has_both(&lib) {
+    if !has_library(&lib) {
         return Err(format!("the build gave no libraries in {}", lib.display()));
     }
     Ok(lib)
@@ -265,7 +267,7 @@ fn leg() -> Result<(&'static str, &'static str), String> {
 }
 
 /// The platform's file name for the library whose stem is `stem`.
-fn file_name(stem: &str) -> String {
+pub(crate) fn file_name(stem: &str) -> String {
     match env::var("CARGO_CFG_TARGET_OS").unwrap_or_default().as_str() {
         "windows" => format!("{stem}.dll"),
         "macos" => format!("lib{stem}.dylib"),
@@ -273,20 +275,21 @@ fn file_name(stem: &str) -> String {
     }
 }
 
-/// The two libraries the crate cannot work without: an unpacked archive lacking one is
-/// not used.
-fn file_names() -> [String; 2] {
-    ["cadaclysm_capi", "cadaclysm_blacksmith"].map(file_name)
-}
+/// The library the crate cannot work without: the full flavour of the single cadaclysm
+/// library, which the release's `cadaclysm-<version>-<leg>` archive carries. An unpacked
+/// archive lacking it is not used.
+pub(crate) const LIBRARY: &str = "cadaclysm";
 
-fn has_both(lib: &Path) -> bool {
-    file_names().iter().all(|name| lib.join(name).is_file())
-}
-
-/// Everything copied beside the binaries: the two, and the two view libraries -- the
+/// Everything copied beside the binaries: the library, and the two view libraries -- the
 /// terminal that `show()` and `view()` draw with by default, and `cadaclysm_view` (wgpu).
-fn shipped() -> [String; 4] {
-    ["cadaclysm_capi", "cadaclysm_blacksmith", "cadaclysm_terminal", "cadaclysm_view"].map(file_name)
+pub(crate) const SHIPPED: [&str; 3] = ["cadaclysm", "cadaclysm_terminal", "cadaclysm_view"];
+
+pub(crate) fn has_library(lib: &Path) -> bool {
+    lib.join(file_name(LIBRARY)).is_file()
+}
+
+fn shipped() -> [String; 3] {
+    SHIPPED.map(file_name)
 }
 
 /// `curl` or `tar`: on Windows the system's own, by path, since a Git or MSYS shell puts

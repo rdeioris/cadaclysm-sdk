@@ -635,6 +635,9 @@ public final class Smoke {
             machining();
             edgeCurves();
             intersections();
+            selfIntersections();
+            check();
+            drawings();
             collider();
             clash();
             sweptClash();
@@ -643,6 +646,7 @@ public final class Smoke {
             measure();
             closestPoint();
             curveClosestPoints();
+            triangleMeshClosestPoints();
             nurbsCurves();
             sheetsFromCurves();
             rtree();
@@ -1859,6 +1863,198 @@ public final class Smoke {
                         fail("intersect: an overlap ring leaves the shared band: " + shared.overlaps().get(0));
             }
             System.out.println("intersect: " + found + " (" + ellipses + " ellipses); " + shared.overlaps().get(0));
+        }
+    }
+
+    // Self-intersections: a thin rectangle swept open along a path that comes back across its
+    // own start (a line to (10, 0, 0), a 270-degree turn about (10, 3, 0), a line down to
+    // (7, -5, 0)) crosses itself at (7, 0) in lines between two walls, never along its own
+    // edges; a cube crosses nothing; a negative tolerance is refused in the kernel's words.
+    private static void selfIntersections() {
+        double tol = 1e-3;
+        try (Blacksmith.SweepPath back = Blacksmith.SweepPath.at(new double[] {0, 0, 0}).lineTo(new double[] {10, 0, 0})
+                     .arc(new double[] {10, 3, 0}, new double[] {0, 0, 1}, 1.5 * Math.PI).lineTo(new double[] {7, -5, 0});
+             Blacksmith.Profile slab = Blacksmith.Profile.rect(0.2, 5);
+             Blacksmith.Solid tube = Blacksmith.Solid.sweepOpen(slab, new double[] {0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0}, back);
+             Blacksmith.Solid cube = Blacksmith.Solid.cuboid(4, 6, 8)) {
+            Blacksmith.Intersection crossed = tube.selfIntersections(tol);
+            if (crossed.chains().isEmpty()) fail("self_intersections: the tube passes through itself at (7, 0)");
+            int faces = tube.faces();
+            for (Blacksmith.Chain c : crossed.chains()) {
+                if (c.faceA() == c.faceB() || c.faceA() >= faces || c.faceB() >= faces) fail("self_intersections: a chain reads " + c);
+                if (c.curve() == null || !c.curve().kind().equals("line")) fail("self_intersections: two planar walls cross in a line: " + c);
+                for (double[] p : c.points())
+                    if (Math.abs(p[0] - 7) > 0.1 + tol || Math.abs(p[1]) > 0.1 + tol || Math.abs(p[2]) > 2.5 + tol)
+                        fail("self_intersections: a chain off the crossing: " + c);
+            }
+            Blacksmith.Intersection clean = cube.selfIntersections(tol);
+            if (!clean.chains().isEmpty() || !clean.overlaps().isEmpty()) fail("self_intersections: a cube reads " + clean);
+            try {
+                tube.selfIntersections(-1.0);
+                fail("self_intersections: a negative tolerance was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().contains("self_intersect: tolerance must be positive and finite")) throw e;
+            }
+            System.out.println("self_intersections: " + crossed);
+        }
+    }
+
+    // Mechanical drawings: Python's test_a_cube_on_its_diagonal_shows_nine_lines_and_hides_three ..
+    // test_a_page_writes_r2000_dxf_that_reads_back_as_its_profiles. A 10-cube seen along its
+    // diagonal shows nine edges (90 long) and hides three (30), meeting at the far corner; in
+    // perspective and as a 12-triangle mesh the same; a plate with a through hole outlines as one
+    // profile with one hole; the SVG's hidden lines removed or dashed; a page of a view, a
+    // profile, a hatch and a text writes R2000 DXF, and the rectangle alone reads back in place.
+    private static void drawings() {
+        try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(10, 10, 10);
+             Blacksmith.Hlr view = Blacksmith.hlr(List.of(cube), Blacksmith.HlrOptions.defaults().withDirection(-1, -1, -1))) {
+            List<Blacksmith.HlrLine> seen = view.visible();
+            List<Blacksmith.HlrLine> hidden = view.hidden();
+            if (seen.size() != 9 || hidden.size() != 3) fail("hlr: the diagonal cube shows " + seen.size() + " and hides " + hidden.size());
+            for (Blacksmith.HlrLine l : view.lines()) {
+                if (l.kind() != Blacksmith.HlrKind.SHARP || l.source() != Blacksmith.HlrSource.EDGE || l.index2() != null || l.solid() != 0)
+                    fail("hlr: every line of a cube is a sharp edge of solid 0: " + l);
+                if (l.beziers2d().count() < 1 || l.beziers2d().count() != l.beziers3d().count()) fail("hlr: Béziers come in matching pairs");
+                for (int k = 2; k < l.beziers2d().points().length; k += 3)
+                    if (l.beziers2d().points()[k] != 0) fail("hlr: a view-plane Bézier lies at z 0");
+                for (double w : l.beziers3d().weights()) if (!(w > 0)) fail("hlr: weights are positive");
+            }
+            double seenLength = seen.stream().mapToDouble(Blacksmith.HlrLine::length3d).sum();
+            double hiddenLength = hidden.stream().mapToDouble(Blacksmith.HlrLine::length3d).sum();
+            if (Math.abs(seenLength - 90) > 1e-6 || Math.abs(hiddenLength - 30) > 1e-6)
+                fail("hlr: lengths " + seenLength + " seen, " + hiddenLength + " hidden, not 90 and 30");
+            for (Blacksmith.HlrLine l : hidden) {
+                double[] p = l.beziers3d().points();
+                boolean first = Math.abs(p[0] + 5) < 1e-9 && Math.abs(p[1] + 5) < 1e-9 && Math.abs(p[2] + 5) < 1e-9;
+                int e = p.length - 3;
+                boolean last = Math.abs(p[e] + 5) < 1e-9 && Math.abs(p[e + 1] + 5) < 1e-9 && Math.abs(p[e + 2] + 5) < 1e-9;
+                if (!first && !last) fail("hlr: a hidden edge of the diagonal cube ends at the far corner");
+            }
+            if (view.report().unsettled() != 0) fail("hlr: " + view.report().unsettled() + " pieces unsettled");
+            if (Math.abs(view.tolerance() - Blacksmith.effectiveTolerance(cube)) > 1e-15) fail("hlr: tolerance " + view.tolerance());
+
+            try (Blacksmith.Hlr perspective = Blacksmith.hlr(List.of(cube), Blacksmith.HlrOptions.defaults().withEye(30, 25, 20))) {
+                if (perspective.visible().size() != 9 || perspective.hidden().size() != 3) fail("hlr: the cube in perspective shows 9 and hides 3");
+            }
+            double[][] corners = {{-5, -5, -5}, {5, -5, -5}, {5, 5, -5}, {-5, 5, -5}, {-5, -5, 5}, {5, -5, 5}, {5, 5, 5}, {-5, 5, 5}};
+            int[][] triangles = {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4}, {3, 7, 6}, {3, 6, 2},
+                                 {0, 4, 7}, {0, 7, 3}, {1, 2, 6}, {1, 6, 5}};
+            try (Blacksmith.TriangleMesh mesh = new Blacksmith.TriangleMesh(corners, triangles);
+                 Blacksmith.Hlr meshView = Blacksmith.hlrMesh(List.of(mesh), Blacksmith.HlrOptions.defaults().withDirection(-1, -1, -1))) {
+                if (meshView.visible().size() != 9 || meshView.hidden().size() != 3) fail("hlr_mesh: the cube mesh shows 9 and hides 3");
+                for (Blacksmith.HlrLine l : meshView.lines())
+                    if (l.source() != Blacksmith.HlrSource.MESH_EDGE || l.index2() == null) fail("hlr_mesh: every line is a mesh edge: " + l);
+            }
+            expectRefusal("hlr", () -> Blacksmith.hlr(List.of(cube), Blacksmith.HlrOptions.defaults().withDirection(0, 0, -1)), null, "hlr: up is along the view");
+            expectRefusal("hlr", () -> Blacksmith.hlr(List.of()), null, "hlr: no solids");
+            expectRefusal("hlr", () -> Blacksmith.hlr(List.of(cube), Blacksmith.HlrOptions.defaults().withTolerance(-1.0)), null,
+                    "hlr: tolerance must be 0 or more");
+
+            try (Blacksmith.Solid slab = Blacksmith.Solid.cuboid(40, 30, 5);
+                 Blacksmith.Solid bore = Blacksmith.Solid.cylinder(5, 20);
+                 Blacksmith.Solid through = bore.translate(0, 0, -10);
+                 Blacksmith.Solid plate = slab.cut(through, Double.NaN)) {
+                List<Blacksmith.Profile> outline = Blacksmith.projectedOutline(List.of(plate),
+                        Blacksmith.HlrOptions.defaults().withDirection(0, 0, -1).withUp(0, 1, 0));
+                if (outline.size() != 1) fail("projected_outline: the plate is " + outline.size() + " profiles, not 1");
+                double[] flat = outline.get(0).beziers();
+                double maxX = 0;
+                for (int k = 0; k < flat.length; k += 4) maxX = Math.max(maxX, Math.abs(flat[k] / flat[k + 3]));
+                if (Math.abs(maxX - 20) > 1e-6 || flat.length / 16 <= 4) fail("projected_outline: max |x| " + maxX + ", " + flat.length / 16 + " Béziers");
+                for (Blacksmith.Profile p : outline) p.close();
+            }
+
+            double el = Math.toDegrees(Math.atan(1 / Math.sqrt(2)));
+            Blacksmith.SvgOptions at = new Blacksmith.SvgOptions(Blacksmith.SvgView.ISO, 45.0, el, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
+                    "#000000", 1.0, null, true, false, false, false, true);
+            String removed = Blacksmith.writeSvgText(List.of(cube), at.withHidden(Blacksmith.SvgHidden.REMOVED));
+            if (!removed.contains("<g id=\"solid-0\"") || removed.contains("solid-0-hidden")) fail("svg: hidden removed draws solid-0 alone");
+            String dashed = Blacksmith.writeSvgText(List.of(cube), at.withHidden(Blacksmith.SvgHidden.DASHED));
+            String group = dashed.substring(dashed.indexOf("<g id=\"solid-0-hidden\""));
+            group = group.substring(0, group.indexOf("</g>"));
+            if (!group.contains("stroke-dasharray") || group.chars().filter(c -> c == 'M').count() != 3) fail("svg: hidden dashed adds three dashed lines");
+
+            try (Blacksmith.Profile rect = Blacksmith.Profile.rect(40, 20);
+                 Blacksmith.Page page = new Blacksmith.Page(Blacksmith.PageUnits.MILLIMETRES);
+                 Blacksmith.Page alone = new Blacksmith.Page()) {
+                page.addView(view, 50, 50, 2);
+                if (page.entityCount() != 12) fail("page: the view is " + page.entityCount() + " entities, not 12");
+                page.addProfile(rect, 150, 50, "parts").addHatch(rect, "ANSI31", 150, 50).addText("PLATE", 150, 30, 3.5, 0, "center", null, null);
+                if (page.entityCount() != 15) fail("page: " + page.entityCount() + " entities, not 15");
+                String dxf = page.dxf();
+                if (!dxf.startsWith("  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n")) fail("page: the DXF is not R2000");
+                if (!dxf.equals(page.dxf())) fail("page: the same page writes the same DXF");
+                for (String layer : new String[] {"visible", "hidden", "parts", "hatch", "text"})
+                    if (!dxf.contains("\n  8\n" + layer + "\n")) fail("page: no layer " + layer);
+                String svg = page.svg();
+                if (!svg.contains("<svg") || !svg.contains("PLATE")) fail("page: the SVG holds the text");
+
+                alone.addProfile(rect, 150, 50);
+                List<Blacksmith.Profile> back = Blacksmith.dxfProfiles(alone.dxf());
+                if (back.size() != 1) fail("dxf_profiles: " + back.size() + " profiles, not 1");
+                double[] b = back.get(0).beziers();
+                double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, maxBX = -Double.MAX_VALUE, maxBY = -Double.MAX_VALUE;
+                for (int k = 0; k < b.length; k += 4) {
+                    minX = Math.min(minX, b[k]);
+                    minY = Math.min(minY, b[k + 1]);
+                    maxBX = Math.max(maxBX, b[k]);
+                    maxBY = Math.max(maxBY, b[k + 1]);
+                }
+                if (Math.abs(minX - 130) > 1e-6 || Math.abs(minY - 40) > 1e-6 || Math.abs(maxBX - 170) > 1e-6 || Math.abs(maxBY - 60) > 1e-6)
+                    fail("dxf_profiles: bounds (" + minX + ", " + minY + ")-(" + maxBX + ", " + maxBY + ")");
+                for (Blacksmith.Profile p : back) p.close();
+                expectRefusal("dxf_profiles", () -> Blacksmith.dxfProfiles("not a DXF file"), null, "dxf_profiles: line ");
+                expectRefusal("page_add_hatch", () -> page.addHatch(rect, "BRICK", 0, 0), null, "page_add_hatch: pattern");
+                System.out.println("hlr: " + seen.size() + " seen, " + hidden.size() + " hidden; page " + page.entityCount() + " entities, "
+                        + dxf.length() + " DXF bytes");
+            }
+        }
+    }
+
+    // Check: Python's test_check_finds_a_tube_through_itself_its_free_edges_for_a_cut_and_nothing_wrong_with_two_cubes.
+    // Two cubes, or a cube and a sphere to join, are clean; the tube above alone is only its
+    // crossing (an open sheet is no fault alone); as a cut its free edges are `open`, and as a
+    // trim's tool the same; a 0.01-thick plate has short edges at 0.05; refusals in the kernel's words.
+    private static void check() {
+        double tol = 1e-3;
+        try (Blacksmith.SweepPath back = Blacksmith.SweepPath.at(new double[] {0, 0, 0}).lineTo(new double[] {10, 0, 0})
+                     .arc(new double[] {10, 3, 0}, new double[] {0, 0, 1}, 1.5 * Math.PI).lineTo(new double[] {7, -5, 0});
+             Blacksmith.Profile slab = Blacksmith.Profile.rect(0.2, 5);
+             Blacksmith.Solid tube = Blacksmith.Solid.sweepOpen(slab, new double[] {0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0}, back);
+             Blacksmith.Solid cube = Blacksmith.Solid.cuboid(1, 1, 1);
+             Blacksmith.Solid ball = Blacksmith.Solid.sphere(2);
+             Blacksmith.Solid thin = Blacksmith.Solid.cuboid(4, 4, 0.01)) {
+            if (!cube.check().isEmpty()) fail("check: a cube reads " + cube.check());
+            if (!cube.check(ball, "join", tol).isEmpty()) fail("check: a cube and a sphere to join read " + cube.check(ball, "join", tol));
+            List<Blacksmith.Finding> alone = tube.check(null, null, tol);
+            if (alone.isEmpty()) fail("check: the tube passes through itself");
+            for (Blacksmith.Finding f : alone)
+                if (!f.kind().equals("self_intersection") || f.argument() != 0 || f.index() == null || f.other() == null
+                        || f.index().equals(f.other()) || !(f.size() > 0.1))
+                    fail("check: the tube alone reads " + f);
+            List<Blacksmith.Finding> asCut = tube.check(cube, "cut", tol);
+            List<Blacksmith.Finding> open = asCut.stream().filter(f -> f.kind().equals("open")).toList();
+            if (open.isEmpty() || open.stream().anyMatch(f -> f.argument() != 0 || f.other() == null || !(f.size() > 0)))
+                fail("check: the tube as a cut reads " + asCut);
+            if (asCut.stream().anyMatch(f -> f.argument() != 0)) fail("check: the cube is fine as a cut's tool: " + asCut);
+            if (cube.check(tube, "trim", tol).stream().noneMatch(f -> f.kind().equals("open") && f.argument() == 1))
+                fail("check: a trim's tool must be closed");
+            List<Blacksmith.Finding> small = thin.check(null, null, 0.05);
+            if (small.stream().noneMatch(f -> f.kind().equals("short_edge") && f.index() != null && f.other() == null && f.size() < 0.05))
+                fail("check: a thin plate reads " + small);
+            try {
+                cube.check(cube, "union");
+                fail("check: an unknown operation was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("check: unknown operation \"union\" (join, cut, common, split_sheet, trim, merge or intersect)")) throw e;
+            }
+            try {
+                cube.check(null, null, -1.0);
+                fail("check: a negative tolerance was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("check: tolerance must be positive and finite")) throw e;
+            }
+            System.out.println("check: " + alone.size() + " self-crossings, " + open.size() + " open edges as a cut, " + small.size() + " on a thin plate");
         }
     }
 
@@ -3266,6 +3462,85 @@ public final class Smoke {
                 }
             } finally {
                 for (Blacksmith.NurbsCurve section : sections) section.close();
+            }
+        }
+
+        // 3c'. holes, ribs and webs, patterns
+        try (Blacksmith.Solid blk = Blacksmith.Solid.cuboid(40, 30, 20).translate(20, 15, 10)) {
+            Blacksmith.Drilled drilled = blk.hole(v(10, 15, 20), 4);
+            Blacksmith.HoleReport hr = drilled.report();
+            try (Blacksmith.Solid body = drilled.solid()) {
+                double vol = body.mass(0).volume();
+                cs(Math.abs(vol - (24000 - 80 * Math.PI)) <= 1e-6 * (24000 - 80 * Math.PI) && body.faces() == 7, "hole read " + vol + ", " + body.faces() + " faces");
+                cs(hr.holes() == 1 && hr.facesAdded() == 1 && hr.bottoms().size() == 1 && Math.abs(hr.bottoms().get(0) - 20) <= 1e-9, "hole's report " + hr);
+            }
+            try (Blacksmith.Solid bit = blk.holeTool(v(10, 15, 20), 4)) {
+                cs(bit.mass(0).volume() > 80 * Math.PI, "hole_tool's volume " + bit.mass(0).volume());
+            }
+            try {
+                blk.hole(v(10, 15, 20), 0).solid().close();
+                cs(false, "a hole of diameter 0 was not refused");
+            } catch (Blacksmith.BuildException expected) {
+                cs(expected.getMessage().startsWith("hole: diameter 0 is not positive and finite"), expected.getMessage());
+            }
+
+            List<Blacksmith.Transform> row = Blacksmith.Pattern.rectangular(v(1, 0, 0), 3, 10);
+            cs(row.size() == 3 && Arrays.equals(row.get(0).rows(), new double[] {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1})
+                    && Arrays.equals(row.get(1).rows(), new double[] {1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}),
+                    "pattern_rectangular's row read " + row.size() + ": " + (row.size() > 1 ? Arrays.toString(row.get(1).rows()) : ""));
+            Blacksmith.Patterned pair = blk.pattern(Blacksmith.Pattern.rectangular(v(1, 0, 0), 2, 8).subList(0, 2));
+            try (Blacksmith.Solid body = pair.solid()) {
+                double vol = body.mass(0).volume();
+                cs(pair.report().instances() == 2 && pair.report().booleans() == 1 && Math.abs(vol - 28800) <= 1e-6 * 28800,
+                        "pattern read " + pair.report() + ", volume " + vol);
+            }
+            List<Blacksmith.Transform> spin = Blacksmith.Pattern.circular(v(0, 0, 0), v(0, 0, 1), 6);
+            cs(spin.size() == 6 && Math.abs(spin.get(1).rows()[0] - 0.5) <= 1e-12, "pattern_circular read " + spin.size());
+            try (Blacksmith.NurbsCurve track = line(v(0, 0, 0), v(30, 0, 0))) {
+                List<Blacksmith.Transform> along = Blacksmith.Pattern.along(track, 4);
+                cs(along.size() == 4 && Math.abs(along.get(3).rows()[3] - 30) <= 1e-9, "pattern_along read " + along.size());
+            }
+            try {
+                Blacksmith.Pattern.rectangular(v(1, 0, 0), 0, 10);
+                cs(false, "a pattern of count 0 was not refused");
+            } catch (Blacksmith.BuildException expected) {
+                cs(expected.getMessage().startsWith("pattern_rectangular: count1 is 0"), expected.getMessage());
+            }
+        }
+        try (Blacksmith.Solid plate = Blacksmith.Solid.cuboid(100, 60, 10).translate(50, 30, 5);
+             Blacksmith.Solid pin = Blacksmith.Solid.cylinder(3, 30).translate(10, 10, -10)) {
+            List<Blacksmith.Transform> grid = Blacksmith.Pattern.rectangular(v(1, 0, 0), 4, 20, v(0, 1, 0), 3, 20);
+            cs(grid.size() == 12, "pattern_rectangular's grid has " + grid.size());
+            Blacksmith.Patterned holed = plate.patternFeature(pin, Blacksmith.FeatureOp.CUT, grid);
+            try (Blacksmith.Solid body = holed.solid()) {
+                double vol = body.mass(0).volume(), want = 60000 - 1080 * Math.PI;
+                Blacksmith.PatternReport r = holed.report();
+                cs(Math.abs(vol - want) <= 1e-6 * want && r.instances() == 12 && r.booleans() == 1 && r.missed() == 0,
+                        "pattern_feature read " + r + ", volume " + vol);
+            }
+        }
+        // an L bracket's rib along the diagonal in the plane y = 15
+        try (Blacksmith.Solid foot = Blacksmith.Solid.cuboid(40, 30, 5).translate(20, 15, 2.5);
+             Blacksmith.Solid upright = Blacksmith.Solid.cuboid(5, 30, 40).translate(2.5, 15, 20);
+             Blacksmith.Solid l = foot.join(upright);
+             Blacksmith.NurbsCurve diag = line(v(30, 15, 5), v(5, 15, 30))) {
+            double[] plane = new Blacksmith.Frame(v(0, 15, 0), v(1, 0, 0), v(0, 0, 1), v(0, -1, 0)).toArray();
+            try (Blacksmith.Solid ribbed = l.rib(diag, plane, 4);
+                 Blacksmith.Solid slab = l.ribTool(diag, plane, 4, Blacksmith.RibSide.FRONT, null, null)) {
+                double a = ribbed.mass(0).volume(), b = slab.mass(0).volume();
+                cs(Math.abs(a - 12500) <= 1e-6 * 12500 && Math.abs(b - 1250) <= 1e-6 * 1250, "rib read " + a + ", rib_tool " + b);
+            }
+        }
+        // a tray's web across its floor, from the rim plane down
+        try (Blacksmith.Solid shell = Blacksmith.Solid.cuboid(60, 40, 20).translate(30, 20, 10);
+             Blacksmith.Solid pocket = Blacksmith.Solid.cuboid(56, 36, 18).translate(30, 20, 11);
+             Blacksmith.Solid tray = shell.cut(pocket);
+             Blacksmith.NurbsCurve across = line(v(10, 20, 10), v(50, 20, 10))) {
+            double[] plane = new Blacksmith.Frame(v(0, 0, 10), v(1, 0, 0), v(0, -1, 0), v(0, 0, -1)).toArray();
+            try (Blacksmith.Solid webbed = tray.web(List.of(across), plane, 3);
+                 Blacksmith.Solid walls = tray.webTool(List.of(across), plane, 3, Blacksmith.WebSide.BOTH, 6.0, false, null)) {
+                double added = webbed.mass(0).volume() - tray.mass(0).volume();
+                cs(Math.abs(added - 1344) <= 1e-6 * 1344 && walls.mass(0).volume() > 0, "web added " + added + ", web_tool " + walls.mass(0).volume());
             }
         }
 
@@ -4971,6 +5246,154 @@ public final class Smoke {
                 fail("closest_object: a NaN point is not refused");
         }
         System.out.println("closest points from a curve: max distance, skew lines, edge, crossing, projector and nearest object read back");
+    }
+
+    /** Every field of two mesh points, exactly. */
+    private static boolean sameMeshPoint(Blacksmith.MeshPoint a, Blacksmith.MeshPoint b) {
+        return a != null && b != null && near(a.point(), b.point(), 0) && a.distance() == b.distance() && a.triangle() == b.triangle()
+            && near(a.barycentric(), b.barycentric(), 0) && a.kind().equals(b.kind()) && Arrays.equals(a.vertices(), b.vertices());
+    }
+
+    /** Every field of two curve-mesh answers, exactly. */
+    private static boolean sameMeshFoot(Blacksmith.CurveMeshFoot a, Blacksmith.CurveMeshFoot b) {
+        return a != null && b != null && a.distance() == b.distance() && a.t() == b.t() && near(a.pointOnCurve(), b.pointOnCurve(), 0)
+            && near(a.pointOnMesh(), b.pointOnMesh(), 0) && a.triangle() == b.triangle() && near(a.barycentric(), b.barycentric(), 0)
+            && a.kind().equals(b.kind()) && Arrays.equals(a.vertices(), b.vertices()) && a.crossing() == b.crossing();
+    }
+
+    private static double[][] moved(double[][] points, double[] s) {
+        double[][] out = new double[points.length][];
+        for (int i = 0; i < points.length; i++) out[i] = shift(points[i][0], points[i][1], points[i][2], s);
+        return out;
+    }
+
+    /** Closest points against a triangle mesh: Python's
+     *  test_a_triangle_mesh_names_its_face_edge_and_vertex_feet_in_closed_form ..
+     *  test_the_nearest_object_to_a_curve_takes_a_triangle_mesh, every figure a closed form written
+     *  out here (mesh closest points P3), at the origin and shifted far out. */
+    private static void triangleMeshClosestPoints() {
+        double[][] square = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+        int[][] squareTriangles = {{0, 1, 2}, {0, 2, 3}};   // sharing the diagonal 0-2
+        double[][] tetra = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        int[][] tetraTriangles = {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}};   // 0 the z = 0 floor
+        double[][] shifts = {{0, 0, 0}, {1e4, -1e4, 5e3}, {1e6, -1e6, 5e5}};
+        for (double[] s : shifts) {
+            double big = Math.max(Math.abs(s[0]), Math.max(Math.abs(s[1]), Math.abs(s[2])));
+            double tol = 1e-12 * (1 + big), ltol = 1e-9 * (1 + big);
+            // 1. above a face, above the shared diagonal (the lower triangle), beyond an outer edge
+            // and beyond a shared corner: kind, vertices and barycentric in closed form
+            try (Blacksmith.TriangleMesh mesh = new Blacksmith.TriangleMesh(moved(square, s), squareTriangles)) {
+                if (mesh.vertexCount() != 4 || mesh.triangleCount() != 2) fail("triangle mesh: counts " + mesh.vertexCount() + ", " + mesh.triangleCount());
+                Blacksmith.Bounds box = mesh.bounds();
+                if (!near(box.min(), s, 0) || !near(box.max(), shift(1, 1, 0, s), 0)) fail("triangle mesh: bounds at shift " + s[0]);
+                Blacksmith.MeshPoint face = mesh.closestPoint(shift(0.75, 0.25, 2, s));
+                if (face == null || !near(face.point(), shift(0.75, 0.25, 0, s), tol) || !within(face.distance(), 2, 1e-9) || face.triangle() != 0
+                    || !face.kind().equals("face") || face.vertices().length != 0 || !near(face.barycentric(), new double[] {0.25, 0.5, 0.25}, 1e-9))
+                    fail("triangle mesh closest_point: the face foot reads " + face + " at shift " + s[0]);
+                Blacksmith.MeshPoint diagonal = mesh.closestPoint(shift(0.5, 0.5, 1, s));
+                if (diagonal == null || diagonal.triangle() != 0 || !diagonal.kind().equals("edge") || !Arrays.equals(diagonal.vertices(), new int[] {0, 2})
+                    || !near(diagonal.barycentric(), new double[] {0.5, 0, 0.5}, 1e-9) || !within(diagonal.distance(), 1, 1e-9))
+                    fail("triangle mesh closest_point: the shared edge reads " + diagonal + " at shift " + s[0]);
+                Blacksmith.MeshPoint outer = mesh.closestPoint(shift(0.5, -1, 0, s));
+                if (outer == null || outer.triangle() != 0 || !outer.kind().equals("edge") || !Arrays.equals(outer.vertices(), new int[] {0, 1})
+                    || !near(outer.barycentric(), new double[] {0.5, 0.5, 0}, 1e-9))
+                    fail("triangle mesh closest_point: the outer edge reads " + outer + " at shift " + s[0]);
+                Blacksmith.MeshPoint corner = mesh.closestPoint(shift(2, 2, 0, s));
+                if (corner == null || corner.triangle() != 0 || !corner.kind().equals("vertex") || !Arrays.equals(corner.vertices(), new int[] {2})
+                    || !near(corner.point(), shift(1, 1, 0, s), tol) || !within(corner.distance(), Math.sqrt(2), 1e-9)
+                    || !near(corner.barycentric(), new double[] {0, 0, 1}, 1e-9))
+                    fail("triangle mesh closest_point: the corner reads " + corner + " at shift " + s[0]);
+                // 2. the limit on both sides; null, NaN and +inf are none
+                double[] p = shift(0.75, 0.25, 2, s);
+                if (!sameMeshPoint(mesh.closestPoint(p, 2.1), face)) fail("triangle mesh closest_point: 2.1 missed a point 2 away");
+                if (mesh.closestPoint(p, 1.9) != null) fail("triangle mesh closest_point: 1.9 found a point 2 away");
+                if (!sameMeshPoint(mesh.closestPoint(p, null), face) || !sameMeshPoint(mesh.closestPoint(p, Double.NaN), face)
+                    || !sameMeshPoint(mesh.closestPoint(p, Double.POSITIVE_INFINITY), face))
+                    fail("triangle mesh closest_point: null, NaN or +inf is a limit");
+            }
+            // 3. a line up the z axis enters the tetrahedron through its floor (triangle 0) at t
+            // 1/3; a line beside it answers its nearest vertex; the limit on both sides
+            try (Blacksmith.TriangleMesh mesh = new Blacksmith.TriangleMesh(moved(tetra, s), tetraTriangles);
+                 Blacksmith.NurbsCurve line = segment(shift(0.2, 0.2, -1, s), shift(0.2, 0.2, 2, s));
+                 Blacksmith.NurbsCurve beside = segment(shift(2, 0, 0, s), shift(3, 0, 0, s))) {
+                Blacksmith.CurveMeshFoot foot = mesh.curveClosestPoints(line);
+                if (foot == null || !foot.crossing() || foot.distance() != 0 || !within(foot.t(), 1.0 / 3, 1e-9)
+                    || !near(foot.pointOnCurve(), shift(0.2, 0.2, 0, s), ltol) || !near(foot.pointOnMesh(), shift(0.2, 0.2, 0, s), ltol)
+                    || foot.triangle() != 0 || !foot.kind().equals("face") || foot.vertices().length != 0
+                    || !near(foot.barycentric(), new double[] {0.6, 0.2, 0.2}, 1e-9))
+                    fail("triangle mesh curve_closest_points: through the tetrahedron reads " + foot + " at shift " + s[0]);
+                Blacksmith.CurveMeshFoot near = mesh.curveClosestPoints(beside, 1.1);
+                if (near == null || near.crossing() || !within(near.distance(), 1, ltol) || !within(near.t(), 0, 1e-9)
+                    || !near(near.pointOnMesh(), shift(1, 0, 0, s), ltol) || near.triangle() != 0 || !near.kind().equals("vertex")
+                    || !Arrays.equals(near.vertices(), new int[] {1}))
+                    fail("triangle mesh curve_closest_points: beside reads " + near + " at shift " + s[0]);
+                if (mesh.curveClosestPoints(beside, 0.9) != null) fail("triangle mesh curve_closest_points: 0.9 found a vertex 1 away");
+                if (!sameMeshFoot(mesh.curveClosestPoints(beside), near) || !sameMeshFoot(mesh.curveClosestPoints(beside, Double.NaN), near)
+                    || !sameMeshFoot(mesh.curveClosestPoints(beside, Double.POSITIVE_INFINITY), near))
+                    fail("triangle mesh curve_closest_points: null, NaN or +inf is a limit");
+            }
+        }
+        // 4. a point on the mesh is within 0; the refusals, exactly
+        double[] flatSquare = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+        try (Blacksmith.TriangleMesh mesh = new Blacksmith.TriangleMesh(square, squareTriangles);
+             Blacksmith.TriangleMesh flat = new Blacksmith.TriangleMesh(flatSquare, new int[] {0, 1, 2, 0, 2, 3});
+             Blacksmith.NurbsCurve beside = segment(new double[] {2, 0, 0}, new double[] {3, 0, 0})) {
+            if (mesh.closestPoint(new double[] {0.5, 0.5, 0}, 0.0) == null) fail("triangle mesh closest_point: a point on the mesh is not within 0");
+            if (!sameMeshPoint(flat.closestPoint(new double[] {0.5, 0.5, 1}), mesh.closestPoint(new double[] {0.5, 0.5, 1})))
+                fail("triangle mesh: the flat arrays build another mesh");
+            String badIndex = refused(() -> new Blacksmith.TriangleMesh(square, new int[][] {{0, 1, 4}}));
+            if (!badIndex.equals("triangle_mesh_new: triangle 0 names vertex 4, past the vertex count")) fail("triangle mesh: a bad index gave '" + badIndex + "'");
+            String negative = refused(() -> mesh.closestPoint(new double[] {0.5, 0.5, 1}, -1.0));
+            if (!negative.equals("triangle_mesh_closest_point: the max distance must not be negative")) fail("triangle mesh closest_point: -1 gave '" + negative + "'");
+            negative = refused(() -> mesh.curveClosestPoints(beside, -1.0));
+            if (!negative.equals("triangle_mesh_curve_closest_points: the max distance must not be negative"))
+                fail("triangle mesh curve_closest_points: -1 gave '" + negative + "'");
+            mesh.close();
+            String closed = refused(() -> mesh.closestPoint(new double[] {0.5, 0.5, 1}));
+            if (!closed.equals("triangle_mesh: closed")) fail("triangle mesh: a closed mesh gave '" + closed + "'");
+        }
+        // 5. a solid's own mesh: its measuring tessellation, answering on after the solid is gone
+        Blacksmith.TriangleMesh cubeMesh;
+        try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(2, 2, 2)) {
+            cubeMesh = cube.triangleMesh();
+            if (cubeMesh.triangleCount() < 12 || cubeMesh.vertexCount() < 8) fail("solid triangle_mesh: " + cubeMesh.triangleCount() + " triangles");
+            Blacksmith.Bounds box = cubeMesh.bounds();
+            if (!near(box.min(), new double[] {-1, -1, -1}, 1e-9) || !near(box.max(), new double[] {1, 1, 1}, 1e-9)) fail("solid triangle_mesh: not the 2-cube's box");
+            try (Blacksmith.TriangleMesh unset = cube.triangleMesh(0.0)) {
+                if (unset.triangleCount() != cubeMesh.triangleCount()) fail("solid triangle_mesh: 0 is not an unset tolerance");
+            }
+            for (double bad : new double[] {-1.0, Double.POSITIVE_INFINITY}) {
+                String refusal = refused(() -> cube.triangleMesh(bad));
+                if (!refusal.equals("solid_triangle_mesh: tolerance must be positive and finite")) fail("solid triangle_mesh: tolerance " + bad + " gave '" + refusal + "'");
+            }
+        }
+        try (Blacksmith.TriangleMesh owned = cubeMesh) {
+            Blacksmith.MeshPoint foot = owned.closestPoint(new double[] {5, 0.1, 0.2});
+            if (foot == null || !within(foot.distance(), 4, 1e-9) || !near(foot.point(), new double[] {1, 0.1, 0.2}, 1e-9))
+                fail("solid triangle_mesh: after the solid reads " + foot);
+        }
+        // 6. the nearest object: a mesh answers its own CurveMeshFoot (answer kind 3); items after
+        // a mesh are counted right; a tie goes to the earlier item
+        try (Blacksmith.TriangleMesh mesh = new Blacksmith.TriangleMesh(tetra, tetraTriangles);
+             Blacksmith.NurbsCurve line = segment(new double[] {0.2, 0.2, -1}, new double[] {0.2, 0.2, 2});
+             Blacksmith.NurbsCurve beside = segment(new double[] {2, 0, 0}, new double[] {3, 0, 0});
+             Blacksmith.NurbsCurve shortLine = segment(new double[] {-2, 0, 0}, new double[] {-1, 0, 0})) {   // 1 from vertex 0 and from the point (0, 0, 0) alike
+            Blacksmith.NearestObject near = line.closestObject(List.of(new double[] {9, 9, 9}, mesh));
+            Blacksmith.CurveMeshFoot own = mesh.curveClosestPoints(line);
+            if (near == null || near.which() != 1 || near.body() != null || near.pair() != null || !sameMeshFoot(near.mesh(), own))
+                fail("closest_object: the mesh's win reads " + near);
+            if (near.distance() != own.distance() || near.t() != own.t() || !near(near.pointOnCurve(), own.pointOnCurve(), 0)
+                || !near(near.pointOnItem(), own.pointOnMesh(), 0))
+                fail("closest_object: the mesh's win is not its own answer");
+            Blacksmith.NearestObject after = beside.closestObject(List.of(mesh, new double[] {2.5, 0.5, 0}));
+            if (after == null || after.which() != 1 || after.mesh() != null || !within(after.distance(), 0.5, 1e-9)) fail("closest_object: the point after a mesh reads " + after);
+            Blacksmith.NearestObject tie = shortLine.closestObject(List.of(mesh, new double[] {0, 0, 0}));
+            if (tie == null || tie.which() != 0 || tie.distance() != 1 || !Arrays.equals(tie.mesh().vertices(), new int[] {0})) fail("closest_object: the tie reads " + tie);
+            Blacksmith.NearestObject second = shortLine.closestObject(List.of(new double[] {0, 0, 0}, mesh));
+            if (second == null || second.which() != 0 || second.mesh() != null) fail("closest_object: the tie the other way reads " + second);
+            if (beside.closestObject(List.of(mesh), 0.9) != null) fail("closest_object: 0.9 found a mesh 1 away");
+        }
+        System.out.println("closest points against a triangle mesh: face, edge, vertex, crossing, max distance, solid's mesh and nearest object read back");
     }
 
     private static double[] shift(double x, double y, double z, double[] s) {

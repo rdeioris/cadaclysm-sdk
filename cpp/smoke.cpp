@@ -1514,6 +1514,139 @@ static Result<void> lofts() {
 // A profile's outline then its holes as polylines at z = 0 -- a closed loop ends on its
 // first point, an open chain does not -- and a negative tolerance refused: what Python's test
 // and the C ABI's check.
+// Mechanical drawings: the 10-cube on its diagonal shows nine edges and hides three (90 and 30
+// long) in parallel, in perspective and as a triangle mesh; a plate with a through hole
+// outlines as one profile with one hole; the SVG writer removes or dashes the hidden lines; a
+// page of the view, a profile, a hatch and a text writes R2000 DXF, and a page of the
+// rectangle alone reads back through dxf_profiles where it was put.
+static double length3d(const std::vector<bs::HlrLine>& lines) {
+    double sum = 0.0;
+    for (const bs::HlrLine& l : lines) sum += l.length3d;
+    return sum;
+}
+
+static Result<void> drawings() {
+    CADACLYSM_TRY(cube, bs::Solid::cuboid(10, 10, 10));
+    bs::HlrOptions diagonal;
+    diagonal.direction = {-1, -1, -1};
+    CADACLYSM_TRY(view, bs::Hlr::of({cube}, diagonal));
+    EXPECT(view.visible().size() == 9 && view.hidden().size() == 3,
+           "hlr: " + std::to_string(view.visible().size()) + " visible, " + std::to_string(view.hidden().size()) + " hidden");
+    EXPECT(std::fabs(length3d(view.visible()) - 90) <= 1e-6 && std::fabs(length3d(view.hidden()) - 30) <= 1e-6, "hlr: lengths not 90 / 30");
+    bool lines_ok = true;
+    for (const bs::HlrLine& l : view.lines()) {
+        lines_ok = lines_ok && l.kind == "sharp" && l.source.kind == "edge" && l.solid == 0 && !l.source.index2;
+        lines_ok = lines_ok && l.beziers2d.count() >= 1 && l.beziers2d.count() == l.beziers3d.count();
+        for (std::size_t i = 2; i < l.beziers2d.points.size(); i += 3) lines_ok = lines_ok && l.beziers2d.points[i] == 0.0;
+    }
+    EXPECT(lines_ok, "hlr: a cube line is not a sharp edge of Beziers on the view plane");
+    for (const bs::HlrLine& l : view.hidden()) {
+        const std::vector<double>& p = l.beziers3d.points;
+        bool first = p[0] == -5 && p[1] == -5 && p[2] == -5;
+        bool last = p[p.size() - 3] == -5 && p[p.size() - 2] == -5 && p[p.size() - 1] == -5;
+        EXPECT(first || last, "hlr: a hidden edge misses the far corner");
+    }
+    EXPECT(view.report().unsettled == 0, "hlr: unsettled pieces");
+    CADACLYSM_TRY(effective, bs::effective_tolerance({cube}));
+    EXPECT(std::fabs(view.tolerance() - effective) <= 1e-12, "hlr: not at the effective tolerance");
+
+    bs::HlrOptions perspective;
+    perspective.eye = bs::Vec3{30, 25, 20};
+    CADACLYSM_TRY(seen, bs::Hlr::of({cube}, perspective));
+    EXPECT(seen.visible().size() == 9 && seen.hidden().size() == 3, "hlr in perspective: not 9 / 3");
+
+    CADACLYSM_TRY(mesh, bs::TriangleMesh::make({{-5, -5, -5}, {5, -5, -5}, {5, 5, -5}, {-5, 5, -5}, {-5, -5, 5}, {5, -5, 5}, {5, 5, 5}, {-5, 5, 5}},
+                                               {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+                                                {3, 7, 6}, {3, 6, 2}, {0, 4, 7}, {0, 7, 3}, {1, 2, 6}, {1, 6, 5}}));
+    CADACLYSM_TRY(meshed, bs::Hlr::of_meshes({mesh}, diagonal));
+    EXPECT(meshed.visible().size() == 9 && meshed.hidden().size() == 3, "hlr_mesh: not 9 / 3");
+    bool mesh_ok = true;
+    for (const bs::HlrLine& l : meshed.lines()) mesh_ok = mesh_ok && l.source.kind == "mesh_edge" && l.source.index2 && *l.source.index2 <= 7;
+    EXPECT(mesh_ok, "hlr_mesh: a line's source is not a mesh edge");
+
+    bs::HlrOptions along = diagonal;
+    along.direction = {0, 0, -1};
+    Result<bs::Hlr> refused = bs::Hlr::of({cube}, along);
+    EXPECT(!refused && refused.error().message.find("hlr: up is along the view") != std::string::npos,
+           "hlr: up along the view: " + (refused ? std::string("accepted") : refused.error().message));
+    Result<bs::Hlr> none = bs::Hlr::of(bs::Solids{});
+    EXPECT(!none && none.error().message.find("hlr: no solids") != std::string::npos, "hlr: no solids accepted");
+
+    CADACLYSM_TRY(plate, bs::Solid::cuboid(40, 30, 5));
+    CADACLYSM_TRY(rod, bs::Solid::cylinder(5, 20));
+    CADACLYSM_TRY(drill, rod.translate(0, 0, -10));
+    CADACLYSM_TRY(holed, plate.cut(drill, std::nullopt));
+    bs::HlrOptions top;
+    top.direction = {0, 0, -1};
+    top.up = {0, 1, 0};
+    CADACLYSM_TRY(outline, bs::projected_outline({holed}, top));
+    EXPECT(outline.size() == 1, "projected_outline: " + std::to_string(outline.size()) + " profiles, not 1");
+    CADACLYSM_TRY(outline_beziers, outline[0].beziers());
+    double most = 0.0;
+    for (std::size_t i = 0; i < outline_beziers.size(); i += 4) most = std::max(most, std::fabs(outline_beziers[i]));
+    EXPECT(std::fabs(most - 20) <= 1e-6 && outline_beziers.size() / 16 > 4, "projected_outline: not the plate with its hole");
+
+    bs::SvgOptions removed;
+    removed.azimuth = 45.0;
+    removed.elevation = std::atan(1.0 / std::sqrt(2.0)) * 180.0 / 3.14159265358979323846;
+    removed.hidden = bs::SvgHidden::removed;
+    CADACLYSM_TRY(removed_svg, bs::write_svg_text({cube}, removed));
+    EXPECT(removed_svg.find("<g id=\"solid-0\"") != std::string::npos && removed_svg.find("solid-0-hidden") == std::string::npos,
+           "svg hidden removed: want solid-0 and no hidden group");
+    bs::SvgOptions dashed = removed;
+    dashed.hidden = bs::SvgHidden::dashed;
+    CADACLYSM_TRY(dashed_svg, bs::write_svg_text({cube}, dashed));
+    std::size_t at = dashed_svg.find("<g id=\"solid-0-hidden\"");
+    EXPECT(at != std::string::npos, "svg hidden dashed: no solid-0-hidden group");
+    std::string group = dashed_svg.substr(at, dashed_svg.find("</g>", at) - at);
+    EXPECT(group.find("stroke-dasharray") != std::string::npos && std::count(group.begin(), group.end(), 'M') == 3,
+           "svg hidden dashed: the hidden group is not three dashed paths");
+
+    CADACLYSM_TRY(rect, bs::Profile::rect(40, 20));
+    CADACLYSM_TRY(page, bs::Page::make());
+    CADACLYSM_TRY_VOID(page.add_view(view, {50, 50}, 2));
+    CADACLYSM_TRY(after_view, page.entity_count());
+    EXPECT(after_view == 12, "page: " + std::to_string(after_view) + " entities after the view, not 12");
+    CADACLYSM_TRY_VOID(page.add_profile(rect, {150, 50}, std::string("parts")));
+    CADACLYSM_TRY_VOID(page.add_hatch(rect, "ANSI31", 0.0, 1.0, {150, 50}));
+    CADACLYSM_TRY_VOID(page.add_text("PLATE", {150, 30}, 3.5, 0.0, "center"));
+    CADACLYSM_TRY(entities, page.entity_count());
+    EXPECT(entities == 15, "page: " + std::to_string(entities) + " entities, not 15");
+    CADACLYSM_TRY(dxf, page.dxf());
+    EXPECT(dxf.rfind("  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n", 0) == 0, "page_dxf_text: not an R2000 header");
+    CADACLYSM_TRY(again, page.dxf());
+    EXPECT(again == dxf, "page_dxf_text: the same page wrote two texts");
+    for (const char* layer : {"visible", "hidden", "parts", "hatch", "text"}) {
+        EXPECT(dxf.find(std::string("\n  8\n") + layer + "\n") != std::string::npos, std::string("page_dxf_text: no layer ") + layer);
+    }
+    CADACLYSM_TRY(page_svg, page.svg());
+    EXPECT(page_svg.find("<svg") != std::string::npos && page_svg.find("PLATE") != std::string::npos, "page_svg_text: no text");
+
+    CADACLYSM_TRY(alone, bs::Page::make(bs::PageUnits::millimetres));
+    CADACLYSM_TRY_VOID(alone.add_profile(rect, {150, 50}));
+    CADACLYSM_TRY(alone_dxf, alone.dxf());
+    CADACLYSM_TRY(back, bs::dxf_profiles(alone_dxf));
+    EXPECT(back.size() == 1, "dxf_profiles: " + std::to_string(back.size()) + " profiles, not 1");
+    CADACLYSM_TRY(back_beziers, back[0].beziers());
+    double lo_x = 1e300, lo_y = 1e300, hi_x = -1e300, hi_y = -1e300;
+    for (std::size_t i = 0; i < back_beziers.size(); i += 4) {
+        lo_x = std::min(lo_x, back_beziers[i]);
+        lo_y = std::min(lo_y, back_beziers[i + 1]);
+        hi_x = std::max(hi_x, back_beziers[i]);
+        hi_y = std::max(hi_y, back_beziers[i + 1]);
+    }
+    EXPECT(std::fabs(lo_x - 130) <= 1e-6 && std::fabs(lo_y - 40) <= 1e-6 && std::fabs(hi_x - 170) <= 1e-6 && std::fabs(hi_y - 60) <= 1e-6,
+           "dxf_profiles: the rectangle did not come back where it was put");
+    Result<std::vector<bs::Profile>> not_dxf = bs::dxf_profiles("not a DXF file");
+    EXPECT(!not_dxf && not_dxf.error().message.find("dxf_profiles: line ") != std::string::npos, "dxf_profiles: plain text accepted");
+    Result<void> brick = page.add_hatch(rect, "BRICK");
+    EXPECT(!brick && brick.error().message.find("page_add_hatch: pattern") != std::string::npos, "page_add_hatch: BRICK accepted");
+    Result<bs::Page> furlongs = bs::Page::make(static_cast<bs::PageUnits>(3));
+    EXPECT(!furlongs && furlongs.error().message.find("page_new: units") != std::string::npos, "page_new: units 3 accepted");
+    std::printf("drawings: %zu lines, a page of %u entities, DXF %zu bytes\n", view.lines().size(), entities, dxf.size());
+    return {};
+}
+
 static Result<void> outlines() {
     CADACLYSM_TRY(rect, bs::Profile::rect(4, 2));
     CADACLYSM_TRY(disc, bs::Profile::circle(0.5));
@@ -1687,6 +1820,92 @@ static Result<void> outlines() {
         EXPECT(rings_ok, "an overlap ring leaves the shared band");
     }
 
+    // Self-intersections: a thin rectangle swept open along a path that comes back across
+    // its own start (a line to (10, 0, 0), a 270-degree turn about (10, 3, 0), a line down to
+    // (7, -5, 0)) crosses itself at (7, 0) in lines between two walls, never along its own
+    // edges, its phases heard; a cube crosses nothing; a negative tolerance is refused in the
+    // kernel's words.
+    {
+        const double tol = 1e-3;
+        bs::SweepPath back = bs::SweepPath::at({0, 0, 0});
+        back.line_to({10, 0, 0}).arc({10, 3, 0}, {0, 0, 1}, 1.5 * 3.14159265358979323846).line_to({7, -5, 0});
+        CADACLYSM_TRY(sweep_frame, bs::Frame::make({0, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 0}));
+        CADACLYSM_TRY(slab, bs::Profile::rect(0.2, 5));
+        CADACLYSM_TRY(tube, bs::Solid::sweep_open(slab, sweep_frame, back));
+        std::vector<std::string> phases;
+        bs::Progress heard = [&phases](std::string_view phase, std::size_t, std::size_t) { phases.emplace_back(phase); };
+        CADACLYSM_TRY(crossed, tube.self_intersections(tol, heard));
+        bool walls_ok = !crossed.chains.empty();
+        for (const bs::Chain& c : crossed.chains) {
+            walls_ok = walls_ok && c.face_a != c.face_b && c.face_a < tube.faces() && c.face_b < tube.faces();
+            walls_ok = walls_ok && c.curve && c.curve->kind == "line";
+            for (const bs::Vec3& p : c.points)
+                walls_ok = walls_ok && std::fabs(p[0] - 7) <= 0.1 + tol && std::fabs(p[1]) <= 0.1 + tol && std::fabs(p[2]) <= 2.5 + tol;
+        }
+        EXPECT(walls_ok, "the tube's self-intersections are not lines between two walls at (7, 0)");
+        EXPECT(std::find(phases.begin(), phases.end(), std::string("mesh")) != phases.end(), "Solid::self_intersections reported no mesh phase");
+        CADACLYSM_TRY(cube, bs::Solid::cuboid(4, 6, 8));
+        CADACLYSM_TRY(clean, cube.self_intersections(tol));
+        EXPECT(clean.chains.empty() && clean.overlaps.empty(), "a cube intersects itself");
+        auto negative = tube.self_intersections(-1.0);
+        EXPECT(!negative && negative.error().message.find("self_intersect: tolerance must be positive and finite") != std::string::npos,
+               "Solid::self_intersections at a negative tolerance: " + (negative ? std::string("accepted") : negative.error().message));
+    }
+
+    // The argument check: two clean cubes are a valid join; the tube above, alone, has only
+    // its crossing to report (an open sheet is no fault alone), its phases heard; as a cut's
+    // first argument it is open, as a trim's tool too; a thin slab's edges are short; an
+    // unknown operation and a negative tolerance are refused in the kernel's words.
+    {
+        const double tol = 1e-3;
+        bs::SweepPath back = bs::SweepPath::at({0, 0, 0});
+        back.line_to({10, 0, 0}).arc({10, 3, 0}, {0, 0, 1}, 1.5 * 3.14159265358979323846).line_to({7, -5, 0});
+        CADACLYSM_TRY(sweep_frame, bs::Frame::make({0, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 0}));
+        CADACLYSM_TRY(slab, bs::Profile::rect(0.2, 5));
+        CADACLYSM_TRY(tube, bs::Solid::sweep_open(slab, sweep_frame, back));
+        CADACLYSM_TRY(cube, bs::Solid::cuboid(1, 1, 1));
+        CADACLYSM_TRY(ball, bs::Solid::sphere(2));
+        CADACLYSM_TRY(cube_alone, cube.check());
+        CADACLYSM_TRY(cube_join, cube.check(&ball, "join", tol));
+        EXPECT(cube_alone.empty() && cube_join.empty(), "Solid::check found something wrong with a cube, or a cube joined to a sphere");
+        std::vector<std::string> phases;
+        bs::Progress heard = [&phases](std::string_view phase, std::size_t, std::size_t) { phases.emplace_back(phase); };
+        CADACLYSM_TRY(alone, tube.check(tol, heard));
+        EXPECT(std::find(phases.begin(), phases.end(), std::string("health")) != phases.end() &&
+                   std::find(phases.begin(), phases.end(), std::string("mesh")) != phases.end(),
+               "Solid::check reported no health or no mesh phase");
+        bool crossing_ok = !alone.empty();
+        for (const bs::Finding& f : alone)
+            crossing_ok = crossing_ok && f.kind == "self_intersection" && f.argument == 0 && f.index && f.other && *f.index != *f.other &&
+                          f.size > 0.1;
+        EXPECT(crossing_ok, "the tube alone is not just its self-intersections");
+        CADACLYSM_TRY(as_cut, tube.check(&cube, "cut", tol));
+        bool open_found = false, cut_ok = true;
+        for (const bs::Finding& f : as_cut) {
+            cut_ok = cut_ok && f.argument == 0;
+            if (f.kind == "open") {
+                open_found = true;
+                cut_ok = cut_ok && f.other && f.size > 0;
+            }
+        }
+        EXPECT(open_found && cut_ok, "the tube as a cut's first argument is not open, or the cube was faulted");
+        CADACLYSM_TRY(as_tool, cube.check(&tube, "trim", tol));
+        bool tool_open = false;
+        for (const bs::Finding& f : as_tool) tool_open = tool_open || (f.kind == "open" && f.argument == 1);
+        EXPECT(tool_open, "a trim's open tool was not found open");
+        CADACLYSM_TRY(thin, bs::Solid::cuboid(4, 4, 0.01));
+        CADACLYSM_TRY(small, thin.check(0.05));
+        bool short_found = false;
+        for (const bs::Finding& f : small) short_found = short_found || (f.kind == "short_edge" && f.index && !f.other && f.size < 0.05);
+        EXPECT(short_found, "a 0.01 slab has no short edge");
+        Result<std::vector<bs::Finding>> unknown = cube.check(&cube, "union");
+        EXPECT(!unknown && unknown.error().message == "check: unknown operation \"union\" (join, cut, common, split_sheet, trim, merge or intersect)",
+               "Solid::check of an unknown operation: " + (unknown ? std::string("accepted") : unknown.error().message));
+        Result<std::vector<bs::Finding>> negative = cube.check(-1.0);
+        EXPECT(!negative && negative.error().message == "check: tolerance must be positive and finite",
+               "Solid::check at a negative tolerance: " + (negative ? std::string("accepted") : negative.error().message));
+    }
+
     // The collider: two cuboids overlapping by 2 along x, plus one far away -> one hit
     // (0, 1), depth 2, solid() non-null.
     {
@@ -1837,6 +2056,7 @@ static Result<std::pair<bs::Solid, std::uint32_t>> solids() {
     CADACLYSM_TRY_VOID(frames());
     CADACLYSM_TRY_VOID(lofts());
     CADACLYSM_TRY_VOID(outlines());
+    CADACLYSM_TRY_VOID(drawings());
 
     // Colour: a gold plate joined with a blue pin -- gold overall, the pin's top blue.
     CADACLYSM_TRY(blue_rgb, bs::rgb("#3366ff"));

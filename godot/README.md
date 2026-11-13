@@ -16,7 +16,7 @@ imports like a `.glb`; or open files at run time, in the editor or an exported g
 
 Every release carries the addon prebuilt, `cadaclysm-<version>-godot.zip`, on the
 [SDK's releases](https://github.com/rdeioris/cadaclysm-sdk/releases): copy its
-`addons/cadaclysm/` into a project. It holds the extension and the two libraries for
+`addons/cadaclysm/` into a project. It holds the extension and the cadaclysm library (its full flavour) for
 Windows x64, macOS (universal) and Linux x64 and arm64, in `bin/<platform>/`, where the
 `.gdextension` file looks for them. Building it yourself is below.
 
@@ -61,11 +61,11 @@ reimport them from the Import dock).
 python build.py --libs path/to/sdk/lib
 ```
 
-Needs Rust 1.94 or later. `--libs` names the directory holding `cadaclysm_capi` and
-`cadaclysm_blacksmith` (an SDK's `lib/`); without it, `CADACLYSM_LIBRARY` and
-`CADACLYSM_BLACKSMITH_LIBRARY`, then the repository's `target/release`. Then
+Needs Rust 1.94 or later. `--libs` names the directory holding the library's full flavour,
+`cadaclysm` (an SDK's `lib/`); without it, `CADACLYSM_LIBRARY` (the library or its
+directory), then the repository's `target/flavours/host` and `target/release`. Then
 `GODOT=path/to/godot python build.py --test` runs the tests headless.
 
-The extension finds the two libraries beside itself (`bin/`, or next to an exported
-game's executable, where the `.gdextension` file's `[dependencies]` copies them); failing
-that, where `CADACLYSM_LIBRARY` and `CADACLYSM_BLACKSMITH_LIBRARY` point.
+The extension finds the library beside itself (`bin/`, or next to an exported
+game's executable, where the `.gdextension` file's `[dependencies]` copies it), of any
+flavour; failing that, where `CADACLYSM_LIBRARY` points.
