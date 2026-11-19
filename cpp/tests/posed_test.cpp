@@ -154,54 +154,54 @@ static Result<void> run() {
     // Posing the shoulder, or sliding the screw, moves things; 0 and no rows do not.
     CADACLYSM_TRY(arm, paired_arm());
     CADACLYSM_TRY(arm_rest, stepped(arm));
-    CADACLYSM_TRY(shoulder_posed, arm.posed({bs::StateRow{"shoulder", {0.5}}}));
+    CADACLYSM_TRY(shoulder_posed, arm.pose({bs::StateRow{"shoulder", {0.5}}}));
     CADACLYSM_TRY(shoulder_text, stepped(shoulder_posed));
     check(shoulder_posed.name() == "arm", "posed shoulder is named " + shoulder_posed.name());
     check(shoulder_text != arm_rest, "posing the shoulder left the step text unchanged");
-    CADACLYSM_TRY(screw_posed, arm.posed({bs::StateRow{"upper/screw", {5.0}}}));
+    CADACLYSM_TRY(screw_posed, arm.pose({bs::StateRow{"upper/screw", {5.0}}}));
     CADACLYSM_TRY(screw_text, stepped(screw_posed));
     check(screw_text != arm_rest, "sliding the screw left the step text unchanged");
-    CADACLYSM_TRY(zero_posed, arm.posed({bs::StateRow{"shoulder", {0.0}}}));
+    CADACLYSM_TRY(zero_posed, arm.pose({bs::StateRow{"shoulder", {0.0}}}));
     CADACLYSM_TRY(zero_text, stepped(zero_posed));
     check(zero_text == arm_rest, "posing the shoulder at 0 changed the step text");
-    CADACLYSM_TRY(nothing_posed, arm.posed({}));
+    CADACLYSM_TRY(nothing_posed, arm.pose({}));
     CADACLYSM_TRY(nothing_text, stepped(nothing_posed));
     check(nothing_text == arm_rest, "posing no rows changed the step text");
 
     // An ambiguous bare name, and a path escaping the "/" inside "right/rear".
     CADACLYSM_TRY(frame, posed_frame());
     CADACLYSM_TRY(frame_rest, stepped(frame));
-    Result<bs::Assembly> ambiguous = frame.posed({bs::StateRow{"turn", {0.3}}});
+    Result<bs::Assembly> ambiguous = frame.pose({bs::StateRow{"turn", {0.3}}});
     check(!ambiguous.ok(), "posing the bare 'turn' was accepted");
     if (!ambiguous) {
         check(ambiguous.error().message ==
                   "posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path",
               "ambiguous refusal reads: " + ambiguous.error().message);
     }
-    CADACLYSM_TRY(turned, frame.posed({bs::StateRow{"right\\/rear/turn", {0.3}}}));
+    CADACLYSM_TRY(turned, frame.pose({bs::StateRow{"right\\/rear/turn", {0.3}}}));
     check(turned.name() == "frame", "posed frame is named " + turned.name());
     CADACLYSM_TRY(turned_text, stepped(turned));
     check(turned_text != frame_rest, "posing right\\/rear/turn left the step text unchanged");
-    CADACLYSM_TRY(still, frame.posed({bs::StateRow{"right\\/rear/turn", {0.0}}}));
+    CADACLYSM_TRY(still, frame.pose({bs::StateRow{"right\\/rear/turn", {0.0}}}));
     CADACLYSM_TRY(still_text, stepped(still));
     check(still_text == frame_rest, "posing right\\/rear/turn at 0 changed the step text");
     CADACLYSM_TRY(frame_after, stepped(frame));
     check(frame_after == frame_rest, "the frame changed after being posed");
 
     // A state, a ground, and the kernel's own refusals.
-    CADACLYSM_TRY(from_state, arm.posed({}, "reach"));
+    CADACLYSM_TRY(from_state, arm.pose({}, "reach"));
     CADACLYSM_TRY(from_state_text, stepped(from_state));
     check(from_state_text == shoulder_text, "state 'reach' differs from shoulder = 0.5");
-    CADACLYSM_TRY(held, arm.posed({bs::StateRow{"shoulder", {0.5}}}, std::nullopt, "upper arm"));
+    CADACLYSM_TRY(held, arm.pose({bs::StateRow{"shoulder", {0.5}}}, std::nullopt, "upper arm"));
     CADACLYSM_TRY(held_text, stepped(held));
     check(held_text != shoulder_text, "ground 'upper arm' left the posed step text unchanged");
-    Result<bs::Assembly> out_of_range = arm.posed({bs::StateRow{"shoulder", {2.0}}});
+    Result<bs::Assembly> out_of_range = arm.pose({bs::StateRow{"shoulder", {2.0}}});
     check(!out_of_range.ok(), "shoulder = 2.0 was accepted");
     if (!out_of_range) {
         check(out_of_range.error().message == "posed: value 0 of joint 'shoulder' is 2, outside its range",
               "range refusal reads: " + out_of_range.error().message);
     }
-    Result<bs::Assembly> no_state = arm.posed({}, "fold");
+    Result<bs::Assembly> no_state = arm.pose({}, "fold");
     check(!no_state.ok(), "state 'fold' was accepted");
     if (!no_state) {
         check(no_state.error().message == "posed: assembly 'arm' has no state named 'fold'",
@@ -213,7 +213,7 @@ static Result<void> run() {
     // The gears: both sides of the mesh given against the law is refused; one side is fine.
     CADACLYSM_TRY(gears, geared());
     CADACLYSM_TRY(gears_rest, stepped(gears));
-    Result<bs::Assembly> both = gears.posed({bs::StateRow{"drive", {0.4}}, bs::StateRow{"driven", {0.4}}});
+    Result<bs::Assembly> both = gears.pose({bs::StateRow{"drive", {0.4}}, bs::StateRow{"driven", {0.4}}});
     check(!both.ok(), "drive = 0.4 with driven = 0.4 was accepted");
     if (!both) {
         const std::string prefix =
@@ -221,7 +221,7 @@ static Result<void> run() {
         check(both.error().message.compare(0, prefix.size(), prefix) == 0,
               "gears refusal reads: " + both.error().message);
     }
-    CADACLYSM_TRY(alone, gears.posed({bs::StateRow{"drive", {0.4}}}));
+    CADACLYSM_TRY(alone, gears.pose({bs::StateRow{"drive", {0.4}}}));
     check(alone.name() == "gears", "posed gears is named " + alone.name());
     CADACLYSM_TRY(gears_after, stepped(gears));
     check(gears_after == gears_rest, "the gears changed after being posed");

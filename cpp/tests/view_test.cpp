@@ -10,7 +10,7 @@
 // table rigged (windows forced offscreen, run faked) the void calls' refusals, show()/view()'s
 // titles, up axes and camera, and run()'s camera Y up; an item removed; a scene posed and back at rest, an empty pose refused, a nested node with its
 // siblings hidden, Scene::close releasing what shows it (and refused while another thread's
-// view shows it); and a closed view's refusals; 1.22's snapping (rigged: the kinds' bits, the answer whole, the work plane; on the GPU: the square's corner). The terminal half skips without
+// view shows it); and a closed view's refusals; 1.22's snapping (rigged: the kinds' bits, the answer whole, the work plane; on the GPU: the square's corner); 1.27's animations (rigged: each binding's target, item and node, the ghosts' NULL and empty arrays; on the GPU: a turntable played, seeked and removed, the binding refusals, an item hidden and shown, ghosts set and cleared, one timeline event under the testing hook). The terminal half skips without
 // cadaclysm_terminal unless CADACLYSM_REQUIRE_TERMINAL=1; the GPU half without cadaclysm_view
 // or an adapter unless CADACLYSM_REQUIRE_WGPU is set.
 //
@@ -131,7 +131,11 @@ CadaclysmView* create(const CadaclysmViewWindow* window, const CadaclysmViewOpti
     return real_create(window, &copy);
 }
 // The pick answer run and pick_result hand back (item 0: nothing).
-CadaclysmViewPick picked{};
+CadaclysmViewPick picked = [] {
+    CadaclysmViewPick p{};
+    p.viewport_label = -1;  // the library's "no label hit"
+    return p;
+}();
 // The window "closed" at once: the camera on `eye`, looking at the origin; the pick `picked`.
 bool run(CadaclysmView*, CadaclysmViewCamera* camera, CadaclysmViewPick* pick) {
     ++runs;
@@ -550,17 +554,17 @@ static void machining_case(const cadaclysm::ViewLibrary& stand_in) {
                 CHECK(made->play(4), "play");
                 CHECK(made->pause(), "pause");
                 CHECK(made->seek(2.0), "seek");
-                CHECK(made->loop(), "loop");
-                CHECK(made->loop(false), "loop off");
+                CHECK(made->set_loop(), "loop");
+                CHECK(made->set_loop(false), "loop off");
                 CHECK(m->seek_move(3), "seek_move");
-                CHECK(m->colour_by("tool"), "colour_by tool");
-                CHECK(m->colour_by("deviation"), "colour_by deviation");
-                CHECK(m->overlays(false), "overlays");
+                CHECK(m->set_colour_by("tool"), "colour_by tool");
+                CHECK(m->set_colour_by("deviation"), "colour_by deviation");
+                CHECK(m->set_overlays(false), "overlays");
                 CHECK(mach::calls == "play 4.000000;pause;seek_time 2.000000;loop on;loop off;seek 7 3;colour_by 7 1;"
                                      "colour_by 7 2;overlays 7 off on;",
                       "the calls: %s", mach::calls.c_str());
-                CHECK(refused(m->colour_by("rainbow")) == "mode 'rainbow': one of height, tool, deviation", "mode: %s",
-                      refused(m->colour_by("rainbow")).c_str());
+                CHECK(refused(m->set_colour_by("rainbow")) == "mode 'rainbow': one of height, tool, deviation", "mode: %s",
+                      refused(m->set_colour_by("rainbow")).c_str());
                 cadaclysm::Result<double> time = made->time();
                 cadaclysm::Result<double> duration = made->duration();
                 cadaclysm::Result<bool> playing = made->playing();
@@ -632,8 +636,8 @@ static void rigged_half(View& view, const cadaclysm::ViewLibrary& wgpu, const st
     CHECK(refused(view.zoom(1)) == "boom from the library", "zoom");
     CHECK(refused(view.look(1, 1)) == "boom from the library", "look");
     CHECK(refused(view.dolly(1)) == "boom from the library", "dolly");
-    CHECK(refused(view.orthographic(false)) == "boom from the library", "orthographic");
-    CHECK(refused(view.background({0, 0, 0})) == "boom from the library", "background");
+    CHECK(refused(view.set_orthographic(false)) == "boom from the library", "orthographic");
+    CHECK(refused(view.set_background({0, 0, 0})) == "boom from the library", "background");
     spy::said = nullptr;
     CHECK(view.orbit(0, 0), "a void call with no last error was refused");
     t.frame = &spy::refuse;
@@ -724,7 +728,7 @@ static void rigged_half(View& view, const cadaclysm::ViewLibrary& wgpu, const st
     t.last_error = &spy::last_error;
     spy::said = nullptr;
     {
-        spy::picked = CadaclysmViewPick{};
+        spy::picked = cadaclysm::detail::no_raw_pick();
         spy::picked.item = 3;
         spy::picked.node = 4;
         spy::picked.face = 5;
@@ -737,6 +741,7 @@ static void rigged_half(View& view, const cadaclysm::ViewLibrary& wgpu, const st
         CHECK(hit && hit->item == 3 && hit->node == 4 && hit->face == 5 && hit->clicks == 2 && hit->point &&
                   *hit->point == (std::array<float, 3>{1.5f, -2.0f, 0.25f}),
               "a double click's hit: %s", refused(hit).c_str());
+        CHECK(hit && hit->viewport_label == -1, "a pick with no label hit carries -1, not %d", hit ? hit->viewport_label : 99);
         spy::picked.clicks = 1;
         spy::picked.has_point = 0;
         auto flat = view.pick(1, 1);
@@ -763,11 +768,26 @@ static void rigged_half(View& view, const cadaclysm::ViewLibrary& wgpu, const st
         CHECK(refused(broke) == "boom from pick_result", "last_pick, a refusal: %s", refused(broke).c_str());
         spy::said = nullptr;
         spy::pick_landed = true;
-        spy::picked = CadaclysmViewPick{};
+        spy::picked = cadaclysm::detail::no_raw_pick();
         spy::picked.clicks = 1;
         cadaclysm::Result<std::optional<cadaclysm::ViewPick>> miss = view.last_pick();
         CHECK(miss && *miss && (*miss)->item == 0 && (*miss)->clicks == 1 && !(*miss)->point,
               "last_pick, a click on nothing: %s", refused(miss).c_str());
+        CHECK(miss && *miss && (*miss)->viewport_label == -1, "last_pick: a miss carries label -1");
+        // 1.28's label hit: item 0, viewport_label 2 -- on pick, last_pick and run's camera.
+        spy::picked.viewport_label = 2;
+        cadaclysm::Result<cadaclysm::ViewPick> labelled = view.pick(1, 1);
+        CHECK(labelled && labelled->item == 0 && labelled->viewport_label == 2, "pick: the label hit");
+        cadaclysm::Result<std::optional<cadaclysm::ViewPick>> labelled_last = view.last_pick();
+        CHECK(labelled_last && *labelled_last && (*labelled_last)->viewport_label == 2, "last_pick: the label hit");
+        {
+            cadaclysm::Result<View> label_run = View::offscreen(32, 32);
+            if (label_run) {
+                cadaclysm::Result<cadaclysm::Camera> cam = label_run->run();
+                CHECK(cam && cam->pick && cam->pick->viewport_label == 2 && cam->pick->item == 0, "run: the label hit");
+            }
+        }
+        spy::picked.viewport_label = -1;
         spy::picked.item = 3;
         spy::picked.node = 4;
         spy::picked.face = 5;
@@ -780,7 +800,7 @@ static void rigged_half(View& view, const cadaclysm::ViewLibrary& wgpu, const st
             CHECK(camera && camera->pick && camera->pick->item == 7 && camera->pick->clicks == 2 && !camera->pick->point,
                   "run's pick: %s", refused(camera).c_str());
         }
-        spy::picked = CadaclysmViewPick{};
+        spy::picked = cadaclysm::detail::no_raw_pick();
 
         spy::calls.clear();
         CHECK(view.set_double_click_frames(true) && view.set_double_click_frames(false), "set_double_click_frames");
@@ -1045,8 +1065,8 @@ static ViewImage colours_drawn(bool text, const cadaclysm::Scene* scene) {
     if (!made) return {};
     View& v = *made;
     auto pick = [&](const char* words, Colour numbers) { return text ? Colour(words) : numbers; };
-    CHECK(v.layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
-    CHECK(v.background(pick("#ff0", {1, 1, 0})), "background");
+    CHECK(v.set_layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
+    CHECK(v.set_background(pick("#ff0", {1, 1, 0})), "background");
     const std::vector<float> square{-4, -1, 0, -2, -1, 0, -2, 1, 0, -4, 1, 0};
     const std::vector<std::uint32_t> triangles{0, 1, 2, 0, 2, 3};
     auto red = v.show_mesh(square, triangles, {}, {}, pick("Red", {1, 0, 0}));
@@ -1054,7 +1074,7 @@ static ViewImage colours_drawn(bool text, const cadaclysm::Scene* scene) {
     std::vector<float> lifted(square);
     for (std::size_t i = 1; i < lifted.size(); i += 3) lifted[i] += 2.5f;
     auto recoloured = v.show_mesh(lifted, triangles);
-    CHECK(recoloured && recoloured->colour(pick("#00f", {0, 0, 1})), "colour");
+    CHECK(recoloured && recoloured->set_colour(pick("#00f", {0, 0, 1})), "colour");
     auto cube = bs::Solid::cuboid(2, 2, 2);
     CHECK(cube, "cuboid");
     if (cube) {
@@ -1063,7 +1083,7 @@ static ViewImage colours_drawn(bool text, const cadaclysm::Scene* scene) {
         // Numbers as a std::vector<std::array<float, 4>>, the form before Colour.
         const std::vector<std::array<float, 4>> numbers{{0, 1, 128.0f / 255.0f, 1}, {0, 0, 0, 1}};
         if (shown)
-            CHECK(text ? shown->face_colours({0, 1}, {"00ff80", "black"}) : shown->face_colours({0, 1}, numbers),
+            CHECK(text ? shown->set_face_colours({0, 1}, {"00ff80", "black"}) : shown->set_face_colours({0, 1}, numbers),
                   "face_colours");
     }
     CHECK(v.show_lines({3, 0, 0, 5, 2, 2}, pick("#ffffff", {1, 1, 1})), "show_lines");
@@ -1073,8 +1093,8 @@ static ViewImage colours_drawn(bool text, const cadaclysm::Scene* scene) {
         auto whole = v.show(*scene);
         CHECK(whole, "show the scene: %s", refused(whole).c_str());
         if (whole) {
-            CHECK(whole->node_colour(0, pick("white", {1, 1, 1})), "node_colour");
-            CHECK(whole->node_highlight(0, pick("#f00", {1, 0, 0, 1})), "node_highlight");
+            CHECK(whole->set_node_colour(0, pick("white", {1, 1, 1})), "node_colour");
+            CHECK(whole->set_node_highlight(0, pick("#f00", {1, 0, 0, 1})), "node_highlight");
         }
     }
     CHECK(v.standard("iso") && v.frame(), "iso, framed");
@@ -1114,17 +1134,17 @@ static void colour_text(const std::string& mechanism) {
     for (const char* bad : {"blurple", "transparent", "rgb(1, 2, 3)", "#f00a", ""}) {
         std::string want = std::string("cadaclysm_view_parse_colour: colour: \"#rgb\", \"#rrggbb\" or a CSS colour name, not '") +
                            bad + "'";
-        CHECK(refused(square->colour(bad)) == want, "colour(\"%s\"): %s", bad, refused(square->colour(bad)).c_str());
+        CHECK(refused(square->set_colour(bad)) == want, "colour(\"%s\"): %s", bad, refused(square->set_colour(bad)).c_str());
     }
     const char* tail = "not 'nope'";
     auto ends_nope = [&](const std::string& m) { return m.size() > 10 && m.compare(m.size() - 10, 10, tail) == 0; };
-    CHECK(ends_nope(refused(v.background("nope"))), "background: %s", refused(v.background("nope")).c_str());
+    CHECK(ends_nope(refused(v.set_background("nope"))), "background: %s", refused(v.set_background("nope")).c_str());
     CHECK(ends_nope(refused(v.show_lines({0, 0, 0, 1, 1, 1}, std::string("nope")))), "show_lines");
     CHECK(ends_nope(refused(v.show_curves(std::vector<float>(16, 1.0f), std::string_view("nope")))), "show_curves");
     CHECK(ends_nope(refused(v.show_mesh({0, 0, 0, 1, 0, 0, 0, 1, 0}, {0, 1, 2}, {}, {}, "nope"))), "show_mesh");
-    CHECK(ends_nope(refused(square->face_colours({0}, {"nope"}))), "face_colours");
-    CHECK(ends_nope(refused(square->node_colour(0, "nope"))), "node_colour");
-    CHECK(ends_nope(refused(square->node_highlight(0, "nope"))), "node_highlight");
+    CHECK(ends_nope(refused(square->set_face_colours({0}, {"nope"}))), "face_colours");
+    CHECK(ends_nope(refused(square->set_node_colour(0, "nope"))), "node_colour");
+    CHECK(ends_nope(refused(square->set_node_highlight(0, "nope"))), "node_highlight");
     auto cube = bs::Solid::cuboid(1, 1, 1);
     if (cube) CHECK(ends_nope(refused(v.show(*cube, 0.05, "nope"))), "show a solid");
     CHECK(changed(before, frame_of(v)) == 0, "a refused colour reached the view");
@@ -1151,11 +1171,11 @@ static void text_case(const std::string& font_path) {
     CHECK(made, "a view for text: %s", refused(made).c_str());
     if (!made) return;
     View& v = *made;
-    CHECK(v.layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
+    CHECK(v.set_layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
     auto blank_made = View::offscreen(96, 96);
     CHECK(blank_made, "a blank view: %s", refused(blank_made).c_str());
     if (!blank_made) return;
-    CHECK(blank_made->layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off (blank)");
+    CHECK(blank_made->set_layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off (blank)");
     ViewImage blank = frame_of(*blank_made);
 
     // Top left at the anchor, the picture's centre (48, 48): line 0 runs y 48..68, line 1 68..88.
@@ -1182,9 +1202,9 @@ static void text_case(const std::string& font_path) {
     CHECK(changed(one_line, two_lines) > 0, "set_text changed nothing drawn");
 
     // The text layer hides every text item, and shows it again.
-    CHECK(v.layer(CADACLYSM_VIEW_LAYER_TEXT, false), "text layer off");
+    CHECK(v.set_layer(CADACLYSM_VIEW_LAYER_TEXT, false), "text layer off");
     CHECK(changed(frame_of(v), blank) == 0, "the text layer off left text drawn");
-    CHECK(v.layer(CADACLYSM_VIEW_LAYER_TEXT, true), "text layer on");
+    CHECK(v.set_layer(CADACLYSM_VIEW_LAYER_TEXT, true), "text layer on");
     CHECK(changed(frame_of(v), two_lines) == 0, "the text layer on did not bring it back");
 
     // Lime glyphs on a red box, centred on the anchor: swapped colours would draw the other way.
@@ -1192,7 +1212,7 @@ static void text_case(const std::string& font_path) {
         auto boxed = View::offscreen(64, 64);
         CHECK(boxed, "a view for the box: %s", refused(boxed).c_str());
         if (boxed) {
-            CHECK(boxed->layer(CADACLYSM_VIEW_LAYER_GRID, false) && boxed->background("black"), "grid off, black");
+            CHECK(boxed->set_layer(CADACLYSM_VIEW_LAYER_GRID, false) && boxed->set_background("black"), "grid off, black");
             cadaclysm::TextOptions o;
             o.colour = "lime";
             o.size = 24;
@@ -1210,7 +1230,7 @@ static void text_case(const std::string& font_path) {
             // Four numbers: the box's own alpha; 0 is no box at all.
             o.box = cadaclysm::Colour(1.0f, 0.0f, 0.0f, 0.0f);
             auto clear = View::offscreen(64, 64);
-            if (clear && clear->layer(CADACLYSM_VIEW_LAYER_GRID, false) && clear->background("black")) {
+            if (clear && clear->set_layer(CADACLYSM_VIEW_LAYER_GRID, false) && clear->set_background("black")) {
                 CHECK(clear->show_text("HH", {0, 0, 0}, o), "a label with an alpha-0 box");
                 ViewImage none = frame_of(*clear);
                 CHECK(count_near(none, {255, 0, 0}) == 0 && count_near(none, {0, 255, 0}) > 20,
@@ -1294,7 +1314,7 @@ static void text_case(const std::string& font_path) {
     CHECK(from_path && *from_path >= 1, "the bundled font's path: %s", refused(from_path).c_str());
     if (!font) return;
     auto lone = View::offscreen(64, 64);
-    if (!lone || !lone->layer(CADACLYSM_VIEW_LAYER_GRID, false)) return;
+    if (!lone || !lone->set_layer(CADACLYSM_VIEW_LAYER_GRID, false)) return;
     ViewImage before = frame_of(*lone);
     cadaclysm::TextOptions loaded;
     loaded.size = 24;
@@ -1316,7 +1336,7 @@ static std::optional<View> framed_square(std::uint32_t* item_id = nullptr) {
     CHECK(made, "offscreen: %s", refused(made).c_str());
     if (!made) return std::nullopt;
     View v = std::move(*made);
-    CHECK(v.layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
+    CHECK(v.set_layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
     auto item = v.show_mesh({-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0}, {0, 1, 2, 0, 2, 3}, {}, {},
                             std::array<float, 3>{1, 0, 0});
     CHECK(item, "show_mesh: %s", refused(item).c_str());
@@ -1472,7 +1492,7 @@ static void snap_case() {
     CHECK(made, "offscreen: %s", refused(made).c_str());
     if (!made) return;
     View v = std::move(*made);
-    CHECK(v.layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
+    CHECK(v.set_layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
     const std::vector<float> square{-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0};
     std::vector<float> outline;
     for (int i = 0; i < 4; ++i)
@@ -1656,11 +1676,11 @@ static void plate_case(const std::string& start, const std::string& cwd_start) {
     CHECK(made->draw(), "draw at the end");
     cadaclysm::Result<double> clamped = made->time();
     CHECK(clamped && std::fabs(*clamped - *duration) < 1e-6, "time clamped to the duration: %g", clamped ? *clamped : -1.0);
-    CHECK(made->loop(true) && made->loop(false), "loop on and off");
-    CHECK(m->colour_by("tool") && m->colour_by("height"), "colour_by tool, height");
-    std::string deviation = refused(m->colour_by("deviation"));
+    CHECK(made->set_loop(true) && made->set_loop(false), "loop on and off");
+    CHECK(m->set_colour_by("tool") && m->set_colour_by("height"), "colour_by tool, height");
+    std::string deviation = refused(m->set_colour_by("deviation"));
     CHECK(has(deviation, "cadaclysm_view_machining_colour_by"), "deviation without a part: %s", deviation.c_str());
-    CHECK(m->overlays(false, false) && m->overlays(), "overlays");
+    CHECK(m->set_overlays(false, false) && m->set_overlays(), "overlays");
     CHECK(made->draw(), "draw");
     CHECK(m->remove(), "remove");
 
@@ -1670,7 +1690,7 @@ static void plate_case(const std::string& start, const std::string& cwd_start) {
     cadaclysm::Result<cadaclysm::Machining> with_part = made->show_machining(programs, box, part, options);
     CHECK(with_part, "show_machining with a part: %s", refused(with_part).c_str());
     if (with_part) {
-        CHECK(with_part->colour_by("deviation"), "deviation with a part: %s", refused(with_part->colour_by("deviation")).c_str());
+        CHECK(with_part->set_colour_by("deviation"), "deviation with a part: %s", refused(with_part->set_colour_by("deviation")).c_str());
         CHECK(made->draw(), "draw by deviation");
         CHECK(with_part->remove(), "remove");
     }
@@ -1685,6 +1705,778 @@ static_assert(static_cast<std::uint32_t>(cadaclysm::Anchor::top_left) == 0 && st
                   static_cast<std::uint32_t>(cadaclysm::Anchor::bottom_right) == 8,
               "Anchor is CADACLYSM_VIEW_ALIGN_*'s 0..8");
 static_assert(std::is_base_of<cadaclysm::Item, cadaclysm::Overlay>::value, "an Overlay is an Item");
+
+// ---- view ABI 1.26's input events ------------------------------------------------------------
+
+// CadaclysmViewInputEvent as the header lays it out: 272 bytes, no implicit padding.
+static_assert(sizeof(CadaclysmViewInputEvent) == 272, "sizeof(CadaclysmViewInputEvent) is 272");
+static_assert(offsetof(CadaclysmViewInputEvent, kind) == 4 && offsetof(CadaclysmViewInputEvent, time_ms) == 8 &&
+                  offsetof(CadaclysmViewInputEvent, x) == 16 && offsetof(CadaclysmViewInputEvent, y) == 20 &&
+                  offsetof(CadaclysmViewInputEvent, wheel_y) == 24 && offsetof(CadaclysmViewInputEvent, button) == 28 &&
+                  offsetof(CadaclysmViewInputEvent, modifiers) == 32 && offsetof(CadaclysmViewInputEvent, pointer) == 36 &&
+                  offsetof(CadaclysmViewInputEvent, pointer_id) == 40 && offsetof(CadaclysmViewInputEvent, width) == 44 &&
+                  offsetof(CadaclysmViewInputEvent, height) == 48 && offsetof(CadaclysmViewInputEvent, repeat) == 52 &&
+                  offsetof(CadaclysmViewInputEvent, dropped) == 56 && offsetof(CadaclysmViewInputEvent, pad0) == 60 &&
+                  offsetof(CadaclysmViewInputEvent, key) == 64 && offsetof(CadaclysmViewInputEvent, pick) == 96 &&
+                  offsetof(CadaclysmViewInputEvent, snap) == 136 && offsetof(CadaclysmViewInputEvent, camera) == 224 &&
+                  offsetof(CadaclysmViewInputEvent, pick_viewport_label) == 268,
+              "CadaclysmViewInputEvent's offsets");
+// InputKind is the header's numbers, written out here (not read through view.hpp).
+static_assert(static_cast<std::uint32_t>(cadaclysm::InputKind::pointer_down) == 1 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::pointer_move) == 2 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::pointer_up) == 3 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::wheel) == 4 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::key_down) == 5 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::key_up) == 6 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::resize) == 7 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::pick) == 8 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::snap) == 9 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::close) == 10 &&
+                  static_cast<std::uint32_t>(cadaclysm::InputKind::timeline) == 11,
+              "InputKind is CADACLYSM_VIEW_INPUT_EVENT_*'s 1..11");
+
+// A raw event of kind `kind` (the header's number) with the modifier bits `mods`.
+static CadaclysmViewInputEvent raw_event(std::uint32_t kind, std::uint32_t mods = 0, const char* key = "") {
+    CadaclysmViewInputEvent raw{};
+    raw.size = sizeof raw;
+    raw.kind = kind;
+    raw.modifiers = mods;
+    raw.pick_viewport_label = -1;  // the library's "no label hit" on every event
+    std::snprintf(raw.key, sizeof raw.key, "%s", key);
+    return raw;
+}
+
+static cadaclysm::InputEvent event_of(const CadaclysmViewInputEvent& raw, bool y_up = false) {
+    cadaclysm::Result<cadaclysm::InputEvent> e = cadaclysm::detail::input_event_of(raw, y_up);
+    CHECK(e, "input_event_of kind %u: %s", raw.kind, refused(e).c_str());
+    return e ? *e : cadaclysm::InputEvent{};
+}
+
+// Each kind and modifier bit by the header's numbers (1..11; SHIFT 1, CTRL 2, ALT 4, META 8),
+// written out here: a swapped kind or bit in view.hpp fails.
+static void input_event_fields_case() {
+    using cadaclysm::InputKind;
+    CadaclysmViewInputEvent down = raw_event(1, 1 | 4);
+    down.x = 10;
+    down.y = 20;
+    down.button = 2;
+    down.time_ms = 5;
+    cadaclysm::InputEvent d = event_of(down);
+    CHECK(d.kind == InputKind::pointer_down && d.x == 10 && d.y == 20 && d.button == 2 && d.pointer == "mouse" &&
+              d.time_ms == 5,
+          "POINTER_DOWN: kind %u at %g, %g, button %u, %s", static_cast<unsigned>(d.kind), d.x, d.y, d.button,
+          d.pointer.c_str());
+    CHECK(d.shift && !d.ctrl && d.alt && !d.meta, "SHIFT 1 and ALT 4: shift %d ctrl %d alt %d meta %d", d.shift, d.ctrl,
+          d.alt, d.meta);
+    CadaclysmViewInputEvent move = raw_event(2);
+    move.pointer = 1;
+    move.pointer_id = 3;
+    cadaclysm::InputEvent m = event_of(move);
+    CHECK(m.kind == InputKind::pointer_move && m.pointer == "touch" && m.pointer_id == 3, "POINTER_MOVE: %s %u",
+          m.pointer.c_str(), m.pointer_id);
+    CadaclysmViewInputEvent up = raw_event(3);
+    up.pointer = 2;
+    cadaclysm::InputEvent u = event_of(up);
+    CHECK(u.kind == InputKind::pointer_up && u.pointer == "pen", "POINTER_UP: %s", u.pointer.c_str());
+    CadaclysmViewInputEvent wheel = raw_event(4, 2);
+    wheel.x = 1;
+    wheel.y = 2;
+    wheel.wheel_y = -100;
+    cadaclysm::InputEvent w = event_of(wheel);
+    CHECK(w.kind == InputKind::wheel && w.wheel_y == -100 && w.x == 1 && w.y == 2, "WHEEL");
+    CHECK(!w.shift && w.ctrl && !w.alt && !w.meta, "CTRL 2: shift %d ctrl %d alt %d meta %d", w.shift, w.ctrl, w.alt,
+          w.meta);
+    CadaclysmViewInputEvent key = raw_event(5, 8, "KeyR");
+    key.repeat = 1;
+    key.dropped = 4;
+    cadaclysm::InputEvent k = event_of(key);
+    CHECK(k.kind == InputKind::key_down && k.key == "KeyR" && k.repeat && k.dropped == 4, "KEY_DOWN: %s", k.key.c_str());
+    CHECK(!k.shift && !k.ctrl && !k.alt && k.meta, "META 8: shift %d ctrl %d alt %d meta %d", k.shift, k.ctrl, k.alt,
+          k.meta);
+    cadaclysm::InputEvent ku = event_of(raw_event(6, 0, "KeyR"));
+    CHECK(ku.kind == InputKind::key_up && ku.key == "KeyR" && !ku.repeat, "KEY_UP: %s", ku.key.c_str());
+    // A key name filling all 32 bytes (no NUL) is read up to the end, not past it.
+    CadaclysmViewInputEvent full = raw_event(5);
+    std::memset(full.key, 'A', sizeof full.key);
+    CHECK(event_of(full).key == std::string(32, 'A'), "a 32-byte key name");
+    CadaclysmViewInputEvent resize = raw_event(7);
+    resize.width = 640;
+    resize.height = 480;
+    cadaclysm::InputEvent r = event_of(resize);
+    CHECK(r.kind == InputKind::resize && r.width == 640 && r.height == 480, "RESIZE");
+    CadaclysmViewInputEvent pick = raw_event(8);
+    pick.pick.item = 3;
+    pick.pick.node = 1;
+    pick.pick.face = 2;
+    pick.pick.clicks = 2;
+    pick.pick.has_point = 1;
+    pick.pick.point[0] = 1;
+    pick.pick.point[1] = 2;
+    pick.pick.point[2] = 3;
+    cadaclysm::InputEvent p = event_of(pick);
+    CHECK(p.kind == InputKind::pick && p.pick && p.pick->item == 3 && p.pick->node == 1 && p.pick->face == 2 &&
+              p.pick->clicks == 2 && p.pick->point && (*p.pick->point)[2] == 3,
+          "PICK");
+    CHECK(p.pick && p.pick->viewport_label == -1, "PICK: no label hit is -1");
+    cadaclysm::InputEvent nothing = event_of(raw_event(8));
+    CHECK(nothing.kind == InputKind::pick && !nothing.pick, "PICK: a click on nothing");
+    // 1.28: a label hit is the event's own pick_viewport_label, item 0; the 40-byte event pick
+    // is never read past.
+    static_assert(sizeof(CadaclysmViewEventPick) == 40, "the event's pick, frozen at 1.26");
+    CadaclysmViewInputEvent label_hit = raw_event(8);
+    label_hit.pick_viewport_label = 2;
+    cadaclysm::InputEvent lh = event_of(label_hit);
+    CHECK(lh.kind == InputKind::pick && lh.pick && lh.pick->item == 0 && lh.pick->viewport_label == 2,
+          "PICK: a label hit on viewport 2");
+    CadaclysmViewInputEvent first_label = raw_event(8);
+    first_label.pick_viewport_label = 0;
+    cadaclysm::InputEvent fl = event_of(first_label);
+    CHECK(fl.pick && fl.pick->viewport_label == 0, "PICK: viewport 0's label is a hit, not nothing");
+    CadaclysmViewInputEvent snap = raw_event(9);
+    snap.snap.kind = CADACLYSM_VIEW_SNAP_VERTEX;
+    snap.snap.item = 3;
+    snap.snap.edge = 4;
+    snap.snap.clicks = 1;
+    cadaclysm::InputEvent s = event_of(snap);
+    CHECK(s.kind == InputKind::snap && s.snap && s.snap->kind == "vertex" && s.snap->edge == 4u && s.snap->clicks == 1,
+          "SNAP");
+    CHECK(!event_of(raw_event(9)).snap, "SNAP: none");
+    CadaclysmViewInputEvent close = raw_event(10);
+    close.camera.eye[1] = -5;
+    close.camera.up[2] = 1;
+    cadaclysm::InputEvent c = event_of(close);
+    CHECK(c.kind == InputKind::close && c.camera && c.camera->eye[1] == -5 && std::lround(c.camera->azimuth) == -90 &&
+              !c.camera->pick,
+          "CLOSE: the camera it closed on");
+    // 1.27's timeline: its kind and stamp alone, whatever else the struct holds.
+    CadaclysmViewInputEvent tick = raw_event(11, 1);
+    tick.time_ms = 9.5;
+    tick.x = 3;
+    tick.width = 7;
+    tick.dropped = 2;
+    cadaclysm::InputEvent tl = event_of(tick);
+    CHECK(tl.kind == InputKind::timeline && tl.time_ms == 9.5 && tl.dropped == 2 && tl.x == 0 && tl.width == 0 &&
+              !tl.shift && !tl.pick && !tl.snap && !tl.camera,
+          "TIMELINE: kind %u, time %g, x %g, width %u", static_cast<unsigned>(tl.kind), tl.time_ms, tl.x, tl.width);
+    CHECK(refused(cadaclysm::detail::input_event_of(raw_event(12), false)) ==
+              "next_event: kind 12 is not a CADACLYSM_VIEW_INPUT_EVENT_* this SDK knows",
+          "kind 12: %s", refused(cadaclysm::detail::input_event_of(raw_event(12), false)).c_str());
+    std::printf("view: input event fields checked\n");
+}
+
+// 1.26 on the real library: an offscreen view queues nothing and has no window to close; with
+// CADACLYSM_VIEW_TEST_QUEUE_INPUT=1 as it is made, it queues what input() hands it -- a key, a
+// shifted right press, a left click on the red square (its pick landing on the next draw, the
+// same answer last_pick gives), a wheel -- read back through next_event.
+static void events_case() {
+    {
+        auto made = View::offscreen(32, 24);
+        CHECK(made, "offscreen: %s", refused(made).c_str());
+        if (!made) return;
+        cadaclysm::Result<std::optional<cadaclysm::InputEvent>> none = made->next_event();
+        CHECK(none && !*none, "an offscreen view queues nothing: %s", refused(none).c_str());
+        std::string why = refused(made->close_window());
+        CHECK(has(why, "only a view with a window of its own is closed"), "an offscreen view's close_window: %s",
+              why.c_str());
+        CHECK(!made->closed(), "a refused close_window closed the view");
+    }
+    cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", "1");
+    auto made = View::offscreen(64, 48);
+    cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", nullptr);
+    CHECK(made, "offscreen with the testing hook: %s", refused(made).c_str());
+    if (!made) return;
+    View v = std::move(*made);
+    auto item = v.show_mesh({-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0}, {0, 1, 2, 0, 2, 3}, {}, {}, "red");
+    CHECK(item, "show_mesh: %s", refused(item).c_str());
+    CHECK(v.standard("top") && v.frame() && v.draw(), "the square from the top, drawn");
+    cadaclysm::ViewEvent e;
+    e.kind = CADACLYSM_VIEW_EVENT_KEY;
+    e.key = "KeyZ";
+    CHECK(v.input(e), "key");
+    e = cadaclysm::ViewEvent{};
+    e.kind = CADACLYSM_VIEW_EVENT_DOWN;
+    e.x = 32;
+    e.y = 24;
+    e.shift = true;
+    e.button = CADACLYSM_VIEW_BUTTON_RIGHT;
+    e.time_ms = 1000;
+    CHECK(v.input(e), "a shifted right press");
+    e.kind = CADACLYSM_VIEW_EVENT_UP;
+    e.time_ms = 1010;
+    CHECK(v.input(e), "its release");
+    e = cadaclysm::ViewEvent{};
+    e.kind = CADACLYSM_VIEW_EVENT_DOWN;
+    e.x = 32;
+    e.y = 24;
+    e.time_ms = 2000;
+    CHECK(v.input(e), "a left press");
+    e.kind = CADACLYSM_VIEW_EVENT_UP;
+    e.time_ms = 2010;
+    CHECK(v.input(e), "its release");
+    CHECK(v.draw(), "the draw that lands the pick");
+    e = cadaclysm::ViewEvent{};
+    e.kind = CADACLYSM_VIEW_EVENT_WHEEL;
+    e.x = 3;
+    e.y = 4;
+    e.wheel_y = -100;
+    CHECK(v.input(e), "wheel");
+    std::vector<cadaclysm::InputEvent> got;
+    for (int guard = 0; guard < 64; ++guard) {
+        cadaclysm::Result<std::optional<cadaclysm::InputEvent>> next = v.next_event();
+        CHECK(next, "next_event: %s", refused(next).c_str());
+        if (!next || !*next) break;
+        got.push_back(**next);
+    }
+    using cadaclysm::InputKind;
+    const std::vector<InputKind> want{InputKind::key_down,  InputKind::pointer_down, InputKind::pointer_up,
+                                      InputKind::pointer_down, InputKind::pointer_up, InputKind::pick, InputKind::wheel};
+    std::string kinds;
+    for (const cadaclysm::InputEvent& g : got) kinds += std::to_string(static_cast<unsigned>(g.kind)) + " ";
+    CHECK(got.size() == want.size(), "the events: %s", kinds.c_str());
+    if (got.size() != want.size()) return;
+    for (std::size_t i = 0; i < want.size(); ++i)
+        CHECK(got[i].kind == want[i], "event %zu: kind %u, not %u (%s)", i, static_cast<unsigned>(got[i].kind),
+              static_cast<unsigned>(want[i]), kinds.c_str());
+    CHECK(got[0].key == "KeyZ" && !got[0].shift, "the key: %s", got[0].key.c_str());
+    CHECK(got[1].button == 2 && got[1].shift && !got[1].ctrl && !got[1].alt && !got[1].meta && got[1].pointer == "mouse" &&
+              got[1].x == 32 && got[1].y == 24,
+          "the shifted right press: button %u shift %d %s", got[1].button, got[1].shift, got[1].pointer.c_str());
+    CHECK(got[3].button == 0 && !got[3].shift, "the left press");
+    CHECK(got[6].wheel_y == -100 && got[6].x == 3, "the wheel: %g at %g", got[6].wheel_y, got[6].x);
+    CHECK(got[5].pick && item && got[5].pick->item == item->id() && got[5].pick->clicks == 1, "the click's pick: item %u",
+          got[5].pick ? got[5].pick->item : 0u);
+    cadaclysm::Result<std::optional<cadaclysm::ViewPick>> last = v.last_pick();
+    CHECK(last && *last && got[5].pick && (*last)->item == got[5].pick->item, "last_pick still has it: %s",
+          last ? (*last ? std::to_string((*last)->item).c_str() : "none") : refused(last).c_str());
+    std::printf("view: input events checked\n");
+}
+
+// ---- run(callback) and close_window on the wgpu table rigged: a queue of events of its own --
+
+namespace evspy {
+std::vector<CadaclysmViewInputEvent> queue;  // next_event's answers, oldest first
+int closes = 0;
+const char* said = nullptr;  // next_event's refusal (nullptr: "no event" when empty)
+const char* last = nullptr;
+bool keep_label = false;  // next_event leaves pick_viewport_label as the caller set it
+const char* last_error() { return last; }
+bool next_event(CadaclysmView*, CadaclysmViewInputEvent* out) {
+    if (said) {
+        last = said;
+        return false;
+    }
+    if (queue.empty()) {
+        last = "cadaclysm_view_next_event: no event";
+        return false;
+    }
+    std::uint32_t size = out->size;
+    const std::int32_t label_in = out->pick_viewport_label;
+    *out = queue.front();
+    out->size = size;
+    if (keep_label) out->pick_viewport_label = label_in;  // a library that leaves the field alone
+    queue.erase(queue.begin());
+    last = nullptr;
+    return true;
+}
+// The close button: a CLOSE event with the camera straight down -y.
+bool close(CadaclysmView*) {
+    ++closes;
+    CadaclysmViewInputEvent e = raw_event(10);
+    e.camera.eye[1] = -5;
+    e.camera.up[2] = 1;
+    queue.push_back(e);
+    return true;
+}
+// pump: the answers in order (past them: open; 0 a failure saying "pump broke"), and its waits;
+// a CLOSED answer queues `closing`.
+std::vector<std::uint32_t> answers;
+std::optional<CadaclysmViewInputEvent> closing;
+int pumps = 0;
+std::vector<std::uint32_t> waits;
+std::uint32_t pump(CadaclysmView*, std::uint32_t ms) {
+    waits.push_back(ms);
+    std::size_t i = static_cast<std::size_t>(pumps++);
+    std::uint32_t answer = i < answers.size() ? answers[i] : CADACLYSM_VIEW_OPEN;
+    last = answer == 0 ? "pump broke" : nullptr;
+    if (answer == CADACLYSM_VIEW_CLOSED && closing) {
+        queue.push_back(*closing);  // the window closed by itself: its close event with it
+        closing.reset();
+    }
+    return answer;
+}
+// pick_result: no answer, or (`landing`) a click on a viewport's label -- item 0, label `landing`.
+std::int32_t landing = -1;
+bool no_pick(CadaclysmView*, CadaclysmViewPick* out) {
+    if (landing >= 0) {
+        out->item = 0;
+        out->viewport_label = landing;
+        last = nullptr;
+        return true;
+    }
+    last = "cadaclysm_view_pick_result: no pick result";
+    return false;
+}
+void reset() {
+    queue.clear();
+    closes = pumps = 0;
+    keep_label = false;
+    landing = -1;
+    said = last = nullptr;
+    answers.clear();
+    waits.clear();
+    closing.reset();
+}
+}  // namespace evspy
+
+static void events_rigged_case(const cadaclysm::ViewLibrary& wgpu) {
+    CvlTable& t = const_cast<CvlTable&>(cadaclysm::detail::ViewAccess::table(wgpu));
+    const CvlTable saved = t;
+    spy::real_create = saved.create;
+    t.create = &spy::create;  // a window of its own, forced offscreen
+    t.next_event = &evspy::next_event;
+    t.close = &evspy::close;
+    t.pump = &evspy::pump;
+    t.pick_result = &evspy::no_pick;
+    t.last_error = &evspy::last_error;
+    using cadaclysm::InputEvent;
+    using cadaclysm::InputKind;
+    {
+        // Returning false closes the window: the key up after it is not handed over, the camera
+        // is the close event's, the pick the last pick event's (none left for pick_result).
+        evspy::reset();
+        auto made = View::create();
+        CHECK(made, "a window of its own: %s", refused(made).c_str());
+        if (made) {
+            View& v = *made;
+            evspy::queue = {raw_event(5, 0, "KeyR"), raw_event(8), raw_event(5, 0, "KeyQ"), raw_event(6, 0, "KeyQ")};
+            evspy::queue[1].pick.item = 3;
+            evspy::queue[1].pick.clicks = 1;
+            evspy::queue[1].pick_viewport_label = 1;
+            std::vector<std::string> seen;
+            cadaclysm::Result<cadaclysm::Camera> cam = v.run([&](const InputEvent& e) {
+                seen.push_back(std::to_string(static_cast<unsigned>(e.kind)) + ":" + e.key);
+                if (e.key == "KeyR") CHECK(v.standard("iso"), "the callback changes the view");
+                return e.key != "KeyQ";
+            });
+            CHECK(cam, "run(callback): %s", refused(cam).c_str());
+            CHECK((seen == std::vector<std::string>{"5:KeyR", "8:", "5:KeyQ"}), "false stops: %zu events", seen.size());
+            CHECK(evspy::closes == 1 && v.closed(), "returning false closed the window: %d closes", evspy::closes);
+            CHECK(cam && cam->eye[1] == -5 && cam->pick && cam->pick->item == 3 &&
+                  cam->pick->viewport_label == 1,
+              "the close event's camera, the pick event's pick and its label");
+            CHECK(!evspy::waits.empty() && evspy::waits[0] == 16, "pump(16)");
+            CHECK(refused(v.frame()) == "cadaclysm_view_frame: the window is closed", "%s", refused(v.frame()).c_str());
+            cadaclysm::Result<std::optional<InputEvent>> after = v.next_event();
+            CHECK(after && !*after, "a closed window still answers next_event: %s", refused(after).c_str());
+            CHECK(v.close_window() && evspy::closes == 1, "close_window on a closed window: nothing");
+            CHECK(v.close(), "close");
+        }
+    }
+    {
+        // The last click's answer is a label hit (item 0): run's camera carries it, as it does a
+        // pick event's; a library that leaves pick_viewport_label alone leaves -1, not 0.
+        evspy::reset();
+        cadaclysm::Result<View> made = View::create();
+        if (made) {
+            View& v = *made;
+            evspy::landing = 3;
+            evspy::keep_label = true;
+            evspy::queue = {raw_event(8), raw_event(5, 0, "KeyQ")};
+            evspy::queue[0].pick.item = 5;
+            evspy::queue[0].pick_viewport_label = 4;  // overwritten by the kept -1 below
+            std::vector<std::optional<std::int32_t>> labels;
+            cadaclysm::Result<cadaclysm::Camera> cam = v.run([&](const InputEvent& e) {
+                if (e.kind == InputKind::pick) labels.push_back(e.pick ? std::optional<std::int32_t>(e.pick->viewport_label) : std::nullopt);
+                return e.key != "KeyQ";
+            });
+            CHECK(cam && cam->pick && cam->pick->item == 0 && cam->pick->viewport_label == 3,
+                  "run(callback): the last click's label hit: %s", refused(cam).c_str());
+            CHECK(labels.size() == 1 && labels[0] && *labels[0] == -1, "a library that leaves the label alone: -1, not 0");
+            CHECK(v.close(), "close");
+        }
+    }
+    {
+        // The window closes by itself: the close event is handed over last; close is not called.
+        evspy::reset();
+        auto made = View::create();
+        if (made) {
+            View& v = *made;
+            CadaclysmViewInputEvent resize = raw_event(7);
+            resize.width = 5;
+            resize.height = 6;
+            evspy::queue = {resize};
+            evspy::answers = {CADACLYSM_VIEW_OPEN, CADACLYSM_VIEW_CLOSED};
+            evspy::closing = raw_event(10);  // the second pump closes the window
+            evspy::closing->camera.eye[0] = 7;
+            evspy::closing->camera.up[2] = 1;
+            std::vector<InputKind> seen;
+            cadaclysm::Result<cadaclysm::Camera> cam = v.run([&](const InputEvent& e) {
+                seen.push_back(e.kind);
+                return true;
+            });
+            CHECK(cam && cam->eye[0] == 7 && !cam->pick, "the window's own close: %s", refused(cam).c_str());
+            CHECK((seen == std::vector<InputKind>{InputKind::resize, InputKind::close}), "%zu events", seen.size());
+            CHECK(evspy::closes == 0 && evspy::pumps == 2 && v.closed(), "%d closes, %d pumps", evspy::closes, evspy::pumps);
+            CHECK(v.close(), "close");
+        }
+    }
+    {
+        // A failure other than "no event" is the library's own message; a failed pump too.
+        evspy::reset();
+        auto made = View::create();
+        if (made) {
+            View& v = *made;
+            evspy::said = "cadaclysm_view_next_event: CadaclysmViewInputEvent.size is 8; this library needs at least 272";
+            CHECK(has(refused(v.next_event()), "needs at least 272"), "%s", refused(v.next_event()).c_str());
+            evspy::said = nullptr;
+            evspy::answers = {0};
+            std::string why = refused(v.run([](const InputEvent&) { return true; }));
+            CHECK(why == "pump broke", "a failed pump: %s", why.c_str());
+            CHECK(!v.closed(), "a failed pump closed the window");
+            CHECK(v.close(), "close");
+        }
+    }
+    t = saved;
+    evspy::reset();
+    std::printf("view: run(callback) and close_window checked\n");
+}
+
+// ---- view ABI 1.27's animations on the wgpu table rigged: what the four calls hand the library --
+
+namespace animspy {
+int plays = 0;
+const CadaclysmBlacksmithAnimation* animation = nullptr;
+bool null_array = false;
+std::uint32_t count = 0;
+std::vector<std::string> bindings;  // "target item node", one a binding
+std::string calls;                  // timeline_remove, set_item_visible and set_node_ghosts, in order
+std::uint32_t play_animation(CadaclysmView*, const CadaclysmBlacksmithAnimation* a, const CadaclysmViewAnimationBinding* b,
+                             std::uint32_t n) {
+    ++plays;
+    animation = a;
+    null_array = b == nullptr;
+    count = n;
+    bindings.clear();
+    for (std::uint32_t i = 0; b && i < n; ++i)
+        bindings.push_back(std::string(b[i].target) + " " + std::to_string(b[i].item) + " " + std::to_string(b[i].node));
+    return 7;
+}
+bool timeline_remove(CadaclysmView*, std::uint32_t track) {
+    calls += "remove " + std::to_string(track) + ";";
+    return true;
+}
+bool set_item_visible(CadaclysmView*, std::uint32_t item, bool visible) {
+    calls += "visible " + std::to_string(item) + " " + (visible ? "1" : "0") + ";";
+    return true;
+}
+bool set_node_ghosts(CadaclysmView*, std::uint32_t item, const std::uint32_t* nodes, std::uint32_t n) {
+    calls += "ghosts " + std::to_string(item) + (nodes ? "" : " NULL");
+    for (std::uint32_t i = 0; nodes && i < n; ++i) calls += " " + std::to_string(nodes[i]);
+    calls += " (" + std::to_string(n) + ");";
+    return true;
+}
+}  // namespace animspy
+
+// Python's test_play_animation_hands_the_library_each_binding_item_and_node and
+// test_remove_track_item_visibility_and_node_ghosts_reach_the_library: each binding's target,
+// item (an id or an Item) and node (std::nullopt: CADACLYSM_VIEW_ALL_NODES), the animation's
+// own handle (NULL once closed), no bindings as a NULL array, a NUL in a target refused before
+// the library; the track removed; an item hidden and shown; ghosts as given, std::nullopt as
+// NULL and no nodes as a non-NULL empty array.
+static void animation_rigged_case(const cadaclysm::ViewLibrary& wgpu) {
+    cadaclysm::Result<View> made = View::offscreen(32, 24);
+    CHECK(made, "offscreen: %s", refused(made).c_str());
+    if (!made) return;
+    View v = std::move(*made);
+    cadaclysm::Result<cadaclysm::Item> item = v.show_mesh({-1, -1, 0, 1, -1, 0, 1, 1, 0}, {0, 1, 2}, {}, {}, "red");
+    CHECK(item, "show_mesh: %s", refused(item).c_str());
+    cadaclysm::Result<bs::Animation> anim = bs::Animation::make();
+    CHECK(anim, "Animation::make: %s", refused(anim).c_str());
+    if (!item || !anim) return;
+    CvlTable& t = const_cast<CvlTable&>(cadaclysm::detail::ViewAccess::table(wgpu));
+    const CvlTable saved = t;
+    t.play_animation = &animspy::play_animation;
+    t.timeline_remove = &animspy::timeline_remove;
+    t.set_item_visible = &animspy::set_item_visible;
+    t.set_node_ghosts = &animspy::set_node_ghosts;
+    const std::string id = std::to_string(item->id());
+
+    cadaclysm::Result<std::uint32_t> track =
+        v.play_animation(*anim, {{"spin", 3u}, {"arm", *item, 2u}, {"lid", 5u, std::nullopt}});
+    CHECK(track && *track == 7, "the track: %s", track ? std::to_string(*track).c_str() : refused(track).c_str());
+    CHECK((animspy::bindings == std::vector<std::string>{"spin 3 4294967295", "arm " + id + " 2", "lid 5 4294967295"}) &&
+              animspy::count == 3 && !animspy::null_array,
+          "the bindings: %s | %s | %s", animspy::bindings.size() > 0 ? animspy::bindings[0].c_str() : "",
+          animspy::bindings.size() > 1 ? animspy::bindings[1].c_str() : "",
+          animspy::bindings.size() > 2 ? animspy::bindings[2].c_str() : "");
+    CHECK(animspy::animation == anim->handle() && animspy::animation != nullptr, "the animation's own handle");
+    cadaclysm::Result<std::uint32_t> none = v.play_animation(*anim, {});
+    CHECK(none && animspy::null_array && animspy::count == 0, "no bindings: a NULL array, count 0");
+    const int plays = animspy::plays;
+    const std::string nul = refused(v.play_animation(*anim, {{"spin", 3u}, {std::string("a\0b", 3), 4u}}));
+    CHECK(nul == "binding 1: the target holds a NUL" && animspy::plays == plays, "a NUL in a target: %s", nul.c_str());
+    anim->close();
+    CHECK(v.play_animation(*anim, {{"spin", 3u}}) && animspy::animation == nullptr,
+          "a closed animation reaches the library as NULL");
+
+    animspy::calls.clear();
+    CHECK(v.remove_track(7), "remove_track");
+    CHECK(item->set_visible(false) && item->set_visible(true), "set_visible");
+    CHECK(item->set_node_ghosts(std::vector<std::uint32_t>{0, 2}), "set_node_ghosts");
+    CHECK(item->set_node_ghosts(std::nullopt), "set_node_ghosts(nullopt)");
+    CHECK(item->set_node_ghosts(std::vector<std::uint32_t>{}), "set_node_ghosts({})");
+    const std::string want = "remove 7;visible " + id + " 0;visible " + id + " 1;ghosts " + id + " 0 2 (2);ghosts " + id +
+                             " NULL (0);ghosts " + id + " (0);";
+    CHECK(animspy::calls == want, "the library saw %s", animspy::calls.c_str());
+    t = saved;
+    std::printf("view: animation calls checked (rigged)\n");
+}
+
+// ---- view ABI 1.28's drafting styles on the wgpu table rigged: the numbers the library gets ----
+
+namespace draftspy {
+std::string calls;
+std::string cs(const float* c) {
+    if (!c) return "NULL";
+    char text[64];
+    std::snprintf(text, sizeof text, "%g,%g,%g", c[0], c[1], c[2]);
+    return text;
+}
+bool set_line_style(CadaclysmView*, std::uint32_t item, float dash, float gap) {
+    calls += "line " + std::to_string(item) + " " + std::to_string(static_cast<int>(dash)) + " " +
+             std::to_string(static_cast<int>(gap)) + ";";
+    return true;
+}
+bool set_point_style(CadaclysmView*, std::uint32_t item, std::uint32_t shape, bool hollow) {
+    calls += "shape " + std::to_string(item) + " " + std::to_string(shape) + (hollow ? " hollow;" : " filled;");
+    return true;
+}
+bool set_point_states(CadaclysmView*, std::uint32_t item, const std::uint8_t* states, std::size_t n) {
+    calls += "states " + std::to_string(item) + (states ? "" : " NULL");
+    for (std::size_t i = 0; states && i < n; ++i) calls += " " + std::to_string(static_cast<unsigned>(states[i]));
+    calls += " (" + std::to_string(n) + ");";
+    return true;
+}
+void set_point_state_colours(CadaclysmView*, const float* h, const float* s, const float* f) {
+    calls += "colours " + cs(h) + " " + cs(s) + " " + cs(f) + ";";
+}
+bool set_viewport_label(CadaclysmView*, std::uint32_t viewport, const char* text, const float* c) {
+    calls += "label " + std::to_string(viewport) + " " + (text ? std::string("'") + text + "'" : "NULL") + " " + cs(c) + ";";
+    return true;
+}
+bool set_viewport_border(CadaclysmView*, std::uint32_t viewport, const float* c) {
+    calls += "border " + std::to_string(viewport) + " " + cs(c) + ";";
+    return true;
+}
+bool set_on_top(CadaclysmView*, std::uint32_t item, bool on) {
+    calls += "top " + std::to_string(item) + (on ? " on;" : " off;");
+    return true;
+}
+}  // namespace draftspy
+
+// The seven drafting calls' wire: the shape and state numbers written out here (the header's
+// 0..3), the dash and gap as given, NULL for each colour not given, NULL for a label cleared,
+// an empty states list as NULL with count 0; a NUL in a label, an unknown shape or state
+// refused before the library.
+static void drafting_rigged_case(const cadaclysm::ViewLibrary& wgpu) {
+    cadaclysm::Result<View> made = View::offscreen(32, 24);
+    CHECK(made, "offscreen: %s", refused(made).c_str());
+    if (!made) return;
+    View v = std::move(*made);
+    cadaclysm::Result<cadaclysm::Item> item = v.show_mesh({-1, -1, 0, 1, -1, 0, 1, 1, 0}, {0, 1, 2}, {}, {}, "red");
+    CHECK(item, "show_mesh: %s", refused(item).c_str());
+    if (!item) return;
+    CvlTable& t = const_cast<CvlTable&>(cadaclysm::detail::ViewAccess::table(wgpu));
+    const CvlTable saved = t;
+    t.set_line_style = &draftspy::set_line_style;
+    t.set_point_style = &draftspy::set_point_style;
+    t.set_point_states = &draftspy::set_point_states;
+    t.set_point_state_colours = &draftspy::set_point_state_colours;
+    t.set_viewport_label = &draftspy::set_viewport_label;
+    t.set_viewport_border = &draftspy::set_viewport_border;
+    t.set_on_top = &draftspy::set_on_top;
+    const std::string id = std::to_string(item->id());
+    draftspy::calls.clear();
+    CHECK(item->set_line_style(6.0f, 4.0f), "set_line_style");
+    CHECK(item->set_point_style("disc", false) && item->set_point_style("ring", true) &&
+              item->set_point_style("square", false) && item->set_point_style("diamond", true),
+          "set_point_style");
+    CHECK(item->set_point_states({"normal", "hover", "selected", "first"}), "set_point_states");
+    CHECK(item->set_point_states({}), "set_point_states({})");
+    CHECK(item->set_on_top(true) && item->set_on_top(false), "set_on_top");
+    // The defaults every defaulting wrapper has: solid, a filled disc, on top.
+    CHECK(item->set_line_style() && item->set_point_style() && item->set_on_top(), "the defaults");
+    const std::array<float, 3> red{1.0f, 0.0f, 0.0f}, blue{0.0f, 0.0f, 1.0f};
+    CHECK(v.set_point_state_colours(red, std::nullopt, blue), "set_point_state_colours");
+    // Text colours, read by the library's own parser, as every other colour setter takes them.
+    CHECK(v.set_point_state_colours("red", "#0f0", std::nullopt), "set_point_state_colours text");
+    CHECK(v.set_point_state_colours(), "set_point_state_colours defaults");
+    CHECK(v.set_viewport_label(2, std::string("FRONT"), blue) && v.set_viewport_label(2, std::nullopt, std::nullopt),
+          "set_viewport_label");
+    CHECK(v.set_viewport_label(2, std::string("TOP"), "blue"), "set_viewport_label text");
+    CHECK(v.set_viewport_border(1, red) && v.set_viewport_border(1, std::nullopt), "set_viewport_border");
+    CHECK(v.set_viewport_border(1, "red"), "set_viewport_border text");
+    const std::string want = "line " + id + " 6 4;shape " + id + " 0 filled;shape " + id + " 1 hollow;shape " + id +
+                             " 2 filled;shape " + id + " 3 hollow;states " + id + " 0 1 2 3 (4);states " + id +
+                             " NULL (0);top " + id + " on;top " + id + " off;line " + id + " 0 0;shape " + id +
+                             " 0 filled;top " + id + " on;colours 1,0,0 NULL 0,0,1;colours 1,0,0 0,1,0 NULL;"
+                             "colours NULL NULL NULL;label 2 'FRONT' 0,0,1;label 2 NULL NULL;label 2 'TOP' 0,0,1;"
+                             "border 1 1,0,0;border 1 NULL;border 1 1,0,0;";
+    CHECK(draftspy::calls == want, "the library saw %s", draftspy::calls.c_str());
+    // Refused before the library.
+    draftspy::calls.clear();
+    const std::string nul = refused(v.set_viewport_label(0, std::string("A\0B", 3), std::nullopt));
+    CHECK(nul.find("NUL") != std::string::npos && draftspy::calls.empty(), "a NUL in a label: %s", nul.c_str());
+    CHECK(!item->set_point_style("star", false) && !item->set_point_states({"normal", "bogus"}) && draftspy::calls.empty(),
+          "an unknown shape or state reached the library");
+    CHECK(!v.set_viewport_border(1, "notacolour") && !v.set_point_state_colours(std::nullopt, "notacolour") &&
+              draftspy::calls.empty(),
+          "colour text the library does not know reached the call");
+    t = saved;
+    std::printf("view: drafting calls checked (rigged)\n");
+}
+
+// A drawn frame (the timeline ticked by the draw), read back: Python's _frame.
+static ViewImage drawn_frame(View& v) {
+    CHECK(v.draw(), "draw");
+    return frame_of(v);
+}
+
+// A 4 x 2 x 1 kernel box shown and framed from the top, as the C ABI's turntable test does.
+static cadaclysm::Result<cadaclysm::Item> shown_box(View& v, const bs::Solid& box) {
+    cadaclysm::Result<cadaclysm::Item> item = v.show(box);
+    CHECK(item, "show the box: %s", refused(item).c_str());
+    if (!item) return item;
+    CHECK(v.standard("top") && item->frame(), "the box from the top");
+    return item;
+}
+
+// The timeline events queued, read until the queue is empty.
+static int timeline_events(View& v) {
+    int n = 0;
+    for (int guard = 0; guard < 64; ++guard) {
+        cadaclysm::Result<std::optional<cadaclysm::InputEvent>> next = v.next_event();
+        CHECK(next, "next_event: %s", refused(next).c_str());
+        if (!next || !*next) break;
+        if ((*next)->kind == cadaclysm::InputKind::timeline) ++n;
+    }
+    return n;
+}
+
+// A rotate track of `degrees` about z, over a second, on target `target`.
+static bs::Animation turntable(const char* target = "spin", double degrees = 30.0) {
+    cadaclysm::Result<bs::Animation> anim = bs::Animation::make();
+    CHECK(anim, "Animation::make: %s", refused(anim).c_str());
+    if (!anim) std::abort();
+    cadaclysm::Result<std::size_t> k = anim->rotate(target, {{0.0, 0.0}, {1.0, degrees}});
+    CHECK(k, "rotate: %s", refused(k).c_str());
+    return std::move(*anim);
+}
+
+// 1.27 on the real library, Python's animation tests: a turntable played, seeked (the box
+// drawn elsewhere) and removed (the rest pose, pixel for pixel; removed twice refused); the
+// binding refusals in the library's words; an item hidden and shown; node 0 of a solid ghosted
+// (the item x-ray, on triangles) and cleared; one timeline event after a seek and a draw under
+// CADACLYSM_VIEW_TEST_QUEUE_INPUT, none after a still draw.
+static void animation_case() {
+    cadaclysm::Result<bs::Solid> box = bs::Solid::cuboid(4.0, 2.0, 1.0);
+    CHECK(box, "cuboid: %s", refused(box).c_str());
+    if (!box) return;
+    {
+        cadaclysm::Result<View> made = View::offscreen(64, 48);
+        CHECK(made, "offscreen: %s", refused(made).c_str());
+        if (!made) return;
+        View v = std::move(*made);
+        cadaclysm::Result<cadaclysm::Item> item = shown_box(v, *box);
+        if (!item) return;
+        ViewImage rest = drawn_frame(v);
+        bs::Animation anim = turntable();
+        cadaclysm::Result<std::uint32_t> track = v.play_animation(anim, {{"spin", *item}});
+        CHECK(track && *track == 1, "the first track: %s", track ? std::to_string(*track).c_str() : refused(track).c_str());
+        anim.close();  // the view plays its own copy
+        CHECK(v.seek(1.0), "seek");
+        ViewImage turned = drawn_frame(v);
+        CHECK(changed(turned, rest) > 0, "turned 30 degrees, the box draws elsewhere");
+        CHECK(track && v.remove_track(*track), "remove_track");
+        CHECK(changed(drawn_frame(v), rest) == 0, "removed: the rest pose again, pixel for pixel");
+        const std::string twice = refused(v.remove_track(1));
+        CHECK(twice == "timeline_remove: no track 1", "removed twice: %s", twice.c_str());
+
+        // The refusals, in the library's words.
+        bs::Animation spin = turntable();
+        const std::string id = std::to_string(item->id());
+        std::string why = refused(v.play_animation(spin, {{"spin", 9999u}}));
+        CHECK(why == "play_animation: no item 9999", "an unknown item: %s", why.c_str());
+        why = refused(v.play_animation(spin, {{"spin", *item, 1u}}));
+        CHECK(why == "play_animation: item " + id + " has no node 1 (it has 1)", "a solid is one node: %s", why.c_str());
+        why = refused(v.play_animation(spin, {{"spin", *item}, {"spin", *item}}));
+        CHECK(why == "play_animation: target \"spin\" is bound twice to item " + id, "bound twice: %s", why.c_str());
+        spin.close();
+        why = refused(v.play_animation(spin, {{"spin", *item}}));
+        CHECK(why == "play_animation: the animation is null", "a closed animation: %s", why.c_str());
+
+        // set_visible: hidden, the box is gone; shown again, the rest frame.
+        CHECK(item->set_visible(false), "hide");
+        CHECK(changed(drawn_frame(v), rest) > 0, "hidden: the box is gone");
+        CHECK(item->set_visible(true), "show again");
+        CHECK(changed(drawn_frame(v), rest) == 0, "shown again");
+        cadaclysm::Result<cadaclysm::Item> gone = v.show(*box);
+        if (gone) {
+            const std::string gone_id = std::to_string(gone->id());
+            CHECK(gone->remove(), "remove");
+            why = refused(gone->set_visible(false));
+            CHECK(why == "set_item_visible: no item " + gone_id, "a removed item hidden: %s", why.c_str());
+            why = refused(gone->set_node_ghosts(std::nullopt));
+            CHECK(why == "set_node_ghosts: no item " + gone_id, "a removed item's ghosts: %s", why.c_str());
+        }
+    }
+    {
+        // Triangles: the exact surfaces draw an x-ray item as they draw it opaque, alone in the picture.
+        cadaclysm::Result<View> made = View::offscreen(64, 48);
+        CHECK(made, "offscreen: %s", refused(made).c_str());
+        if (!made) return;
+        View v = std::move(*made);
+        CHECK(v.set_surfaces(true), "triangles");
+        cadaclysm::Result<cadaclysm::Item> item = shown_box(v, *box);
+        if (!item) return;
+        ViewImage rest = drawn_frame(v);
+        CHECK(item->set_xray(true), "x-ray on");
+        ViewImage xray = drawn_frame(v);
+        CHECK(item->set_xray(false), "x-ray off");
+        CHECK(item->set_node_ghosts(std::vector<std::uint32_t>{0}), "ghost node 0");
+        ViewImage ghosted = drawn_frame(v);
+        CHECK(changed(ghosted, rest) > 0, "node 0 drawn x-ray");
+        CHECK(changed(ghosted, xray) == 0, "a solid's one node ghosted is the item x-ray");
+        CHECK(item->set_node_ghosts(std::nullopt), "clear the ghosts");
+        CHECK(changed(drawn_frame(v), rest) == 0, "cleared");
+        const std::string why = refused(item->set_node_ghosts(std::vector<std::uint32_t>{1}));
+        CHECK(why == "set_node_ghosts: item " + std::to_string(item->id()) + " has no node 1 (it has 1)", "node 1: %s",
+              why.c_str());
+    }
+    {
+        // CADACLYSM_VIEW_TEST_QUEUE_INPUT=1: an offscreen view queues as an own window does.
+        cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", "1");
+        cadaclysm::Result<View> made = View::offscreen(64, 48);
+        cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", nullptr);
+        CHECK(made, "offscreen with the testing hook: %s", refused(made).c_str());
+        if (!made) return;
+        View v = std::move(*made);
+        cadaclysm::Result<cadaclysm::Item> item = shown_box(v, *box);
+        if (!item) return;
+        bs::Animation anim = turntable();
+        CHECK(v.play_animation(anim, {{"spin", *item}}), "play");
+        anim.close();
+        CHECK(v.draw(), "draw");
+        timeline_events(v);
+        CHECK(v.seek(0.5) && v.draw(), "seek and draw");
+        const int after_seek = timeline_events(v);
+        CHECK(after_seek == 1, "a seek and a draw: %d timeline events, not 1", after_seek);
+        CHECK(v.draw(), "a still draw");
+        const int still = timeline_events(v);
+        CHECK(still == 0, "the clock still: %d timeline events", still);
+    }
+    std::printf("view: animations checked\n");
+}
 
 // 1.25's stats on wgpu offscreen: an offscreen view's frames are its images, each counted once
 // with its CPU time, triangles and draw calls; a draw that renders nothing counts none.
@@ -1722,7 +2514,7 @@ static void overlay_case() {
     CHECK(made, "a view for overlays: %s", refused(made).c_str());
     if (!made) return;
     View& ov = *made;
-    CHECK(ov.background("black"), "background");
+    CHECK(ov.set_background("black"), "background");
     auto cube = bs::Solid::cuboid(80, 80, 20);
     CHECK(cube, "cuboid");
     if (!cube) return;
@@ -1737,7 +2529,7 @@ static void overlay_case() {
         std::array<std::uint8_t, 4> p = at(img, x, y);
         return std::to_string(p[0]) + "," + std::to_string(p[1]) + "," + std::to_string(p[2]);
     };
-    // A rounded panel with a round hole, red by its own colour, at the window's centre.
+    // A rounded panel with a round hole, filled red (an outline by default), at the window's centre.
     cadaclysm::Result<bs::Profile> plate = bs::Profile::rect(60, 40);
     cadaclysm::Result<bs::Profile> hole = bs::Profile::circle(8);
     CHECK(plate && hole, "profiles");
@@ -1751,7 +2543,9 @@ static void overlay_case() {
     cadaclysm::Result<bs::Profile> panel_shape = holed->coloured("red");
     CHECK(panel_shape, "the panel: %s", refused(panel_shape).c_str());
     if (!panel_shape) return;
-    cadaclysm::Result<cadaclysm::Overlay> panel = ov.show_overlay(*panel_shape, cadaclysm::Anchor::centre, 0, 0);
+    cadaclysm::OverlayStyle red_fill;
+    red_fill.fill = cadaclysm::Colour("red");
+    cadaclysm::Result<cadaclysm::Overlay> panel = ov.show_overlay(*panel_shape, cadaclysm::Anchor::centre, 0, 0, red_fill);
     CHECK(panel, "show_overlay: %s", refused(panel).c_str());
     if (!panel) return;
     ViewImage img = frame_of(ov);
@@ -1847,6 +2641,93 @@ static void overlay_case() {
     std::printf("view: overlays checked\n");
 }
 
+// A profile is a sketch: with no style it is stroked -- in its own colour, else white -- and not
+// filled; a fill draws only where given; fill only is a fill and a stroke of "none"; neither is
+// refused.
+static void overlay_outline_case() {
+    auto made = View::offscreen(120, 80);
+    CHECK(made, "a view for outlines: %s", refused(made).c_str());
+    if (!made) return;
+    View& ol = *made;
+    CHECK(ol.set_background("black"), "background");
+    cadaclysm::Result<bs::Profile> square = bs::Profile::rect(40, 40);  // x 40..80, y 20..60 at the window's centre
+    CHECK(square, "square");
+    if (!square) return;
+    auto px = [](const ViewImage& img, std::uint32_t x) {
+        std::array<std::uint8_t, 4> p = at(img, x, 40);
+        return std::array<int, 3>{p[0], p[1], p[2]};
+    };
+    auto text = [&](const ViewImage& img, std::uint32_t x) {
+        std::array<int, 3> p = px(img, x);
+        return std::to_string(p[0]) + "," + std::to_string(p[1]) + "," + std::to_string(p[2]);
+    };
+    // Any pixel of row 40 from x0 to x1 passing ok: a 1 px stroke on the right edge (x 80) may fall across two columns.
+    auto edge = [&](const ViewImage& img, std::uint32_t x0, std::uint32_t x1, bool (*ok)(std::array<int, 3>)) {
+        for (std::uint32_t x = x0; x <= x1; ++x)
+            if (ok(px(img, x))) return true;
+        return false;
+    };
+    bool (*white)(std::array<int, 3>) = [](std::array<int, 3> p) { return p[0] > 100 && p[1] > 100 && p[2] > 100; };
+    bool (*red)(std::array<int, 3>) = [](std::array<int, 3> p) { return p[0] > 100 && p[1] < 60 && p[2] < 60; };
+    bool (*lit)(std::array<int, 3>) = [](std::array<int, 3> p) { return p[0] > 60 || p[2] > 60; };
+    auto dark = [&](const ViewImage& img, std::uint32_t x) {
+        std::array<int, 3> p = px(img, x);
+        return p[0] < 40 && p[1] < 40 && p[2] < 40;
+    };
+    // (a) No style: a white edge, an unfilled inside.
+    cadaclysm::Result<cadaclysm::Overlay> o = ol.show_overlay(*square, cadaclysm::Anchor::centre, 0, 0);
+    CHECK(o, "no style: %s", refused(o).c_str());
+    if (!o) return;
+    ViewImage img = frame_of(ol);
+    CHECK(edge(img, 78, 82, white), "no style: the edge is stroked white: %s / %s", text(img, 79).c_str(), text(img, 80).c_str());
+    CHECK(dark(img, 60), "no style: the inside is not filled: %s", text(img, 60).c_str());
+    CHECK(o->remove(), "remove");
+    // (b) A coloured profile: stroked in its colour, still not filled.
+    cadaclysm::Result<bs::Profile> red_square = square->coloured("red");
+    CHECK(red_square, "coloured");
+    if (!red_square) return;
+    o = ol.show_overlay(*red_square, cadaclysm::Anchor::centre, 0, 0);
+    CHECK(o, "coloured: %s", refused(o).c_str());
+    if (!o) return;
+    img = frame_of(ol);
+    CHECK(edge(img, 78, 82, red) && !edge(img, 78, 82, white), "a coloured profile strokes in its colour: %s / %s", text(img, 79).c_str(),
+          text(img, 80).c_str());
+    CHECK(dark(img, 60), "a coloured profile is not filled: %s", text(img, 60).c_str());
+    CHECK(o->remove(), "remove");
+    // (c) Fill only: a fill and a stroke of "none".
+    cadaclysm::OverlayStyle fill_only;
+    fill_only.fill = cadaclysm::Colour("lime");
+    fill_only.stroke = cadaclysm::Colour("none");
+    o = ol.show_overlay(*square, cadaclysm::Anchor::centre, 0, 0, fill_only);
+    CHECK(o, "fill only: %s", refused(o).c_str());
+    if (!o) return;
+    img = frame_of(ol);
+    std::array<int, 3> inside = px(img, 60);
+    CHECK(inside[1] > 200 && inside[0] < 60 && inside[2] < 60, "fill only: the inside is lime: %s", text(img, 60).c_str());
+    CHECK(!edge(img, 76, 84, lit), "fill only: no stroke on the edge");
+    CHECK(o->remove(), "remove");
+    // Raw Beziers have no colour of their own: white.
+    cadaclysm::Result<std::vector<double>> flat = square->beziers();
+    CHECK(flat, "beziers");
+    if (!flat) return;
+    std::vector<float> curves;
+    curves.reserve(flat->size());
+    for (double d : *flat) curves.push_back(static_cast<float>(d));
+    o = ol.show_overlay(curves, cadaclysm::Anchor::centre, 0, 0);
+    CHECK(o, "raw Beziers: %s", refused(o).c_str());
+    if (!o) return;
+    img = frame_of(ol);
+    CHECK(edge(img, 78, 82, white) && dark(img, 60), "raw Beziers: stroked white, not filled");
+    CHECK(o->remove(), "remove");
+    // (d) Neither a fill nor a stroke: refused.
+    cadaclysm::OverlayStyle neither;
+    neither.fill = cadaclysm::Colour("none");
+    neither.stroke = cadaclysm::Colour(" NONE ");
+    std::string why = refused(ol.show_overlay(*square, cadaclysm::Anchor::centre, 0, 0, neither));
+    CHECK(why == "show_overlay: neither a fill nor a stroke", "both none: %s", why.c_str());
+    std::printf("view: overlay outlines checked\n");
+}
+
 int main(int argc, char** argv) {
     const std::string scratch = argc > 1 ? argv[1] : ".";
     const std::string mechanism = argc > 2 ? argv[2] : "";  // samples/mechanism-solid.stp
@@ -1939,7 +2820,13 @@ int main(int argc, char** argv) {
     double_click_case();
     snap_case();
     overlay_case();
+    overlay_outline_case();
     stats_case();
+    input_event_fields_case();
+    events_case();
+    animation_rigged_case(**wgpu);
+    drafting_rigged_case(**wgpu);
+    animation_case();
     plate_case(mechanism, ".");
 
     // A solid by handle: its item keeps it alive after the Solid is gone.
@@ -1973,16 +2860,16 @@ int main(int argc, char** argv) {
     // 1.16's user layers: the sphere on layer 3, the layer off (the centre no longer the
     // sphere's) and on again (the sphere's again); layer 32 refused, for an item and for the view.
     if (item) {
-        CHECK(item->user_layer(3), "user_layer 3");
-        CHECK(view.user_layer(3, false), "user layer 3 off");
+        CHECK(item->set_user_layer(3), "user_layer 3");
+        CHECK(view.set_user_layer(3, false), "user layer 3 off");
         ViewImage hidden = frame_of(view);
         CHECK(!hidden.rgba.empty() && at(hidden, 160, 120) != at(drawn, 160, 120), "an item on a layer switched off drew");
-        CHECK(view.user_layer(3, true), "user layer 3 on");
+        CHECK(view.set_user_layer(3, true), "user layer 3 on");
         ViewImage shown = frame_of(view);
         CHECK(!shown.rgba.empty() && at(shown, 160, 120) == at(drawn, 160, 120), "an item on a layer switched on again did not draw");
-        CHECK(has(refused(item->user_layer(32)), "past 31"), "%s", refused(item->user_layer(32)).c_str());
-        CHECK(has(refused(view.user_layer(32, false)), "past 31"), "%s", refused(view.user_layer(32, false)).c_str());
-        CHECK(item->user_layer(0), "user_layer 0");
+        CHECK(has(refused(item->set_user_layer(32)), "past 31"), "%s", refused(item->set_user_layer(32)).c_str());
+        CHECK(has(refused(view.set_user_layer(32, false)), "past 31"), "%s", refused(view.set_user_layer(32, false)).c_str());
+        CHECK(item->set_user_layer(0), "user_layer 0");
     }
     std::string png = scratch + "/view_test.png";
     CHECK(view.save(png), "save");
@@ -1997,23 +2884,23 @@ int main(int argc, char** argv) {
 
     // Master's three: levels on and off, the wake answer; node transforms refused on a solid
     // (only a shown scene takes them), with the library's own reason.
-    CHECK(view.lod("smooth", 0), "lod smooth");
+    CHECK(view.set_lod("smooth", 0), "lod smooth");
     auto wake = view.wake_ms();
     CHECK(wake, "wake_ms: %s", refused(wake).c_str());
-    CHECK(view.lod(std::nullopt), "lod off");
-    CHECK(has(refused(view.lod("sharp")), "one of detailed, smooth"), "%s", refused(view.lod("sharp")).c_str());
+    CHECK(view.set_lod(std::nullopt), "lod off");
+    CHECK(has(refused(view.set_lod("sharp")), "one of detailed, smooth"), "%s", refused(view.set_lod("sharp")).c_str());
     // 1.9's lighting: the headlight by default, studio set and read back, another name refused
     // before C (the lighting unchanged), and the headlight again.
     auto lit = view.lighting();
     CHECK(lit && *lit == "headlight", "lighting at first: %s", lit ? lit->c_str() : refused(lit).c_str());
-    CHECK(view.lighting("studio"), "lighting studio");
+    CHECK(view.set_lighting("studio"), "lighting studio");
     lit = view.lighting();
     CHECK(lit && *lit == "studio", "lighting after studio: %s", lit ? lit->c_str() : refused(lit).c_str());
-    CHECK(refused(view.lighting("noon")) == "lighting 'noon': 'headlight' or 'studio'", "%s",
-          refused(view.lighting("noon")).c_str());
+    CHECK(refused(view.set_lighting("noon")) == "lighting 'noon': 'headlight' or 'studio'", "%s",
+          refused(view.set_lighting("noon")).c_str());
     lit = view.lighting();
     CHECK(lit && *lit == "studio", "a refused lighting changed it: %s", lit ? lit->c_str() : refused(lit).c_str());
-    CHECK(view.lighting("headlight"), "lighting headlight");
+    CHECK(view.set_lighting("headlight"), "lighting headlight");
     lit = view.lighting();
     CHECK(lit && *lit == "headlight", "lighting after headlight: %s", lit ? lit->c_str() : refused(lit).c_str());
     // 1.20's occluded style: the defaults first, a set one (with a colour) read back, a refused
@@ -2027,19 +2914,63 @@ int main(int argc, char** argv) {
         style.gap = 5.0f;
         style.dim = 0.25f;
         style.colour = std::array<float, 3>{0.5f, 0.25f, 0.75f};
-        CHECK(view.occluded_style(style), "occluded style set");
+        CHECK(view.set_occluded_style(style), "occluded style set");
         cadaclysm::Result<cadaclysm::OccludedStyle> back = view.occluded_style();
         CHECK(back && back->dash == 10.0f && back->gap == 5.0f && back->dim == 0.25f && back->colour.has_value() &&
                   (*back->colour)[0] == 0.5f && (*back->colour)[1] == 0.25f && (*back->colour)[2] == 0.75f,
               "occluded style read back: %s", back ? "other values" : refused(back).c_str());
         cadaclysm::OccludedStyle bad = style;
         bad.dash = -1.0f;
-        CHECK(!view.occluded_style(bad), "a negative dash accepted");
+        CHECK(!view.set_occluded_style(bad), "a negative dash accepted");
         back = view.occluded_style();
         CHECK(back && back->dash == 10.0f, "a refused style changed it");
-        CHECK(view.occluded_style(cadaclysm::OccludedStyle()), "occluded style defaults");
+        CHECK(view.set_occluded_style(cadaclysm::OccludedStyle()), "occluded style defaults");
         back = view.occluded_style();
         CHECK(back && back->dash == 6.0f && !back->colour.has_value(), "the defaults were not restored");
+    }
+    // 1.28's drafting styles.
+    {
+        static_assert(sizeof(CadaclysmViewPick) == 44, "the 1.28 pick");
+        static_assert(sizeof(CadaclysmViewEventPick) == 40, "the event's pick, frozen at 1.26");
+        std::vector<float> seg{-1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+        cadaclysm::Result<cadaclysm::Item> line = view.show_lines(seg);
+        CHECK(line, "show_lines");
+        if (line) {
+            CHECK(line->set_line_style(6.0f, 4.0f), "a dash");
+            CHECK(line->set_line_style(0.0f, 0.0f), "solid again");
+            CHECK(!line->set_line_style(6.0f, 0.0f), "a dash with no gap accepted");
+            CHECK(line->set_on_top(true) && line->set_on_top(false), "on top and back");
+        }
+        std::vector<float> at{0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+        cadaclysm::Result<cadaclysm::Item> pts = view.show_points(at, std::nullopt, 9.0f);
+        CHECK(pts, "show_points");
+        if (pts) {
+            CHECK(pts->set_point_style("diamond", true), "a hollow diamond");
+            CHECK(!pts->set_point_style("star", false), "an unknown shape accepted");
+            std::vector<std::string> states{"first", "hover"};
+            CHECK(pts->set_point_states(states), "two states");
+            std::vector<std::string> short_states{"hover"};
+            CHECK(!pts->set_point_states(short_states), "a short states list accepted");
+        }
+        std::array<float, 3> red{1.0f, 0.0f, 0.0f};
+        CHECK(view.set_point_state_colours(red, std::nullopt, std::nullopt), "a hover colour");
+        CHECK(view.set_viewport_border(0, red), "a border");
+        CHECK(view.set_viewport_label(0, std::string("FRONT"), "red"), "a label in colour text");
+        CHECK(view.set_point_state_colours(std::nullopt, "#378add", "red"), "state colours as text");
+        bool picked = false;
+        const std::uint32_t probes[6][2] = {{8, 8}, {10, 10}, {12, 8}, {9, 12}, {14, 10}, {7, 6}};
+        for (const std::uint32_t* xy : probes) {
+            if (picked) break;
+            cadaclysm::Result<cadaclysm::ViewPick> p = view.pick(xy[0], xy[1]);
+            picked = p && p->viewport_label == 0 && p->item == 0;
+        }
+        CHECK(picked, "the label picks as viewport 0");
+        CHECK(view.set_viewport_label(0, std::nullopt, std::nullopt) && view.set_viewport_border(0, std::nullopt), "cleared");
+        CHECK(!view.set_viewport_border(3, red), "a viewport past the last accepted");
+        // The later frame comparisons see the scene as it was.
+        if (line) CHECK(line->remove(), "the line removed");
+        if (pts) CHECK(pts->remove(), "the points removed");
+        CHECK(view.set_point_state_colours(std::nullopt, std::nullopt, std::nullopt), "the state colours back");
     }
     // 1.23's line colours: a view-wide isocurve colour read back, an item's own edge and
     // curve colours set and cleared.
@@ -2059,7 +2990,7 @@ int main(int argc, char** argv) {
         }
     }
     if (item) {
-        auto posed = item->node_transforms(std::vector<std::array<double, 16>>{});
+        auto posed = item->set_node_transforms(std::vector<std::array<double, 16>>{});
         CHECK(!posed && !posed.error().message.empty(), "node transforms on a solid were accepted");
     }
 
@@ -2085,11 +3016,11 @@ int main(int argc, char** argv) {
                   "too large"),
               "an image size that wraps was not refused");
     if (item) {
-        CHECK(refused(item->face_colours({1, 2}, {std::array<float, 4>{1, 0, 0, 1}})) ==
+        CHECK(refused(item->set_face_colours({1, 2}, {std::array<float, 4>{1, 0, 0, 1}})) ==
                   "8 numbers (rgba, 4 a face), not 4",
-              "%s", refused(item->face_colours({1, 2}, {std::array<float, 4>{1, 0, 0, 1}})).c_str());
+              "%s", refused(item->set_face_colours({1, 2}, {std::array<float, 4>{1, 0, 0, 1}})).c_str());
         // An empty list clears: it reaches the library as an empty array, not "none".
-        CHECK(item->face_colours({}, {}), "face_colours([]) did not clear");
+        CHECK(item->set_face_colours({}, {}), "face_colours([]) did not clear");
     }
     // Empty lines and curves are accepted (a non-NULL empty array).
     auto no_lines = view.show_lines({});
@@ -2163,14 +3094,14 @@ int main(int argc, char** argv) {
                 auto pose = scene->pose_state(states[0]);
                 CHECK(pose, "pose_state: %s", refused(pose).c_str());
                 if (pose) {
-                    auto posed = shown->node_transforms(pose->transforms);
+                    auto posed = shown->set_node_transforms(pose->transforms);
                     CHECK(posed, "node_transforms: %s", refused(posed).c_str());
                     CHECK(changed(whole, frame_of(view)) > 0, "the pose moved nothing on screen");
                 }
-                CHECK(shown->node_transforms(std::nullopt), "the rest pose");
+                CHECK(shown->set_node_transforms(std::nullopt), "the rest pose");
                 std::size_t back = changed(whole, frame_of(view));
                 CHECK(back < 320 * 240 / 1000, "std::nullopt did not put the rest pose back: %zu pixels", back);
-                std::string none = refused(shown->node_transforms(std::vector<std::array<double, 16>>{}));
+                std::string none = refused(shown->set_node_transforms(std::vector<std::array<double, 16>>{}));
                 CHECK(has(none, "0 transforms were given"), "an empty transform list: %s", none.c_str());
             }
             if (shown) CHECK(shown->remove(), "remove the scene");
@@ -2222,10 +3153,10 @@ int main(int argc, char** argv) {
             }
             CHECK(whole_item && node_item, "show the scene and its node");
             CHECK(!scene_kept.expired(), "the item let go of the scene it shows");
-            if (node_item) CHECK(node_item->colour({1, 0, 0}), "the node item stopped drawing while its scene is kept");
+            if (node_item) CHECK(node_item->set_colour({1, 0, 0}), "the node item stopped drawing while its scene is kept");
             if (whole_item) CHECK(whole_item->remove(), "remove the scene item");
             CHECK(scene_kept.expired(), "a removed item still holds its scene");
-            if (node_item) CHECK(!node_item->colour({1, 0, 0}), "a node item of a dropped scene is still shown");
+            if (node_item) CHECK(!node_item->set_colour({1, 0, 0}), "a node item of a dropped scene is still shown");
             CHECK(view.draw(), "the view no longer draws after its scene was dropped");
         }
 
@@ -2286,8 +3217,8 @@ int main(int argc, char** argv) {
                 doc->close();
                 CHECK(doc->closed(), "the scene stayed open");
                 CHECK(view.draw(), "the view no longer draws after its scene closed");
-                if (all) CHECK(!all->colour({1, 0, 0}), "an item of a closed scene is still shown");
-                if (part) CHECK(!part->colour({1, 0, 0}), "a node item of a closed scene is still shown");
+                if (all) CHECK(!all->set_colour({1, 0, 0}), "an item of a closed scene is still shown");
+                if (part) CHECK(!part->set_colour({1, 0, 0}), "a node item of a closed scene is still shown");
             }
         }
 
@@ -2338,6 +3269,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    events_rigged_case(**wgpu);
     // Last: the rigged calls really run (the background turns black).
     rigged_half(view, **wgpu, mechanism);
 
@@ -2348,8 +3280,8 @@ int main(int argc, char** argv) {
     CHECK(refused(refused_lines) == "cadaclysm_view_show_lines: the view is closed", "%s",
           refused(refused_lines).c_str());
     if (item)
-        CHECK(refused(item->colour({1, 0, 0})) == "cadaclysm_view_set_colour: the view is closed", "%s",
-              refused(item->colour({1, 0, 0})).c_str());
+        CHECK(refused(item->set_colour({1, 0, 0})) == "cadaclysm_view_set_colour: the view is closed", "%s",
+              refused(item->set_colour({1, 0, 0})).c_str());
 
     // A moved-from View names no library and is closed.
     {

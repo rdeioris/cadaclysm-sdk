@@ -35,8 +35,10 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.WeakHashMap;
+import java.util.function.Predicate;
 import java.util.zip.CRC32;
 import java.util.zip.Deflater;
 
@@ -70,8 +72,14 @@ public final class View implements AutoCloseable {
      * 1.24: overlays -- {@code cadaclysm_view_show_overlay}, {@code _show_overlay_image}, {@code _move_overlay},
      * screen text and the pick's overlay flag.
      * 1.25: {@code cadaclysm_view_stats} (frames drawn, the last frame's CPU and GPU time, triangles, draw calls).
+     * 1.26: {@code cadaclysm_view_next_event} and {@code cadaclysm_view_close} -- the own window's input events
+     * ({@link #nextEvent()}, {@link #run(Predicate)}) and {@link #closeWindow()}.
+     * 1.27: animations on the timeline -- {@code cadaclysm_view_play_animation}, {@code _timeline_remove},
+     * {@code _set_item_visible}, {@code _set_node_ghosts} ({@link #playAnimation}, {@link #removeTrack},
+     * {@link Item#setVisible}, {@link Item#setNodeGhosts}) -- and the {@link TimelineEvent}.
+     * 1.28: the drafting styles and the pick's viewport label.
      */
-    static final int ABI_MINOR = 25;
+    static final int ABI_MINOR = 28;
     /** CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0). */
     static final int NAVIGATION_FLY = 1;
     static final int OPEN = 1;
@@ -149,6 +157,17 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("clicks"),
             ValueLayout.JAVA_INT.withName("has_point"),
             MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("point"),
+            ValueLayout.JAVA_INT.withName("overlay"),
+            ValueLayout.JAVA_INT.withName("viewport_label"));
+    /** CadaclysmViewEventPick: the pick inside an input event, CadaclysmViewPick as 1.26 laid the event out (40 bytes). */
+    static final MemoryLayout EVENT_PICK = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("item"),
+            ValueLayout.JAVA_INT.withName("node"),
+            ValueLayout.JAVA_INT.withName("face"),
+            ValueLayout.JAVA_INT.withName("clicks"),
+            ValueLayout.JAVA_INT.withName("has_point"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("point"),
             ValueLayout.JAVA_INT.withName("overlay"));
     static final MemoryLayout LOD = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
@@ -180,7 +199,7 @@ public final class View implements AutoCloseable {
     /** CADACLYSM_VIEW_LAYER_EDGES, _CURVES and _ISOCURVES: the layers the line colours take. */
     static final int LAYER_EDGES = 1, LAYER_CURVES = 2, LAYER_ISOCURVES = 3;
 
-    /** The colour every edge, curve or isocurve draws in ({@link View#edgeColour()} and its siblings): {@code colour} (3 numbers in 0..1), or each part's own colour where {@code fromPart}. */
+    /** The colour every edge, curve or isocurve draws in ({@link View#setEdgeColour()} and its siblings): {@code colour} (3 numbers in 0..1), or each part's own colour where {@code fromPart}. */
     public record LineColour(float[] colour, boolean fromPart) {
     }
 
@@ -273,6 +292,41 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_LONG.withName("triangles"),
             ValueLayout.JAVA_INT.withName("draw_calls"),
             ValueLayout.JAVA_INT.withName("pad1"));
+    /** CadaclysmViewAnimationBinding, 1.27: the target's name, the item and the node (ALL_NODES: the item itself); 16 bytes on 64 bits. */
+    static final MemoryLayout ANIMATION_BINDING = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("target"),
+            ValueLayout.JAVA_INT.withName("item"),
+            ValueLayout.JAVA_INT.withName("node"));
+    /** CADACLYSM_VIEW_ALL_NODES (UINT32_MAX): a binding to the item itself. */
+    static final int ALL_NODES = -1;
+    /** CadaclysmViewInputEvent, 1.26: 272 bytes, padded explicitly, the pick, snap and camera nested whole. */
+    static final MemoryLayout INPUT_EVENT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("kind"),
+            ValueLayout.JAVA_DOUBLE.withName("time_ms"),
+            ValueLayout.JAVA_FLOAT.withName("x"),
+            ValueLayout.JAVA_FLOAT.withName("y"),
+            ValueLayout.JAVA_FLOAT.withName("wheel_y"),
+            ValueLayout.JAVA_INT.withName("button"),
+            ValueLayout.JAVA_INT.withName("modifiers"),
+            ValueLayout.JAVA_INT.withName("pointer"),
+            ValueLayout.JAVA_INT.withName("pointer_id"),
+            ValueLayout.JAVA_INT.withName("width"),
+            ValueLayout.JAVA_INT.withName("height"),
+            ValueLayout.JAVA_INT.withName("repeat"),
+            ValueLayout.JAVA_INT.withName("dropped"),
+            ValueLayout.JAVA_INT.withName("pad0"),
+            MemoryLayout.sequenceLayout(32, ValueLayout.JAVA_BYTE).withName("key"),
+            EVENT_PICK.withName("pick"),
+            SNAP.withName("snap"),
+            CAMERA.withName("camera"),
+            ValueLayout.JAVA_INT.withName("pick_viewport_label"));
+    /** The CADACLYSM_VIEW_INPUT_EVENT_* kinds (1.26; TIMELINE 1.27). */
+    static final int INPUT_EVENT_POINTER_DOWN = 1, INPUT_EVENT_POINTER_MOVE = 2, INPUT_EVENT_POINTER_UP = 3, INPUT_EVENT_WHEEL = 4,
+            INPUT_EVENT_KEY_DOWN = 5, INPUT_EVENT_KEY_UP = 6, INPUT_EVENT_RESIZE = 7, INPUT_EVENT_PICK = 8, INPUT_EVENT_SNAP = 9,
+            INPUT_EVENT_CLOSE = 10, INPUT_EVENT_TIMELINE = 11;
+    /** The CADACLYSM_VIEW_MOD_* bits (1.26). */
+    static final int MOD_SHIFT = 1, MOD_CTRL = 2, MOD_ALT = 4, MOD_META = 8;
     /** CADACLYSM_VIEW_TOOL_FLAT .. _BULLNOSE, in order. */
     static final List<String> TOOL_SHAPES = List.of("flat", "ball", "drill", "vbit", "bullnose");
     /** The machining's colour modes, in CADACLYSM_VIEW_MACHINING_COLOUR_* order. */
@@ -397,12 +451,13 @@ public final class View implements AutoCloseable {
                 dolly, input, showMesh, showLines, showPoints, showCurves, showImage, setColour, setXray, setOccluded, setFinish, setFaceColours,
                 setPlacement, showSolid, showSolidFaces, image, size, setLod, wakeMs, setNodeTransforms, parseColour, loadFont, showText,
                 setText, setDoubleClickFrames, focus, navigation, setLighting, lighting, setOccludedStyle, occludedStyle,
-                setLineColour, lineColour, setItemLineColour, showOverlay, showOverlayImage, moveOverlay, stats,
+                setLineColour, lineColour, setItemLineColour, showOverlay, showOverlayImage, moveOverlay, stats, nextEvent, closeWindow,
                 setSnap, requestSnapIn, snapResult, clearSnap, setWorkPlane, clearWorkPlane, viewportCamera,
                 setViewportCamera, setViewportRects, aim, setPivot, setTap, orbitIn, panIn, zoomIn, lookIn, dollyIn,
                 frameIn, standardIn, showMachining, machiningSeek, machiningColourBy, machiningOverlays, machiningInfo,
                 machiningHeights, timelinePlay, timelinePause, timelineSeek, timelineSetLoop, timelineTime,
-                timelineDuration, timelinePlaying, timelineStatus;
+                timelineDuration, timelinePlaying, timelineStatus, playAnimation, timelineRemove, setItemVisible, setNodeGhosts,
+                setLineStyle, setPointStyle, setPointStates, setPointStateColours, setViewportLabel, setViewportBorder, setOnTop;
 
         @SuppressWarnings("restricted") // libraryLookup: the view library chosen.
         Library(Path file) {
@@ -465,6 +520,13 @@ public final class View implements AutoCloseable {
             setColour = bind(linker, lib, "cadaclysm_view_set_colour", FunctionDescriptor.of(B, A, I, A));
             setXray = bind(linker, lib, "cadaclysm_view_set_xray", FunctionDescriptor.of(B, A, I, B));
             setOccluded = bind(linker, lib, "cadaclysm_view_set_occluded", FunctionDescriptor.of(B, A, I, I));
+            setLineStyle = bind(linker, lib, "cadaclysm_view_set_line_style", FunctionDescriptor.of(B, A, I, F, F));
+            setPointStyle = bind(linker, lib, "cadaclysm_view_set_point_style", FunctionDescriptor.of(B, A, I, I, B));
+            setPointStates = bind(linker, lib, "cadaclysm_view_set_point_states", FunctionDescriptor.of(B, A, I, A, L));
+            setPointStateColours = bind(linker, lib, "cadaclysm_view_set_point_state_colours", FunctionDescriptor.ofVoid(A, A, A, A));
+            setViewportLabel = bind(linker, lib, "cadaclysm_view_set_viewport_label", FunctionDescriptor.of(B, A, I, A, A));
+            setViewportBorder = bind(linker, lib, "cadaclysm_view_set_viewport_border", FunctionDescriptor.of(B, A, I, A));
+            setOnTop = bind(linker, lib, "cadaclysm_view_set_on_top", FunctionDescriptor.of(B, A, I, B));
             setFinish = bind(linker, lib, "cadaclysm_view_set_finish", FunctionDescriptor.of(B, A, I, I));
             setFaceColours = bind(linker, lib, "cadaclysm_view_set_face_colours", FunctionDescriptor.of(B, A, I, A, A, I));
             setPlacement = bind(linker, lib, "cadaclysm_view_set_placement", FunctionDescriptor.of(B, A, I, A));
@@ -492,6 +554,14 @@ public final class View implements AutoCloseable {
             moveOverlay = bind(linker, lib, "cadaclysm_view_move_overlay", FunctionDescriptor.of(B, A, I, I, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT));
             // 1.25: frame statistics.
             stats = bind(linker, lib, "cadaclysm_view_stats", FunctionDescriptor.of(B, A, A));
+            // 1.26: the own window's input events, and closing it as its close button does.
+            nextEvent = bind(linker, lib, "cadaclysm_view_next_event", FunctionDescriptor.of(B, A, A));
+            closeWindow = bind(linker, lib, "cadaclysm_view_close", FunctionDescriptor.of(B, A));
+            // 1.27: animations on the timeline, an item's visibility and a node's ghost.
+            playAnimation = bind(linker, lib, "cadaclysm_view_play_animation", FunctionDescriptor.of(I, A, A, A, I));
+            timelineRemove = bind(linker, lib, "cadaclysm_view_timeline_remove", FunctionDescriptor.of(B, A, I));
+            setItemVisible = bind(linker, lib, "cadaclysm_view_set_item_visible", FunctionDescriptor.of(B, A, I, B));
+            setNodeGhosts = bind(linker, lib, "cadaclysm_view_set_node_ghosts", FunctionDescriptor.of(B, A, I, A, I));
             setSnap = bind(linker, lib, "cadaclysm_view_set_snap", FunctionDescriptor.of(B, A, A));
             requestSnapIn = bind(linker, lib, "cadaclysm_view_request_snap_in", FunctionDescriptor.ofVoid(A, I, I, I));
             snapResult = bind(linker, lib, "cadaclysm_view_snap_result", FunctionDescriptor.of(B, A, A));
@@ -806,6 +876,89 @@ public final class View implements AutoCloseable {
     public record Stats(long framesDrawn, float lastFrameMs, float lastGpuMs, long triangles, int drawCalls) {
     }
 
+    /**
+     * One input event a view's own window handled (view ABI 1.26, {@link #nextEvent()} and {@link #run(Predicate)}):
+     * the window still orbits, zooms and closes by itself -- events report, they do not intercept. Match on the
+     * record: {@link PointerEvent}, {@link WheelEvent}, {@link KeyEvent}, {@link ResizeEvent}, {@link PickEvent},
+     * {@link SnapEvent}, {@link CloseEvent}, {@link TimelineEvent}. {@code timeMs} is the library's own clock (only differences mean
+     * anything); {@code dropped}, how many events a full queue (1024) dropped just before this one, the oldest
+     * pointer moves first.
+     */
+    public sealed interface InputEvent permits PointerEvent, WheelEvent, KeyEvent, ResizeEvent, PickEvent, SnapEvent, CloseEvent, TimelineEvent {
+        double timeMs();
+
+        int dropped();
+    }
+
+    /**
+     * A button went down, the pointer moved or a button went up: {@code type} "down", "move" or "up"; x, y in
+     * physical pixels; {@code button} 0 left, 1 middle, 2 right (0 for a move); the modifiers held;
+     * {@code pointer} "mouse", "touch" or "pen", and the touch's {@code pointerId}.
+     */
+    public record PointerEvent(String type, float x, float y, int button, boolean shift, boolean ctrl, boolean alt, boolean meta,
+                               String pointer, int pointerId, double timeMs, int dropped) implements InputEvent {
+    }
+
+    /** The wheel turned at x, y: {@code wheelY} a DOM deltaY, negative forward (about 100 a notch); the modifiers held. */
+    public record WheelEvent(float x, float y, float wheelY, boolean shift, boolean ctrl, boolean alt, boolean meta,
+                             double timeMs, int dropped) implements InputEvent {
+    }
+
+    /**
+     * A key went down ({@code down}) or up: {@code key} is its DOM code -- "KeyR", "Digit1", "Space", "Escape",
+     * "ArrowUp", "ShiftLeft", "F5" -- every key, the ones the view binds too; {@code repeat} for the system's auto-repeat.
+     */
+    public record KeyEvent(String key, boolean down, boolean shift, boolean ctrl, boolean alt, boolean meta, boolean repeat,
+                           double timeMs, int dropped) implements InputEvent {
+    }
+
+    /** The window's drawing area is now width x height physical pixels. */
+    public record ResizeEvent(int width, int height, double timeMs, int dropped) implements InputEvent {
+    }
+
+    /** A click's pick has landed: what it hit, or null for nothing. {@link View#lastPick()} gets the same answer. */
+    public record PickEvent(Pick pick, double timeMs, int dropped) implements InputEvent {
+    }
+
+    /**
+     * With snapping on, a hover's or click's snap has landed ({@code clicks} 0 for a hover): the snap, or null for
+     * none. {@link View#lastSnap()} gets the same answer.
+     */
+    public record SnapEvent(Snap snap, double timeMs, int dropped) implements InputEvent {
+    }
+
+    /**
+     * The window closed (Escape, its close button, {@link View#closeWindow()}): the last event, with the camera it
+     * closed on, as {@link View#run()} returns it (its pick null).
+     */
+    public record CloseEvent(Camera camera, double timeMs, int dropped) implements InputEvent {
+    }
+
+    /**
+     * The timeline's clock moved in a drawn frame (view ABI 1.27: playing, or a seek, play or pause since the last
+     * frame), at most one a frame. No fields beyond the stamp; {@link View#time()} reads where the clock is.
+     */
+    public record TimelineEvent(double timeMs, int dropped) implements InputEvent {
+    }
+
+    /**
+     * One binding of an animation's target ({@link View#playAnimation}): the target's name, the item and the node
+     * of the item it moves (null: the item itself, CADACLYSM_VIEW_ALL_NODES). A solid is one node.
+     */
+    public record AnimationBinding(String target, int item, Integer node) {
+        public AnimationBinding(String target, int item) {
+            this(target, item, null);
+        }
+
+        public AnimationBinding(String target, Item item) {
+            this(target, item.id(), null);
+        }
+
+        public AnimationBinding(String target, Item item, int node) {
+            this(target, item.id(), node);
+        }
+    }
+
     /** {@link Machining#info()}: the move the timeline is at of the job's moves, the height grid and the cycle time. */
     public record MachiningInfo(int moves, int move, int nx, int ny, float cell, float[] min, double cycleTime) {
     }
@@ -815,12 +968,18 @@ public final class View implements AutoCloseable {
      * {@code point} where the ray met the model (x, y, z, in the coordinates the items were shown
      * in), or null where the library read no depth (a machining stock, the terminal library);
      * {@code overlay} (1.24) true where the item is an overlay: it was over the pixel, so nothing of
-     * the scene beneath it was picked ({@code face} is a text overlay's line, else 0).
+     * the scene beneath it was picked ({@code face} is a text overlay's line, else 0);
+     * {@code viewportLabel} (1.28) the viewport whose label was under the pixel, else -1 (none).
      */
-    public record Pick(int item, int node, int face, int clicks, float[] point, boolean overlay) {
-        /** A pick of the scene: no overlay. */
+    public record Pick(int item, int node, int face, int clicks, float[] point, boolean overlay, int viewportLabel) {
+        /** A pick of the scene: no overlay, no viewport label. */
         public Pick(int item, int node, int face, int clicks, float[] point) {
-            this(item, node, face, clicks, point, false);
+            this(item, node, face, clicks, point, false, -1);
+        }
+
+        /** A pick with no viewport label. */
+        public Pick(int item, int node, int face, int clicks, float[] point, boolean overlay) {
+            this(item, node, face, clicks, point, overlay, -1);
         }
     }
 
@@ -849,17 +1008,18 @@ public final class View implements AutoCloseable {
 
     /**
      * How {@link View#showOverlay(Blacksmith.Profile, Anchor, float, float, OverlayStyle)} draws a shape.
-     * The fill: {@link #fillText} or {@link #fill} where set ("none" for no fill), else the profile's
-     * own colour ({@code Profile.coloured}), else white -- unless a stroke is set, when an uncoloured
-     * profile is not filled. The stroke only where {@link #strokeText} or {@link #stroke} is set: an
-     * open profile, never filled, draws only with one.
+     * A profile is a sketch, so it draws as its outline by default. The stroke: {@link #strokeText} or
+     * {@link #stroke} where set ("none" for no stroke), else the profile's own colour
+     * ({@code Profile.coloured}), else white, {@link #strokeWidth} pixels wide. The fill only where
+     * {@link #fillText} or {@link #fill} is set ("none" for no fill): a panel needs one. Fill only is a
+     * fill and {@code stroke("none")}; neither a fill nor a stroke is refused.
      */
     public static final class OverlayStyle {
         /** The fill as text ("#rgb", "#rrggbb", a CSS name, or "none"); it wins over {@link #fill}. */
         public String fillText;
         /** The fill as 3 or 4 numbers in 0..1 (alpha 1 where 3). */
         public float[] fill;
-        /** The stroke as text ("#rgb", "#rrggbb", a CSS name); it wins over {@link #stroke}. */
+        /** The stroke as text ("#rgb", "#rrggbb", a CSS name, or "none"); it wins over {@link #stroke}. */
         public String strokeText;
         /** The stroke as 3 or 4 numbers in 0..1 (alpha 1 where 3). */
         public float[] stroke;
@@ -878,16 +1038,25 @@ public final class View implements AutoCloseable {
 
     /** A CadaclysmViewPick as the answer: null for no item; the point only where has_point is set (Python's _pick_dict). */
     static Pick pickOf(MemorySegment raw) {
-        return raw.get(ValueLayout.JAVA_INT, off(PICK, "item")) == 0 ? null : answerOf(raw);
+        return pickOf(raw, raw.get(ValueLayout.JAVA_INT, off(PICK, "viewport_label")));
+    }
+
+    /** As {@link #pickOf(MemorySegment)} for a pick whose label lies elsewhere (the event's 40-byte pick). */
+    static Pick pickOf(MemorySegment raw, int viewportLabel) {
+        return raw.get(ValueLayout.JAVA_INT, off(PICK, "item")) == 0 && viewportLabel < 0 ? null : answerOf(raw, viewportLabel);
     }
 
     /** A CadaclysmViewPick as it was answered, item 0 (nothing hit) included. */
     static Pick answerOf(MemorySegment raw) {
+        return answerOf(raw, raw.get(ValueLayout.JAVA_INT, off(PICK, "viewport_label")));
+    }
+
+    static Pick answerOf(MemorySegment raw, int viewportLabel) {
         float[] point = raw.get(ValueLayout.JAVA_INT, off(PICK, "has_point")) != 0
                 ? raw.asSlice(off(PICK, "point"), 12).toArray(ValueLayout.JAVA_FLOAT) : null;
         return new Pick(raw.get(ValueLayout.JAVA_INT, off(PICK, "item")), raw.get(ValueLayout.JAVA_INT, off(PICK, "node")),
                 raw.get(ValueLayout.JAVA_INT, off(PICK, "face")), raw.get(ValueLayout.JAVA_INT, off(PICK, "clicks")), point,
-                raw.get(ValueLayout.JAVA_INT, off(PICK, "overlay")) != 0);
+                raw.get(ValueLayout.JAVA_INT, off(PICK, "overlay")) != 0, viewportLabel);
     }
 
     /**
@@ -925,7 +1094,7 @@ public final class View implements AutoCloseable {
 
     /**
      * Why the library at {@code path}, answering {@code version} from cadaclysm_view_abi_version,
-     * is refused -- null when this wrapper takes it (1.24 or a later 1.x).
+     * is refused -- null when this wrapper takes it (1.27 or a later 1.x).
      */
     static String abiRefusal(String path, int version) {
         int major = version >>> 16, minor = version & 0xFFFF;
@@ -1251,7 +1420,7 @@ public final class View implements AutoCloseable {
         for (Cad.Node at = node; at != null; at = at.parent()) chain.add(0, at);
         List<Cad.Node> level = node.scene().roots();
         for (Cad.Node on : chain) {
-            for (Cad.Node other : level) if (other.index() != on.index()) item.nodeVisible(other.index(), false);
+            for (Cad.Node other : level) if (other.index() != on.index()) item.setNodeVisible(other.index(), false);
             level = on.children();
         }
         return item;
@@ -1516,8 +1685,9 @@ public final class View implements AutoCloseable {
 
     /**
      * A 2D shape over the window: {@code shape} in pixels (one profile unit a pixel, y up), its origin
-     * hung {@code x}, {@code y} pixels inward from {@code anchor} -- a closed profile filled (holes cut,
-     * even-odd), stroked where the style says ({@link OverlayStyle}). Drawn after everything else, never
+     * hung {@code x}, {@code y} pixels inward from {@code anchor} -- stroked, in its own colour or white,
+     * and its closed loops filled (holes cut, even-odd) only where the style gives a fill
+     * ({@link OverlayStyle}). Drawn after everything else, never
      * moved by the camera, kept in place as the window resizes; a click on it picks it
      * ({@link Pick#overlay()}) and nothing beneath.
      */
@@ -1533,7 +1703,7 @@ public final class View implements AutoCloseable {
 
     /**
      * Several profiles as one overlay -- a crosshair's two strokes, a frame's two loops: their fills
-     * together by the even-odd rule. The fill falls back on the first coloured profile's colour.
+     * together by the even-odd rule. The stroke falls back on the first coloured profile's colour.
      */
     public Overlay showOverlay(List<Blacksmith.Profile> shapes, Anchor anchor, float x, float y, OverlayStyle style) {
         if (shapes == null) throw new ViewException("showOverlay: shapes, not null");
@@ -1577,14 +1747,20 @@ public final class View implements AutoCloseable {
         }
         Anchor a = anchorOf(anchor, "showOverlay");
         OverlayStyle s = style == null ? new OverlayStyle() : style;
-        float[] stroke = s.strokeText != null ? rgba(lib, s.strokeText) : rgba(s.stroke, "showOverlay stroke");
+        float[] stroke;
+        if (s.strokeText != null) {
+            stroke = s.strokeText.trim().equalsIgnoreCase("none") ? null : rgba(lib, s.strokeText);
+        } else {
+            stroke = rgba(s.stroke, "showOverlay stroke");
+            if (stroke == null) stroke = own != null ? own : new float[]{1, 1, 1, 1};
+        }
         float[] fill;
         if (s.fillText != null) {
             fill = s.fillText.trim().equalsIgnoreCase("none") ? null : rgba(lib, s.fillText);
         } else {
             fill = rgba(s.fill, "showOverlay fill");
-            if (fill == null) fill = own != null ? own : stroke == null ? new float[]{1, 1, 1, 1} : null;
         }
+        if (fill == null && stroke == null) throw new ViewException("showOverlay: neither a fill nor a stroke");
         MemorySegment p = live(c("show_overlay"));
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment o = arena.allocate(OVERLAY);
@@ -1769,7 +1945,7 @@ public final class View implements AutoCloseable {
         ok(call(() -> (boolean) lib.frame.invoke(p, 0)), "frame");
     }
 
-    public void orthographic(boolean on) {
+    public void setOrthographic(boolean on) {
         voidCall("set_orthographic", lib.setOrthographic, on);
     }
 
@@ -1808,7 +1984,7 @@ public final class View implements AutoCloseable {
         return View.<Integer>call(() -> (int) lib.navigation.invoke(p)) == NAVIGATION_FLY ? "fly" : "orbit";
     }
 
-    public void viewports(List<Viewport> list) {
+    public void setViewports(List<Viewport> list) {
         List<Integer> grids = new ArrayList<>();
         for (Viewport v : list) {
             exact(v.rect(), 4, "viewport rect");
@@ -1836,26 +2012,26 @@ public final class View implements AutoCloseable {
     }
 
     /** surfaces, edges, curves, isocurves, grid or text. */
-    public void layer(String name, boolean on) {
+    public void setLayer(String name, boolean on) {
         int which = named(LAYERS, name, "layer");
         MemorySegment p = live(c("set_layer"));
         ok(call(() -> (boolean) lib.setLayer.invoke(p, which, on)), "layer");
     }
 
     /** User layer {@code layer}, 0..31, on or off in every viewport (all start on); see {@link Item#userLayer}. A layer past 31 is refused. */
-    public void userLayer(int layer, boolean on) {
+    public void setUserLayer(int layer, boolean on) {
         MemorySegment p = live(c("set_user_layer"));
         ok(call(() -> (boolean) lib.setUserLayer.invoke(p, layer, on)), "userLayer");
     }
 
     /** The clear colour as text: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour name. */
-    public void background(String rgb) {
+    public void setBackground(String rgb) {
         if (rgb == null) throw new ViewException("background: 3 numbers, not none");
-        background(lib.colour(rgb));
+        setBackground(lib.colour(rgb));
     }
 
     /** Three numbers, the clear colour. */
-    public void background(float[] rgb) {
+    public void setBackground(float[] rgb) {
         if (rgb == null) throw new ViewException("background: 3 numbers, not none");
         exact(rgb, 3, "background");
         MemorySegment p = live(c("set_background"));
@@ -1872,7 +2048,7 @@ public final class View implements AutoCloseable {
         return call(() -> (int) lib.surfaces.invoke(p)) == 1 ? "triangles" : "exact";
     }
 
-    public void surfaces(String name) {
+    public void setSurfaces(String name) {
         int which = named(SURFACES, name, "surfaces");
         MemorySegment p = live(c("set_surfaces"));
         ok(call(() -> (boolean) lib.setSurfaces.invoke(p, which)), "surfaces");
@@ -1888,7 +2064,7 @@ public final class View implements AutoCloseable {
      * "headlight" -- whatever faces the camera is bright -- or "studio", a key light fixed above the
      * scene with an ambient and a camera fill. Another name is refused before the library is called.
      */
-    public void lighting(String name) {
+    public void setLighting(String name) {
         int which = named(LIGHTING, name, "lighting");
         MemorySegment p = live(c("set_lighting"));
         ok(call(() -> (boolean) lib.setLighting.invoke(p, which)), "lighting");
@@ -1951,7 +2127,7 @@ public final class View implements AutoCloseable {
     }
 
     /** The view-wide occluded style; "solid" and "off" items never use it. */
-    public void occludedStyle(OccludedStyle style) {
+    public void setOccludedStyle(OccludedStyle style) {
         if (style.colour() != null && style.colour().length != 3) throw new ViewException("occludedStyle: colour is 3 numbers in 0..1");
         MemorySegment p = live(c("set_occluded_style"));
         try (Arena arena = Arena.ofConfined()) {
@@ -1965,6 +2141,71 @@ public final class View implements AutoCloseable {
                 for (int i = 0; i < 3; i++) raw.set(ValueLayout.JAVA_FLOAT, off(OCCLUDED_STYLE, "colour") + 4L * i, style.colour()[i]);
             }
             ok(call(() -> (boolean) lib.setOccludedStyle.invoke(p, raw)), "occludedStyle");
+        }
+    }
+
+    /** {@link #setPointStateColours(float[], float[], float[])}: every state's default. */
+    public void setPointStateColours() { setPointStateColours((float[]) null, null, null); }
+
+    /**
+     * {@link #setPointStateColours(float[], float[], float[])} with colour text ({@code "#rgb"},
+     * {@code "#rrggbb"} or a CSS colour name); null restores that state's default.
+     */
+    public void setPointStateColours(String hover, String selected, String first) {
+        setPointStateColours(lib.colour(hover), lib.colour(selected), lib.colour(first));
+    }
+
+    /** The colours hover, selected and first points draw in, three numbers 0..1 each; null restores that state's default. */
+    public void setPointStateColours(float[] hover, float[] selected, float[] first) {
+        exact(hover, 3, "pointStateColours hover");
+        exact(selected, 3, "pointStateColours selected");
+        exact(first, 3, "pointStateColours first");
+        try (Arena arena = Arena.ofConfined()) {
+            voidCall("set_point_state_colours", lib.setPointStateColours, floats(arena, hover), floats(arena, selected), floats(arena, first));
+        }
+    }
+
+    /** {@link #setViewportLabel(int, String, float[])} in the default colour (white). */
+    public void setViewportLabel(int viewport, String text) { setViewportLabel(viewport, text, (float[]) null); }
+
+    /**
+     * {@link #setViewportLabel(int, String, float[])} with colour text ({@code "#rgb"},
+     * {@code "#rrggbb"} or a CSS colour name); null is white.
+     */
+    public void setViewportLabel(int viewport, String text, String colour) {
+        if (text != null && text.indexOf('\0') >= 0) throw nulLabel(text);
+        setViewportLabel(viewport, text, lib.colour(colour));
+    }
+
+    private static ViewException nulLabel(String text) {
+        return new ViewException("viewport label \"" + text + "\": a NUL character cannot be shown (the C string ends there)");
+    }
+
+    /** Names viewport {@code viewport} top left inside it in {@code colour} (three numbers 0..1; null: white); null text clears it. */
+    public void setViewportLabel(int viewport, String text, float[] colour) {
+        if (text != null && text.indexOf('\0') >= 0) throw nulLabel(text);
+        exact(colour, 3, "viewportLabel colour");
+        MemorySegment p = live(c("set_viewport_label"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment t = text == null ? MemorySegment.NULL : arena.allocateFrom(text);
+            MemorySegment col = floats(arena, colour);
+            ok(call(() -> (boolean) lib.setViewportLabel.invoke(p, viewport, t, col)), "viewportLabel");
+        }
+    }
+
+    /**
+     * {@link #setViewportBorder(int, float[])} with colour text ({@code "#rgb"}, {@code "#rrggbb"}
+     * or a CSS colour name); null clears it.
+     */
+    public void setViewportBorder(int viewport, String colour) { setViewportBorder(viewport, lib.colour(colour)); }
+
+    /** Frames viewport {@code viewport} one point inside its edge in {@code colour} (three numbers 0..1); null clears it. */
+    public void setViewportBorder(int viewport, float[] colour) {
+        exact(colour, 3, "viewportBorder colour");
+        MemorySegment p = live(c("set_viewport_border"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment col = floats(arena, colour);
+            ok(call(() -> (boolean) lib.setViewportBorder.invoke(p, viewport, col)), "viewportBorder");
         }
     }
 
@@ -2009,13 +2250,55 @@ public final class View implements AutoCloseable {
         ok(call(() -> (boolean) lib.timelineSeek.invoke(p, seconds)), "seek");
     }
 
-    /** {@link #loop(boolean)} on. */
-    public void loop() {
-        loop(true);
+    /**
+     * Plays {@code animation} on the timeline: each binding gives a target of the animation the item (and node) it
+     * moves. Returns the track's id (1 or more). The view plays its own copy, so the animation may be closed at
+     * once. Refused as the library words it: no such item or node, a target bound twice, a scaled node. Seek and
+     * draw to see it; {@link #removeTrack} puts back what it moved.
+     */
+    public int playAnimation(Blacksmith.Animation animation, List<AnimationBinding> bindings) {
+        Objects.requireNonNull(bindings, "bindings");
+        int n = bindings.size();
+        MemorySegment p = live(c("play_animation"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment array = MemorySegment.NULL;
+            if (n > 0) {
+                array = arena.allocate(ANIMATION_BINDING, n);
+                for (int k = 0; k < n; k++) {
+                    AnimationBinding b = bindings.get(k);
+                    if (b == null) throw new ViewException("binding " + k + ": is null");
+                    if (b.target() == null || b.target().indexOf('\0') >= 0) {
+                        throw new ViewException("binding " + k + ": the target is not a name without a NUL");
+                    }
+                    if (b.item() < 0) throw new ViewException("binding " + k + ": item " + Integer.toUnsignedString(b.item()) + " is not a view item");
+                    if (b.node() != null && b.node() < 0) throw new ViewException("binding " + k + ": node " + b.node() + " is not a node");
+                    MemorySegment slot = array.asSlice(k * ANIMATION_BINDING.byteSize(), ANIMATION_BINDING.byteSize());
+                    slot.set(ValueLayout.ADDRESS, off(ANIMATION_BINDING, "target"), arena.allocateFrom(b.target()));
+                    slot.set(ValueLayout.JAVA_INT, off(ANIMATION_BINDING, "item"), b.item());
+                    slot.set(ValueLayout.JAVA_INT, off(ANIMATION_BINDING, "node"), b.node() == null ? ALL_NODES : b.node());
+                }
+            }
+            MemorySegment a = animation == null ? MemorySegment.NULL : animation.handle();
+            MemorySegment bs = array;
+            int track = call(() -> (int) lib.playAnimation.invoke(p, a, bs, n));
+            if (track == 0) throw lib.failure("playAnimation");
+            return track;
+        }
+    }
+
+    /** Takes the track {@link #playAnimation} returned off the timeline, putting back what it moved; a track already gone is refused. */
+    public void removeTrack(int track) {
+        MemorySegment p = live(c("timeline_remove"));
+        ok(call(() -> (boolean) lib.timelineRemove.invoke(p, track)), "removeTrack");
+    }
+
+    /** {@link #setLoop(boolean)} on. */
+    public void setLoop() {
+        setLoop(true);
     }
 
     /** Whether the timeline starts over at its end. */
-    public void loop(boolean on) {
+    public void setLoop(boolean on) {
         MemorySegment p = live(c("timeline_set_loop"));
         ok(call(() -> (boolean) lib.timelineSetLoop.invoke(p, on)), "loop");
     }
@@ -2086,6 +2369,7 @@ public final class View implements AutoCloseable {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment out = arena.allocate(PICK);
             out.set(ValueLayout.JAVA_INT, off(PICK, "size"), (int) PICK.byteSize());
+            out.set(ValueLayout.JAVA_INT, off(PICK, "viewport_label"), -1);
             for (int i = 0; i < 200; i++) {
                 draw();
                 if (call(() -> (boolean) lib.pickResult.invoke(p, out))) return pickOf(out);
@@ -2110,6 +2394,7 @@ public final class View implements AutoCloseable {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment out = arena.allocate(PICK);
             out.set(ValueLayout.JAVA_INT, off(PICK, "size"), (int) PICK.byteSize());
+            out.set(ValueLayout.JAVA_INT, off(PICK, "viewport_label"), -1);
             if (call(() -> (boolean) lib.pickResult.invoke(p, out))) return Optional.of(answerOf(out));
         }
         String waiting = lib.lastErrorText();
@@ -2256,6 +2541,7 @@ public final class View implements AutoCloseable {
             cam.set(ValueLayout.JAVA_INT, 0, (int) CAMERA.byteSize());
             MemorySegment pick = arena.allocate(PICK);
             pick.set(ValueLayout.JAVA_INT, 0, (int) PICK.byteSize());
+            pick.set(ValueLayout.JAVA_INT, off(PICK, "viewport_label"), -1);
             ok(call(() -> (boolean) lib.run.invoke(p, cam, pick)), "run");
             markClosed();
             float[] eye = cam.asSlice(off(CAMERA, "eye"), 12).toArray(ValueLayout.JAVA_FLOAT);
@@ -2264,6 +2550,138 @@ public final class View implements AutoCloseable {
             boolean ortho = cam.get(ValueLayout.JAVA_INT, off(CAMERA, "orthographic")) != 0;
             return camera(eye, target, up, ortho, pickOf(pick), yUp);
         }
+    }
+
+    /**
+     * The oldest input event the view's own window handled and not handed out yet (view ABI 1.26), without
+     * waiting: empty while none waits. Read between {@link #pump(int)}s, or let {@link #run(Predicate)} hand
+     * them over. A view in a host's window, or offscreen, queues nothing. Still answers once the window has
+     * closed. A failure other than "no event" throws the library's own message.
+     */
+    public Optional<InputEvent> nextEvent() {
+        String call = c("next_event");
+        // Not live(): the queue is read after the window has closed (its CLOSE event last).
+        if (Thread.currentThread() != thread) throw new ViewException(call + ": a view belongs to the thread that made it");
+        if (handle.address == 0) throw new ViewException(call + ": the view is closed");
+        MemorySegment p = MemorySegment.ofAddress(handle.address);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(INPUT_EVENT);
+            out.set(ValueLayout.JAVA_INT, off(INPUT_EVENT, "size"), (int) INPUT_EVENT.byteSize());
+            if (call(() -> (boolean) lib.nextEvent.invoke(p, out))) return Optional.of(eventOf(out, yUp));
+        }
+        String why = lib.lastErrorText();
+        if (!why.isEmpty() && !why.endsWith("no event")) throw new ViewException(why);
+        return Optional.empty();
+    }
+
+    /**
+     * Closes the view's own window as its close button does (view ABI 1.26): {@link #closed()} turns true, a
+     * {@link CloseEvent} is queued and a loop around {@link #pump(int)} ends; {@link #close()} still owes the
+     * destroy. Nothing for a window already closed; a view in a host's window, or offscreen, has none to close.
+     */
+    public void closeWindow() {
+        if (handle.address != 0 && windowClosed) return;
+        MemorySegment p = live(c("close"));
+        ok(call(() -> (boolean) lib.closeWindow.invoke(p)), "closeWindow");
+        markClosed();
+    }
+
+    /**
+     * Runs the window on this thread, handing each input event to {@code onEvent} as the window handles it
+     * (view ABI 1.26); returning false closes the window and ends the run. The callback may change the scene or
+     * the camera: it is called between pumps, never from inside the library. The {@link CloseEvent} is handed
+     * over last when the window closes by itself (Escape, its close button). Returns the camera the window
+     * closed on and the last pick, as {@link #run()} does.
+     */
+    public Camera run(Predicate<InputEvent> onEvent) {
+        Objects.requireNonNull(onEvent, "onEvent");
+        Camera closedOn = null;
+        Pick picked = null;
+        boolean stopping = false;
+        while (closedOn == null) {
+            int state;
+            if (windowClosed) {
+                state = CLOSED;
+            } else {
+                MemorySegment p = live(c("pump"));
+                state = call(() -> (int) lib.pump.invoke(p, 16));
+            }
+            if (state != OPEN && state != CLOSED) throw lib.failure("pump");
+            while (closedOn == null) {
+                Optional<InputEvent> next = nextEvent();
+                if (next.isEmpty()) break;
+                InputEvent e = next.get();
+                if (e instanceof PickEvent pe) picked = pe.pick();
+                if (e instanceof CloseEvent ce) {
+                    closedOn = ce.camera();
+                    if (!stopping) onEvent.test(e);
+                } else if (!stopping && !onEvent.test(e)) {
+                    stopping = true;
+                    closeWindow();
+                }
+            }
+            if (state == CLOSED && closedOn == null) {
+                markClosed();
+                throw new ViewException("run: the window closed with no close event");
+            }
+        }
+        // The answer the last click left for lastPick, taken as run() takes it; else the last pick event's.
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(PICK);
+            out.set(ValueLayout.JAVA_INT, off(PICK, "size"), (int) PICK.byteSize());
+            out.set(ValueLayout.JAVA_INT, off(PICK, "viewport_label"), -1);
+            MemorySegment p = MemorySegment.ofAddress(handle.address);
+            if (call(() -> (boolean) lib.pickResult.invoke(p, out))) picked = pickOf(out);
+        }
+        markClosed();
+        return new Camera(closedOn.eye(), closedOn.target(), closedOn.up(), closedOn.orthographic(), closedOn.azimuth(),
+                closedOn.elevation(), picked);
+    }
+
+    /** A CadaclysmViewInputEvent as its record. */
+    static InputEvent eventOf(MemorySegment raw, boolean yUp) {
+        int kind = raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "kind"));
+        int mods = raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "modifiers"));
+        boolean shift = (mods & MOD_SHIFT) != 0, ctrl = (mods & MOD_CTRL) != 0, alt = (mods & MOD_ALT) != 0, meta = (mods & MOD_META) != 0;
+        double t = raw.get(ValueLayout.JAVA_DOUBLE, off(INPUT_EVENT, "time_ms"));
+        int dropped = raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "dropped"));
+        float x = raw.get(ValueLayout.JAVA_FLOAT, off(INPUT_EVENT, "x")), y = raw.get(ValueLayout.JAVA_FLOAT, off(INPUT_EVENT, "y"));
+        return switch (kind) {
+            case INPUT_EVENT_POINTER_DOWN, INPUT_EVENT_POINTER_MOVE, INPUT_EVENT_POINTER_UP -> {
+                int code = raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "pointer"));
+                String pointer = POINTERS.entrySet().stream().filter(e -> e.getValue() == code).map(Map.Entry::getKey)
+                        .findFirst().orElse(Integer.toString(code));
+                yield new PointerEvent(kind == INPUT_EVENT_POINTER_DOWN ? "down" : kind == INPUT_EVENT_POINTER_MOVE ? "move" : "up", x, y,
+                        raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "button")), shift, ctrl, alt, meta, pointer,
+                        raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "pointer_id")), t, dropped);
+            }
+            case INPUT_EVENT_WHEEL -> new WheelEvent(x, y, raw.get(ValueLayout.JAVA_FLOAT, off(INPUT_EVENT, "wheel_y")), shift, ctrl, alt, meta,
+                    t, dropped);
+            case INPUT_EVENT_KEY_DOWN, INPUT_EVENT_KEY_UP -> new KeyEvent(keyName(raw), kind == INPUT_EVENT_KEY_DOWN, shift, ctrl, alt, meta,
+                    raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "repeat")) != 0, t, dropped);
+            case INPUT_EVENT_RESIZE -> new ResizeEvent(raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "width")),
+                    raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "height")), t, dropped);
+            case INPUT_EVENT_PICK -> new PickEvent(pickOf(raw.asSlice(off(INPUT_EVENT, "pick"), EVENT_PICK.byteSize()),
+                    raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "pick_viewport_label"))), t, dropped);
+            case INPUT_EVENT_SNAP -> new SnapEvent(snapOf(raw.asSlice(off(INPUT_EVENT, "snap"), SNAP.byteSize())), t, dropped);
+            case INPUT_EVENT_TIMELINE -> new TimelineEvent(t, dropped);
+            case INPUT_EVENT_CLOSE -> {
+                MemorySegment cam = raw.asSlice(off(INPUT_EVENT, "camera"), CAMERA.byteSize());
+                yield new CloseEvent(camera(cam.asSlice(off(CAMERA, "eye"), 12).toArray(ValueLayout.JAVA_FLOAT),
+                        cam.asSlice(off(CAMERA, "target"), 12).toArray(ValueLayout.JAVA_FLOAT),
+                        cam.asSlice(off(CAMERA, "up"), 12).toArray(ValueLayout.JAVA_FLOAT),
+                        cam.get(ValueLayout.JAVA_INT, off(CAMERA, "orthographic")) != 0, null, yUp), t, dropped);
+            }
+            default -> throw new ViewException("next_event: kind " + kind + " is not a CADACLYSM_VIEW_INPUT_EVENT_* this SDK knows");
+        };
+    }
+
+    /** The event's key name: UTF-8 up to its NUL, at most 32 bytes. */
+    private static String keyName(MemorySegment raw) {
+        byte[] key = raw.asSlice(off(INPUT_EVENT, "key"), 32).toArray(ValueLayout.JAVA_BYTE);
+        int n = 0;
+        while (n < key.length && key[n] != 0) n++;
+        return new String(key, 0, n, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /** One frame read back, RGBA8, rows from the top. */
@@ -2380,7 +2798,7 @@ public final class View implements AutoCloseable {
      * {@code motion} says -- "detailed" or "smooth" (refines once the camera rests, see
      * {@link #wakeMs()}). {@code motion} null turns levels off.
      */
-    public void lod(String motion, int minTriangles) {
+    public void setLod(String motion, int minTriangles) {
         if (motion == null) {
             MemorySegment p = live(c("set_lod"));
             ok(call(() -> (boolean) lib.setLod.invoke(p, MemorySegment.NULL)), "lod");
@@ -2398,8 +2816,8 @@ public final class View implements AutoCloseable {
         }
     }
 
-    public void lod(String motion) {
-        lod(motion, 0);
+    public void setLod(String motion) {
+        setLod(motion, 0);
     }
 
     /** Milliseconds until needsDraw turns true by itself; 0 when a draw is owed now, null when none is coming. */
@@ -2542,7 +2960,7 @@ public final class View implements AutoCloseable {
          * Pose.rawTransform's layout -- every node of the scene, in index order), drawn in place
          * of each node's rest transform. null restores the rest pose.
          */
-        public void nodeTransforms(double[][] transforms) {
+        public void setNodeTransforms(double[][] transforms) {
             if (transforms == null) {
                 MemorySegment p = view.live(c("set_node_transforms"));
                 view.ok(call(() -> (boolean) view.lib.setNodeTransforms.invoke(p, id, MemorySegment.NULL, 0)), "nodeTransforms");
@@ -2562,12 +2980,12 @@ public final class View implements AutoCloseable {
         }
 
         /** Recolours the item: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour name, any case. */
-        public void colour(String rgb) {
+        public void setColour(String rgb) {
             if (rgb == null) throw new ViewException("colour: 3 numbers, not none");
-            colour(view.lib.colour(rgb));
+            setColour(view.lib.colour(rgb));
         }
 
-        public void colour(float[] rgb) {
+        public void setColour(float[] rgb) {
             if (rgb == null) throw new ViewException("colour: 3 numbers, not none");
             exact(rgb, 3, "colour");
             MemorySegment p = view.live(c("set_colour"));
@@ -2588,7 +3006,7 @@ public final class View implements AutoCloseable {
         }
 
         /** Sixteen doubles, column-major; null puts it back. */
-        public void placement(double[] matrix) {
+        public void setPlacement(double[] matrix) {
             exact(matrix, 16, "placement");
             MemorySegment p = view.live(c("set_placement"));
             try (Arena arena = Arena.ofConfined()) {
@@ -2598,9 +3016,9 @@ public final class View implements AutoCloseable {
         }
 
         /** {@code faces} (pick numbers) coloured by {@code colours}, one text a face (alpha 1); faces null clears every one. */
-        public void faceColours(int[] faces, String[] colours) {
+        public void setFaceColours(int[] faces, String[] colours) {
             if (faces == null) {
-                faceColours(null, (float[]) null);
+                setFaceColours(null, (float[]) null);
                 return;
             }
             float[] rgba = new float[4 * (colours == null ? 0 : colours.length)];
@@ -2609,11 +3027,11 @@ public final class View implements AutoCloseable {
                 if (c == null) throw new ViewException("faceColours: colour " + k + " is null");
                 System.arraycopy(c, 0, rgba, 4 * k, 4);
             }
-            faceColours(faces, rgba);
+            setFaceColours(faces, rgba);
         }
 
         /** {@code faces} (pick numbers) in {@code rgba} (four floats a face); faces null clears every one. */
-        public void faceColours(int[] faces, float[] rgba) {
+        public void setFaceColours(int[] faces, float[] rgba) {
             if (faces != null && (rgba == null || rgba.length != 4 * faces.length)) {
                 throw new ViewException("faceColours: " + 4 * faces.length + " numbers (rgba, 4 a face), not "
                         + (rgba == null ? 0 : rgba.length));
@@ -2632,17 +3050,55 @@ public final class View implements AutoCloseable {
             view.ok(call(() -> (boolean) view.lib.frame.invoke(p, id)), "frame");
         }
 
-        public void xray(boolean on) {
+        public void setXray(boolean on) {
             MemorySegment p = view.live(c("set_xray"));
             view.ok(call(() -> (boolean) view.lib.setXray.invoke(p, id, on)), "xray");
         }
 
         /** How the item's lines and points draw where a surface hides them: "off" (not drawn, the default), "solid" (drawn through) or "dashed" (dashed and dimmed). */
-        public void occluded(String mode) {
+        public void setOccluded(String mode) {
             Integer m = mode == null ? null : OCCLUDED.get(mode);
             if (m == null) throw new ViewException("occluded: '" + mode + "' is not 'off', 'solid' or 'dashed'");
             MemorySegment p = view.live(c("set_occluded"));
             view.ok(call(() -> (boolean) view.lib.setOccluded.invoke(p, id, (int) m)), "occluded");
+        }
+
+        static final java.util.List<String> SHAPES = java.util.List.of("disc", "ring", "square", "diamond");
+        static final java.util.List<String> STATES = java.util.List.of("normal", "hover", "selected", "first");
+
+        /** Draws the item's lines in its own dash: {@code dash} points on, {@code gap} off; 0 is solid. */
+        public void setLineStyle(float dash, float gap) {
+            MemorySegment p = view.live(c("set_line_style"));
+            view.ok(call(() -> (boolean) view.lib.setLineStyle.invoke(p, id, dash, gap)), "lineStyle");
+        }
+
+        /** A points item's marker: "disc", "ring", "square" or "diamond", filled or hollow. */
+        public void setPointStyle(String shape, boolean hollow) {
+            int s = SHAPES.indexOf(shape);
+            if (s < 0) throw new ViewException("point style: '" + shape + "' is not 'disc', 'ring', 'square' or 'diamond'");
+            MemorySegment p = view.live(c("set_point_style"));
+            view.ok(call(() -> (boolean) view.lib.setPointStyle.invoke(p, id, s, hollow)), "pointStyle");
+        }
+
+        /** One state a point: "normal", "hover", "selected" or "first". */
+        public void setPointStates(String... states) {
+            byte[] codes = new byte[states.length];
+            for (int i = 0; i < states.length; i++) {
+                int c = STATES.indexOf(states[i]);
+                if (c < 0) throw new ViewException("point states: '" + states[i] + "' is not 'normal', 'hover', 'selected' or 'first'");
+                codes[i] = (byte) c;
+            }
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = codes.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_BYTE, codes);
+                MemorySegment p = view.live(c("set_point_states"));
+                view.ok(call(() -> (boolean) view.lib.setPointStates.invoke(p, id, raw, (long) codes.length)), "pointStates");
+            }
+        }
+
+        /** Draws the item after every other, depth testing off; picked ahead of what is under it. */
+        public void setOnTop(boolean on) {
+            MemorySegment p = view.live(c("set_on_top"));
+            view.ok(call(() -> (boolean) view.lib.setOnTop.invoke(p, id, on)), "onTop");
         }
 
         /**
@@ -2651,7 +3107,7 @@ public final class View implements AutoCloseable {
          * blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads the scene again,
          * as a show does: set it as each item is shown rather than over a finished scene item by item.
          */
-        public void finish(String finish) {
+        public void setFinish(String finish) {
             Integer f = finish == null ? null : FINISHES.get(finish);
             if (f == null) throw new ViewException("finish: '" + finish + "' is not 'gloss', 'satin' or 'matte'");
             MemorySegment p = view.live(c("set_finish"));
@@ -2687,23 +3143,40 @@ public final class View implements AutoCloseable {
          * The user layer the item is on, 0..31 (every item starts on 0): it draws while the layer is on
          * ({@link View#userLayer}) and in the viewports whose {@code layerMask} has its bit. A layer past 31 is refused.
          */
-        public void userLayer(int layer) {
+        public void setUserLayer(int layer) {
             MemorySegment p = view.live(c("set_item_layer"));
             view.ok(call(() -> (boolean) view.lib.setItemLayer.invoke(p, id, layer)), "userLayer");
         }
 
-        public void nodeVisible(int node, boolean on) {
+        /** Hides the item (false) or shows it again: a hidden item draws nothing, is not picked and is left out of what the camera frames. */
+        public void setVisible(boolean visible) {
+            MemorySegment p = view.live(c("set_item_visible"));
+            view.ok(call(() -> (boolean) view.lib.setItemVisible.invoke(p, id, visible)), "visible");
+        }
+
+        /** Draws {@code nodes} of the item as ghosts (x-ray), replacing the ones ghosted before; null or empty clears them. */
+        public void setNodeGhosts(int[] nodes) {
+            MemorySegment p = view.live(c("set_node_ghosts"));
+            try (Arena arena = Arena.ofConfined()) {
+                int n = nodes == null ? 0 : nodes.length;
+                MemorySegment list = nodes == null ? MemorySegment.NULL
+                        : arena.allocateFrom(ValueLayout.JAVA_INT, n == 0 ? new int[1] : nodes);
+                view.ok(call(() -> (boolean) view.lib.setNodeGhosts.invoke(p, id, list, n)), "nodeGhosts");
+            }
+        }
+
+        public void setNodeVisible(int node, boolean on) {
             MemorySegment p = view.live(c("set_node_visible"));
             view.ok(call(() -> (boolean) view.lib.setNodeVisible.invoke(p, id, node, on)), "nodeVisible");
         }
 
-        /** {@link #nodeColour(int, float[])} with the colour as text (alpha 1); null clears. */
-        public void nodeColour(int node, String rgba) {
-            nodeColour(node, rgba(view.lib, rgba));
+        /** {@link #setNodeColour(int, float[])} with the colour as text (alpha 1); null clears. */
+        public void setNodeColour(int node, String rgba) {
+            setNodeColour(node, rgba(view.lib, rgba));
         }
 
         /** Three or four numbers (alpha 1 when three); null clears. */
-        public void nodeColour(int node, float[] rgba) {
+        public void setNodeColour(int node, float[] rgba) {
             float[] four = rgba(rgba, "nodeColour");
             MemorySegment p = view.live(c("set_node_color"));
             try (Arena arena = Arena.ofConfined()) {
@@ -2712,13 +3185,13 @@ public final class View implements AutoCloseable {
             }
         }
 
-        /** {@link #nodeHighlight(int, float[])} with the colour as text: alpha 1, the colour itself; null clears. */
-        public void nodeHighlight(int node, String rgba) {
-            nodeHighlight(node, rgba(view.lib, rgba));
+        /** {@link #setNodeHighlight(int, float[])} with the colour as text: alpha 1, the colour itself; null clears. */
+        public void setNodeHighlight(int node, String rgba) {
+            setNodeHighlight(node, rgba(view.lib, rgba));
         }
 
         /** Tint {@code node} toward rgba's colour by its alpha; null clears. */
-        public void nodeHighlight(int node, float[] rgba) {
+        public void setNodeHighlight(int node, float[] rgba) {
             float[] four = rgba(rgba, "nodeHighlight");
             MemorySegment p = view.live(c("set_node_highlight"));
             try (Arena arena = Arena.ofConfined()) {
@@ -2735,7 +3208,9 @@ public final class View implements AutoCloseable {
 
     /**
      * An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the window,
-     * drawn over everything, untouched by the camera. remove, userLayer and (text) text work as on any item.
+     * drawn over everything, untouched by the camera. remove, userLayer and, for text, text and colour
+     * work as on any item; the item calls that mean nothing for an overlay (colour on a shape or an image,
+     * placement, xray, frame, ...) throw, saying it is an overlay.
      */
     public static final class Overlay extends Item {
         private Anchor anchor;
@@ -2778,20 +3253,20 @@ public final class View implements AutoCloseable {
         }
 
         /** "height", "tool" or "deviation" (needs the part given to showMachining). */
-        public void colourBy(String mode) {
+        public void setColourBy(String mode) {
             int m = mode == null ? -1 : COLOUR_BY.indexOf(mode);
             if (m < 0) throw new ViewException("mode '" + mode + "': one of " + String.join(", ", COLOUR_BY));
             MemorySegment p = view.live(c("machining_colour_by"));
             view.ok(call(() -> (boolean) view.lib.machiningColourBy.invoke(p, id, m)), "colourBy");
         }
 
-        /** {@link #overlays(boolean, boolean)} with both on. */
-        public void overlays() {
-            overlays(true, true);
+        /** {@link #setOverlays(boolean, boolean)} with both on. */
+        public void setOverlays() {
+            setOverlays(true, true);
         }
 
         /** The toolpath and the tool, each on or off. */
-        public void overlays(boolean path, boolean tool) {
+        public void setOverlays(boolean path, boolean tool) {
             MemorySegment p = view.live(c("machining_overlays"));
             view.ok(call(() -> (boolean) view.lib.machiningOverlays.invoke(p, id, path, tool)), "overlays");
         }
@@ -2919,8 +3394,8 @@ public final class View implements AutoCloseable {
         try (View v = new View(vo)) {
             double tolerance = o.tolerance != null ? o.tolerance : 0.05;
             Item item = o.rgbText != null ? v.show(obj, o.rgbText, tolerance) : v.show(obj, o.rgb, tolerance);
-            if (transforms != null) item.nodeTransforms(transforms);
-            v.layer("edges", o.edges);
+            if (transforms != null) item.setNodeTransforms(transforms);
+            v.setLayer("edges", o.edges);
             v.aim(o, obj instanceof Cad.Node node ? () -> item.frameNode(node.index()) : () -> { });
             if (!orbit && !"wgpu".equals(library.kind())) {
                 v.draw();

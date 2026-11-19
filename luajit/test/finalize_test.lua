@@ -50,6 +50,7 @@ return function(t)
       { "thickness_gauge", function() return handle_of(bs.ThicknessGauge.new({ a }, 0.05)) end },
       { "projector", function() return handle_of(a:projector()) end },
       { "triangle_mesh", function() return handle_of(a:triangle_mesh()) end },
+      { "nurbs_surface", function() return handle_of(a:face_surface(0)) end },
       { "collisions", function() return collider:check({ IDENTITY, IDENTITY })[1]._collisions end },
       { "fem_mesh", function() return handle_of(a:fem_mesh(0.5)) end },
       { "tessellation", function() return (a:mesh(0.5))._held._ptr end },

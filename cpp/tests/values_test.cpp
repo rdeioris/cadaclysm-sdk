@@ -230,7 +230,7 @@ static void interval_measures_keep_the_orientation() {
     check((up.min)() == 2.0 && (up.max)() == 6.0 && (down.min)() == 2.0 && (down.max)() == 6.0, "min and max");
     check(up.is_increasing() && !down.is_increasing() && !iv(3, 3).is_increasing(), "is_increasing");
     check(iv(3, 3).is_singleton() && !up.is_singleton(), "is_singleton");
-    check(up.swapped() == down && down.swapped() == up, "swapped");
+    check(up.swap() == down && down.swap() == up, "swapped");
     check(down.t0() == 6.0 && down.t1() == 2.0, "t0 and t1 as given");
 }
 
@@ -324,9 +324,9 @@ static void plane_verbs_match_rhino() {
     const Records* r = vectors();
     if (!r) return;
     Frame p = frame_of(nums(*r, "plane", "frame"));
-    Frame flip = p.flipped();
+    Frame flip = p.flip();
     close(vec(flip.raw()), nums(*r, "plane", "flip"), EXACT, "flip");
-    close(vec(must(p.rotated(0.6, {1, -1, 0.5}), "rotated").raw()), nums(*r, "plane", "rotate"), EXACT, "rotate");
+    close(vec(must(p.rotate(0.6, {1, -1, 0.5}), "rotated").raw()), nums(*r, "plane", "rotate"), EXACT, "rotate");
     for (const std::pair<std::string, Vec3>& q : queries(*r, "plane")) {
         close(vec(p.to_local(q.second)), nums(*r, q.first, "remap"), EXACT, q.first + " to_local");
         close(vec(p.closest_point(q.second)), nums(*r, q.first, "closest"), EXACT, q.first + " closest_point");

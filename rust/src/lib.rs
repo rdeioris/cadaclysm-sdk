@@ -1089,7 +1089,7 @@ impl Brep {
     /// twice are joined. A larger `tolerance` also joins two curves between the same
     /// two vertices that part by up to it; `vertex` is what decides which edges are
     /// candidates at all, and raising it is what could close a slot. Nothing moves.
-    pub fn sewed(&self, tolerance: Option<f64>, vertex: Option<f64>) -> Result<(Brep, SewReport)> {
+    pub fn sew(&self, tolerance: Option<f64>, vertex: Option<f64>) -> Result<(Brep, SewReport)> {
         let mut counts = [0u32; 4];
         let mut gaps = [0f64; 3];
         let pointer = unsafe {
@@ -1123,7 +1123,7 @@ impl Brep {
 
     /// What is wrong with this brep, as a [`HealthReport`]: the free edges (the sides one face
     /// bounds) and the wires they chain into, each with its nearest partner and the gap to it;
-    /// the features below `tolerance`; the loose edges; and what [`Brep::sewed`] would join and
+    /// the features below `tolerance`; the loose edges; and what [`Brep::sew`] would join and
     /// leave. Nothing moves. `tolerance` is an absolute length, by default (`None`, or a value
     /// that is not finite and positive) `1e-4` times the body's diagonal; the report says what
     /// was used. `mesh` also meshes the brep and reports where the mesh cracks
@@ -1152,7 +1152,7 @@ impl Brep {
     /// refuses fixes that made it worse ([`HealReport::guarded`]). `kinds` switches each kind
     /// of fix ([`HealKinds::default`] heals all three); a kind switched off is refused as
     /// `"toggled"`. `tolerance` as [`Brep::health`]'s.
-    pub fn healed(&self, tolerance: Option<f64>, kinds: HealKinds) -> Result<(Brep, HealReport)> {
+    pub fn heal(&self, tolerance: Option<f64>, kinds: HealKinds) -> Result<(Brep, HealReport)> {
         let api = self.api;
         let handle = unsafe { (api.cadaclysm_brep_healed)(self.pointer(), tolerance.unwrap_or(f64::NAN), kinds.flags()) };
         let fail = || reader_error(api, "healed");
@@ -1178,6 +1178,32 @@ impl Brep {
             None
         } else {
             Some(t)
+        }
+    }
+
+    /// This brep with its free-form surfaces and edge curves given their analytic kind, and
+    /// what was taken, as a new `Brep` and a [`RecognizeReport`]; this one is left as it was.
+    /// A NURBS (or revolved, extruded or swept) surface that is a plane, cylinder, cone, sphere
+    /// or torus within `tolerance` of every sample of its faces and every point of their edges
+    /// becomes exactly that, and an edge curve that is a line, circle or ellipse within it
+    /// likewise -- so a file that stored analytic faces as NURBS (a `.3dm` especially) comes
+    /// back as they were made. Faces and edges keep their numbers. `tolerance` `None`, or a
+    /// value that is not finite and positive, takes the default, 1e-6 of the body's extent --
+    /// not the file's declared tolerance, at which a fillet's blend reads as a torus (the
+    /// report shows what was used).
+    pub fn recognize(&self, tolerance: Option<f64>) -> Result<(Brep, RecognizeReport)> {
+        let api = self.api;
+        let handle = unsafe { (api.cadaclysm_brep_recognized)(self.pointer(), tolerance.unwrap_or(f64::NAN)) };
+        let fail = || reader_error(api, "recognized");
+        unsafe {
+            recognize_from(
+                handle,
+                api.cadaclysm_brep_recognize_free,
+                api.cadaclysm_brep_recognize_summary,
+                [api.cadaclysm_brep_recognize_faces, api.cadaclysm_brep_recognize_refused, api.cadaclysm_brep_recognize_edges],
+                &fail,
+                |h| NonNull::new((api.cadaclysm_brep_recognize_body)(h).cast_mut()).map(|pointer| Brep { pointer, api }),
+            )
         }
     }
 
@@ -1844,7 +1870,7 @@ impl Manifold {
     }
 }
 
-/// What [`Brep::sewed`] did, as plain data: the edges it joined (`pairs`), the free
+/// What [`Brep::sew`] did, as plain data: the edges it joined (`pairs`), the free
 /// edges before and after, how many groups of free edges between the same two
 /// vertices it left free (`refused`: too far apart for the tolerance, or more than
 /// two), the widest gap it sewed, and the two tolerances it used.
@@ -1861,8 +1887,8 @@ pub struct SewReport {
 
 // ---- health and healing -----------------------------------------------------------
 //
-// One set of report types for both libraries: [`Brep::health`] / [`Brep::healed`] here and
-// [`blacksmith::Solid::health`] / [`blacksmith::Solid::healed`] return the same ones, as
+// One set of report types for both libraries: [`Brep::health`] / [`Brep::heal`] here and
+// [`blacksmith::Solid::health`] / [`blacksmith::Solid::heal`] return the same ones, as
 // [`Manifold`] is shared.
 
 /// What is wrong with a body, as plain data ([`Brep::health`], [`blacksmith::Solid::health`]):
@@ -1951,7 +1977,7 @@ pub struct Cracks {
     pub edges: Vec<u32>,
 }
 
-/// What [`Brep::healed`] (or [`blacksmith::Solid::healed`]) did, as plain data: the
+/// What [`Brep::heal`] (or [`blacksmith::Solid::heal`]) did, as plain data: the
 /// `tolerance` it healed at, the furthest any trim the result keeps `moved`, whether the body
 /// guard refused fixes (`guarded`), the `fixes` made and the small features `refused`; and the
 /// body's health before and after at that tolerance -- its small features, free edges, whether
@@ -1997,7 +2023,7 @@ pub struct HealRefusal {
     pub figure: f64,
 }
 
-/// Which kinds of fix [`Brep::healed`] (and [`blacksmith::Solid::healed`]) makes -- Rust's
+/// Which kinds of fix [`Brep::heal`] (and [`blacksmith::Solid::heal`]) makes -- Rust's
 /// spelling of Python's `edges=`, `faces=`, `holes=` keywords. `Default` switches all three
 /// on; a kind switched off is refused as `"toggled"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2246,6 +2272,147 @@ pub(crate) unsafe fn heal_from<H, T>(
     let (fix_items, fix_sizes) = report_rows(handle, fixes, 2, 2);
     let (refused_items, refused_sizes) = report_rows(handle, refused, 3, 1);
     let report = heal_report(&counts, &sizes, &fix_items, &fix_sizes, &refused_items, &refused_sizes)?;
+    let body = take(handle).ok_or_else(fail)?;
+    Ok((body, report))
+}
+
+// ---- canonical recognition ---------------------------------------------------------
+//
+// One set of report types for both libraries, as health and healing: [`Brep::recognize`]
+// here and [`blacksmith::Solid::recognize`] return the same ones.
+
+/// What [`Brep::recognize`] (or [`blacksmith::Solid::recognize`]) did, as plain data: the
+/// `tolerance` it fitted to, the `faces` given an analytic kind and those `refused`, the
+/// `edges` given one, how many edges were left free-form (`edges_left`), and the worst
+/// deviation of a face (`worst_face`) and of an edge (`worst_edge`) taken.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecognizeReport {
+    pub tolerance: f64,
+    pub faces: Vec<RecognizedFace>,
+    pub refused: Vec<RecognizeRefusal>,
+    pub edges: Vec<RecognizedEdge>,
+    pub edges_left: u32,
+    pub worst_face: f64,
+    pub worst_edge: f64,
+}
+
+/// One face recognition gave an analytic kind: its `face` number (unchanged), its `kind`
+/// (`"plane"`, `"cylinder"`, `"cone"`, `"sphere"` or `"torus"`), and how far any sample of it
+/// lies from the analytic surface (`deviation`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecognizedFace {
+    pub face: u32,
+    pub kind: String,
+    pub deviation: f64,
+}
+
+/// One face recognition left free-form, and why: `"no_kind"` (no kind fits within the
+/// tolerance; `closest` the nearest kind's deviation), `"mixed_normals"`, `"parameter_trims"`
+/// (a parameter trim cannot be lifted) or `"too_few_samples"` (`closest` `None`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecognizeRefusal {
+    pub face: u32,
+    pub why: String,
+    pub closest: Option<f64>,
+}
+
+/// One edge whose curve recognition gave an analytic kind: its brep `edge` id (as
+/// [`Brep::edge_tolerance`] takes one), its `kind` (`"line"`, `"circle"` or `"ellipse"`), and
+/// how far any point of the curve or the edge lies from the analytic curve (`deviation`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecognizedEdge {
+    pub edge: u32,
+    pub kind: String,
+    pub deviation: f64,
+}
+
+/// The recognition ABI's face kinds, by code.
+const RECOGNIZE_FACE_KINDS: [&str; 5] = ["plane", "cylinder", "cone", "sphere", "torus"];
+
+/// The recognition ABI's edge kinds, by code.
+const RECOGNIZE_EDGE_KINDS: [&str; 3] = ["line", "circle", "ellipse"];
+
+/// The recognition ABI's refusal reasons, by code.
+const RECOGNIZE_WHYS: [&str; 4] = ["no_kind", "mixed_normals", "parameter_trims", "too_few_samples"];
+
+/// The flat rows of the recognition C ABI as a [`RecognizeReport`], index for index as
+/// Python's `_recognize_report`: `counts` ten (faces per kind, faces left, edges per kind,
+/// edges left), `sizes` three (tolerance, worst face, worst edge), each row two ids and one
+/// size.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recognize_report(
+    counts: &[u32; 10],
+    sizes: &[f64; 3],
+    face_items: &[u32],
+    face_sizes: &[f64],
+    refused_items: &[u32],
+    refused_sizes: &[f64],
+    edge_items: &[u32],
+    edge_sizes: &[f64],
+) -> Result<RecognizeReport> {
+    let faces = face_items
+        .chunks_exact(2)
+        .zip(face_sizes)
+        .map(|(item, &deviation)| {
+            Ok(RecognizedFace { face: item[0], kind: coded(&RECOGNIZE_FACE_KINDS, item[1], "face kind")?, deviation })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let refused = refused_items
+        .chunks_exact(2)
+        .zip(refused_sizes)
+        .map(|(item, &closest)| {
+            Ok(RecognizeRefusal {
+                face: item[0],
+                why: coded(&RECOGNIZE_WHYS, item[1], "recognize refusal")?,
+                closest: if closest.is_nan() { None } else { Some(closest) },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let edges = edge_items
+        .chunks_exact(2)
+        .zip(edge_sizes)
+        .map(|(item, &deviation)| {
+            Ok(RecognizedEdge { edge: item[0], kind: coded(&RECOGNIZE_EDGE_KINDS, item[1], "edge kind")?, deviation })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(RecognizeReport {
+        tolerance: sizes[0],
+        faces,
+        refused,
+        edges,
+        edges_left: counts[9],
+        worst_face: sizes[1],
+        worst_edge: sizes[2],
+    })
+}
+
+/// A recognition handle's report and its body (`take`, `None` where the library gave none),
+/// for either library: `readers` are the face, refusal and edge row readers; the handle is
+/// freed on every path, after the body is taken; null is `fail()`.
+///
+/// # Safety
+/// `handle` null or a live recognition handle the five functions belong to, not used after.
+pub(crate) unsafe fn recognize_from<H, T>(
+    handle: *mut H,
+    free: unsafe extern "C" fn(*mut H),
+    summary: unsafe extern "C" fn(*const H, *mut u32, *mut f64) -> bool,
+    readers: [RowsFn<H>; 3],
+    fail: &dyn Fn() -> Error,
+    take: impl FnOnce(*const H) -> Option<T>,
+) -> Result<(T, RecognizeReport)> {
+    if handle.is_null() {
+        return Err(fail());
+    }
+    let _freed = Freed(handle, free);
+    let (mut counts, mut sizes) = ([0u32; 10], [0f64; 3]);
+    if !summary(handle, counts.as_mut_ptr(), sizes.as_mut_ptr()) {
+        return Err(fail());
+    }
+    let (face_items, face_sizes) = report_rows(handle, readers[0], 2, 1);
+    let (refused_items, refused_sizes) = report_rows(handle, readers[1], 2, 1);
+    let (edge_items, edge_sizes) = report_rows(handle, readers[2], 2, 1);
+    let report =
+        recognize_report(&counts, &sizes, &face_items, &face_sizes, &refused_items, &refused_sizes, &edge_items, &edge_sizes)?;
     let body = take(handle).ok_or_else(fail)?;
     Ok((body, report))
 }
@@ -2974,11 +3141,53 @@ pub struct TaskTime {
     pub actual_start: Option<f64>,
     pub actual_finish: Option<f64>,
     pub duration: Option<f64>,
+    /// How `duration` is counted, `None` where the file gives none.
+    pub duration_kind: Option<DurationKind>,
+    /// The duration in working time, `None` where there is none (an IFC2X3 task, or no duration).
+    pub work_duration: Option<WorkDuration>,
+}
+
+/// How a task's duration is counted: the schema's `IfcTaskDurationEnum`
+/// ([`TaskTime::duration_kind`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurationKind {
+    Elapsed,
+    Work,
+    NotDefined,
+}
+
+impl DurationKind {
+    fn from_raw(raw: u32) -> Option<DurationKind> {
+        match raw {
+            0 => Some(DurationKind::Elapsed),
+            1 => Some(DurationKind::Work),
+            2 => Some(DurationKind::NotDefined),
+            _ => None,
+        }
+    }
+
+    /// `"ELAPSEDTIME"`, `"WORKTIME"` or `"NOTDEFINED"`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            DurationKind::Elapsed => "ELAPSEDTIME",
+            DurationKind::Work => "WORKTIME",
+            DurationKind::NotDefined => "NOTDEFINED",
+        }
+    }
+}
+
+/// A duration in working time: that many working days, then that many seconds of working time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WorkDuration {
+    pub days: f64,
+    pub seconds: f64,
 }
 
 impl TaskTime {
-    fn from_raw(raw: sys::CadaclysmTaskTime) -> TaskTime {
+    fn from_raw(raw: sys::CadaclysmTaskTime, duration_kind: Option<DurationKind>, work_duration: Option<WorkDuration>) -> TaskTime {
         TaskTime {
+            duration_kind,
+            work_duration,
             schedule_start: raw.has_schedule_start.then_some(raw.schedule_start),
             schedule_finish: raw.has_schedule_finish.then_some(raw.schedule_finish),
             early_start: raw.has_early_start.then_some(raw.early_start),
@@ -3046,6 +3255,8 @@ impl<'s> WorkSchedule<'s> {
         let scene = owner.raw();
         let mut raw = sys::CadaclysmTaskTime::default();
         unsafe { (api.cadaclysm_task_time)(scene, s, index, &mut raw) };
+        let (mut days, mut seconds) = (0f64, 0f64);
+        let has_work = unsafe { (api.cadaclysm_task_work_duration)(scene, s, index, &mut days, &mut seconds) };
         Task {
             scene: owner,
             schedule: s,
@@ -3056,7 +3267,11 @@ impl<'s> WorkSchedule<'s> {
             kind_name: unsafe { text((api.cadaclysm_task_kind_name)(scene, s, index)) },
             status: unsafe { text((api.cadaclysm_task_status)(scene, s, index)) },
             milestone: unsafe { (api.cadaclysm_task_milestone)(scene, s, index) },
-            time: TaskTime::from_raw(raw),
+            time: TaskTime::from_raw(
+                raw,
+                DurationKind::from_raw(unsafe { (api.cadaclysm_task_duration_kind)(scene, s, index) }),
+                has_work.then_some(WorkDuration { days, seconds }),
+            ),
         }
     }
 
@@ -3139,10 +3354,23 @@ pub struct Task<'s> {
     pub time: TaskTime,
 }
 
-impl Task<'_> {
+impl<'s> Task<'s> {
     /// The index of the work schedule this task belongs to (`scene.schedules()[i]`).
     pub fn schedule_index(&self) -> u32 {
         self.schedule
+    }
+
+    /// The index of the work calendar this task works on (`scene.calendars()[i]`), `None`
+    /// where it has none.
+    pub fn calendar_index(&self) -> Option<u32> {
+        let mut out = 0u32;
+        let found = unsafe { (self.scene.api.cadaclysm_task_calendar)(self.scene.raw(), self.schedule, self.index, &mut out) };
+        found.then_some(out)
+    }
+
+    /// The work calendar this task works on, `None` where it has none.
+    pub fn calendar(&self) -> Option<WorkCalendar<'s>> {
+        self.calendar_index().map(|c| self.scene.calendar_of(c))
     }
 }
 
@@ -3184,6 +3412,191 @@ impl<'s> Task<'s> {
         let mut out = vec![0u32; count as usize];
         unsafe { (api.cadaclysm_task_nodes)(self.scene.raw(), self.schedule, self.index, out.as_mut_ptr(), count) };
         out.into_iter().map(|index| Node { scene: self.scene, index }).collect()
+    }
+}
+
+/// A work calendar's kind: the schema's `IfcWorkCalendarTypeEnum`
+/// (`cadaclysm_calendar_kind`). [`CalendarKind::UserDefined`]'s text is
+/// [`WorkCalendar::kind_name`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalendarKind {
+    FirstShift,
+    SecondShift,
+    ThirdShift,
+    NotDefined,
+    UserDefined,
+}
+
+impl CalendarKind {
+    fn from_raw(raw: u32) -> CalendarKind {
+        match raw {
+            0 => CalendarKind::FirstShift,
+            1 => CalendarKind::SecondShift,
+            2 => CalendarKind::ThirdShift,
+            4 => CalendarKind::UserDefined,
+            _ => CalendarKind::NotDefined,
+        }
+    }
+
+    /// `"FIRSTSHIFT"`, `"SECONDSHIFT"`, `"THIRDSHIFT"`, `"NOTDEFINED"` or `"USERDEFINED"`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            CalendarKind::FirstShift => "FIRSTSHIFT",
+            CalendarKind::SecondShift => "SECONDSHIFT",
+            CalendarKind::ThirdShift => "THIRDSHIFT",
+            CalendarKind::NotDefined => "NOTDEFINED",
+            CalendarKind::UserDefined => "USERDEFINED",
+        }
+    }
+}
+
+/// How a [`Recurrence`] repeats: the schema's `IfcRecurrenceTypeEnum`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecurrenceKind {
+    Daily,
+    Weekly,
+    MonthlyByDayOfMonth,
+    MonthlyByPosition,
+    ByDayCount,
+    ByWeekdayCount,
+    YearlyByDayOfMonth,
+    YearlyByPosition,
+}
+
+impl RecurrenceKind {
+    fn from_raw(raw: u32) -> RecurrenceKind {
+        match raw {
+            1 => RecurrenceKind::Weekly,
+            2 => RecurrenceKind::MonthlyByDayOfMonth,
+            3 => RecurrenceKind::MonthlyByPosition,
+            4 => RecurrenceKind::ByDayCount,
+            5 => RecurrenceKind::ByWeekdayCount,
+            6 => RecurrenceKind::YearlyByDayOfMonth,
+            7 => RecurrenceKind::YearlyByPosition,
+            _ => RecurrenceKind::Daily,
+        }
+    }
+
+    /// `"DAILY"`, `"WEEKLY"`, `"MONTHLY_BY_DAY_OF_MONTH"`, `"MONTHLY_BY_POSITION"`,
+    /// `"BY_DAY_COUNT"`, `"BY_WEEKDAY_COUNT"`, `"YEARLY_BY_DAY_OF_MONTH"` or `"YEARLY_BY_POSITION"`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            RecurrenceKind::Daily => "DAILY",
+            RecurrenceKind::Weekly => "WEEKLY",
+            RecurrenceKind::MonthlyByDayOfMonth => "MONTHLY_BY_DAY_OF_MONTH",
+            RecurrenceKind::MonthlyByPosition => "MONTHLY_BY_POSITION",
+            RecurrenceKind::ByDayCount => "BY_DAY_COUNT",
+            RecurrenceKind::ByWeekdayCount => "BY_WEEKDAY_COUNT",
+            RecurrenceKind::YearlyByDayOfMonth => "YEARLY_BY_DAY_OF_MONTH",
+            RecurrenceKind::YearlyByPosition => "YEARLY_BY_POSITION",
+        }
+    }
+}
+
+/// A repeating set of days (and times of day) in a [`WorkTime`]'s pattern
+/// (`IfcRecurrencePattern`). `days` (1..31), `weekdays` (1 = Monday .. 7 = Sunday) and
+/// `months` (1..12) are sorted; `periods` are `(start, end)` pairs in seconds after
+/// midnight, empty for all day.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recurrence {
+    pub kind: RecurrenceKind,
+    pub days: Vec<u8>,
+    pub weekdays: Vec<u8>,
+    pub months: Vec<u8>,
+    pub position: Option<i32>,
+    pub interval: Option<u32>,
+    pub occurrences: Option<u32>,
+    pub periods: Vec<(f64, f64)>,
+}
+
+/// A repeating set of working (or, among a calendar's `exceptions`, non-working) periods,
+/// valid between two dates (`IfcWorkTime`). `start` and `finish` are midnight of their day,
+/// in seconds since 1970-01-01T00:00, `None` for an open end; the finish day is included.
+/// `pattern` is `None` for every day of the range, all day.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkTime {
+    pub name: String,
+    pub start: Option<f64>,
+    pub finish: Option<f64>,
+    pub pattern: Option<Recurrence>,
+}
+
+/// When work happens (`IfcWorkCalendar`). From [`Scene::calendars`] or [`Task::calendar`].
+/// Dates are seconds since 1970-01-01T00:00, no zone. The queries fail, with the library's
+/// message, for a date that is not finite or a `from` after `to`.
+#[derive(Clone)]
+pub struct WorkCalendar<'s> {
+    scene: &'s Scene,
+    pub index: u32,
+    /// Its name, else its identification, else `calendar #k`.
+    pub name: String,
+    /// Its identification, `""` where none.
+    pub identification: String,
+    pub kind: CalendarKind,
+    /// The text of a user-defined kind ([`CalendarKind::UserDefined`]); `""` otherwise.
+    pub kind_name: String,
+    /// Its working times, in file order.
+    pub working: Vec<WorkTime>,
+    /// Its exception (non-working) times, in file order.
+    pub exceptions: Vec<WorkTime>,
+}
+
+impl std::fmt::Debug for WorkCalendar<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkCalendar")
+            .field("index", &self.index)
+            .field("name", &self.name)
+            .field("identification", &self.identification)
+            .field("kind", &self.kind)
+            .field("kind_name", &self.kind_name)
+            .finish()
+    }
+}
+
+// Identity is the pair, so the same calendar from two lookups is equal.
+impl PartialEq for WorkCalendar<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index && std::ptr::eq(self.scene, other.scene)
+    }
+}
+
+impl Eq for WorkCalendar<'_> {}
+
+impl WorkCalendar<'_> {
+    fn check(&self, status: u32) -> Result<()> {
+        if status == 0 {
+            return Ok(());
+        }
+        Err(Error::new(unsafe { text((self.scene.api.cadaclysm_calendar_error_message)(status)) }))
+    }
+
+    /// The working periods overlapping `from`..`to`, clipped to it, sorted and merged:
+    /// `(start, end)` pairs, no two touching or overlapping.
+    pub fn working_periods(&self, from: f64, to: f64) -> Result<Vec<(f64, f64)>> {
+        let api = self.scene.api;
+        let mut count = 0u32;
+        self.check(unsafe { (api.cadaclysm_calendar_working_periods)(self.scene.raw(), self.index, from, to, std::ptr::null_mut(), 0, &mut count) })?;
+        let mut flat = vec![0f64; 2 * count as usize];
+        if count > 0 {
+            self.check(unsafe { (api.cadaclysm_calendar_working_periods)(self.scene.raw(), self.index, from, to, flat.as_mut_ptr(), count, &mut count) })?;
+        }
+        Ok(flat.chunks_exact(2).map(|p| (p[0], p[1])).collect())
+    }
+
+    /// The working seconds in `from`..`to`.
+    pub fn working_seconds(&self, from: f64, to: f64) -> Result<f64> {
+        let mut out = 0f64;
+        self.check(unsafe { (self.scene.api.cadaclysm_calendar_working_seconds)(self.scene.raw(), self.index, from, to, &mut out) })?;
+        Ok(out)
+    }
+
+    /// The date `days` working days and then `seconds` of working time after `from` (before
+    /// it, when negative). A forward result landing at the start of a working day is the end
+    /// of the previous one. Fails when no working time lies within 100 years.
+    pub fn add_work(&self, from: f64, days: f64, seconds: f64) -> Result<f64> {
+        let mut out = 0f64;
+        self.check(unsafe { (self.scene.api.cadaclysm_calendar_add_work)(self.scene.raw(), self.index, from, days, seconds, &mut out) })?;
+        Ok(out)
     }
 }
 
@@ -3637,6 +4050,20 @@ impl<'s> Node<'s> {
     /// different index range.
     pub fn mesh_lod(&self, level: u32) -> Mesh<'s> {
         self.mesh_of(unsafe { (self.scene.api.cadaclysm_node_mesh_lod)(self.scene.raw(), self.index, level) })
+    }
+
+    /// A second set of texture coordinates for [`Node::mesh`], one pair a vertex in its order,
+    /// packed into the unit square with no two triangles overlapping: what a baked lightmap needs.
+    /// `None` when not asked for at open, for a node with no B-rep, and for a body whose charts did
+    /// not fit. Borrowed from the scene.
+    pub fn lightmap_uvs(&self) -> Option<&'s [[f32; 2]]> {
+        let mut count = 0u32;
+        let p = unsafe { (self.scene.api.cadaclysm_node_mesh_lightmap_uvs)(self.scene.raw(), self.index, &mut count) };
+        if count == 0 {
+            return None;
+        }
+        // SAFETY: the library returns `2 * count` floats, valid until the scene closes.
+        unsafe { groups::<2>(p, count as usize) }
     }
 
     /// How far [`Node::mesh_lod`] at this level moved the surface, in the scene's units
@@ -4455,6 +4882,73 @@ impl Scene {
         }
     }
 
+    /// The file's work calendars -- see [`WorkCalendar`]. Empty where the file records none.
+    pub fn calendars(&self) -> Vec<WorkCalendar<'_>> {
+        let count = unsafe { (self.api.cadaclysm_calendar_count)(self.raw()) };
+        (0..count).map(|index| self.calendar_of(index)).collect()
+    }
+
+    /// Work calendar `index` (file order), or `None` past the last one.
+    pub fn calendar(&self, index: usize) -> Option<WorkCalendar<'_>> {
+        let count = unsafe { (self.api.cadaclysm_calendar_count)(self.raw()) };
+        let index = u32::try_from(index).ok().filter(|&i| i < count)?;
+        Some(self.calendar_of(index))
+    }
+
+    fn calendar_of(&self, index: u32) -> WorkCalendar<'_> {
+        let api = self.api;
+        let c = index;
+        let times = |exception: bool, count: u32| -> Vec<WorkTime> {
+            let numbers = |call: unsafe extern "C" fn(*const sys::CadaclysmScene, u32, bool, u32, *mut u8, u32) -> u32, w: u32| -> Vec<u8> {
+                let n = unsafe { call(self.raw(), c, exception, w, std::ptr::null_mut(), 0) };
+                let mut out = vec![0u8; n as usize];
+                if n > 0 {
+                    unsafe { call(self.raw(), c, exception, w, out.as_mut_ptr(), n) };
+                }
+                out
+            };
+            (0..count)
+                .map(|w| {
+                    let mut raw = sys::CadaclysmWorkTime::default();
+                    unsafe { (api.cadaclysm_calendar_work_time)(self.raw(), c, exception, w, &mut raw) };
+                    let pattern = raw.has_pattern.then(|| {
+                        let n = unsafe { (api.cadaclysm_calendar_work_time_periods)(self.raw(), c, exception, w, std::ptr::null_mut(), 0) };
+                        let mut flat = vec![0f64; 2 * n as usize];
+                        if n > 0 {
+                            unsafe { (api.cadaclysm_calendar_work_time_periods)(self.raw(), c, exception, w, flat.as_mut_ptr(), n) };
+                        }
+                        Recurrence {
+                            kind: RecurrenceKind::from_raw(raw.kind),
+                            days: numbers(api.cadaclysm_calendar_work_time_days, w),
+                            weekdays: numbers(api.cadaclysm_calendar_work_time_weekdays, w),
+                            months: numbers(api.cadaclysm_calendar_work_time_months, w),
+                            position: raw.has_position.then_some(raw.position),
+                            interval: raw.has_interval.then_some(raw.interval),
+                            occurrences: raw.has_occurrences.then_some(raw.occurrences),
+                            periods: flat.chunks_exact(2).map(|p| (p[0], p[1])).collect(),
+                        }
+                    });
+                    WorkTime {
+                        name: unsafe { text((api.cadaclysm_calendar_work_time_name)(self.raw(), c, exception, w)) },
+                        start: raw.has_start.then_some(raw.start),
+                        finish: raw.has_finish.then_some(raw.finish),
+                        pattern,
+                    }
+                })
+                .collect()
+        };
+        WorkCalendar {
+            scene: self,
+            index,
+            name: unsafe { text((api.cadaclysm_calendar_name)(self.raw(), index)) },
+            identification: unsafe { text((api.cadaclysm_calendar_identification)(self.raw(), index)) },
+            kind: CalendarKind::from_raw(unsafe { (api.cadaclysm_calendar_kind)(self.raw(), index) }),
+            kind_name: unsafe { text((api.cadaclysm_calendar_kind_name)(self.raw(), index)) },
+            working: times(false, unsafe { (api.cadaclysm_calendar_working_count)(self.raw(), index) }),
+            exceptions: times(true, unsafe { (api.cadaclysm_calendar_exception_count)(self.raw(), index) }),
+        }
+    }
+
     /// The link the file declares as the mechanism's base, or `None` when it declares
     /// none (the default ground is then the link on the most joints; see [`Scene::pose`]).
     pub fn base(&self) -> Option<Link<'_>> {
@@ -4744,11 +5238,19 @@ pub struct OpenOptions {
     colors: bool,
     source_metres_per_unit: f64,
     name: Option<String>,
+    lightmap_resolution: u32,
 }
 
 impl OpenOptions {
     pub fn new() -> OpenOptions {
         OpenOptions::default()
+    }
+
+    /// A lightmap atlas that many texels on a side: one chart per B-rep face, no two sharing a
+    /// texel, read back as [`Node::lightmap_uvs`]. 0, the default, is none.
+    pub fn lightmap_resolution(mut self, texels: u32) -> OpenOptions {
+        self.lightmap_resolution = texels;
+        self
     }
 
     /// The space to read the file into: a [`Convention`], optionally OR'd with
@@ -4812,6 +5314,7 @@ impl OpenOptions {
             schema_length: 0,
             pick: std::ptr::null(),
             pick_user: std::ptr::null_mut(),
+            lightmap_resolution: self.lightmap_resolution,
         };
         Ok((options, held))
     }
@@ -4983,6 +5486,32 @@ mod tests {
         let err = packed("bogus").unwrap_err().to_string();
         assert!(err.contains("not 'bogus'"), "{err}");
         assert!(!err.contains("0..1"), "{err}");
+    }
+
+    #[test]
+    fn lightmap_uvs_arrive_when_asked_and_not_otherwise() {
+        // A faced STEP: samples/mechanism.stp has no faces.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../cadaclysm-acis/tests/fixtures/fusion/rhino-fillet-mixed-radii.stp");
+        let plain = match open(&path) {
+            Ok(scene) => scene,
+            Err(err) => {
+                eprintln!("skipped: {err} (no library)");
+                return;
+            }
+        };
+        assert!(plain.walk().all(|n| n.lightmap_uvs().is_none()), "unasked is off");
+        let lit = OpenOptions::new().lightmap_resolution(256).open(&path).unwrap();
+        let mut count = 0;
+        for node in lit.walk() {
+            let Some(uvs) = node.lightmap_uvs() else { continue };
+            let mesh = node.mesh();
+            assert_eq!(uvs.len(), mesh.vertex_count(), "one pair a vertex");
+            assert!(uvs.iter().flatten().all(|f| (0.0..=1.0).contains(f)), "inside the unit square");
+            assert!(mesh.uvs.is_none(), "no material uvs were asked");
+            count += 1;
+        }
+        assert!(count > 0, "a faced STEP comes back lit");
     }
 
     #[test]
@@ -5533,6 +6062,89 @@ mod tests {
         assert_eq!(err.to_string(), "the date must be a finite number");
     }
 
+    /// `samples/schedule-calendar.ifc`: `schedule.ifc` with one work calendar. Skips quietly without a library.
+    fn calendared() -> Option<Scene> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../samples/schedule-calendar.ifc");
+        match open(path) {
+            Ok(scene) => Some(scene),
+            Err(err) => {
+                eprintln!("skipped: {err} (no library to open the calendar with)");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn calendar_a_file_reads_its_work_calendar() {
+        let Some(scene) = calendared() else { return };
+        let monday = 1772409600.0;
+        let calendars = scene.calendars();
+        assert_eq!(calendars.len(), 1);
+        let cal = &calendars[0];
+        assert_eq!((cal.name.as_str(), cal.identification.as_str(), cal.kind, cal.kind_name.as_str()), ("Site calendar", "CAL-1", CalendarKind::FirstShift, ""));
+        assert_eq!(cal.kind.name(), "FIRSTSHIFT");
+        assert_eq!(cal.working.len(), 1);
+        let weekdays = &cal.working[0];
+        assert_eq!((weekdays.name.as_str(), weekdays.start, weekdays.finish), ("Weekdays", Some(monday - 60.0 * DAY), None));
+        let p = weekdays.pattern.as_ref().expect("a pattern");
+        assert_eq!(p.kind, RecurrenceKind::Weekly);
+        assert_eq!(p.kind.name(), "WEEKLY");
+        assert_eq!((p.days.as_slice(), p.weekdays.as_slice(), p.months.as_slice()), (&[][..], &[1u8, 2, 3, 4, 5][..], &[][..]));
+        assert_eq!((p.position, p.interval, p.occurrences), (None, None, None));
+        assert_eq!(p.periods, [(28800.0, 43200.0), (46800.0, 61200.0)]);
+        assert_eq!(cal.exceptions.len(), 1);
+        let easter = &cal.exceptions[0];
+        assert_eq!((easter.name.as_str(), easter.start, easter.finish), ("Easter Monday", None, None));
+        let ep = easter.pattern.as_ref().expect("a pattern");
+        assert_eq!((ep.kind, ep.days.as_slice(), ep.months.as_slice(), ep.periods.len()), (RecurrenceKind::YearlyByDayOfMonth, &[6u8][..], &[4u8][..], 0));
+
+        let slab = &scene.schedules()[0].tasks()[0];
+        assert_eq!(slab.calendar_index(), Some(0));
+        assert_eq!(slab.calendar().as_ref(), Some(cal));
+        // The calendar outlives the Task temporary it came from: it borrows the scene.
+        let held = scene.schedules()[0].tasks()[0].calendar();
+        assert_eq!(held.as_ref(), Some(cal));
+        assert_eq!(slab.time.duration_kind, Some(DurationKind::Work));
+        assert_eq!(slab.time.duration_kind.map(|k| k.name()), Some("WORKTIME"));
+        assert_eq!(slab.time.work_duration, Some(WorkDuration { days: 10.0, seconds: 0.0 }));
+
+        let week = cal.working_periods(monday, monday + 7.0 * DAY).unwrap();
+        assert_eq!(week.len(), 10);
+        assert_eq!(week[0], (1772438400.0, 1772452800.0));
+        assert_eq!(cal.working_seconds(monday, monday + 7.0 * DAY).unwrap(), 10.0 * 4.0 * 3600.0);
+        assert!(cal.working_periods(1775433600.0, 1775520000.0).unwrap().is_empty()); // Easter Monday 2026-04-06
+        assert_eq!(cal.add_work(1772438400.0, 10.0, 0.0).unwrap(), 1773421200.0);
+
+        assert_eq!(cal.working_periods(1.0, 0.0).unwrap_err().to_string(), "from must not be after to");
+        assert_eq!(cal.working_seconds(f64::NAN, 0.0).unwrap_err().to_string(), "from and to must be finite");
+        assert_eq!(cal.working_periods(0.0, 1.7e12).unwrap_err().to_string(), "from and to must lie within 100 years of each other");
+        assert_eq!(cal.add_work(T0, f64::INFINITY, 0.0).unwrap_err().to_string(), "from and to must be finite");
+    }
+
+    /// `CadaclysmWorkTime` as the header lays it out: bool/double x2, bool/u32, bool/i32, bool/u32 x2.
+    #[test]
+    fn calendar_work_time_layout_matches_the_header() {
+        use std::mem::{offset_of, size_of};
+        type W = sys::CadaclysmWorkTime;
+        assert_eq!(size_of::<W>(), 64);
+        let offsets = [
+            offset_of!(W, has_start), offset_of!(W, start), offset_of!(W, has_finish), offset_of!(W, finish),
+            offset_of!(W, has_pattern), offset_of!(W, kind), offset_of!(W, has_position), offset_of!(W, position),
+            offset_of!(W, has_interval), offset_of!(W, interval), offset_of!(W, has_occurrences), offset_of!(W, occurrences),
+        ];
+        assert_eq!(offsets, [0, 8, 16, 24, 32, 36, 40, 44, 48, 52, 56, 60]);
+    }
+
+    #[test]
+    fn calendar_a_file_without_one_has_none() {
+        let Some(scene) = scheduled() else { return };
+        assert!(scene.calendars().is_empty());
+        assert!(scene.calendar(0).is_none());
+        let slab = &scene.schedules()[0].tasks()[0];
+        assert_eq!(slab.calendar_index(), None);
+        assert!(slab.calendar().is_none());
+    }
+
     #[test]
     fn schedule_a_file_without_one_has_none() {
         let Some(scene) = two_cubes("schedule") else { return };
@@ -5589,7 +6201,7 @@ mod tests {
         let Some(mechanism) = open_mechanism_solid() else { return };
         let pose = mechanism.pose(&[], None).unwrap();
         let camera = mechanism.shown_with(fake::leaked(), Shown::Pose(&mechanism, &pose.transforms), &ViewOptions::default(), true).unwrap().expect("a camera");
-        assert_eq!(camera.pick, Some(crate::view::Pick { item: 3, node: 4, face: 5, clicks: 1, point: None, overlay: false }));
+        assert_eq!(camera.pick, Some(crate::view::Pick { item: 3, node: 4, face: 5, clicks: 1, point: None, overlay: false, viewport_label: None }));
     }
 
     // ---- Node::silhouette_beziers --------------------------------------------------------
@@ -5852,7 +6464,7 @@ mod tests {
         assert_eq!(report.wire_edges(0), &report.free_edges[..report.wires[0].count as usize]);
         assert!(report.wire_edges(0).iter().all(|e| e.wire == 0));
         assert!(report.wire_edges(45).is_empty());
-        let (_sewn, sew) = body.sewed(None, None).unwrap();
+        let (_sewn, sew) = body.sew(None, None).unwrap();
         assert_eq!(report.sew_pairs, sew.pairs);
         assert!(report.tolerance > 0.0 && report.cracks.is_none());
         assert_eq!(body.health(Some(f64::NAN), false).unwrap().tolerance, report.tolerance);
@@ -5884,11 +6496,11 @@ mod tests {
     fn brep_healed_heals_st203_bapl_and_leaves_the_original() {
         let Some((_scene, breps)) = st203() else { return };
         let body = &breps[1];
-        let (same, report) = body.healed(None, HealKinds::default()).unwrap();
+        let (same, report) = body.heal(None, HealKinds::default()).unwrap();
         assert_ne!(same.pointer(), body.pointer());
         assert_eq!((report.small_before, report.free_before), (0, 188));
         assert!(rel(report.tolerance, 1e-4 * body.health(None, false).unwrap().extent, 1e-12));
-        let (healed, report) = body.healed(Some(5.0), HealKinds::default()).unwrap();
+        let (healed, report) = body.heal(Some(5.0), HealKinds::default()).unwrap();
         assert_eq!(report.tolerance, 5.0);
         assert_eq!((report.small_before, report.fixes.len(), report.small_after), (96, 28, 8));
         assert_eq!((report.free_before, report.free_after), (188, 88));
@@ -5913,7 +6525,7 @@ mod tests {
         assert_eq!(healed.edge_tolerance(41363), Some(0.0));
         assert_eq!(healed.edge_tolerance(0xFFFF_FFF0), None);
         let off = HealKinds { edges: false, faces: false, holes: false };
-        let (_, off) = body.healed(Some(5.0), off).unwrap();
+        let (_, off) = body.heal(Some(5.0), off).unwrap();
         assert!(off.fixes.is_empty() && off.refused.len() == 96 && off.free_after == off.free_before);
         assert!(off.refused.iter().all(|r| r.why == "toggled" && r.figure == 0.0));
         let per_kind: Vec<usize> = ["short_edge", "sliver_face", "tiny_face"]
@@ -5922,7 +6534,7 @@ mod tests {
             .collect();
         assert_eq!(per_kind, [64, 26, 6]);
         // edges alone: only edge fixes, every other kind refused as toggled
-        let (_, edges_only) = body.healed(Some(5.0), HealKinds { edges: true, faces: false, holes: false }).unwrap();
+        let (_, edges_only) = body.heal(Some(5.0), HealKinds { edges: true, faces: false, holes: false }).unwrap();
         assert!(edges_only.refused.iter().filter(|r| r.kind != "short_edge").all(|r| r.why == "toggled"));
         assert!(edges_only.fixes.iter().all(|f| f.kind == "short_edge" || f.kind == "collapsed_edge"));
         assert!(!edges_only.fixes.is_empty());
@@ -5997,5 +6609,79 @@ mod tests {
         assert_eq!(HealKinds { edges: false, faces: true, holes: false }.flags(), 2);
         assert_eq!(HealKinds { edges: false, faces: false, holes: true }.flags(), 4);
         assert_eq!(HealKinds { edges: false, faces: false, holes: false }.flags(), 0);
+    }
+
+    // ---- canonical recognition (recognition in the other wrappers, 2026-11-16) ----------
+
+    #[test]
+    fn brep_recognize_takes_a_3dm_ball_back_to_a_sphere_and_leaves_the_original() {
+        // box-union-sphere.3dm: a box unioned with a ball, every face stored as NURBS.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../cadaclysm-acis/tests/fixtures/rhino/box-union-sphere.3dm");
+        let scene = match open(&path) {
+            Ok(scene) => scene,
+            Err(err) => {
+                eprintln!("skipped: {err} (no library to open box-union-sphere.3dm with)");
+                return;
+            }
+        };
+        let body = scene.nodes().iter().find_map(|n| n.brep()).expect("a body");
+        let (back, report) = body.recognize(None).unwrap();
+        assert_ne!(back.pointer(), body.pointer());
+        let kinds: Vec<&str> = report.faces.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"sphere") && kinds.contains(&"plane"), "{kinds:?}");
+        let faces: std::collections::BTreeSet<u32> = report.faces.iter().map(|f| f.face).collect();
+        assert_eq!(faces.len(), report.faces.len(), "every face once");
+        assert!(report.faces.iter().all(|f| f.deviation <= report.tolerance), "{report:?}");
+        assert!(report.edges.iter().all(|e| e.deviation <= report.tolerance), "{report:?}");
+        assert_eq!(report.worst_face, report.faces.iter().map(|f| f.deviation).fold(f64::NEG_INFINITY, f64::max));
+        // the edges named as the brep names them
+        assert!(report.edges.iter().all(|e| back.edge_tolerance(e.edge).is_some()), "{report:?}");
+        back.release();
+        assert_eq!(body.recognize(Some(0.25)).unwrap().1.tolerance, 0.25);
+    }
+
+    #[test]
+    fn the_recognize_decoder_reads_every_column_of_distinct_rows() {
+        // The C ABI's layout: counts 10 u32 (faces per kind, faces left, edges per kind, edges
+        // left), sizes 3 f64 (tolerance, worst face, worst edge), each row two u32 and one f64.
+        // Every figure different, so a swapped column cannot read back.
+        let r = recognize_report(
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 11],
+            &[0.5, 0.25, 0.125],
+            &[10, 4, 12, 0],
+            &[1.5, 2.5],
+            &[20, 0, 21, 3],
+            &[7.5, f64::NAN],
+            &[30, 2, 31, 1, 32, 0],
+            &[0.75, 0.0625, 0.03125],
+        )
+        .unwrap();
+        assert_eq!((r.tolerance, r.worst_face, r.worst_edge, r.edges_left), (0.5, 0.25, 0.125, 11));
+        assert_eq!(
+            r.faces,
+            vec![
+                RecognizedFace { face: 10, kind: "torus".into(), deviation: 1.5 },
+                RecognizedFace { face: 12, kind: "plane".into(), deviation: 2.5 },
+            ]
+        );
+        assert_eq!(
+            r.refused,
+            vec![
+                RecognizeRefusal { face: 20, why: "no_kind".into(), closest: Some(7.5) },
+                RecognizeRefusal { face: 21, why: "too_few_samples".into(), closest: None },
+            ]
+        );
+        assert_eq!(
+            r.edges,
+            vec![
+                RecognizedEdge { edge: 30, kind: "ellipse".into(), deviation: 0.75 },
+                RecognizedEdge { edge: 31, kind: "circle".into(), deviation: 0.0625 },
+                RecognizedEdge { edge: 32, kind: "line".into(), deviation: 0.03125 },
+            ]
+        );
+        let empty: [u32; 0] = [];
+        assert!(recognize_report(&[0; 10], &[0.0; 3], &[0, 5], &[0.0], &empty, &[], &empty, &[]).is_err(), "kind 5 is no face kind");
+        assert!(recognize_report(&[0; 10], &[0.0; 3], &empty, &[], &[0, 4], &[0.0], &empty, &[]).is_err(), "why 4 is no why");
+        assert!(recognize_report(&[0; 10], &[0.0; 3], &empty, &[], &empty, &[], &[0, 3], &[0.0]).is_err(), "kind 3 is no edge kind");
     }
 }

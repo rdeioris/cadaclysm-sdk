@@ -235,8 +235,8 @@ item.remove(); v.close();
 on a stock: `programs` are `[tool, gcode]` in run order (`tool` is `{ number, shape, diameter,
 flute_length?, angle?, corner_radius? }`), `stock` is `[[minX, minY, minZ], [maxX, maxY, maxZ]]`,
 and `part` (`{ positions, indices }`) colours by deviation. It returns a `Machining` item
-(`seekMove`, `colourBy`, `overlays`, `info`, `heights`); the view's timeline plays it with
-`play(speed)`, `pause()`, `seek(seconds)`, `loop()`, `time`, `duration`, `playing` and `status()`.
+(`seekMove`, `setColourBy`, `setOverlays`, `info`, `heights`); the view's timeline plays it with
+`play(speed)`, `pause()`, `seek(seconds)`, `setLoop()`, `time`, `duration`, `playing` and `status()`.
 
 While a window is open, a 16 ms timer keeps it live and keeps the process running; the process
 ends when the last window is closed. `view.pump()` serves a loop of your own. The library is

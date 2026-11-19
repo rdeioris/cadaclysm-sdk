@@ -478,6 +478,13 @@ type openConfig struct {
 	format              string
 	colours             bool
 	sourceMetresPerUnit float64
+	lightmapResolution  uint32
+}
+
+// WithLightmapResolution asks for a lightmap atlas that many texels on a side: one chart per
+// B-rep face, no two sharing a texel, read back as Node.LightmapUvs. 0, the default, is none.
+func WithLightmapResolution(texels uint32) Option {
+	return func(cfg *openConfig) { cfg.lightmapResolution = texels }
 }
 
 // WithFormat names the kind of the bytes OpenMemory is given, as an extension would —
@@ -522,6 +529,7 @@ func buildOptions(cfg openConfig) C.CadaclysmOpenOptions {
 		opts.colors = C.uint32_t(C.CADACLYSM_COLORS_PER_FACE)
 	}
 	opts.source_meters_per_unit = C.double(cfg.sourceMetresPerUnit)
+	opts.lightmap_resolution = C.uint32_t(cfg.lightmapResolution)
 	return opts
 }
 
@@ -1673,12 +1681,24 @@ func (q Sequence) Pose(t float64, ground *Link) (*Pose, error) {
 
 // TaskTime is every date pair of a Task, in seconds since 1970-01-01T00:00 (no zone), each
 // nil where the file gives none; Duration is in seconds. From Task.Time.
+//
+// DurationKind is "ELAPSEDTIME", "WORKTIME" or "NOTDEFINED", nil where the file gives none.
+// WorkDuration is the duration in working time -- that many working days, then that many
+// seconds of working time -- nil where there is none (an IFC2X3 task, or no duration).
 type TaskTime struct {
 	ScheduleStart, ScheduleFinish *float64
 	EarlyStart, EarlyFinish       *float64
 	LateStart, LateFinish         *float64
 	ActualStart, ActualFinish     *float64
 	Duration                      *float64
+	DurationKind                  *string
+	WorkDuration                  *WorkDuration
+}
+
+// WorkDuration is a duration in working time: Days working days, then Seconds of working
+// time. From TaskTime.WorkDuration.
+type WorkDuration struct {
+	Days, Seconds float64
 }
 
 // Task is one task of a WorkSchedule (IfcTask). From WorkSchedule.Tasks.
@@ -1702,7 +1722,19 @@ type Task struct {
 	// Parent is the summary task nesting this one, or nil for a top-level task.
 	Parent *Task
 	Time   TaskTime
-	scene  *Scene
+	// CalendarIndex is the index of the work calendar this task works on
+	// (scene.Calendars()[i]), nil where it has none.
+	CalendarIndex *uint32
+	scene         *Scene
+}
+
+// Calendar is the work calendar this task works on, or nil where it has none.
+func (t Task) Calendar() *WorkCalendar {
+	if t.CalendarIndex == nil {
+		return nil
+	}
+	c := t.scene.workCalendar(*t.CalendarIndex)
+	return &c
 }
 
 // ScheduleIndex is the index of the work schedule this task belongs to (scene.Schedules()[i]).
@@ -1763,6 +1795,240 @@ func kindWord(words []string, code uint32) string {
 		return words[code]
 	}
 	return "notdefined"
+}
+
+// durationKindWords are the words of CadaclysmDurationKind; the fourth value (unset) has none.
+var durationKindWords = [...]string{"ELAPSEDTIME", "WORKTIME", "NOTDEFINED"}
+
+// Calendars use the IFC words, as the core spells them.
+var (
+	calendarKindWords   = [...]string{"FIRSTSHIFT", "SECONDSHIFT", "THIRDSHIFT", "NOTDEFINED", "USERDEFINED"}
+	recurrenceKindWords = [...]string{"DAILY", "WEEKLY", "MONTHLY_BY_DAY_OF_MONTH", "MONTHLY_BY_POSITION", "BY_DAY_COUNT",
+		"BY_WEEKDAY_COUNT", "YEARLY_BY_DAY_OF_MONTH", "YEARLY_BY_POSITION"}
+)
+
+// Recurrence is the repeating set of days (and times of day) in a WorkTime's pattern
+// (IfcRecurrencePattern).
+type Recurrence struct {
+	// Kind is "DAILY", "WEEKLY", "MONTHLY_BY_DAY_OF_MONTH", "MONTHLY_BY_POSITION",
+	// "BY_DAY_COUNT", "BY_WEEKDAY_COUNT", "YEARLY_BY_DAY_OF_MONTH" or "YEARLY_BY_POSITION".
+	Kind string
+	// Days (1..31), Weekdays (1 = Monday .. 7 = Sunday) and Months (1..12) are sorted.
+	Days, Weekdays, Months []uint8
+	// Position, Interval and Occurrences are nil where the file gives none.
+	Position    *int32
+	Interval    *uint32
+	Occurrences *uint32
+	// Periods are (start, end) pairs in seconds after midnight; empty for all day.
+	Periods [][2]float64
+}
+
+// WorkTime is a repeating set of working (or, among a calendar's Exceptions, non-working)
+// periods, valid between two dates (IfcWorkTime). From WorkCalendar.Working and
+// WorkCalendar.Exceptions.
+type WorkTime struct {
+	Name string
+	// Start and Finish are midnight of their day, in seconds since 1970-01-01T00:00, nil for an
+	// open end; the finish day is included.
+	Start, Finish *float64
+	// Pattern is nil for every day of the range, all day.
+	Pattern *Recurrence
+}
+
+// WorkCalendar is when work happens (IfcWorkCalendar). From Scene.Calendars or
+// Task.Calendar. Dates are seconds since 1970-01-01T00:00 (no zone). The queries return a
+// *CadaclysmError with the library's message for a date that is not finite or a from after to.
+type WorkCalendar struct {
+	Index uint32
+	// Name is its name, else its identification, else "calendar #k" (k from 1).
+	Name string
+	// Identification is its identification, "" where the file gives none.
+	Identification string
+	// Kind is "FIRSTSHIFT", "SECONDSHIFT", "THIRDSHIFT", "NOTDEFINED" or "USERDEFINED".
+	Kind string
+	// KindName is the text of a user-defined kind ("USERDEFINED"), "" otherwise.
+	KindName string
+	scene    *Scene
+}
+
+func (s *Scene) workCalendar(i uint32) WorkCalendar {
+	h := s.h()
+	return WorkCalendar{
+		Index:          i,
+		Name:           C.GoString(C.cadaclysm_calendar_name(h, C.uint32_t(i))),
+		Identification: C.GoString(C.cadaclysm_calendar_identification(h, C.uint32_t(i))),
+		Kind:           calendarKindWord(uint32(C.cadaclysm_calendar_kind(h, C.uint32_t(i)))),
+		KindName:       C.GoString(C.cadaclysm_calendar_kind_name(h, C.uint32_t(i))),
+		scene:          s,
+	}
+}
+
+func calendarKindWord(code uint32) string {
+	if int(code) < len(calendarKindWords) {
+		return calendarKindWords[code]
+	}
+	return "NOTDEFINED"
+}
+
+// Calendars is the file's work calendars, in file order; empty for a file that records
+// none.
+func (s *Scene) Calendars() []WorkCalendar {
+	n := uint32(C.cadaclysm_calendar_count(s.h()))
+	out := make([]WorkCalendar, n)
+	for i := uint32(0); i < n; i++ {
+		out[i] = s.workCalendar(i)
+	}
+	return out
+}
+
+// Working is the calendar's working times, in file order.
+func (c WorkCalendar) Working() []WorkTime {
+	return c.workTimes(false, uint32(C.cadaclysm_calendar_working_count(c.scene.h(), C.uint32_t(c.Index))))
+}
+
+// Exceptions is the calendar's exception (non-working) times, in file order.
+func (c WorkCalendar) Exceptions() []WorkTime {
+	return c.workTimes(true, uint32(C.cadaclysm_calendar_exception_count(c.scene.h(), C.uint32_t(c.Index))))
+}
+
+func (c WorkCalendar) workTimes(exception bool, n uint32) []WorkTime {
+	h := c.scene.h()
+	ci, ex := C.uint32_t(c.Index), C.bool(exception)
+	// numbers reads one of the pattern's sorted lists: 0 days, 1 weekdays, 2 months.
+	numbers := func(list int, w C.uint32_t) []uint8 {
+		call := func(out *C.uint8_t, capacity C.uint32_t) C.uint32_t {
+			switch list {
+			case 0:
+				return C.cadaclysm_calendar_work_time_days(h, ci, ex, w, out, capacity)
+			case 1:
+				return C.cadaclysm_calendar_work_time_weekdays(h, ci, ex, w, out, capacity)
+			default:
+				return C.cadaclysm_calendar_work_time_months(h, ci, ex, w, out, capacity)
+			}
+		}
+		count := uint32(call(nil, 0))
+		out := make([]uint8, count)
+		if count > 0 {
+			call((*C.uint8_t)(&out[0]), C.uint32_t(count))
+		}
+		return out
+	}
+	opt := func(has C.bool, v C.double) *float64 {
+		if !bool(has) {
+			return nil
+		}
+		f := float64(v)
+		return &f
+	}
+	out := make([]WorkTime, n)
+	for i := uint32(0); i < n; i++ {
+		w := C.uint32_t(i)
+		var raw C.CadaclysmWorkTime
+		C.cadaclysm_calendar_work_time(h, ci, ex, w, &raw)
+		wt := WorkTime{
+			Name:   C.GoString(C.cadaclysm_calendar_work_time_name(h, ci, ex, w)),
+			Start:  opt(raw.has_start, raw.start),
+			Finish: opt(raw.has_finish, raw.finish),
+		}
+		if bool(raw.has_pattern) {
+			kind := "DAILY"
+			if int(raw.kind) < len(recurrenceKindWords) {
+				kind = recurrenceKindWords[raw.kind]
+			}
+			p := &Recurrence{
+				Kind:     kind,
+				Days:     numbers(0, w),
+				Weekdays: numbers(1, w),
+				Months:   numbers(2, w),
+			}
+			if bool(raw.has_position) {
+				v := int32(raw.position)
+				p.Position = &v
+			}
+			if bool(raw.has_interval) {
+				v := uint32(raw.interval)
+				p.Interval = &v
+			}
+			if bool(raw.has_occurrences) {
+				v := uint32(raw.occurrences)
+				p.Occurrences = &v
+			}
+			count := uint32(C.cadaclysm_calendar_work_time_periods(h, ci, ex, w, nil, 0))
+			p.Periods = make([][2]float64, count)
+			if count > 0 {
+				flat := make([]C.double, 2*count)
+				C.cadaclysm_calendar_work_time_periods(h, ci, ex, w, &flat[0], C.uint32_t(count))
+				for k := range p.Periods {
+					p.Periods[k] = [2]float64{float64(flat[2*k]), float64(flat[2*k+1])}
+				}
+			}
+			wt.Pattern = p
+		}
+		out[i] = wt
+	}
+	return out
+}
+
+func calendarError(status C.uint32_t) error {
+	if status == 0 {
+		return nil
+	}
+	return &CadaclysmError{Message: C.GoString(C.cadaclysm_calendar_error_message(status))}
+}
+
+// WorkingPeriods is the calendar's working periods overlapping from..to, clipped to it,
+// sorted and merged: (start, end) pairs, no two touching or overlapping.
+func (c WorkCalendar) WorkingPeriods(from, to float64) ([][2]float64, error) {
+	if err := c.scene.closedError(); err != nil {
+		return nil, err
+	}
+	defer pin()()
+	h := c.scene.h()
+	var count C.uint32_t
+	if err := calendarError(C.cadaclysm_calendar_working_periods(h, C.uint32_t(c.Index), C.double(from), C.double(to), nil, 0, &count)); err != nil {
+		return nil, err
+	}
+	out := make([][2]float64, count)
+	if count == 0 {
+		return out, nil
+	}
+	flat := make([]C.double, 2*count)
+	n := count
+	if err := calendarError(C.cadaclysm_calendar_working_periods(h, C.uint32_t(c.Index), C.double(from), C.double(to), &flat[0], n, &count)); err != nil {
+		return nil, err
+	}
+	for k := range out {
+		out[k] = [2]float64{float64(flat[2*k]), float64(flat[2*k+1])}
+	}
+	return out, nil
+}
+
+// WorkingSeconds is the calendar's working seconds in from..to.
+func (c WorkCalendar) WorkingSeconds(from, to float64) (float64, error) {
+	if err := c.scene.closedError(); err != nil {
+		return 0, err
+	}
+	defer pin()()
+	var out C.double
+	if err := calendarError(C.cadaclysm_calendar_working_seconds(c.scene.h(), C.uint32_t(c.Index), C.double(from), C.double(to), &out)); err != nil {
+		return 0, err
+	}
+	return float64(out), nil
+}
+
+// AddWork is the date days working days and then seconds of working time after from (before
+// it, when negative). A forward result landing at the start of a working day is the end of
+// the previous one. Returns an error where no working time lies within 100 years.
+func (c WorkCalendar) AddWork(from, days, seconds float64) (float64, error) {
+	if err := c.scene.closedError(); err != nil {
+		return 0, err
+	}
+	defer pin()()
+	var out C.double
+	if err := calendarError(C.cadaclysm_calendar_add_work(c.scene.h(), C.uint32_t(c.Index), C.double(from), C.double(days), C.double(seconds), &out)); err != nil {
+		return 0, err
+	}
+	return float64(out), nil
 }
 
 // Schedules is the file's work schedules, in file order; empty for a file that records
@@ -1832,6 +2098,19 @@ func (w WorkSchedule) Tasks() []Task {
 			ActualStart:    opt(raw.has_actual_start, raw.actual_start),
 			ActualFinish:   opt(raw.has_actual_finish, raw.actual_finish),
 			Duration:       opt(raw.has_duration, raw.duration),
+		}
+		var days, seconds C.double
+		if bool(C.cadaclysm_task_work_duration(h, s, t, &days, &seconds)) {
+			task.Time.WorkDuration = &WorkDuration{Days: float64(days), Seconds: float64(seconds)}
+		}
+		if kind := uint32(C.cadaclysm_task_duration_kind(h, s, t)); int(kind) < len(durationKindWords) {
+			word := durationKindWords[kind]
+			task.Time.DurationKind = &word
+		}
+		var calendar C.uint32_t
+		if bool(C.cadaclysm_task_calendar(h, s, t, &calendar)) {
+			index := uint32(calendar)
+			task.CalendarIndex = &index
 		}
 		out[i] = task
 	}
@@ -2062,7 +2341,7 @@ func ManifoldOf(row [8]uint32) Manifold {
 	}
 }
 
-// Sewed is this brep with its free edges sewn, and what was sewn, as a new [Brep] and a
+// Sew is this brep with its free edges sewn, and what was sewn, as a new [Brep] and a
 // [SewReport]; this one is left as it was. Two free edges become one shared edge where both
 // their ends coincide within vertex -- by default the rounding [Brep.Manifold] merges
 // vertices at -- and their curves lie within tolerance of each other, by default vertex too,
@@ -2070,7 +2349,7 @@ func ManifoldOf(row [8]uint32) Manifold {
 // two curves between the same two vertices that part by up to it; vertex is what decides
 // which edges are candidates at all, and raising it is what could close a slot. Nothing
 // moves. A nil tolerance or vertex takes the default. The new brep is the caller's to Close.
-func (b *Brep) Sewed(tolerance, vertex *float64) (*Brep, SewReport, error) {
+func (b *Brep) Sew(tolerance, vertex *float64) (*Brep, SewReport, error) {
 	defer pin()()
 	if b == nil || b.ptr == nil {
 		return nil, SewReport{}, &CadaclysmError{Message: "brep: released"}
@@ -2098,7 +2377,7 @@ func (b *Brep) Sewed(tolerance, vertex *float64) (*Brep, SewReport, error) {
 	}, nil
 }
 
-// SewReport is what [Brep.Sewed] did, as plain data: the edges it joined (Pairs), the free
+// SewReport is what [Brep.Sew] did, as plain data: the edges it joined (Pairs), the free
 // edges before and after, how many groups of free edges between the same two vertices it
 // left free (Refused: too far apart for the tolerance, or more than two), the widest gap it
 // sewed, and the two tolerances it used.
@@ -2109,7 +2388,7 @@ type SewReport struct {
 
 // Health is what is wrong with this brep, as a [HealthReport]: the free edges (the sides one
 // face bounds) and the wires they chain into, with each edge's nearest partner and the gap to
-// it; the features below tolerance; the loose edges; and what [Brep.Sewed] would join and
+// it; the features below tolerance; the loose edges; and what [Brep.Sew] would join and
 // leave. tolerance is the length below which a feature is small and a gap closes -- nil, or a
 // value that is not finite and positive, takes the default (the report shows what was used).
 // mesh also meshes the brep and reports where the mesh cracks (Cracks); without it Cracks is
@@ -2157,7 +2436,7 @@ func (b *Brep) Health(tolerance *float64, mesh bool) (HealthReport, error) {
 	return healthReport(counts[:], sizes[:], freeIDs, freeSizes, wireRuns, wireSizes, smallItems, smallSizes, crackEdges), nil
 }
 
-// Healed is this brep with its small features removed, and what was done, as a new [Brep] and
+// Heal is this brep with its small features removed, and what was done, as a new [Brep] and
 // a [HealReport]; this one is left as it was. The features are the ones [Brep.Health] lists
 // as small at tolerance: short and collapsed edges, sliver and tiny faces, small holes. Every
 // fix is a vertex merge, and an edge it moves records how far as its [Brep.EdgeTolerance]. A
@@ -2166,7 +2445,7 @@ func (b *Brep) Health(tolerance *float64, mesh bool) (HealthReport, error) {
 // everything; a kind switched off is refused as "toggled". A nil tolerance, or one that is not
 // finite and positive, takes the default (the report shows what was used). The new brep is the
 // caller's to Close.
-func (b *Brep) Healed(tolerance *float64, edges, faces, holes bool) (*Brep, HealReport, error) {
+func (b *Brep) Heal(tolerance *float64, edges, faces, holes bool) (*Brep, HealReport, error) {
 	defer pin()()
 	if b == nil || b.ptr == nil {
 		return nil, HealReport{}, &CadaclysmError{Message: "brep: released"}
@@ -2219,6 +2498,61 @@ func (b *Brep) EdgeTolerance(edge uint32) (*float64, error) {
 		return nil, nil
 	}
 	return &t, nil
+}
+
+// Recognize is this brep with its free-form surfaces and edge curves given their analytic
+// kind, and what was taken, as a new [Brep] and a [RecognizeReport]; this one is left as it
+// was. A NURBS (or revolved, extruded or swept) surface that is a plane, cylinder, cone,
+// sphere or torus within tolerance of every sample of its faces and every point of their
+// edges becomes exactly that, and an edge curve that is a line, circle or ellipse within it
+// likewise -- so a file that stored analytic faces as NURBS (a .3dm especially) comes back as
+// they were made. Faces and edges keep their numbers. A nil tolerance, or one that is not
+// finite and positive, takes the default, 1e-6 of the body's extent -- not the file's
+// declared tolerance, at which a fillet's blend reads as a torus (the report shows what was
+// used). The new brep is the caller's to Close.
+func (b *Brep) Recognize(tolerance *float64) (*Brep, RecognizeReport, error) {
+	defer pin()()
+	if b == nil || b.ptr == nil {
+		return nil, RecognizeReport{}, &CadaclysmError{Message: "brep: released"}
+	}
+	tol := math.NaN()
+	if tolerance != nil {
+		tol = *tolerance
+	}
+	h := C.cadaclysm_brep_recognized(b.ptr, C.double(tol))
+	runtime.KeepAlive(b)
+	if h == nil {
+		return nil, RecognizeReport{}, &CadaclysmError{Message: lastErrorOr("recognized")}
+	}
+	defer C.cadaclysm_brep_recognize_free(h)
+	var counts [10]uint32
+	var sizes [3]float64
+	if !bool(C.cadaclysm_brep_recognize_summary(h, (*C.uint32_t)(unsafe.Pointer(&counts[0])), (*C.double)(unsafe.Pointer(&sizes[0])))) {
+		return nil, RecognizeReport{}, &CadaclysmError{Message: lastErrorOr("recognized")}
+	}
+	n := int(C.cadaclysm_brep_recognize_faces(h, nil, nil))
+	faceItems, faceSizes := make([]uint32, 2*n), make([]float64, n)
+	if n > 0 {
+		C.cadaclysm_brep_recognize_faces(h, (*C.uint32_t)(unsafe.Pointer(&faceItems[0])), (*C.double)(unsafe.Pointer(&faceSizes[0])))
+	}
+	n = int(C.cadaclysm_brep_recognize_refused(h, nil, nil))
+	refusedItems, refusedSizes := make([]uint32, 2*n), make([]float64, n)
+	if n > 0 {
+		C.cadaclysm_brep_recognize_refused(h, (*C.uint32_t)(unsafe.Pointer(&refusedItems[0])), (*C.double)(unsafe.Pointer(&refusedSizes[0])))
+	}
+	n = int(C.cadaclysm_brep_recognize_edges(h, nil, nil))
+	edgeItems, edgeSizes := make([]uint32, 2*n), make([]float64, n)
+	if n > 0 {
+		C.cadaclysm_brep_recognize_edges(h, (*C.uint32_t)(unsafe.Pointer(&edgeItems[0])), (*C.double)(unsafe.Pointer(&edgeSizes[0])))
+	}
+	report := recognizeReport(counts[:], sizes[:], faceItems, faceSizes, refusedItems, refusedSizes, edgeItems, edgeSizes)
+	p := C.cadaclysm_brep_recognize_body(h)
+	if p == nil {
+		return nil, RecognizeReport{}, &CadaclysmError{Message: lastErrorOr("recognized")}
+	}
+	recognized := &Brep{ptr: p}
+	runtime.SetFinalizer(recognized, (*Brep).Close)
+	return recognized, report, nil
 }
 
 // HealthReport is what is wrong with a body, as plain data ([Brep.Health]): the Tolerance and
@@ -2287,7 +2621,7 @@ type Cracks struct {
 	Edges                   []uint32
 }
 
-// HealReport is what [Brep.Healed] did, as plain data: the Tolerance it healed at, the
+// HealReport is what [Brep.Heal] did, as plain data: the Tolerance it healed at, the
 // furthest any trim Moved, whether the body guard refused fixes (Guarded), the Fixes made and
 // the features Refused; and the body's health before and after at that tolerance -- its small
 // features, free edges, whether it is closed, and its non-manifold edges.
@@ -2302,7 +2636,7 @@ type HealReport struct {
 	NonmanifoldBefore, NonmanifoldAfter int
 }
 
-// HealFix is one small feature [Brep.Healed] removed: its Kind (as [SmallFeature]'s), its
+// HealFix is one small feature [Brep.Heal] removed: its Kind (as [SmallFeature]'s), its
 // Index in the input (the edge, face or loop number Health gave it), its Size, and how far
 // the vertex it merged Moved.
 type HealFix struct {
@@ -2311,7 +2645,7 @@ type HealFix struct {
 	Size, Moved float64
 }
 
-// HealRefusal is one small feature [Brep.Healed] left, and why: Kind and Index as in
+// HealRefusal is one small feature [Brep.Heal] left, and why: Kind and Index as in
 // [HealFix]; Why is "would_empty_loop", "closed", "seam", "chain" (a chain wider than the
 // tolerance), "neighbours_part" (a sliver's neighbours part), "uneven" (uneven sliver sides),
 // "non_manifold", "has_holes", "body_guard" (the fix made the body's health worse),
@@ -2395,7 +2729,7 @@ func healReport(counts []uint32, sizes []float64, fixItems []uint32, fixSizes []
 	}
 }
 
-// healFlags is Healed's switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.
+// healFlags is Heal's switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.
 func healFlags(edges, faces, holes bool) uint32 {
 	var flags uint32
 	if edges {
@@ -2408,6 +2742,82 @@ func healFlags(edges, faces, holes bool) uint32 {
 		flags |= 4
 	}
 	return flags
+}
+
+// RecognizeReport is what [Brep.Recognize] did, as plain data: the Tolerance it fitted to,
+// the Faces given an analytic kind and those Refused, the Edges given one, how many edges
+// were left free-form (EdgesLeft), and the worst deviation of a face (WorstFace) and of an
+// edge (WorstEdge) taken.
+type RecognizeReport struct {
+	Tolerance            float64
+	Faces                []RecognizedFace
+	Refused              []RecognizeRefusal
+	Edges                []RecognizedEdge
+	EdgesLeft            int
+	WorstFace, WorstEdge float64
+}
+
+// RecognizedFace is one face [Brep.Recognize] gave an analytic kind: its Face number
+// (unchanged), its Kind ("plane", "cylinder", "cone", "sphere" or "torus"), and how far any
+// sample of it lies from the analytic surface (Deviation).
+type RecognizedFace struct {
+	Face      uint32
+	Kind      string
+	Deviation float64
+}
+
+// RecognizeRefusal is one face [Brep.Recognize] left free-form, and why: "no_kind" (no kind
+// fits within the tolerance; Closest the nearest kind's deviation), "mixed_normals",
+// "parameter_trims" (a parameter trim cannot be lifted) or "too_few_samples" (Closest nil).
+type RecognizeRefusal struct {
+	Face    uint32
+	Why     string
+	Closest *float64
+}
+
+// RecognizedEdge is one edge whose curve [Brep.Recognize] gave an analytic kind: its brep
+// Edge id (as [Brep.EdgeTolerance] takes one), its Kind ("line", "circle" or "ellipse"), and
+// how far any point of the curve or the edge lies from the analytic curve (Deviation).
+type RecognizedEdge struct {
+	Edge      uint32
+	Kind      string
+	Deviation float64
+}
+
+// recognizeFaceKinds are RecognizedFace.Kind's words by the C ABI's kind number,
+// recognizeEdgeKinds RecognizedEdge.Kind's and recognizeWhys RecognizeRefusal.Why's.
+var (
+	recognizeFaceKinds = [...]string{"plane", "cylinder", "cone", "sphere", "torus"}
+	recognizeEdgeKinds = [...]string{"line", "circle", "ellipse"}
+	recognizeWhys      = [...]string{"no_kind", "mixed_normals", "parameter_trims", "too_few_samples"}
+)
+
+// recognizeReport is the recognition C ABI's flat rows as a RecognizeReport: counts[10]
+// (faces per kind, faces left, edges per kind, edges left) and sizes[3] (tolerance, worst
+// face, worst edge) from the summary, then the face, refusal and edge rows, each two u32 and
+// one f64.
+func recognizeReport(counts []uint32, sizes []float64, faceItems []uint32, faceSizes []float64,
+	refusedItems []uint32, refusedSizes []float64, edgeItems []uint32, edgeSizes []float64) RecognizeReport {
+	faces := make([]RecognizedFace, len(faceSizes))
+	for i := range faces {
+		faces[i] = RecognizedFace{Face: faceItems[2*i], Kind: recognizeFaceKinds[faceItems[2*i+1]], Deviation: faceSizes[i]}
+	}
+	refused := make([]RecognizeRefusal, len(refusedSizes))
+	for i := range refused {
+		r := RecognizeRefusal{Face: refusedItems[2*i], Why: recognizeWhys[refusedItems[2*i+1]]}
+		if c := refusedSizes[i]; !math.IsNaN(c) {
+			r.Closest = &c
+		}
+		refused[i] = r
+	}
+	edges := make([]RecognizedEdge, len(edgeSizes))
+	for i := range edges {
+		edges[i] = RecognizedEdge{Edge: edgeItems[2*i], Kind: recognizeEdgeKinds[edgeItems[2*i+1]], Deviation: edgeSizes[i]}
+	}
+	return RecognizeReport{
+		Tolerance: sizes[0], Faces: faces, Refused: refused, Edges: edges,
+		EdgesLeft: int(counts[9]), WorstFace: sizes[1], WorstEdge: sizes[2],
+	}
 }
 
 // Close gives this reference back. Idempotent, and a no-op on a nil Brep. The error
@@ -3416,6 +3826,22 @@ func (n *Node) MeshLod(level uint32) (*Mesh, error) {
 		return nil, err
 	}
 	return meshFrom(C.cadaclysm_node_mesh_lod(n.scene.h(), C.uint32_t(n.index), C.uint32_t(level))), nil
+}
+
+// LightmapUvs is a second set of texture coordinates for Mesh, two floats a vertex in its
+// order, packed into the unit square with no two triangles overlapping: what a baked lightmap
+// needs. Nil when not asked for at open, for a node with no B-rep, and for a body whose charts
+// did not fit. A view into the scene's memory, valid until Close.
+func (n *Node) LightmapUvs() ([]float32, error) {
+	if err := n.scene.closedError(); err != nil {
+		return nil, err
+	}
+	var count C.uint32_t
+	p := C.cadaclysm_node_mesh_lightmap_uvs(n.scene.h(), C.uint32_t(n.index), &count)
+	if p == nil || count == 0 {
+		return nil, nil
+	}
+	return unsafe.Slice((*float32)(unsafe.Pointer(p)), int(count)*2), nil
 }
 
 // LodError is how far MeshLod at this level moved the surface, in the scene's units --

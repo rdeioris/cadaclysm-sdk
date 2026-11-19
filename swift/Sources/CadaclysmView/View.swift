@@ -333,22 +333,59 @@ public struct OccludedStyle: Equatable {
     }
 }
 
+/// A points item's marker (`Item.setPointStyle`, 1.28): the `CADACLYSM_VIEW_POINT_*` shapes
+/// as raw values.
+public enum PointShape: UInt32, CaseIterable, Sendable { case disc = 0, ring = 1, square = 2, diamond = 3 }
+
+/// One point's state (`Item.setPointStates`, 1.28): the `CADACLYSM_VIEW_POINT_STATE_*` codes
+/// as raw values.
+public enum PointState: UInt8, CaseIterable, Sendable { case normal = 0, hover = 1, selected = 2, first = 3 }
+
 /// What is under a pixel: the item, the scene node (or a solid's 0) and the face; `clicks` 2
 /// for a double click's pick, else 1; `point` where the ray met the model, in the coordinates
 /// the items were shown in -- nil where the library read no depth (no hit, a machining stock,
 /// the terminal library). `overlay` (1.24): the item is an overlay -- it was over the pixel,
 /// so nothing of the scene beneath it was picked (`face` a text overlay's line, else 0).
+/// `viewportLabel` (1.28): the viewport whose label (`View.setViewportLabel`) was over the
+/// pixel -- `item` is then 0 -- else nil.
 public struct ViewPick: Equatable {
     public let item: UInt32, node: UInt32, face: UInt32
     public let clicks: UInt32
     public let point: SIMD3<Float>?
     public let overlay: Bool
+    public let viewportLabel: Int?
+    init(item: UInt32, node: UInt32, face: UInt32, clicks: UInt32, point: SIMD3<Float>?, overlay: Bool,
+         viewportLabel: Int? = nil) {
+        self.item = item; self.node = node; self.face = face; self.clicks = clicks; self.point = point
+        self.overlay = overlay; self.viewportLabel = viewportLabel
+    }
 }
+
+/// A raw pick for the library to fill: its size set and `viewport_label` -1 (no label hit),
+/// so a library that writes no label answers none.
+func rawPick() -> CadaclysmViewPick {
+    var p = CadaclysmViewPick()
+    p.size = UInt32(MemoryLayout<CadaclysmViewPick>.size)
+    p.viewport_label = -1
+    return p
+}
+
+/// Whether a library's pick answer hit anything: an item, or a viewport's label.
+func pickHit(_ p: CadaclysmViewPick) -> Bool { p.item != 0 || p.viewport_label >= 0 }
 
 /// A library's pick answer as a ViewPick.
 func pickOf(_ p: CadaclysmViewPick) -> ViewPick {
     ViewPick(item: p.item, node: p.node, face: p.face, clicks: p.clicks,
-             point: p.has_point != 0 ? SIMD3(p.point.0, p.point.1, p.point.2) : nil, overlay: p.overlay != 0)
+             point: p.has_point != 0 ? SIMD3(p.point.0, p.point.1, p.point.2) : nil, overlay: p.overlay != 0,
+             viewportLabel: p.viewport_label >= 0 ? Int(p.viewport_label) : nil)
+}
+
+/// An input event's pick (`CadaclysmViewEventPick`, the 1.26 layout, which has no label) as
+/// `pickOf` reads a pick, with the event's own `pick_viewport_label` as `label`.
+func pickOf(_ p: CadaclysmViewEventPick, label: Int32) -> ViewPick {
+    ViewPick(item: p.item, node: p.node, face: p.face, clicks: p.clicks,
+             point: p.has_point != 0 ? SIMD3(p.point.0, p.point.1, p.point.2) : nil, overlay: p.overlay != 0,
+             viewportLabel: label >= 0 ? Int(label) : nil)
 }
 
 /// What a snap may land on, and what it landed on: Python's names, the `CADACLYSM_VIEW_SNAP_*`
@@ -430,7 +467,7 @@ func camera(_ c: CadaclysmViewCamera, _ p: CadaclysmViewPick, yUp: Bool) -> Came
     cvl_angles(&cam, yUp ? 1 : 0, &az, &el)
     return Camera(eye: SIMD3(c.eye.0, c.eye.1, c.eye.2), target: SIMD3(c.target.0, c.target.1, c.target.2),
                   up: SIMD3(c.up.0, c.up.1, c.up.2), orthographic: c.orthographic != 0, azimuth: az, elevation: el,
-                  pick: p.item != 0 ? pickOf(p) : nil)
+                  pick: pickHit(p) ? pickOf(p) : nil)
 }
 
 /// Python's refusal of a tolerance for a document: "<Scene|Node|Pose>.<show|view> takes no
@@ -456,8 +493,7 @@ package func drawObject(solid: OpaquePointer?, scene: OpaquePointer?, tolerance:
     let library = try ViewLibrary.current()
     var cam = CadaclysmViewCamera()
     cam.size = UInt32(MemoryLayout<CadaclysmViewCamera>.size)
-    var pick = CadaclysmViewPick()
-    pick.size = UInt32(MemoryLayout<CadaclysmViewPick>.size)
+    var pick = rawPick()
     var err = [CChar](repeating: 0, count: Int(CVL_ERROR))
     let errCount = err.count
     let title = o.title.isEmpty ? label : o.title
@@ -507,12 +543,12 @@ public class Item {
         view.forget(id)
     }
     /// Paints the whole item: numbers or text (see Colour).
-    public func colour(_ rgb: any Colour) throws {
+    public func setColour(_ rgb: any Colour) throws {
         let c = try view.paint("cadaclysm_view_set_colour", rgb)
         try ok("cadaclysm_view_set_colour") { t, v in withColour(c) { t.pointee.set_colour!(v, id, $0) } }
     }
     /// A column-major 4x4 (sixteen numbers), kept across uploads; nil takes it back.
-    public func placement(_ m: [Double]?) throws {
+    public func setPlacement(_ m: [Double]?) throws {
         if let m, m.count != 16 { throw ViewError("16 numbers, not \(m.count)") }
         try ok("cadaclysm_view_set_placement") { t, v in
             guard let m else { return t.pointee.set_placement!(v, id, nil) }
@@ -521,7 +557,7 @@ public class Item {
     }
     /// Paints `faces` (the item's pick numbering), one colour each (see Colour; the alpha is
     /// not drawn); both empty: every face its own colour again.
-    public func faceColours(_ faces: [UInt32], _ rgba: [any Colour]) throws {
+    public func setFaceColours(_ faces: [UInt32], _ rgba: [any Colour]) throws {
         guard faces.count == rgba.count else {
             throw ViewError("\(4 * UInt64(faces.count)) numbers (rgba, 4 a face), not \(4 * UInt64(rgba.count))")
         }
@@ -541,12 +577,38 @@ public class Item {
     /// Fits the camera to this item.
     public func frame() throws { try ok("cadaclysm_view_frame") { t, v in t.pointee.frame!(v, id) } }
     /// Draws the item's triangles through whatever is in front of them.
-    public func xray(_ on: Bool) throws { try ok("cadaclysm_view_set_xray") { t, v in t.pointee.set_xray!(v, id, on) } }
+    public func setXray(_ on: Bool) throws { try ok("cadaclysm_view_set_xray") { t, v in t.pointee.set_xray!(v, id, on) } }
     /// How the item's lines and points draw where a surface hides them.
     public enum Occluded: UInt32, Sendable { case off = 0, solid = 1, dashed = 2 }
     /// Sets how the item's lines and points draw where a surface hides them: not drawn (`off`, the
     /// default), drawn through (`solid`) or dashed and dimmed (`dashed`).
-    public func occluded(_ mode: Occluded) throws { try ok("cadaclysm_view_set_occluded") { t, v in t.pointee.set_occluded!(v, id, mode.rawValue) } }
+    public func setOccluded(_ mode: Occluded) throws { try ok("cadaclysm_view_set_occluded") { t, v in t.pointee.set_occluded!(v, id, mode.rawValue) } }
+    /// Draws the item's lines in its own dash (1.28): `dash` points on, `gap` off; `dash` 0 is
+    /// solid (the default). Refused for an overlay, a negative or non-finite length, one past
+    /// 511.5, or a dash with no gap.
+    public func setLineStyle(dash: Float = 0, gap: Float = 0) throws {
+        try ok("cadaclysm_view_set_line_style") { t, v in t.pointee.set_line_style!(v, id, dash, gap) }
+    }
+    /// A points item's marker (1.28): `shape`, filled or `hollow`. Refused for an item that is
+    /// not points.
+    public func setPointStyle(_ shape: PointShape = .disc, hollow: Bool = false) throws {
+        try ok("cadaclysm_view_set_point_style") { t, v in t.pointee.set_point_style!(v, id, shape.rawValue, hollow) }
+    }
+    /// A points item's per-point states (1.28), one a point in the order shown: hover and
+    /// selected draw in their colour (`View.setPointStateColours`), first draws a ring round
+    /// the point. Refused for an item that is not points or a count that is not its points'.
+    public func setPointStates(_ states: [PointState]) throws {
+        let codes = states.map(\.rawValue)
+        try ok("cadaclysm_view_set_point_states") { t, v in
+            withBytes(codes) { t.pointee.set_point_states!(v, id, $0, codes.count) }  // empty: non-NULL, count 0
+        }
+    }
+    /// Draws the item after every other, through whatever is in front of it (1.28); false
+    /// takes it back. Refused for an overlay, text, an image, a machining stock, or a body
+    /// shown with exact surfaces or exact parts.
+    public func setOnTop(_ on: Bool = true) throws {
+        try ok("cadaclysm_view_set_on_top") { t, v in t.pointee.set_on_top!(v, id, on) }
+    }
     /// An item's finish under the lighting.
     public enum Finish: UInt32, Sendable { case gloss = 0, satin = 1, matte = 2 }
     /// Sets the item's finish: `gloss` (an item shows with this until it is set) -- under the
@@ -554,7 +616,7 @@ public class Item {
     /// weaker, blurred coat) or `matte` (no mirror, a faint sheen: rubber, cloth). Uploads the scene
     /// again, as a show does: set it as each item is shown rather than over a finished scene item by
     /// item.
-    public func finish(_ finish: Finish) throws { try ok("cadaclysm_view_set_finish") { t, v in t.pointee.set_finish!(v, id, finish.rawValue) } }
+    public func setFinish(_ finish: Finish) throws { try ok("cadaclysm_view_set_finish") { t, v in t.pointee.set_finish!(v, id, finish.rawValue) } }
     /// Draws the item's edges in `rgb` (see Colour), over the view's `setEdgeColour`, the item's
     /// colour and a solid's own edge paint; nil takes the view's colour again.
     public func setEdgeColour(_ rgb: (any Colour)?) throws { try lineColour(UInt32(CADACLYSM_VIEW_LAYER_EDGES), rgb) }
@@ -571,23 +633,37 @@ public class Item {
     /// Puts the item on user layer `layer`, 0...31 (every item starts on 0): it draws while the
     /// layer is on (`View.userLayer`) and in the viewports whose `layerMask` has its bit. A
     /// layer past 31 is refused.
-    public func userLayer(_ layer: UInt32) throws {
+    public func setUserLayer(_ layer: UInt32) throws {
         try ok("cadaclysm_view_set_item_layer") { t, v in t.pointee.set_item_layer!(v, id, layer) }
     }
     /// Shows or hides a scene node (the reader's index) and its subtree.
-    public func nodeVisible(_ node: UInt32, _ on: Bool) throws {
+    public func setNodeVisible(_ node: UInt32, _ on: Bool) throws {
         try ok("cadaclysm_view_set_node_visible") { t, v in t.pointee.set_node_visible!(v, id, node, on) }
     }
     /// Colours a node's subtree (see Colour; the alpha is not drawn); nil: the node's own colour.
-    public func nodeColour(_ node: UInt32, _ rgba: (any Colour)?) throws {
+    public func setNodeColour(_ node: UInt32, _ rgba: (any Colour)?) throws {
         let c = try view.paint("cadaclysm_view_set_node_color", rgba)
         try ok("cadaclysm_view_set_node_color") { t, v in withColour(c) { t.pointee.set_node_color!(v, id, node, $0) } }
     }
     /// Tints a node's subtree toward rgba's colour by its alpha (see Colour; text: alpha 1);
     /// nil clears.
-    public func nodeHighlight(_ node: UInt32, _ rgba: (any Colour)?) throws {
+    public func setNodeHighlight(_ node: UInt32, _ rgba: (any Colour)?) throws {
         let c = try view.paint("cadaclysm_view_set_node_highlight", rgba)
         try ok("cadaclysm_view_set_node_highlight") { t, v in withColour(c) { t.pointee.set_node_highlight!(v, id, node, $0) } }
+    }
+    /// Shows or hides the whole item (1.27): a hidden item draws nothing, is never picked or
+    /// snapped, and is left out of the fit; it shows only when its layer is on too.
+    public func setVisible(_ visible: Bool) throws {
+        try ok("cadaclysm_view_set_item_visible") { t, v in t.pointee.set_item_visible!(v, id, visible) }
+    }
+    /// Draws these nodes of the item x-ray (1.27), replacing the ones ghosted before; nil (or an
+    /// empty list) clears. A node the item does not have is refused in the library's words.
+    public func setNodeGhosts(_ nodes: [UInt32]?) throws {
+        guard let nodes else {
+            return try ok("cadaclysm_view_set_node_ghosts") { t, v in t.pointee.set_node_ghosts!(v, id, nil, 0) }
+        }
+        let n = try count(nodes.count, "node_ghosts")
+        try ok("cadaclysm_view_set_node_ghosts") { t, v in withUInt32s(nodes) { t.pointee.set_node_ghosts!(v, id, $0, n) } }
     }
     /// Fits the camera to one node of a scene item.
     public func frameNode(_ node: UInt32) throws {
@@ -596,7 +672,7 @@ public class Item {
     /// Poses a shown scene: one column-major 4x4 (sixteen doubles) per scene node, in index
     /// order (`Pose.rawTransform`'s layout), drawn in place of each node's rest transform; nil
     /// restores the rest pose. An empty list reaches the library, which refuses it.
-    public func nodeTransforms(_ transforms: [[Double]]?) throws {
+    public func setNodeTransforms(_ transforms: [[Double]]?) throws {
         guard let transforms else {
             return try ok("cadaclysm_view_set_node_transforms") { t, v in t.pointee.set_node_transforms!(v, id, nil, 0) }
         }
@@ -606,6 +682,22 @@ public class Item {
         let n = try count(transforms.count, "node_transforms")
         let flat = transforms.flatMap { $0 }
         try ok("cadaclysm_view_set_node_transforms") { t, v in withDoubles(flat) { t.pointee.set_node_transforms!(v, id, $0, n) } }
+    }
+}
+
+// ---- animations (1.27) -------------------------------------------------------------------------
+
+/// One binding of a kernel animation to a shown item: the animation's `target` name drives the
+/// item (`node` nil) or one node of it and its subtree, by the reader's index.
+public struct AnimationBinding: Equatable {
+    public let target: String
+    public let item: UInt32
+    public let node: UInt32?
+    public init(target: String, item: UInt32, node: UInt32? = nil) {
+        self.target = target; self.item = item; self.node = node
+    }
+    public init(target: String, item: Item, node: UInt32? = nil) {
+        self.init(target: target, item: item.id, node: node)
     }
 }
 
@@ -669,6 +761,105 @@ public struct ViewStats: Equatable {
     public var drawCalls: UInt32
 }
 
+// ---- input events (view ABI 1.26) --------------------------------------------------------
+
+/// What a pointer event came from (`CADACLYSM_VIEW_POINTER_*`).
+public enum PointerKind: UInt32, CaseIterable, Sendable {
+    case mouse = 0, touch = 1, pen = 2
+}
+
+/// The keys held during a pointer, wheel or key event (`CADACLYSM_VIEW_MOD_*`).
+public struct Modifiers: OptionSet, Hashable, Sendable {
+    public let rawValue: UInt32
+    public init(rawValue: UInt32) { self.rawValue = rawValue }
+    public static let shift = Modifiers(rawValue: UInt32(CADACLYSM_VIEW_MOD_SHIFT))
+    public static let ctrl = Modifiers(rawValue: UInt32(CADACLYSM_VIEW_MOD_CTRL))
+    public static let alt = Modifiers(rawValue: UInt32(CADACLYSM_VIEW_MOD_ALT))
+    public static let meta = Modifiers(rawValue: UInt32(CADACLYSM_VIEW_MOD_META))
+}
+
+/// A pointer press, move or release: where (physical pixels from the window's top left), the
+/// `button` (0 left, 1 middle, 2 right), the kind of pointer and its id, the keys held.
+public struct PointerInput: Equatable, Sendable {
+    public let x: Float, y: Float
+    public let button: UInt32
+    public let pointer: PointerKind
+    public let pointerID: UInt32
+    public let modifiers: Modifiers
+}
+
+/// A wheel turn at (x, y): `wheelY` as a DOM deltaY (negative forward), the keys held.
+public struct WheelInput: Equatable, Sendable {
+    public let x: Float, y: Float
+    public let wheelY: Float
+    public let modifiers: Modifiers
+}
+
+/// A key pressed or released: `key` the DOM code ("KeyR", "Digit1", "Space", "Escape",
+/// "ArrowUp"...), `isRepeat` for a held key's repeat, the keys held.
+public struct KeyInput: Equatable, Sendable {
+    public let key: String
+    public let isRepeat: Bool
+    public let modifiers: Modifiers
+}
+
+/// An input event the view's own window handled (`View.nextEvent()`, view ABI 1.26): what
+/// happened, `timeMs` on the library's clock, and `dropped`, the events a full queue dropped
+/// before this one.
+public struct ViewInputEvent {
+    /// What happened.
+    public enum Kind {
+        case pointerDown(PointerInput)
+        case pointerMove(PointerInput)
+        case pointerUp(PointerInput)
+        case wheel(WheelInput)
+        case keyDown(KeyInput)
+        case keyUp(KeyInput)
+        /// The window's new size in physical pixels.
+        case resize(width: UInt32, height: UInt32)
+        /// A click's answer, as `lastPick` also gives it; nil for a click on nothing.
+        case pick(ViewPick?)
+        /// A hover's or click's snap with snapping on; nil where nothing snapped.
+        case snap(ViewSnap?)
+        /// The window closed, on this camera (as `run()` returns it, with no pick).
+        case close(Camera)
+        /// A draw moved the timeline's clock (1.27): `timeMs` is the stamp, nothing else rides.
+        case timeline
+        /// A kind this module does not know (a later 1.x library's).
+        case other(UInt32)
+    }
+    public let kind: Kind
+    public let timeMs: Double
+    public let dropped: UInt32
+}
+
+/// A library's input event as a ViewInputEvent.
+func inputEventOf(_ e: CadaclysmViewInputEvent, yUp: Bool) -> ViewInputEvent {
+    let mods = Modifiers(rawValue: e.modifiers)
+    let pointer = PointerInput(x: e.x, y: e.y, button: e.button, pointer: PointerKind(rawValue: e.pointer) ?? .mouse,
+                               pointerID: e.pointer_id, modifiers: mods)
+    // The key is NUL-terminated; read at most its 32 bytes all the same.
+    let key = withUnsafeBytes(of: e.key) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+    let typed = KeyInput(key: key, isRepeat: e.`repeat` != 0, modifiers: mods)
+    let kind: ViewInputEvent.Kind
+    switch Int(e.kind) {
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_POINTER_DOWN): kind = .pointerDown(pointer)
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_POINTER_MOVE): kind = .pointerMove(pointer)
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_POINTER_UP): kind = .pointerUp(pointer)
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_WHEEL): kind = .wheel(WheelInput(x: e.x, y: e.y, wheelY: e.wheel_y, modifiers: mods))
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_KEY_DOWN): kind = .keyDown(typed)
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_KEY_UP): kind = .keyUp(typed)
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_RESIZE): kind = .resize(width: e.width, height: e.height)
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_PICK):
+        kind = .pick(e.pick.item != 0 || e.pick_viewport_label >= 0 ? pickOf(e.pick, label: e.pick_viewport_label) : nil)
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_SNAP): kind = .snap(snapOf(e.snap))
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_CLOSE): kind = .close(camera(e.camera, rawPick(), yUp: yUp))
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_TIMELINE): kind = .timeline
+    default: kind = .other(e.kind)
+    }
+    return ViewInputEvent(kind: kind, timeMs: e.time_ms, dropped: e.dropped)
+}
+
 /// A machining's facts: `moves` in the job, `move` done as of the last draw, the heights'
 /// grid (`nx`, `ny`, `cell` mm, `min` the corner of cell (0, 0)) and the `cycleTime` in seconds.
 public struct MachiningInfo {
@@ -687,7 +878,7 @@ public final class Machining: Item {
         try ok("cadaclysm_view_machining_seek") { t, v in t.pointee.machining_seek!(v, id, move) }
     }
     /// "height", "tool" or "deviation" (needs a part).
-    public func colourBy(_ mode: String) throws {
+    public func setColourBy(_ mode: String) throws {
         let modes: [String: UInt32] = ["height": UInt32(CADACLYSM_VIEW_COLOUR_BY_HEIGHT),
                                        "tool": UInt32(CADACLYSM_VIEW_COLOUR_BY_TOOL),
                                        "deviation": UInt32(CADACLYSM_VIEW_COLOUR_BY_DEVIATION)]
@@ -695,7 +886,7 @@ public final class Machining: Item {
         try ok("cadaclysm_view_machining_colour_by") { t, v in t.pointee.machining_colour_by!(v, id, m) }
     }
     /// The toolpath and the tool, on or off.
-    public func overlays(path: Bool = true, tool: Bool = true) throws {
+    public func setOverlays(path: Bool = true, tool: Bool = true) throws {
         try ok("cadaclysm_view_machining_overlays") { t, v in t.pointee.machining_overlays!(v, id, path, tool) }
     }
     /// `moves`, `move` (done, as of the last draw), the heights' grid and the cycle time.
@@ -734,12 +925,13 @@ public enum Anchor: UInt32, CaseIterable, Sendable {
     case topLeft = 0, top = 1, topRight = 2, left = 3, centre = 4, right = 5, bottomLeft = 6, bottom = 7, bottomRight = 8
 }
 
-/// How `View.showOverlay` draws a shape. `fill`: where set, its colour (see Colour; four
-/// numbers for an alpha), or "none" for no fill; nil, the profile's own colour
-/// (`Profile.coloured`), else white -- unless a `stroke` is set, when an uncoloured profile is
-/// not filled. `stroke`: only where set, `strokeWidth` pixels wide; an open profile, never
-/// filled, draws only with one. `order`: lower draws first, equal orders in show order
-/// (shapes, text and images share it).
+/// How `View.showOverlay` draws a shape. A profile is a sketch, so it draws as its outline by
+/// default. `stroke`: where set, its colour (see Colour; four numbers for an alpha), or "none"
+/// for no stroke; nil, the profile's own colour (`Profile.coloured`), else white;
+/// `strokeWidth` pixels wide. `fill`: only where set, its colour, or "none" for no fill -- a
+/// panel needs one. Fill only is a `fill` and `stroke: "none"`; neither a fill nor a stroke is
+/// refused. `order`: lower draws first, equal orders in show order (shapes, text and images
+/// share it).
 public struct OverlayStyle {
     public var fill: (any Colour)?
     public var stroke: (any Colour)?
@@ -1272,15 +1464,16 @@ public final class View {
     /// Rational cubic Beziers, sixteen floats each (x, y, z, w per control point, z not read:
     /// a profile's `beziers()`), in pixels (y up), as one overlay hung `x`, `y` pixels inward
     /// from `anchor`: loops split where a curve does not start where the last ended, closed
-    /// where one ends where it started; closed loops filled together by the even-odd rule,
-    /// stroked where `style` says. Drawn after everything else, never moved by the camera,
+    /// where one ends where it started; stroked white unless `style` says otherwise, closed
+    /// loops filled together by the even-odd rule only where it gives a fill. Drawn after
+    /// everything else, never moved by the camera,
     /// kept in place as the window resizes; a click on it picks it (`ViewPick.overlay`) and
     /// nothing beneath. `showOverlay(_:anchor:x:y:style:)` takes a Profile (Blacksmith).
     public func showOverlay(curves beziers: [Float], anchor: Anchor, x: Float, y: Float,
                             style: OverlayStyle = OverlayStyle()) throws -> Overlay {
         try showOverlayCurves(beziers, own: nil, anchor: anchor, x: x, y: y, style: style)
     }
-    /// `showOverlay(curves:)` with the profile's own colour, `own` (r, g, b, a), for the fill
+    /// `showOverlay(curves:)` with the profile's own colour, `own` (r, g, b, a), for the stroke
     /// rule: what Blacksmith's `showOverlay` of a Profile builds on.
     package func showOverlayCurves(_ beziers: [Float], own: [Float]?, anchor: Anchor, x: Float, y: Float,
                                    style: OverlayStyle) throws -> Overlay {
@@ -1288,15 +1481,23 @@ public final class View {
             throw ViewError("show_overlay: 16 numbers a curve, at least one, not \(beziers.count)")
         }
         let n = try count(beziers.count / 16, "show_overlay")
-        let stroke = try paint("cadaclysm_view_show_overlay", style.stroke)
-        var fill: [Float]?
-        if let text = style.fill as? String, text.trimmingCharacters(in: .whitespaces).lowercased() == "none" {
-            fill = nil
-        } else if let given = style.fill {
-            fill = try colourValues(library.table, given)
-        } else {
-            fill = own ?? (stroke == nil ? [1, 1, 1, 1] : nil)
+        if let no = refusal("cadaclysm_view_show_overlay") { throw no }
+        func isNone(_ c: (any Colour)?) -> Bool {
+            (c as? String)?.trimmingCharacters(in: .whitespaces).lowercased() == "none"
         }
+        var stroke: [Float]?
+        if isNone(style.stroke) {
+            stroke = nil
+        } else if let given = style.stroke {
+            stroke = try colourValues(library.table, given)
+        } else {
+            stroke = own ?? [1, 1, 1, 1]
+        }
+        var fill: [Float]?
+        if let given = style.fill, !isNone(given) {
+            fill = try colourValues(library.table, given)
+        }
+        if fill == nil && stroke == nil { throw ViewError("show_overlay: neither a fill nor a stroke") }
         return try add("cadaclysm_view_show_overlay", owner: nil, make: { Overlay(view: $0, id: $1, anchor: anchor) }) { t, v in
             withFloats(beziers) { b -> UInt32 in
                 var o = CadaclysmViewOverlay()
@@ -1385,11 +1586,11 @@ public final class View {
     /// Moves the eye toward the target by `ratio`.
     public func dolly(_ ratio: Float) throws { try act("cadaclysm_view_dolly") { t, v in t.pointee.dolly!(v, ratio) } }
     /// Switches the projection.
-    public func orthographic(_ on: Bool) throws {
+    public func setOrthographic(_ on: Bool) throws {
         try act("cadaclysm_view_set_orthographic") { t, v in t.pointee.set_orthographic!(v, on) }
     }
     /// The clear colour, linear 0..1: numbers or text (see Colour).
-    public func background(_ rgb: any Colour) throws {
+    public func setBackground(_ rgb: any Colour) throws {
         let c = try paint("cadaclysm_view_set_background", rgb)
         try act("cadaclysm_view_set_background") { t, v in withColour(c) { t.pointee.set_background!(v, $0) } }
     }
@@ -1425,7 +1626,7 @@ public final class View {
         }
     }
     /// Panes of their own cameras; empty: the one camera again.
-    public func viewports(_ list: [Viewport]) throws {
+    public func setViewports(_ list: [Viewport]) throws {
         let n = try count(list.count, "viewports")
         var raw: [CadaclysmViewViewport] = []
         for p in list {
@@ -1446,7 +1647,7 @@ public final class View {
         }
     }
     /// Exact surfaces (false) or triangles (true).
-    public func surfaces(triangles: Bool) throws {
+    public func setSurfaces(triangles: Bool) throws {
         try ok("cadaclysm_view_set_surfaces") { t, v in t.pointee.set_surfaces!(v, triangles ? 1 : 0) }
     }
     /// How plain parts are lit, as Python's `View.lighting`: "headlight" (the default) --
@@ -1468,7 +1669,7 @@ public final class View {
     }
     // -- the timeline (CAM jobs shown with showMachining play on it)
 
-    /// Plays the timeline at `speed` times real time; it stops at its end unless `loop()` is on
+    /// Plays the timeline at `speed` times real time; it stops at its end unless `setLoop()` is on
     /// (`play` at the end starts again from 0). A speed that is not finite is refused.
     public func play(speed: Double = 1) throws {
         guard speed.isFinite else { throw ViewError("play speed: a finite number") }
@@ -1480,8 +1681,37 @@ public final class View {
         guard seconds.isFinite else { throw ViewError("seek seconds: a finite number") }
         try ok("cadaclysm_view_timeline_seek") { t, v in t.pointee.timeline_seek!(v, seconds) }
     }
-    public func loop(_ on: Bool = true) throws {
+    public func setLoop(_ on: Bool = true) throws {
         try ok("cadaclysm_view_timeline_set_loop") { t, v in t.pointee.timeline_set_loop!(v, on) }
+    }
+    /// Plays a kernel animation on the timeline (1.27) -- `animation` is the handle
+    /// `View+Solid.swift`'s `playAnimation` passes (nil is the library's "animation is null"
+    /// refusal) -- bound as `bindings` say; the view plays its own copy. The new track's id.
+    package func playAnimationHandle(_ animation: OpaquePointer?, _ bindings: [AnimationBinding]) throws -> UInt32 {
+        let call = "cadaclysm_view_play_animation"
+        if let no = refusal(call) { throw no }
+        var targets: [UnsafeMutablePointer<CChar>?] = []
+        defer { targets.forEach { free($0) } }
+        var raw: [CadaclysmViewAnimationBinding] = []
+        for (k, b) in bindings.enumerated() {
+            if b.target.unicodeScalars.contains("\0") {
+                throw ViewError("binding \(k): target \(quoted(b.target)) holds a NUL character")
+            }
+            let c = strdup(b.target)
+            targets.append(c)
+            raw.append(CadaclysmViewAnimationBinding(target: UnsafePointer(c), item: b.item,
+                                                      node: b.node ?? UInt32(CADACLYSM_VIEW_ALL_NODES)))
+        }
+        let n = try count(raw.count, "play_animation")
+        let (t, v) = (library.table, handle!)
+        let id = raw.withUnsafeBufferPointer { t.pointee.play_animation!(v, animation, raw.isEmpty ? nil : $0.baseAddress, n) }
+        if id == 0 { throw libraryError(t) }
+        return id
+    }
+    /// Takes an animation track off the timeline (1.27), putting back what it drove. A track
+    /// no animation played is refused: "timeline_remove: no track N".
+    public func removeTrack(_ track: UInt32) throws {
+        try ok("cadaclysm_view_timeline_remove") { t, v in t.pointee.timeline_remove!(v, track) }
     }
     /// The clock, seconds.
     public var time: Double {
@@ -1523,18 +1753,18 @@ public final class View {
         return []
     }
     /// Switches a `CADACLYSM_VIEW_LAYER_*` layer (`CADACLYSM_VIEW_LAYER_TEXT`: every text item).
-    public func layer(_ which: UInt32, _ on: Bool) throws {
+    public func setLayer(_ which: UInt32, _ on: Bool) throws {
         try ok("cadaclysm_view_set_layer") { t, v in t.pointee.set_layer!(v, which, on) }
     }
     /// Switches user layer `layer`, 0...31, on or off in every viewport (all start on); see
     /// `Item.userLayer`. A layer past 31 is refused.
-    public func userLayer(_ layer: UInt32, _ on: Bool) throws {
+    public func setUserLayer(_ layer: UInt32, _ on: Bool) throws {
         try ok("cadaclysm_view_set_user_layer") { t, v in t.pointee.set_user_layer!(v, layer, on) }
     }
     /// Levels of detail, as Python's `View.lod`: parts of `minTriangles` or more (0: the
     /// library's default, 2,048) get coarser levels, and a moving frame draws as `motion`
     /// says -- "detailed" or "smooth" (see wakeMs); nil turns them off (the default).
-    public func lod(_ motion: String? = "detailed", minTriangles: UInt32 = 0) throws {
+    public func setLod(_ motion: String? = "detailed", minTriangles: UInt32 = 0) throws {
         guard let motion else { return try ok("cadaclysm_view_set_lod") { t, v in t.pointee.set_lod!(v, nil) } }
         guard motion == "detailed" || motion == "smooth" else {
             throw ViewError("motion '\(motion)': one of detailed, smooth or none")
@@ -1591,6 +1821,40 @@ public final class View {
         }
         try ok("cadaclysm_view_set_occluded_style") { t, v in t.pointee.set_occluded_style!(v, &raw) }
     }
+    /// The colours hover, selected and first points draw in (1.28, `Item.setPointStates`):
+    /// numbers or text each (see Colour); nil restores that state's default (hover #9CD3FF,
+    /// selected and first #378ADD). A colour not finite is the library's refusal, and changes none.
+    public func setPointStateColours(hover: (any Colour)? = nil, selected: (any Colour)? = nil,
+                                     first: (any Colour)? = nil) throws {
+        let call = "cadaclysm_view_set_point_state_colours"
+        let h = try paint(call, hover), s = try paint(call, selected), f = try paint(call, first)
+        try act(call) { t, v in
+            withColour(h) { h in withColour(s) { s in withColour(f) { f in t.pointee.set_point_state_colours!(v, h, s, f) } } }
+        }
+    }
+    /// Names viewport `viewport` (1.28): `text` top left inside it at 12 points in `colour`
+    /// (numbers or text, see Colour; nil: white); nil text clears it. Kept across `setViewportRects`,
+    /// and across `setViewports` while the index survives. A pick on it answers
+    /// `viewportLabel`. A NUL in the text is refused before the library is called; no such
+    /// viewport, by the library.
+    public func setViewportLabel(_ viewport: UInt32, text: String?, colour: (any Colour)? = nil) throws {
+        let call = "cadaclysm_view_set_viewport_label"
+        let s = try text.map(checkedText)
+        let c = try paint(call, colour)
+        try ok(call) { t, v in
+            withColour(c) { c in
+                guard let s else { return t.pointee.set_viewport_label!(v, viewport, nil, c) }
+                return s.withCString { t.pointee.set_viewport_label!(v, viewport, $0, c) }
+            }
+        }
+    }
+    /// Frames viewport `viewport` in `colour` (1.28, numbers or text, see Colour), one point wide
+    /// inside its edge; nil clears it. Never picked. No such viewport is the library's refusal.
+    public func setViewportBorder(_ viewport: UInt32, colour: (any Colour)?) throws {
+        let call = "cadaclysm_view_set_viewport_border"
+        let c = try paint(call, colour)
+        try ok(call) { t, v in withColour(c) { t.pointee.set_viewport_border!(v, viewport, $0) } }
+    }
     /// The view's occluded style, the defaults as their values.
     public func occludedStyle() throws -> OccludedStyle {
         var raw = CadaclysmViewOccludedStyle()
@@ -1613,14 +1877,14 @@ public final class View {
     /// drawn is drawn first; the library's own error, or "pick: the answer never landed (...)".
     public func pick(x: UInt32, y: UInt32, viewport: UInt32 = 0) throws -> ViewPick? {
         let (t, v) = try live(drawn != 0 ? "cadaclysm_view_request_pick_in" : "cadaclysm_view_draw")
-        var raw = CadaclysmViewPick()
+        var raw = rawPick()
         var err = [CChar](repeating: 0, count: Int(CVL_ERROR))
         let errCount = err.count
         var once = drawn
         let found = cvl_pick(t, v, &once, viewport, x, y, &raw, &err, errCount)
         drawn = once
         if found == 0 { throw ViewError(text(err)) }
-        return raw.item == 0 ? nil : pickOf(raw)
+        return pickHit(raw) ? pickOf(raw) : nil
     }
     /// The newest pick answer that has landed, without asking or waiting -- Python's
     /// last_pick: a click or tap in the view's own window (pump lands them as it draws), a
@@ -1630,9 +1894,8 @@ public final class View {
     /// "no answer yet" is the library's own message.
     public func lastPick() throws -> (landed: Bool, pick: ViewPick?) {
         let (t, v) = try live("cadaclysm_view_pick_result")
-        var raw = CadaclysmViewPick()
-        raw.size = UInt32(MemoryLayout<CadaclysmViewPick>.size)
-        if t.pointee.pick_result!(v, &raw) { return (true, raw.item == 0 ? nil : pickOf(raw)) }
+        var raw = rawPick()
+        if t.pointee.pick_result!(v, &raw) { return (true, pickHit(raw) ? pickOf(raw) : nil) }
         let said = lastError(t)
         if !said.isEmpty && !said.hasSuffix("no pick result") { throw ViewError(said) }
         return (false, nil)
@@ -1701,6 +1964,76 @@ public final class View {
         try ok("cadaclysm_view_draw") { t, v in t.pointee.draw!(v) }
         drawn = 1
     }
+    /// The oldest input event the view's own window handled and has not handed out yet,
+    /// without waiting; nil while there is none. The window still orbits, zooms and closes on
+    /// its own -- the events report what it handled, they do not stop it. A view in a host's
+    /// window, or offscreen, queues nothing. Still read after the window closed. A failure
+    /// other than "no event" is the library's own message.
+    public func nextEvent() throws -> ViewInputEvent? {
+        if ccadaclysm_view_thread() != thread { throw ViewError("cadaclysm_view_next_event: a view belongs to the thread that made it") }
+        guard let v = handle else { throw ViewError("cadaclysm_view_next_event: the view is closed") }
+        let t = library.table
+        var raw = CadaclysmViewInputEvent()
+        raw.size = UInt32(MemoryLayout<CadaclysmViewInputEvent>.size)
+        raw.pick_viewport_label = -1  // no label hit, until the library says otherwise
+        if t.pointee.next_event!(v, &raw) { return inputEventOf(raw, yUp: yUp) }
+        let said = lastError(t)
+        if !said.isEmpty && !said.hasSuffix("no event") { throw ViewError(said) }
+        return nil
+    }
+    /// Every event waiting now, oldest first (`nextEvent` until nil): read between pumps.
+    public func events() throws -> [ViewInputEvent] {
+        var all: [ViewInputEvent] = []
+        while let e = try nextEvent() { all.append(e) }
+        return all
+    }
+    /// Closes the view's own window as its close button does: `isClosed` turns true, a
+    /// `.close` event is queued, a loop around `pump` ends; the view lives on until close().
+    /// Nothing for a window already closed. A view in a host's window or offscreen has none:
+    /// the library refuses it.
+    public func closeWindow() throws {
+        if ccadaclysm_view_thread() == thread && handle != nil && windowClosed { return }
+        try ok("cadaclysm_view_close") { t, v in t.pointee.close!(v) }
+        markClosed()
+    }
+    /// run() with each input event handed to `onEvent` on this thread as the window handles
+    /// it, between pumps -- it may change the scene or the camera. Returning false closes the
+    /// window and ends the run; true goes on. The `.close` event is handed over last, whatever
+    /// closed the window. The camera the window closed on, with the last pick: the answer the
+    /// last click left for `lastPick`, else the last `.pick` event's.
+    @discardableResult public func run(_ onEvent: (ViewInputEvent) throws -> Bool) throws -> Camera {
+        let (t, v) = try live("cadaclysm_view_pump")
+        let open = UInt32(CADACLYSM_VIEW_OPEN), closed = UInt32(CADACLYSM_VIEW_CLOSED)
+        var picked: ViewPick? = nil
+        var closing: Camera? = nil
+        var stopping = false
+        while closing == nil {
+            var state = closed
+            if !windowClosed {
+                state = t.pointee.pump!(v, 16)
+                if state != open && state != closed { throw libraryError(t) }
+            }
+            while let e = try nextEvent() {
+                if case .pick(let p) = e.kind { picked = p }
+                if case .close(let c) = e.kind {
+                    closing = c
+                    if !stopping { _ = try onEvent(e) }
+                    break
+                }
+                if !stopping, try !onEvent(e) {
+                    stopping = true
+                    try closeWindow()
+                }
+            }
+            if state == closed && closing == nil { throw ViewError("run: the window closed with no close event") }
+        }
+        var out = rawPick()
+        if t.pointee.pick_result!(v, &out) { picked = pickHit(out) ? pickOf(out) : nil }
+        markClosed()
+        let c = closing!
+        return Camera(eye: c.eye, target: c.target, up: c.up, orthographic: c.orthographic, azimuth: c.azimuth,
+                      elevation: c.elevation, pick: picked)
+    }
     /// Blocks until the window is closed: the camera it was left at (read in this view's up
     /// axis) and the last pick. The window is then closed (as Python's run): every call but
     /// close() refuses.
@@ -1708,8 +2041,7 @@ public final class View {
         let (t, v) = try live("cadaclysm_view_run")
         var cam = CadaclysmViewCamera()
         cam.size = UInt32(MemoryLayout<CadaclysmViewCamera>.size)
-        var pick = CadaclysmViewPick()
-        pick.size = UInt32(MemoryLayout<CadaclysmViewPick>.size)
+        var pick = rawPick()
         if !t.pointee.run!(v, &cam, &pick) { throw libraryError(t) }
         markClosed()
         return camera(cam, pick, yUp: yUp)

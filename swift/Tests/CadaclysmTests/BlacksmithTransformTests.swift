@@ -160,7 +160,7 @@ final class BlacksmithTransformTests: XCTestCase {
         assertQuaternion(back, q.w, q.x, q.y, q.z, 1e-9)
         XCTAssertEqual(try Quaternion.slerp(Quaternion(), q, 0.25).angle, .pi / 8, accuracy: 1e-9)
         assertQuaternion(try q * q.conjugate(), 1, 0, 0, 0, 1e-9)
-        XCTAssertEqual(try Quaternion(0, 0, 0, 2).normalized(), try Quaternion(0, 0, 0, 1))
+        XCTAssertEqual(try Quaternion(0, 0, 0, 2).normalize(), try Quaternion(0, 0, 0, 1))
         // No zero components, so every term counts.
         XCTAssertEqual(try Quaternion(1, 2, 3, 4) * Quaternion(5, 6, 7, 8), try Quaternion(-60, 12, 30, 24))
         // Every term's sign: for two generic turns the product turns as the two transforms composed.
@@ -180,15 +180,15 @@ final class BlacksmithTransformTests: XCTestCase {
     func testAQuaternionFarFromUnitLengthStillNormalises() throws {
         let half = 0.5.squareRoot()
         for k in [1e200, 1e-170] {
-            XCTAssertEqual(try Quaternion(k, 0, 0, 0).normalized(), try Quaternion(1, 0, 0, 0), "\(k)")
-            XCTAssertEqual(try Quaternion(0, 0, 0, -k).normalized(), try Quaternion(0, 0, 0, -1), "\(k)")
+            XCTAssertEqual(try Quaternion(k, 0, 0, 0).normalize(), try Quaternion(1, 0, 0, 0), "\(k)")
+            XCTAssertEqual(try Quaternion(0, 0, 0, -k).normalize(), try Quaternion(0, 0, 0, -1), "\(k)")
             let kk = try Quaternion(k, k, 0, 0)
-            assertQuaternion(try kk.normalized(), half, half, 0, 0)
+            assertQuaternion(try kk.normalize(), half, half, 0, 0)
             XCTAssertEqual(kk.length, k * 2.0.squareRoot(), accuracy: 1e-15 * k * 2.0.squareRoot(), "\(k)")
             XCTAssertEqual(kk.angle, .pi / 2, accuracy: 1e-12, "\(k)")
             assertAt(try XCTUnwrap(try Quaternion(0, k, k, 0).axis), half, half, 0)
         }
-        assertRefused("Quaternion.normalized: the quaternion is zero") { _ = try Quaternion(0, 0, 0, 0).normalized() }
+        assertRefused("Quaternion.normalized: the quaternion is zero") { _ = try Quaternion(0, 0, 0, 0).normalize() }
     }
 
     func testASolidTakesAnyAffineMap() throws {

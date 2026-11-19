@@ -13,6 +13,8 @@ mod items;
 
 mod machining;
 
+mod animation;
+
 mod target;
 
 pub(crate) mod objects;
@@ -32,12 +34,13 @@ mod overlay;
 
 pub use colour::{Colour, Rgb, Rgba};
 pub use options::{Camera, Lighting, Navigation, Pick, SurfaceMode, ViewOptions};
-pub use items::{Finish, Item, Material, Occluded, SolidOptions, View};
+pub use items::{Finish, Item, Material, Occluded, PointShape, PointState, SolidOptions, View};
+pub use animation::AnimationBinding;
 pub use machining::{ColourBy, Machining, MachiningInfo, MachiningOptions, MachiningPart, MachiningProgram, MachiningTool, ToolShape};
 pub use text::{Align, Text, TextMode};
 pub use overlay::{Anchor, Overlay, OverlayStyle};
 pub use target::{RawWindow, WindowKind};
-pub use control::{Button, Event, Grid, Image, Input, Layer, LineColour, Lod, LodMotion, OccludedStyle, Pointer, Snap, SnapKind, Standard, Stats, Viewport, WorkPlane};
+pub use control::{Button, Event, EventKind, Grid, Image, Input, Layer, LineColour, Lod, LodMotion, Modifiers, OccludedStyle, Pointer, PointerPhase, Snap, SnapKind, Standard, Stats, ViewEvent, Viewport, WorkPlane};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::ffi::OsString;
@@ -398,7 +401,7 @@ mod tests {
     fn a_viewer_reports_its_name_and_version() {
         let v = fake::library();
         assert_eq!(v.name(), "fake 1.0");
-        assert_eq!(v.abi_version(), (1, 25));
+        assert_eq!(v.abi_version(), (1, 28));
         assert_eq!(v.path(), Path::new("fake"));
     }
 
@@ -482,8 +485,8 @@ mod tests {
     fn another_abi_major_is_refused_with_both_versions() {
         fake::abi((2 << 16) | 5);
         let err = Library::from_api(fake::api(), PathBuf::from("v2.dll"), None).expect_err("ABI 2 refused");
-        fake::abi((1 << 16) | 25);
-        assert_eq!(err.message(), "v2.dll: view ABI 2.5, this SDK needs 1.25 or a later 1.x");
+        fake::abi((1 << 16) | 28);
+        assert_eq!(err.message(), "v2.dll: view ABI 2.5, this SDK needs 1.28 or a later 1.x");
     }
 
     #[test]
@@ -492,30 +495,30 @@ mod tests {
         let m = abi_mismatch(1, 5, Path::new("old.dll"), Some(reason));
         assert_eq!(
             m,
-            "old.dll: view ABI 1.5, this SDK needs 1.25 or a later 1.x\n\
+            "old.dll: view ABI 1.5, this SDK needs 1.28 or a later 1.x\n\
              The build gave no libraries of its own: they were not built from R:\\src: cargo build failed"
         );
-        assert_eq!(abi_mismatch(1, 5, Path::new("old.dll"), None), "old.dll: view ABI 1.5, this SDK needs 1.25 or a later 1.x");
+        assert_eq!(abi_mismatch(1, 5, Path::new("old.dll"), None), "old.dll: view ABI 1.5, this SDK needs 1.28 or a later 1.x");
     }
 
     #[test]
-    fn a_minor_version_below_25_is_refused_with_the_abi_message() {
+    fn a_minor_version_below_28_is_refused_with_the_abi_message() {
         fake::abi((1 << 16) | 4);
         let err = Library::from_api(fake::api(), PathBuf::from("v1.4.dll"), None).expect_err("1.4 is too old");
-        fake::abi((1 << 16) | 25);
-        assert_eq!(err.message(), "v1.4.dll: view ABI 1.4, this SDK needs 1.25 or a later 1.x");
-        fake::abi((1 << 16) | 24);
-        let err = Library::from_api(fake::api(), PathBuf::from("v1.24.dll"), None).expect_err("1.24 is too old");
-        fake::abi((1 << 16) | 25);
-        assert_eq!(err.message(), "v1.24.dll: view ABI 1.24, this SDK needs 1.25 or a later 1.x");
+        fake::abi((1 << 16) | 28);
+        assert_eq!(err.message(), "v1.4.dll: view ABI 1.4, this SDK needs 1.28 or a later 1.x");
+        fake::abi((1 << 16) | 27);
+        let err = Library::from_api(fake::api(), PathBuf::from("v1.27.dll"), None).expect_err("1.27 is too old");
+        fake::abi((1 << 16) | 28);
+        assert_eq!(err.message(), "v1.27.dll: view ABI 1.27, this SDK needs 1.28 or a later 1.x");
     }
 
     #[test]
     fn a_later_minor_version_is_accepted() {
-        fake::abi((1 << 16) | 26);
-        let v = Library::from_api(fake::api(), PathBuf::from("v1.26"), None);
-        fake::abi((1 << 16) | 25);
-        assert_eq!(v.expect("1.26 is 1.25 or later").abi_version(), (1, 26));
+        fake::abi((1 << 16) | 29);
+        let v = Library::from_api(fake::api(), PathBuf::from("v1.29"), None);
+        fake::abi((1 << 16) | 28);
+        assert_eq!(v.expect("1.29 is 1.28 or later").abi_version(), (1, 29));
     }
 
     #[test]
@@ -548,7 +551,7 @@ mod tests {
     #[test]
     fn a_viewer_prints_its_name_path_and_version() {
         let text = format!("{:?}", fake::library());
-        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 25) }"#);
+        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 28) }"#);
     }
 
     #[test]

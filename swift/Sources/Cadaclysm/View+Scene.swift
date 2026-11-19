@@ -14,7 +14,7 @@ extension View {
     @discardableResult
     public func showNode(_ node: Node) throws -> Item {
         let item = try showScene(node.scene)
-        for hidden in node.siblingsAlongPath { try item.nodeVisible(hidden, false) }
+        for hidden in node.siblingsAlongPath { try item.setNodeVisible(hidden, false) }
         return item
     }
 }

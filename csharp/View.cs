@@ -70,6 +70,21 @@ internal unsafe struct RawViewPick
     public uint HasPoint;
     public fixed float Point[3];
     public uint Overlay;
+    public int ViewportLabel;
+}
+
+/// <summary>CadaclysmViewEventPick: the pick inside an input event, CadaclysmViewPick as 1.26 laid the
+/// event out (40 bytes); the 1.28 label hit is the event's own PickViewportLabel.</summary>
+internal unsafe struct RawViewEventPick
+{
+    public uint Size;
+    public uint Item;
+    public uint Node;
+    public uint Face;
+    public uint Clicks;
+    public uint HasPoint;
+    public fixed float Point[3];
+    public uint Overlay;
 }
 
 internal struct RawViewLod
@@ -102,6 +117,14 @@ public readonly record struct OccludedStyle(float Dash = 6f, float Gap = 4f, flo
 /// <see cref="View.CurveColour()"/>, <see cref="View.IsocurveColour()"/>): <c>Colour</c> (3 numbers in
 /// 0..1), or each part's own colour where <c>FromPart</c>.</summary>
 public readonly record struct LineColour(float[] Colour, bool FromPart);
+
+// CadaclysmViewAnimationBinding, 1.27: 16 bytes on a 64-bit target.
+internal struct RawViewAnimationBinding
+{
+    public IntPtr Target;
+    public uint Item;
+    public uint Node;
+}
 
 internal unsafe struct RawViewSnap
 {
@@ -282,6 +305,31 @@ internal struct RawViewStats
     public uint Pad1;
 }
 
+// CadaclysmViewInputEvent, 1.26: 272 bytes, padded explicitly, every field at its natural alignment.
+internal unsafe struct RawViewInputEvent
+{
+    public uint Size;
+    public uint Kind;
+    public double TimeMs;
+    public float X;
+    public float Y;
+    public float WheelY;
+    public uint Button;
+    public uint Modifiers;
+    public uint Pointer;
+    public uint PointerId;
+    public uint Width;
+    public uint Height;
+    public uint Repeat;
+    public uint Dropped;
+    public uint Pad0;
+    public fixed byte Key[32];
+    public RawViewEventPick Pick;
+    public RawViewSnap Snap;
+    public RawViewCamera Camera;
+    public int PickViewportLabel;
+}
+
 // 1.10, bound only: nothing in this file fills one yet (C#'s viewport-camera API comes later).
 #pragma warning disable CS0649
 internal unsafe struct RawViewViewportCamera
@@ -421,6 +469,19 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_occluded(ViewHandle view, uint item, uint mode);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_line_style(ViewHandle view, uint item, float dashPt, float gapPt);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_point_style(ViewHandle view, uint item, uint shape, [MarshalAs(UnmanagedType.I1)] bool hollow);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_point_states(ViewHandle view, uint item, byte* states, nuint count);
+    [DllImport(Lib)] internal static extern void cadaclysm_view_set_point_state_colours(ViewHandle view, float* hover, float* selected, float* first);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_viewport_label(ViewHandle view, uint viewport, byte* text, float* colour);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_viewport_border(ViewHandle view, uint viewport, float* colour);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_on_top(ViewHandle view, uint item, [MarshalAs(UnmanagedType.I1)] bool on);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_item_line_colour(ViewHandle view, uint item, uint layer, float* rgb);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_finish(ViewHandle view, uint item, uint finish);
@@ -464,6 +525,20 @@ internal static unsafe class ViewNative
     // 1.25: frame statistics.
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_stats(ViewHandle view, RawViewStats* stats);
+    // 1.26: the own window's input events, one at a time; false with "no event" while none waits.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_next_event(ViewHandle view, RawViewInputEvent* output);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_close(ViewHandle view);
+    // 1.27: animations on the timeline, per-item visibility, per-node ghosts.
+    [DllImport(Lib)]
+    internal static extern uint cadaclysm_view_play_animation(ViewHandle view, IntPtr animation, RawViewAnimationBinding* bindings, uint count);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_timeline_remove(ViewHandle view, uint track);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_item_visible(ViewHandle view, uint item, [MarshalAs(UnmanagedType.I1)] bool visible);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_node_ghosts(ViewHandle view, uint item, uint* nodes, uint count);
     // 1.8: the double-click opt-in, focus, the navigation mode.
     [DllImport(Lib)] internal static extern void cadaclysm_view_set_double_click_frames(ViewHandle view, [MarshalAs(UnmanagedType.I1)] bool on);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -624,7 +699,9 @@ public static unsafe class ViewLibrary
     }
 
     /// <summary>Why the library at `path`, answering `version` from cadaclysm_view_abi_version, is
-    /// refused -- null when this wrapper takes it (1.25 or a later 1.x).</summary>
+    /// refused -- null when this wrapper takes it (1.28 or a later 1.x).</summary>
+    internal const uint AbiMinor = 28;
+
     internal static string? AbiRefusal(string path, uint version)
     {
         uint major = version >> 16, minor = version & 0xFFFF;
@@ -635,8 +712,10 @@ public static unsafe class ViewLibrary
         // 1.18: set_finish. 1.20: set_occluded_style and occluded_style. 1.21: show_solid_faces.
         // 1.22: snapping -- set_snap, request_snap_in, snap_result, clear_snap, set_work_plane, clear_work_plane.
         // 1.23: set_line_colour, line_colour and set_item_line_colour. 1.24: overlays -- show_overlay,
-        // show_overlay_image, move_overlay, screen text, the pick's overlay flag. 1.25: stats.
-        return major != 1 || minor < 25 ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.25 or a later 1.x" : null;
+        // show_overlay_image, move_overlay, screen text, the pick's overlay flag. 1.25: stats. 1.26: next_event and close.
+        // 1.27: play_animation, timeline_remove, set_item_visible, set_node_ghosts and the timeline event.
+        // 1.28: the drafting styles and the pick's viewport label.
+        return major != 1 || minor < AbiMinor ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.{AbiMinor} or a later 1.x" : null;
     }
 
     private static bool SamePath(string a, string? b) =>
@@ -715,13 +794,94 @@ public static unsafe class ViewLibrary
 
 public sealed record ViewOptions(string? Title = null, uint Width = 0, uint Height = 0, string Surfaces = "exact", string Up = "z", uint Backend = 0);
 
+/// <summary>A colour, from text or numbers, wherever the options take one: text -- `"#rgb"`,
+/// `"#rrggbb"` (the `#` optional) or one of the 148 CSS colour names, any case, read by the view
+/// library's own `cadaclysm_view_parse_colour`, so every wrapper takes the same forms -- or three or
+/// four numbers in 0..1 (alpha 1 where three). `"none"` (any case) is <see cref="None"/>: no colour,
+/// where a call takes none. A string or a float[] converts to it implicitly, so
+/// <c>new OverlayStyle { Fill = "none", Stroke = "white" }</c> and <c>Stroke = new[] { 1f, .5f, 0f }</c>
+/// both compile. The text is read when the colour is used: a wrong one is refused by the call that
+/// takes it, in the library's words. <c>default(Colour)</c>, and a null string or array converted,
+/// is no colour given: the call's own default.</summary>
+public readonly struct Colour : IEquatable<Colour>
+{
+    private readonly string? text;
+    private readonly float[]? values;
+    private readonly bool none;
+
+    private Colour(string? text, float[]? values, bool none)
+    {
+        this.text = text;
+        this.values = values;
+        this.none = none;
+    }
+
+    /// <summary>No colour: what the text "none" converts to.</summary>
+    public static Colour None => new(null, null, true);
+
+    /// <summary>Whether it is <see cref="None"/>.</summary>
+    public bool IsNone => none;
+
+    /// <summary>The text it was made from; null where it was made from numbers, or is None.</summary>
+    public string? Text => text;
+
+    /// <summary>A copy of the numbers it was made from; null where it was made from text, or is None.</summary>
+    public float[]? Values => values?.ToArray();
+
+    /// <summary>Colour text; "none" (any case, spaces around) is <see cref="None"/>.</summary>
+    public static implicit operator Colour(string? text) =>
+        text is not null && text.Trim().Equals("none", StringComparison.OrdinalIgnoreCase) ? None : new(text, null, false);
+
+    /// <summary>Three or four numbers in 0..1, copied.</summary>
+    public static implicit operator Colour(float[]? values) => new(null, values?.ToArray(), false);
+
+    /// <summary>Neither text, numbers nor None: <c>default(Colour)</c>.</summary>
+    internal bool IsDefault => !none && text is null && values is null;
+
+    /// <summary>Given, and not default: a value the call reads.</summary>
+    internal static bool Given(Colour? c) => c is { IsDefault: false };
+
+    /// <summary>Four floats (alpha 1 where text or three numbers); null for None or default.</summary>
+    internal float[]? Rgba(string what) =>
+        none ? null : text is not null ? ViewNative.Rgba(text) : View.Rgba(values, what);
+
+    /// <summary>Three floats; None is refused (`what` takes a colour), default is null.</summary>
+    internal float[]? Rgb(string what) =>
+        none ? throw new ViewException($"{what}: a colour, not none")
+            : text is not null ? ViewNative.Colour(text) : View.Exact(values, 3, what);
+
+    /// <summary>"none", the text as given, or the numbers as `[r, g, b]` / `[r, g, b, a]`; empty for default.</summary>
+    public override string ToString() =>
+        none ? "none" : text ?? (values is null ? "" : "[" + string.Join(", ", values.Select(v => v.ToString(System.Globalization.CultureInfo.InvariantCulture))) + "]");
+
+    public bool Equals(Colour other) =>
+        none == other.none && string.Equals(text, other.text, StringComparison.Ordinal)
+        && (values is null ? other.values is null : other.values is not null && values.SequenceEqual(other.values));
+
+    public override bool Equals(object? obj) => obj is Colour c && Equals(c);
+
+    public override int GetHashCode()
+    {
+        var h = new HashCode();
+        h.Add(none);
+        h.Add(text, StringComparer.Ordinal);
+        if (values is not null) foreach (var v in values) h.Add(v);
+        return h.ToHashCode();
+    }
+
+    public static bool operator ==(Colour a, Colour b) => a.Equals(b);
+    public static bool operator !=(Colour a, Colour b) => !a.Equals(b);
+}
+
 /// <summary>What Show() and View() on a Solid, Scene, Node or Pose take. `Up` null is the scene's own
 /// up axis ("z" for a solid); `Tolerance` null is 0.05 for a solid and refused for a document, which
-/// is drawn at the tolerance it was read with. The colour is `Rgb` (three numbers in 0..1) or `RgbText`
-/// (`"#rgb"`, `"#rrggbb"` or a CSS colour name, read by the view library), which wins when both are given.</summary>
+/// is drawn at the tolerance it was read with. The colour, `Rgb`, is a <see cref="Colour"/>: three
+/// numbers in 0..1 or text (`"#rgb"`, `"#rrggbb"` or a CSS colour name, read by the view library);
+/// unset or "none", the solid's own paint. `RgbText` is the old text form, kept for one release: it
+/// wins over `Rgb` when both are given.</summary>
 public sealed record ShowOptions(string View = "iso", double? Azimuth = null, double? Elevation = null, double? Zoom = null, string? Up = null,
-    bool Edges = true, uint Width = 0, uint Height = 0, string? Title = null, double? Tolerance = null, float[]? Rgb = null,
-    string? RgbText = null);
+    bool Edges = true, uint Width = 0, uint Height = 0, string? Title = null, double? Tolerance = null, Colour? Rgb = null,
+    [property: Obsolete("use Rgb with a string")] string? RgbText = null);
 
 /// <summary>ShowText's options: a white 12 px label, bottom-left on its anchor, by default.</summary>
 public sealed class TextOptions
@@ -729,14 +889,18 @@ public sealed class TextOptions
     /// <summary>"label" (pixels, facing the camera) or "world" (model units, in the plane of Right and Up).</summary>
     public string Mode { get; init; } = "label";
     public float Size { get; init; } = 12f;
-    /// <summary>The glyphs' colour as text ("#rgb", "#rrggbb", a CSS name); it wins over Colour when both are set, as ShowOptions' RgbText does.</summary>
+    /// <summary>The glyphs' colour as text: the old form, kept for one release; it wins over Colour when both are set.</summary>
+    [Obsolete("use Colour with a string")]
     public string? ColourText { get; init; }
-    public float[]? Colour { get; init; }
+    /// <summary>The glyphs' colour (a <see cref="global::Cadaclysm.Views.Colour"/>: text or three numbers); white where unset.</summary>
+    public Colour? Colour { get; init; }
     public string Align { get; init; } = "bottom-left";
     public float[]? Offset { get; init; }
-    /// <summary>The label's background box as text (alpha 1); it wins over Box (3 or 4 numbers) when both are set; none by default.</summary>
+    /// <summary>The label's background box as text: the old form, kept for one release; it wins over Box when both are set.</summary>
+    [Obsolete("use Box with a string")]
     public string? BoxText { get; init; }
-    public float[]? Box { get; init; }
+    /// <summary>The label's background box (a <see cref="global::Cadaclysm.Views.Colour"/>: text, alpha 1, or 3 or 4 numbers); none where unset or "none".</summary>
+    public Colour? Box { get; init; }
     public float Padding { get; init; } = 4f;
     public bool OnTop { get; init; }
     public uint Font { get; init; }
@@ -752,7 +916,7 @@ public sealed record ViewEvent(string Type, float X = 0, float Y = 0, uint Butto
     string Pointer = "mouse", float WheelY = 0, string? Key = null, bool KeyDown = true, double TimeMs = 0);
 
 /// <summary>Rect is x, y, w, h in physical pixels, the matrices column-major; Grid: none, top, front or right;
-/// LayerMask: the user layers drawn here, bit n for layer n (<see cref="Item.UserLayer"/>), every one by default.</summary>
+/// LayerMask: the user layers drawn here, bit n for layer n (<see cref="Item.SetUserLayer"/>), every one by default.</summary>
 public sealed record Viewport(uint[] Rect, float[] View, float[] Projection, float[] Eye, string Grid = "none", uint LayerMask = 0xFFFFFFFFu);
 
 /// <summary>A CAM tool: Shape is flat, ball, drill, vbit or bullnose; the flute length, a V-bit's angle and a bull-nose's corner radius are 0 where they mean nothing.</summary>
@@ -788,7 +952,7 @@ public sealed unsafe class Machining : Item
         Ok(ViewNative.cadaclysm_view_machining_seek(View.Live("cadaclysm_view_machining_seek"), Id, move));
 
     /// <summary>"height", "tool" or "deviation" (needs the part given to ShowMachining).</summary>
-    public void ColourBy(string mode)
+    public void SetColourBy(string mode)
     {
         var m = mode is null ? -1 : Array.IndexOf(Modes, mode);
         if (m < 0) throw new ViewException($"mode '{mode}': one of {string.Join(", ", Modes)}");
@@ -796,7 +960,7 @@ public sealed unsafe class Machining : Item
     }
 
     /// <summary>The toolpath and the tool, each on or off.</summary>
-    public void Overlays(bool path = true, bool tool = true) =>
+    public void SetOverlays(bool path = true, bool tool = true) =>
         Ok(ViewNative.cadaclysm_view_machining_overlays(View.Live("cadaclysm_view_machining_overlays"), Id, path, tool));
 
     public MachiningInfo Info()
@@ -822,8 +986,9 @@ public sealed unsafe class Machining : Item
 /// the ray met the model (x, y, z, in the coordinates the items were shown in), or null where the
 /// library read no depth (a machining stock, the terminal library). Overlay (1.24): the item is an
 /// overlay -- it was over the pixel, so nothing of the scene beneath it was picked (Face is a text
-/// overlay's line, else 0).</summary>
-public sealed record Pick(uint Item, uint Node, uint Face, uint Clicks = 1, float[]? Point = null, bool Overlay = false);
+/// overlay's line, else 0). ViewportLabel (1.28): the viewport whose label was under the pixel (Item 0
+/// then), else -1.</summary>
+public sealed record Pick(uint Item, uint Node, uint Face, uint Clicks = 1, float[]? Point = null, bool Overlay = false, int ViewportLabel = -1);
 
 /// <summary>Where an overlay hangs in the window (view ABI 1.24): a corner, the middle of an edge, or
 /// the centre. An overlay's offset is measured inward from it: x away from the left edge for the left
@@ -833,20 +998,24 @@ public sealed record Pick(uint Item, uint Node, uint Face, uint Clicks = 1, floa
 public enum Anchor { TopLeft, Top, TopRight, Left, Centre, Right, BottomLeft, Bottom, BottomRight }
 
 /// <summary>How <see cref="View.ShowOverlay(Profile, Anchor, float, float, OverlayStyle?)"/> draws a shape.
-/// The fill: <see cref="FillText"/> or <see cref="Fill"/> where set ("none" for no fill), else the
-/// profile's own colour (<see cref="Profile.Coloured(string)"/>), else white -- unless a stroke is set,
-/// when an uncoloured profile is not filled. The stroke only where <see cref="StrokeText"/> or
-/// <see cref="Stroke"/> is set: an open profile, never filled, draws only with one.</summary>
+/// A profile is a sketch, so it draws as its outline by default. The stroke: <see cref="Stroke"/>
+/// where set ("none" for no stroke), else the profile's own colour (<see cref="Profile.Coloured(string)"/>),
+/// else white; <see cref="StrokeWidth"/> pixels wide. The fill only where <see cref="Fill"/> is set
+/// ("none" for no fill): a panel needs one. Fill-only is a fill and <c>Stroke = "none"</c>; neither a
+/// fill nor a stroke is refused.</summary>
 public sealed class OverlayStyle
 {
-    /// <summary>The fill as text ("#rgb", "#rrggbb", a CSS name, or "none"); it wins over Fill.</summary>
+    /// <summary>The fill as text: the old form, kept for one release; it wins over Fill.</summary>
+    [Obsolete("use Fill with a string")]
     public string? FillText { get; init; }
-    /// <summary>The fill as 3 or 4 numbers in 0..1 (alpha 1 where 3).</summary>
-    public float[]? Fill { get; init; }
-    /// <summary>The stroke as text ("#rgb", "#rrggbb", a CSS name); it wins over Stroke.</summary>
+    /// <summary>The fill (a <see cref="Colour"/>: text, "none", or 3 or 4 numbers in 0..1); none where unset.</summary>
+    public Colour? Fill { get; init; }
+    /// <summary>The stroke as text: the old form, kept for one release; it wins over Stroke.</summary>
+    [Obsolete("use Stroke with a string")]
     public string? StrokeText { get; init; }
-    /// <summary>The stroke as 3 or 4 numbers in 0..1 (alpha 1 where 3).</summary>
-    public float[]? Stroke { get; init; }
+    /// <summary>The stroke (a <see cref="Colour"/>: text, "none", or 3 or 4 numbers in 0..1); unset, the
+    /// profile's own colour, else white.</summary>
+    public Colour? Stroke { get; init; }
     /// <summary>The stroke's width in pixels.</summary>
     public float StrokeWidth { get; init; } = 1f;
     /// <summary>Lower draws first; equal orders in show order. Shapes, text and images share it.</summary>
@@ -854,8 +1023,10 @@ public sealed class OverlayStyle
 }
 
 /// <summary>An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the
-/// window, drawn over everything, untouched by the camera. Remove, UserLayer and (text) SetText work
-/// as on any item.</summary>
+/// window, drawn over everything, untouched by the camera. Remove, UserLayer and, for text, SetText and
+/// Colour work as on any item; the item calls that mean nothing for an overlay -- Colour on a shape or
+/// an image, Placement, Xray, the edge, curve and node colours, Frame -- throw a ViewException saying it
+/// is an overlay.</summary>
 public sealed unsafe class Overlay : Item
 {
     internal Overlay(View view, uint id, object? shown, Anchor anchor) : base(view, id, shown) { Anchor = anchor; }
@@ -883,7 +1054,58 @@ public sealed unsafe class Overlay : Item
 public sealed record Snap(string Kind, double[] Point, uint Item, uint Node, uint Face, uint? Edge, float[] Tangent,
     float[] Axis, double Radius, float DistancePx, uint Clicks);
 
+/// <summary>One binding of an animation's target to what it moves (view ABI 1.27, <see cref="View.PlayAnimation"/>):
+/// the <see cref="Animation"/>'s Target name, the item shown, and Node -- a node of that item (its subtree moves
+/// with it), or null for the item itself.</summary>
+public sealed record AnimationBinding(string Target, uint Item, uint? Node = null)
+{
+    public AnimationBinding(string target, Item item, uint? node = null) : this(target, (item ?? throw new ArgumentNullException(nameof(item))).Id, node) { }
+}
+
 public sealed record Camera(float[] Eye, float[] Target, float[] Up, bool Orthographic, double Azimuth, double Elevation, Pick? Pick);
+
+/// <summary>One input event a view's own window handled (view ABI 1.26, <see cref="View.NextEvent"/> and
+/// <see cref="View.Run(Func{ViewInputEvent, bool})"/>): the window still orbits, zooms and closes by itself --
+/// events report, they do not intercept. Match on the kind: <see cref="PointerEvent"/>, <see cref="WheelEvent"/>,
+/// <see cref="KeyEvent"/>, <see cref="ResizeEvent"/>, <see cref="PickEvent"/>, <see cref="SnapEvent"/>,
+/// <see cref="TimelineEvent"/>, <see cref="CloseEvent"/>. TimeMs is the library's own clock (only differences mean anything); Dropped, how
+/// many events a full queue (1024) dropped before this one, the oldest pointer moves first.</summary>
+public abstract record ViewInputEvent
+{
+    public double TimeMs { get; init; }
+    public uint Dropped { get; init; }
+}
+
+/// <summary>A button went down, the pointer moved or a button went up: Type "down", "move" or "up"; X, Y in
+/// physical pixels; Button 0 left, 1 middle, 2 right (0 for a move); the modifiers held; Pointer "mouse",
+/// "touch" or "pen", and the touch's PointerId.</summary>
+public sealed record PointerEvent(string Type, float X, float Y, uint Button, bool Shift, bool Ctrl, bool Alt, bool Meta = false,
+    string Pointer = "mouse", uint PointerId = 0) : ViewInputEvent;
+
+/// <summary>The wheel turned at X, Y: WheelY a DOM deltaY, negative forward (about 100 a notch).</summary>
+public sealed record WheelEvent(float X, float Y, float WheelY, bool Shift, bool Ctrl, bool Alt, bool Meta = false) : ViewInputEvent;
+
+/// <summary>A key went down (Down) or up: Key is its DOM code -- "KeyR", "Digit1", "Space", "Escape", "ArrowUp",
+/// "ShiftLeft", "F5" -- every key, the ones the view binds too; Repeat for the system's auto-repeat.</summary>
+public sealed record KeyEvent(string Key, bool Down, bool Shift, bool Ctrl, bool Alt, bool Meta = false, bool Repeat = false) : ViewInputEvent;
+
+/// <summary>The window's drawing area is now Width x Height physical pixels.</summary>
+public sealed record ResizeEvent(uint Width, uint Height) : ViewInputEvent;
+
+/// <summary>A click's pick has landed: what it hit, or null for nothing. <see cref="View.LastPick"/> gets the same answer.</summary>
+public sealed record PickEvent(Pick? Pick) : ViewInputEvent;
+
+/// <summary>With snapping on, a hover's or click's snap has landed (Clicks 0 for a hover): the snap, or null for none.
+/// <see cref="View.LastSnap"/> gets the same answer.</summary>
+public sealed record SnapEvent(Snap? Snap) : ViewInputEvent;
+
+/// <summary>The timeline's clock moved in a drawn frame (view ABI 1.27: playing, or a seek, play or pause since
+/// the last frame), at most once per frame: no fields beyond the stamp. Read the clock with <see cref="View.Time"/>.</summary>
+public sealed record TimelineEvent : ViewInputEvent;
+
+/// <summary>The window closed (Escape, its close button, <see cref="View.CloseWindow"/>): the last event, with the
+/// camera it closed on, as <see cref="View.Run()"/> returns it (its Pick null).</summary>
+public sealed record CloseEvent(Camera Camera) : ViewInputEvent;
 
 /// <summary>RGBA8, rows from the top.</summary>
 public sealed record ViewImage(int Width, int Height, byte[] Rgba);
@@ -908,7 +1130,7 @@ public unsafe class Item
     /// <summary>Poses a shown scene: one world transform per node (sixteen doubles each, column-major,
     /// Pose.RawTransform's layout -- every node of the scene, in index order), drawn in place of each
     /// node's rest transform. null restores the rest pose.</summary>
-    public void NodeTransforms(IReadOnlyList<double[]>? transforms)
+    public void SetNodeTransforms(IReadOnlyList<double[]>? transforms)
     {
         if (transforms is null) { Ok(ViewNative.cadaclysm_view_set_node_transforms(View.Live("cadaclysm_view_set_node_transforms"), Id, null, 0)); return; }
         var flat = new double[16 * transforms.Count];
@@ -922,13 +1144,13 @@ public unsafe class Item
     }
 
     /// <summary>Recolours the item: `"#rgb"`, `"#rrggbb"` or a CSS colour name, any case.</summary>
-    public void Colour(string rgb)
+    public void SetColour(string rgb)
     {
         if (rgb is null) throw new ViewException("colour: 3 numbers, not none");
-        Colour(ViewNative.Colour(rgb)!);
+        SetColour(ViewNative.Colour(rgb)!);
     }
 
-    public void Colour(float[] rgb)
+    public void SetColour(float[] rgb)
     {
         if (rgb is null) throw new ViewException("colour: 3 numbers, not none");
         View.Exact(rgb, 3, "colour");
@@ -937,7 +1159,7 @@ public unsafe class Item
     }
 
     /// <summary>Sixteen doubles, column-major; null puts it back.</summary>
-    public void Placement(double[]? matrix)
+    public void SetPlacement(double[]? matrix)
     {
         View.Exact(matrix, 16, "placement");
         var h = View.Live("cadaclysm_view_set_placement");
@@ -945,17 +1167,17 @@ public unsafe class Item
     }
 
     /// <summary>`faces` (pick numbers) coloured by `colours`, one text a face (alpha 1); null faces clears every one.</summary>
-    public void FaceColours(uint[]? faces, string[] colours)
+    public void SetFaceColours(uint[]? faces, string[] colours)
     {
-        if (faces is null) { FaceColours(null, (float[]?)null); return; }
+        if (faces is null) { SetFaceColours(null, (float[]?)null); return; }
         var rgba = new float[4 * (colours?.Length ?? 0)];
         for (var k = 0; k < rgba.Length / 4; k++)
             (ViewNative.Rgba(colours![k]) ?? throw new ViewException($"faceColours: colour {k} is null")).CopyTo(rgba, 4 * k);
-        FaceColours(faces, rgba);
+        SetFaceColours(faces, rgba);
     }
 
     /// <summary>`faces` (pick numbers) in `rgba`, four floats a face; null faces clears every one.</summary>
-    public void FaceColours(uint[]? faces, float[]? rgba)
+    public void SetFaceColours(uint[]? faces, float[]? rgba)
     {
         if (faces is not null && (rgba is null || rgba.Length != 4 * faces.Length))
             throw new ViewException($"faceColours: {4 * faces.Length} numbers (rgba, 4 a face), not {rgba?.Length ?? 0}");
@@ -974,23 +1196,62 @@ public unsafe class Item
         Ok(ViewNative.cadaclysm_view_set_text(h, Id, ViewNative.TextOf(text)));
     }
 
-    public void Xray(bool on) => Ok(ViewNative.cadaclysm_view_set_xray(View.Live("cadaclysm_view_set_xray"), Id, on));
+    public void SetXray(bool on) => Ok(ViewNative.cadaclysm_view_set_xray(View.Live("cadaclysm_view_set_xray"), Id, on));
 
     /// <summary>How the item's lines and points draw where a surface hides them: "off" (not drawn; an
     /// item shows with this until it is set), "solid" (drawn through) or "dashed" (dashed and dimmed).</summary>
-    public void Occluded(string mode)
+    public void SetOccluded(string mode)
     {
         if (mode is null || !View.OccludedModes.TryGetValue(mode, out uint m))
             throw new ViewException($"occluded: '{mode}' is not 'off', 'solid' or 'dashed'");
         Ok(ViewNative.cadaclysm_view_set_occluded(View.Live("cadaclysm_view_set_occluded"), Id, m));
     }
 
+    internal static readonly string[] PointShapes = { "disc", "ring", "square", "diamond" };
+    internal static readonly string[] PointStates = { "normal", "hover", "selected", "first" };
+
+    /// <summary>Draws the item's lines in its own dash: <paramref name="dash"/> points on, <paramref name="gap"/> off; 0 is solid.</summary>
+    public void SetLineStyle(float dash = 0f, float gap = 0f) =>
+        Ok(ViewNative.cadaclysm_view_set_line_style(View.Live("cadaclysm_view_set_line_style"), Id, dash, gap));
+
+    /// <summary>A points item's marker: "disc", "ring", "square" or "diamond", filled or hollow.</summary>
+    public void SetPointStyle(string shape = "disc", bool hollow = false)
+    {
+        int s = Array.IndexOf(PointShapes, shape);
+        if (s < 0) throw new ViewException($"point style: '{shape}' is not 'disc', 'ring', 'square' or 'diamond'");
+        Ok(ViewNative.cadaclysm_view_set_point_style(View.Live("cadaclysm_view_set_point_style"), Id, (uint)s, hollow));
+    }
+
+    /// <summary>One state a point: "normal", "hover", "selected" or "first".</summary>
+    public void SetPointStates(IReadOnlyList<string> states)
+    {
+        var codes = new byte[states.Count];
+        for (int i = 0; i < codes.Length; i++)
+        {
+            int c = Array.IndexOf(PointStates, states[i]);
+            if (c < 0) throw new ViewException($"point states: '{states[i]}' is not 'normal', 'hover', 'selected' or 'first'");
+            codes[i] = (byte)c;
+        }
+        SetPointStates(codes);
+    }
+
+    /// <summary>The states as the header's numbers (0 normal, 1 hover, 2 selected, 3 first), one per point.</summary>
+    public unsafe void SetPointStates(ReadOnlySpan<byte> states)
+    {
+        fixed (byte* p = states)
+            Ok(ViewNative.cadaclysm_view_set_point_states(View.Live("cadaclysm_view_set_point_states"), Id, p, (nuint)states.Length));
+    }
+
+    /// <summary>Draws the item after every other, depth testing off; picked ahead of what is under it.</summary>
+    public void SetOnTop(bool on = true) =>
+        Ok(ViewNative.cadaclysm_view_set_on_top(View.Live("cadaclysm_view_set_on_top"), Id, on));
+
     /// <summary>The item's finish: "gloss" (an item shows with this until it is set) -- under the
     /// showroom lighting a clear coat mirroring the room, silver at a grazing angle -- "satin" (a
     /// weaker, blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads the scene
     /// again, as a show does: set it as each item is shown rather than over a finished scene item by
     /// item.</summary>
-    public void Finish(string finish)
+    public void SetFinish(string finish)
     {
         if (finish is null || !View.Finishes.TryGetValue(finish, out uint f))
             throw new ViewException($"finish: '{finish}' is not 'gloss', 'satin' or 'matte'");
@@ -998,26 +1259,26 @@ public unsafe class Item
     }
 
     /// <summary>Draws the item's edges in <paramref name="rgb"/> -- `"#rgb"`, `"#rrggbb"` or a CSS colour
-    /// name, any case -- over the view's <see cref="View.EdgeColour(string, bool)"/>, the item's colour and
+    /// name, any case -- over the view's <see cref="View.SetEdgeColour(string, bool)"/>, the item's colour and
     /// a solid's own edge paint; null takes the view's colour again.</summary>
-    public void EdgeColour(string? rgb) => LineColourOf(View.LayerEdges, ViewNative.Colour(rgb));
+    public void SetEdgeColour(string? rgb) => LineColourOf(View.LayerEdges, ViewNative.Colour(rgb));
 
-    /// <summary><see cref="EdgeColour(string?)"/> with three numbers in 0..1.</summary>
-    public void EdgeColour(float r, float g, float b) => LineColourOf(View.LayerEdges, new[] { r, g, b });
+    /// <summary><see cref="SetEdgeColour(string?)"/> with three numbers in 0..1.</summary>
+    public void SetEdgeColour(float r, float g, float b) => LineColourOf(View.LayerEdges, new[] { r, g, b });
 
     /// <summary>Draws the item's curves in <paramref name="rgb"/>, over the view's
-    /// <see cref="View.CurveColour(string, bool)"/> and the item's colour; null takes the view's colour again.</summary>
-    public void CurveColour(string? rgb) => LineColourOf(View.LayerCurves, ViewNative.Colour(rgb));
+    /// <see cref="View.SetCurveColour(string, bool)"/> and the item's colour; null takes the view's colour again.</summary>
+    public void SetCurveColour(string? rgb) => LineColourOf(View.LayerCurves, ViewNative.Colour(rgb));
 
-    /// <summary><see cref="CurveColour(string?)"/> with three numbers in 0..1.</summary>
-    public void CurveColour(float r, float g, float b) => LineColourOf(View.LayerCurves, new[] { r, g, b });
+    /// <summary><see cref="SetCurveColour(string?)"/> with three numbers in 0..1.</summary>
+    public void SetCurveColour(float r, float g, float b) => LineColourOf(View.LayerCurves, new[] { r, g, b });
 
     /// <summary>Draws the item's isocurves in <paramref name="rgb"/>, over the view's
-    /// <see cref="View.IsocurveColour(string, bool)"/> and the item's colour; null takes the view's colour again.</summary>
-    public void IsocurveColour(string? rgb) => LineColourOf(View.LayerIsocurves, ViewNative.Colour(rgb));
+    /// <see cref="View.SetIsocurveColour(string, bool)"/> and the item's colour; null takes the view's colour again.</summary>
+    public void SetIsocurveColour(string? rgb) => LineColourOf(View.LayerIsocurves, ViewNative.Colour(rgb));
 
-    /// <summary><see cref="IsocurveColour(string?)"/> with three numbers in 0..1.</summary>
-    public void IsocurveColour(float r, float g, float b) => LineColourOf(View.LayerIsocurves, new[] { r, g, b });
+    /// <summary><see cref="SetIsocurveColour(string?)"/> with three numbers in 0..1.</summary>
+    public void SetIsocurveColour(float r, float g, float b) => LineColourOf(View.LayerIsocurves, new[] { r, g, b });
 
     private void LineColourOf(uint layer, float[]? rgb)
     {
@@ -1026,28 +1287,43 @@ public unsafe class Item
     }
 
     /// <summary>The user layer the item is on, 0..31 (every item starts on 0): it draws while the layer is on
-    /// (<see cref="View.UserLayer"/>) and in the viewports whose <see cref="Viewport.LayerMask"/> has its bit.
+    /// (<see cref="View.SetUserLayer"/>) and in the viewports whose <see cref="Viewport.LayerMask"/> has its bit.
     /// A layer past 31 is refused.</summary>
-    public void UserLayer(uint layer) => Ok(ViewNative.cadaclysm_view_set_item_layer(View.Live("cadaclysm_view_set_item_layer"), Id, layer));
+    public void SetUserLayer(uint layer) => Ok(ViewNative.cadaclysm_view_set_item_layer(View.Live("cadaclysm_view_set_item_layer"), Id, layer));
 
-    public void NodeVisible(uint node, bool on) => Ok(ViewNative.cadaclysm_view_set_node_visible(View.Live("cadaclysm_view_set_node_visible"), Id, node, on));
+    /// <summary>Shows or hides the whole item (view ABI 1.27): a hidden item draws nothing, is never picked or
+    /// snapped, and is left out of Frame and the bounds the camera fits.</summary>
+    public void SetVisible(bool visible) => Ok(ViewNative.cadaclysm_view_set_item_visible(View.Live("cadaclysm_view_set_item_visible"), Id, visible));
 
-    /// <summary><see cref="NodeColour(uint, float[])"/> with the colour as text (alpha 1); null clears.</summary>
-    public void NodeColour(uint node, string? rgba) => NodeColour(node, ViewNative.Rgba(rgba));
+    /// <summary>Draws exactly these nodes of the item x-ray (ghosted), replacing its previous set (view ABI 1.27);
+    /// null, or an empty list, clears. A node the item has not is refused. The exact surfaces draw a ghost as
+    /// opaque: use <c>Surfaces = "triangles"</c> to see it.</summary>
+    public void SetNodeGhosts(uint[]? nodes)
+    {
+        var h = View.Live("cadaclysm_view_set_node_ghosts");
+        var pinned = nodes is null ? null : nodes.Length == 0 ? new uint[1] : nodes;
+        fixed (uint* n = pinned)
+            Ok(ViewNative.cadaclysm_view_set_node_ghosts(h, Id, pinned is null ? null : n, (uint)(nodes?.Length ?? 0)));
+    }
+
+    public void SetNodeVisible(uint node, bool on) => Ok(ViewNative.cadaclysm_view_set_node_visible(View.Live("cadaclysm_view_set_node_visible"), Id, node, on));
+
+    /// <summary><see cref="SetNodeColour(uint, float[])"/> with the colour as text (alpha 1); null clears.</summary>
+    public void SetNodeColour(uint node, string? rgba) => SetNodeColour(node, ViewNative.Rgba(rgba));
 
     /// <summary>Three or four numbers (alpha 1 when three); null clears.</summary>
-    public void NodeColour(uint node, float[]? rgba)
+    public void SetNodeColour(uint node, float[]? rgba)
     {
         var four = View.Rgba(rgba, "nodeColour");
         var h = View.Live("cadaclysm_view_set_node_color");
         fixed (float* c = four) Ok(ViewNative.cadaclysm_view_set_node_color(h, Id, node, c));
     }
 
-    /// <summary><see cref="NodeHighlight(uint, float[])"/> with the colour as text: alpha 1, the colour itself; null clears.</summary>
-    public void NodeHighlight(uint node, string? rgba) => NodeHighlight(node, ViewNative.Rgba(rgba));
+    /// <summary><see cref="SetNodeHighlight(uint, float[])"/> with the colour as text: alpha 1, the colour itself; null clears.</summary>
+    public void SetNodeHighlight(uint node, string? rgba) => SetNodeHighlight(node, ViewNative.Rgba(rgba));
 
     /// <summary>Tint `node` toward rgba's colour by its alpha (three or four numbers); null clears.</summary>
-    public void NodeHighlight(uint node, float[]? rgba)
+    public void SetNodeHighlight(uint node, float[]? rgba)
     {
         var four = View.Rgba(rgba, "nodeHighlight");
         var h = View.Live("cadaclysm_view_set_node_highlight");
@@ -1313,7 +1589,7 @@ public sealed unsafe class View : IDisposable
         IReadOnlyList<Node> level = node.Scene.Roots;
         foreach (var on in chain)
         {
-            foreach (var other in level) if (other.Index != on.Index) item.NodeVisible(other.Index, false);
+            foreach (var other in level) if (other.Index != on.Index) item.SetNodeVisible(other.Index, false);
             level = on.Children;
         }
         return item;
@@ -1389,7 +1665,7 @@ public sealed unsafe class View : IDisposable
     }
 
     /// <summary>A CAM job on a stock, paused at its start: `programs` in run order, the stock's two
-    /// corners, the finished `part` (null: none; ColourBy("deviation") needs it) and the options (null,
+    /// corners, the finished `part` (null: none; SetColourBy("deviation") needs it) and the options (null,
     /// or a null in them: the library's defaults). Play it with Play(). A shape is one of flat, ball,
     /// drill, vbit, bullnose; a part's positions are x y z triples and its indices whole triangles
     /// inside them. Anything wrong is refused before the library is called.</summary>
@@ -1462,6 +1738,50 @@ public sealed unsafe class View : IDisposable
 
     // ---- the timeline (1.7): one per view, shared by whatever it shows
 
+    /// <summary>Plays an <see cref="Animation"/> on the view's timeline (view ABI 1.27) over the items and nodes
+    /// <paramref name="bindings"/> name, and returns the new track's id (1 or more). The view plays its own copy,
+    /// so the animation may be disposed at once. It does not start playing: <see cref="Play"/> and
+    /// <see cref="Seek"/> move the clock. A null animation, an unknown item or node and a target bound twice are
+    /// refused with the library's text; a null binding and a null or NUL-holding target are refused before it.</summary>
+    public uint PlayAnimation(Animation? animation, IEnumerable<AnimationBinding> bindings)
+    {
+        ArgumentNullException.ThrowIfNull(bindings);
+        var list = bindings.ToList();
+        var targets = new IntPtr[list.Count];
+        try
+        {
+            var raw = new RawViewAnimationBinding[Math.Max(list.Count, 1)];
+            for (var k = 0; k < list.Count; k++)
+            {
+                var b = list[k] ?? throw new ViewException($"binding {k}: is null");
+                if (b.Target is null) throw new ViewException($"binding {k}: the target is null");
+                if (b.Target.Contains('\0')) throw new ViewException($"binding {k}: the target holds a NUL");
+                targets[k] = Marshal.StringToCoTaskMemUTF8(b.Target);
+                raw[k] = new RawViewAnimationBinding { Target = targets[k], Item = b.Item, Node = b.Node ?? AllNodes };
+            }
+            var h = Live("cadaclysm_view_play_animation");
+            var animationHandle = animation is null ? IntPtr.Zero : animation.Handle.DangerousGetHandle();
+            fixed (RawViewAnimationBinding* r = raw)
+            {
+                var track = ViewNative.cadaclysm_view_play_animation(h, animationHandle, list.Count == 0 ? null : r, (uint)list.Count);
+                GC.KeepAlive(animation);
+                if (track == 0) throw ViewNative.Failure();
+                return track;
+            }
+        }
+        finally
+        {
+            foreach (var t in targets) if (t != IntPtr.Zero) Marshal.FreeCoTaskMem(t);
+        }
+    }
+
+    /// <summary>The binding value that names the item itself rather than a node of it (CADACLYSM_VIEW_ALL_NODES).</summary>
+    internal const uint AllNodes = 0xFFFFFFFF;
+
+    /// <summary>Takes an animation track off the timeline (view ABI 1.27), putting back what it drove; a track no
+    /// animation played is refused ("timeline_remove: no track N").</summary>
+    public void RemoveTrack(uint track) => Ok(ViewNative.cadaclysm_view_timeline_remove(Live("cadaclysm_view_timeline_remove"), track));
+
     /// <summary>Play the timeline at `speed` times real time, from where it is (from the start once it has ended).</summary>
     public void Play(double speed = 1) => Ok(ViewNative.cadaclysm_view_timeline_play(Live("cadaclysm_view_timeline_play"), speed));
 
@@ -1471,7 +1791,7 @@ public sealed unsafe class View : IDisposable
     public void Seek(double seconds) => Ok(ViewNative.cadaclysm_view_timeline_seek(Live("cadaclysm_view_timeline_seek"), seconds));
 
     /// <summary>Whether the timeline starts over at its end.</summary>
-    public void Loop(bool on = true) => Ok(ViewNative.cadaclysm_view_timeline_set_loop(Live("cadaclysm_view_timeline_set_loop"), on));
+    public void SetLoop(bool on = true) => Ok(ViewNative.cadaclysm_view_timeline_set_loop(Live("cadaclysm_view_timeline_set_loop"), on));
 
     /// <summary>Seconds into the timeline, as of the last draw.</summary>
     public double Time => ViewNative.cadaclysm_view_timeline_time(Live("cadaclysm_view_timeline_time"));
@@ -1529,17 +1849,40 @@ public sealed unsafe class View : IDisposable
         }
     }
 
+#pragma warning disable CS0618 // the obsolete ...Text properties are still honoured, and win, for one release
+    /// <summary>The text's colour: ColourText where set, else Colour, else white.</summary>
+    private static float[] TextRgb(TextOptions o, string what) =>
+        o.ColourText is not null ? ViewNative.Colour(o.ColourText)!
+            : global::Cadaclysm.Views.Colour.Given(o.Colour) ? o.Colour!.Value.Rgb(what)! : ViewNative.Colour("white")!;
+
+    /// <summary>The text's box: BoxText where set, else Box; null for none.</summary>
+    private static float[]? TextBox(TextOptions o, string what) =>
+        o.BoxText is not null ? ViewNative.Rgba(o.BoxText) : global::Cadaclysm.Views.Colour.Given(o.Box) ? o.Box!.Value.Rgba(what) : null;
+
+    /// <summary>An overlay style's fill and stroke, by the outline rule (see <see cref="OverlayStyle"/>):
+    /// the stroke where given ("none": none), else `own`, else white; the fill only where given.</summary>
+    private static (float[]? Fill, float[]? Stroke) OverlayPaint(OverlayStyle s, float[]? own)
+    {
+        Colour? fillGiven = s.FillText is not null ? s.FillText : s.Fill;
+        Colour? strokeGiven = s.StrokeText is not null ? s.StrokeText : s.Stroke;
+        var fill = global::Cadaclysm.Views.Colour.Given(fillGiven) ? fillGiven!.Value.Rgba("showOverlay fill") : null;
+        var stroke = global::Cadaclysm.Views.Colour.Given(strokeGiven) ? strokeGiven!.Value.Rgba("showOverlay stroke") : own ?? new[] { 1f, 1f, 1f, 1f };
+        if (fill is null && stroke is null) throw new ViewException("showOverlay: neither a fill nor a stroke");
+        return (fill, stroke);
+    }
+#pragma warning restore CS0618
+
     /// <summary>Text shown as one item (cadaclysm_view_show_text): a label anchored to <paramref name="at"/>, or world text.</summary>
     public Item ShowText(string text, float[] at, TextOptions? options = null)
     {
         var o = options ?? new TextOptions();
         uint mode = Named(TextModes, o.Mode, "mode"), align = Named(Aligns, o.Align, "align");
         if (at is null || at.Length != 3) throw new ViewException($"showText at: 3 numbers, not {at?.Length ?? 0}");
-        var rgb = Exact(o.ColourText is not null ? ViewNative.Colour(o.ColourText) : o.Colour ?? ViewNative.Colour("white"), 3, "showText colour")!;
+        var rgb = TextRgb(o, "showText colour");
         var right = Exact(o.Right, 3, "showText right");
         var up = Exact(o.Up, 3, "showText up");
         var offset = Exact(o.Offset, 2, "showText offset");
-        var box = o.BoxText is not null ? ViewNative.Rgba(o.BoxText) : Rgba(o.Box, "showText box");
+        var box = TextBox(o, "showText box");
         var h = Live("cadaclysm_view_show_text");
         IntPtr utf8 = Marshal.StringToCoTaskMemUTF8(ViewNative.TextOf(text));
         try
@@ -1563,15 +1906,16 @@ public sealed unsafe class View : IDisposable
     // ---- overlays (1.24): a HUD over the whole window
 
     /// <summary>A 2D shape over the window: `shape` in pixels (one profile unit a pixel, y up), its
-    /// origin hung `x`, `y` pixels inward from `anchor` -- a closed profile filled (holes cut, even-odd),
-    /// stroked where the style says (<see cref="OverlayStyle"/>). Drawn after everything else, never
+    /// origin hung `x`, `y` pixels inward from `anchor` -- stroked, in its own colour or white, and its
+    /// closed loops filled (holes cut, even-odd) only where the style gives a fill (<see cref="OverlayStyle"/>).
+    /// Drawn after everything else, never
     /// moved by the camera, kept in place as the window resizes; a click on it picks it
     /// (<see cref="Pick.Overlay"/>) and nothing beneath.</summary>
     public Overlay ShowOverlay(Profile shape, Anchor anchor, float x, float y, OverlayStyle? style = null) =>
         ShowOverlay(new[] { shape }, anchor, x, y, style);
 
     /// <summary>Several profiles as one overlay -- a crosshair's two strokes, a frame's two loops: their
-    /// fills together by the even-odd rule. The fill falls back on the first coloured profile's colour.</summary>
+    /// fills together by the even-odd rule. The stroke falls back on the first coloured profile's colour.</summary>
     public Overlay ShowOverlay(IEnumerable<Profile> shapes, Anchor anchor, float x, float y, OverlayStyle? style = null)
     {
         var list = shapes?.ToList() ?? throw new ViewException("showOverlay: shapes, not null");
@@ -1593,12 +1937,7 @@ public sealed unsafe class View : IDisposable
         if (beziers is null || beziers.Length == 0 || beziers.Length % 16 != 0)
             throw new ViewException($"showOverlay: 16 numbers a curve, at least one, not {beziers?.Length ?? 0}");
         var s = style ?? new OverlayStyle();
-        var stroke = s.StrokeText is not null ? ViewNative.Rgba(s.StrokeText) : Rgba(s.Stroke, "showOverlay stroke");
-        float[]? fill;
-        if (s.FillText is not null)
-            fill = s.FillText.Trim().Equals("none", StringComparison.OrdinalIgnoreCase) ? null : ViewNative.Rgba(s.FillText);
-        else
-            fill = Rgba(s.Fill, "showOverlay fill") ?? own ?? (stroke is null ? new[] { 1f, 1f, 1f, 1f } : null);
+        var (fill, stroke) = OverlayPaint(s, own);
         var h = Live("cadaclysm_view_show_overlay");
         fixed (float* b = beziers)
         {
@@ -1625,8 +1964,8 @@ public sealed unsafe class View : IDisposable
     public Overlay ShowOverlayText(string text, Anchor anchor, float x, float y, TextOptions? options = null, int order = 0)
     {
         var o = options ?? new TextOptions();
-        var rgb = Exact(o.ColourText is not null ? ViewNative.Colour(o.ColourText) : o.Colour ?? ViewNative.Colour("white"), 3, "showOverlayText colour")!;
-        var box = o.BoxText is not null ? ViewNative.Rgba(o.BoxText) : Rgba(o.Box, "showOverlayText box");
+        var rgb = TextRgb(o, "showOverlayText colour");
+        var box = TextBox(o, "showOverlayText box");
         var h = Live("cadaclysm_view_show_text");
         IntPtr utf8 = Marshal.StringToCoTaskMemUTF8(ViewNative.TextOf(text));
         try
@@ -1681,7 +2020,7 @@ public sealed unsafe class View : IDisposable
     /// <summary>Fit the camera to everything shown.</summary>
     public void Frame() => Ok(ViewNative.cadaclysm_view_frame(Live("cadaclysm_view_frame"), 0));
 
-    public void Orthographic(bool on) => Void("cadaclysm_view_set_orthographic", h => ViewNative.cadaclysm_view_set_orthographic(h, on));
+    public void SetOrthographic(bool on) => Void("cadaclysm_view_set_orthographic", h => ViewNative.cadaclysm_view_set_orthographic(h, on));
 
     /// <summary>Whether a double click frames what it hit (off by default: it is a pick answered with
     /// Clicks 2 and the camera stays). Applies where the view takes the pick itself (its own window,
@@ -1706,7 +2045,7 @@ public sealed unsafe class View : IDisposable
     /// after the key is let go; Tab toggles it; Frame, Standard and Focus leave it.</summary>
     public string Navigation => ViewNative.cadaclysm_view_navigation(Live("cadaclysm_view_navigation")) == NavigationFly ? "fly" : "orbit";
 
-    public void Viewports(IReadOnlyList<Viewport> list)
+    public void SetViewports(IReadOnlyList<Viewport> list)
     {
         var grids = new uint[list.Count];
         for (var i = 0; i < list.Count; i++)
@@ -1735,25 +2074,25 @@ public sealed unsafe class View : IDisposable
     }
 
     /// <summary>surfaces, edges, curves, isocurves or grid.</summary>
-    public void Layer(string name, bool on)
+    public void SetLayer(string name, bool on)
     {
         var which = Named(Layers, name, "layer");
         Ok(ViewNative.cadaclysm_view_set_layer(Live("cadaclysm_view_set_layer"), which, on));
     }
 
     /// <summary>User layer `layer`, 0..31, on or off in every viewport (all start on); see
-    /// <see cref="Item.UserLayer"/>. A layer past 31 is refused.</summary>
-    public void UserLayer(uint layer, bool on) => Ok(ViewNative.cadaclysm_view_set_user_layer(Live("cadaclysm_view_set_user_layer"), layer, on));
+    /// <see cref="Item.SetUserLayer"/>. A layer past 31 is refused.</summary>
+    public void SetUserLayer(uint layer, bool on) => Ok(ViewNative.cadaclysm_view_set_user_layer(Live("cadaclysm_view_set_user_layer"), layer, on));
 
     /// <summary>The clear colour as text: `"#rgb"`, `"#rrggbb"` or a CSS colour name.</summary>
-    public void Background(string rgb)
+    public void SetBackground(string rgb)
     {
         if (rgb is null) throw new ViewException("background: 3 numbers, not none");
-        Background(ViewNative.Colour(rgb)!);
+        SetBackground(ViewNative.Colour(rgb)!);
     }
 
     /// <summary>Three numbers, the clear colour.</summary>
-    public void Background(float[] rgb)
+    public void SetBackground(float[] rgb)
     {
         if (rgb is null) throw new ViewException("background: 3 numbers, not none");
         Exact(rgb, 3, "background");
@@ -1781,31 +2120,31 @@ public sealed unsafe class View : IDisposable
     /// <summary>The colour every edge draws in: <paramref name="rgb"/> -- `"#rgb"`, `"#rrggbb"` or a CSS
     /// colour name -- or, with <paramref name="fromPart"/>, each part's own colour, brightened so an edge
     /// reads over its faces (the colour kept for when it is turned off). An item's
-    /// <see cref="Item.EdgeColour(string?)"/> draws over it.</summary>
-    public void EdgeColour(string rgb, bool fromPart = false) => SetLineColour(LayerEdges, "edgeColour", rgb, fromPart);
+    /// <see cref="Item.SetEdgeColour(string?)"/> draws over it.</summary>
+    public void SetEdgeColour(string rgb, bool fromPart = false) => SetLineColour(LayerEdges, "edgeColour", rgb, fromPart);
 
-    /// <summary><see cref="EdgeColour(string, bool)"/> with three numbers in 0..1.</summary>
-    public void EdgeColour(float[] rgb, bool fromPart = false) => SetLineColour(LayerEdges, "edgeColour", rgb, fromPart);
+    /// <summary><see cref="SetEdgeColour(string, bool)"/> with three numbers in 0..1.</summary>
+    public void SetEdgeColour(float[] rgb, bool fromPart = false) => SetLineColour(LayerEdges, "edgeColour", rgb, fromPart);
 
     /// <summary>The edges' colour in use.</summary>
     public LineColour EdgeColour() => LineColourOf(LayerEdges);
 
     /// <summary>The colour every curve (a curves or lines item's) draws in: <paramref name="rgb"/>, or
     /// with <paramref name="fromPart"/> each part's own colour -- the default.</summary>
-    public void CurveColour(string rgb, bool fromPart = false) => SetLineColour(LayerCurves, "curveColour", rgb, fromPart);
+    public void SetCurveColour(string rgb, bool fromPart = false) => SetLineColour(LayerCurves, "curveColour", rgb, fromPart);
 
-    /// <summary><see cref="CurveColour(string, bool)"/> with three numbers in 0..1.</summary>
-    public void CurveColour(float[] rgb, bool fromPart = false) => SetLineColour(LayerCurves, "curveColour", rgb, fromPart);
+    /// <summary><see cref="SetCurveColour(string, bool)"/> with three numbers in 0..1.</summary>
+    public void SetCurveColour(float[] rgb, bool fromPart = false) => SetLineColour(LayerCurves, "curveColour", rgb, fromPart);
 
     /// <summary>The curves' colour in use.</summary>
     public LineColour CurveColour() => LineColourOf(LayerCurves);
 
     /// <summary>The colour every isocurve draws in: <paramref name="rgb"/>, or with
     /// <paramref name="fromPart"/> each part's own colour.</summary>
-    public void IsocurveColour(string rgb, bool fromPart = false) => SetLineColour(LayerIsocurves, "isocurveColour", rgb, fromPart);
+    public void SetIsocurveColour(string rgb, bool fromPart = false) => SetLineColour(LayerIsocurves, "isocurveColour", rgb, fromPart);
 
-    /// <summary><see cref="IsocurveColour(string, bool)"/> with three numbers in 0..1.</summary>
-    public void IsocurveColour(float[] rgb, bool fromPart = false) => SetLineColour(LayerIsocurves, "isocurveColour", rgb, fromPart);
+    /// <summary><see cref="SetIsocurveColour(string, bool)"/> with three numbers in 0..1.</summary>
+    public void SetIsocurveColour(float[] rgb, bool fromPart = false) => SetLineColour(LayerIsocurves, "isocurveColour", rgb, fromPart);
 
     /// <summary>The isocurves' colour in use.</summary>
     public LineColour IsocurveColour() => LineColourOf(LayerIsocurves);
@@ -1831,6 +2170,47 @@ public sealed unsafe class View : IDisposable
         var h = Live("cadaclysm_view_line_colour");
         fixed (float* c = rgb) Ok(ViewNative.cadaclysm_view_line_colour(h, layer, c, &fromPart));
         return new LineColour(rgb, fromPart != 0);
+    }
+
+    /// <summary>A drafting colour (<see cref="Views.Colour"/>: text or numbers) as three floats; null, or none given, stays null.</summary>
+    private static float[]? DraftRgb(Colour? colour, string what) =>
+        global::Cadaclysm.Views.Colour.Given(colour) ? colour!.Value.Rgb(what) : null;
+
+    /// <summary>The colours hover, selected and first points draw in, each a <see cref="Views.Colour"/> (text such as
+    /// "red" or "#9cd3ff", or three numbers in 0..1); null restores that state's default.</summary>
+    public unsafe void SetPointStateColours(Colour? hover = null, Colour? selected = null, Colour? first = null)
+    {
+        float[]? h0 = DraftRgb(hover, "hover"), s0 = DraftRgb(selected, "selected"), f0 = DraftRgb(first, "first");
+        float[] h = h0 ?? new float[3], s = s0 ?? new float[3], f = f0 ?? new float[3];
+        fixed (float* ph = h, ps = s, pf = f)
+        {
+            ViewNative.cadaclysm_view_set_point_state_colours(Live("cadaclysm_view_set_point_state_colours"), h0 is null ? null : ph, s0 is null ? null : ps, f0 is null ? null : pf);
+            var why = ViewNative.LastError();
+            if (why.Length > 0) throw new ViewException(why);
+        }
+    }
+
+    /// <summary>Names viewport <paramref name="viewport"/> top left inside it in <paramref name="colour"/> (a
+    /// <see cref="Views.Colour"/>, text or numbers; null: white); null text clears it. Text holding a NUL is refused.</summary>
+    public unsafe void SetViewportLabel(uint viewport, string? text, Colour? colour = null)
+    {
+        if (text is not null && text.Contains('\0')) throw new ViewException($"viewport label \"{text}\": a NUL character cannot be shown (the C string ends there)");
+        byte[]? utf8 = text is null ? null : System.Text.Encoding.UTF8.GetBytes(text + "\0");
+        float[]? c0 = DraftRgb(colour, "colour");
+        float[] c = c0 ?? new float[3];
+        fixed (byte* t = utf8)
+        fixed (float* pc = c)
+            Ok(ViewNative.cadaclysm_view_set_viewport_label(Live("cadaclysm_view_set_viewport_label"), viewport, t, c0 is null ? null : pc));
+    }
+
+    /// <summary>Frames viewport <paramref name="viewport"/> one point inside its edge in <paramref name="colour"/> (a
+    /// <see cref="Views.Colour"/>, text or numbers); null clears it.</summary>
+    public unsafe void SetViewportBorder(uint viewport, Colour? colour)
+    {
+        float[]? c0 = DraftRgb(colour, "colour");
+        float[] c = c0 ?? new float[3];
+        fixed (float* pc = c)
+            Ok(ViewNative.cadaclysm_view_set_viewport_border(Live("cadaclysm_view_set_viewport_border"), viewport, c0 is null ? null : pc));
     }
 
     /// <summary>The view-wide occluded style (see <see cref="OccludedStyle"/>); "solid" and "off" items never use it.</summary>
@@ -1873,7 +2253,7 @@ public sealed unsafe class View : IDisposable
         if (!_drawn) Draw();
         var h = Live("cadaclysm_view_request_pick_in");
         Void("cadaclysm_view_request_pick_in", v => ViewNative.cadaclysm_view_request_pick_in(v, viewport, x, y));
-        var output = new RawViewPick { Size = (uint)sizeof(RawViewPick) };
+        var output = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1 };
         var waiting = "";
         for (var i = 0; i < 200; i++)
         {
@@ -1894,7 +2274,7 @@ public sealed unsafe class View : IDisposable
     /// <remarks>A failure other than "no answer yet" throws the library's own message.</remarks>
     public bool LastPick(out Pick? pick)
     {
-        var output = new RawViewPick { Size = (uint)sizeof(RawViewPick) };
+        var output = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1 };
         if (ViewNative.cadaclysm_view_pick_result(Live("cadaclysm_view_pick_result"), &output))
         {
             pick = PickOf(output);
@@ -2004,12 +2384,116 @@ public sealed unsafe class View : IDisposable
 
     public void Draw() { Ok(ViewNative.cadaclysm_view_draw(Live("cadaclysm_view_draw"))); _drawn = true; }
 
+    /// <summary>The oldest input event the view's own window handled and not handed out yet (view ABI 1.26),
+    /// without waiting: false, with `e` null, while none waits. Read between <see cref="ViewLibrary.Pump"/>s,
+    /// or let <see cref="Run(Func{ViewInputEvent, bool})"/> hand them over. A view in a host's window, or
+    /// offscreen, queues nothing. Still answers once the window has closed.</summary>
+    /// <remarks>A failure other than "no event" throws the library's own message.</remarks>
+    public bool NextEvent(out ViewInputEvent? e)
+    {
+        if (Environment.CurrentManagedThreadId != _thread) throw new ViewException("cadaclysm_view_next_event: a view belongs to the thread that made it");
+        if (_handle.IsClosed) throw new ViewException("cadaclysm_view_next_event: the view is closed");
+        var raw = new RawViewInputEvent { Size = (uint)sizeof(RawViewInputEvent) };
+        if (ViewNative.cadaclysm_view_next_event(_handle, &raw))
+        {
+            e = EventOf(raw, _yUp);
+            return true;
+        }
+        var why = ViewNative.LastError();
+        if (why.Length > 0 && !why.EndsWith("no event", StringComparison.Ordinal)) throw new ViewException(why);
+        e = null;
+        return false;
+    }
+
+    /// <summary>Closes the view's own window as its close button does (view ABI 1.26): <see cref="Closed"/> turns
+    /// true, a <see cref="CloseEvent"/> is queued and a loop around Pump ends; Dispose still owes the destroy.
+    /// Nothing for a window already closed; a view in a host's window, or offscreen, has none to close.</summary>
+    public void CloseWindow()
+    {
+        if (!_handle.IsClosed && _windowClosed) return;
+        Ok(ViewNative.cadaclysm_view_close(Live("cadaclysm_view_close")));
+        MarkClosed();
+    }
+
+    /// <summary>Runs the window on this thread, handing each input event to `onEvent` as the window handles it
+    /// (view ABI 1.26); returning false closes the window and ends the run. The callback may change the scene or
+    /// the camera: it is called between pumps, never from inside the library. The <see cref="CloseEvent"/> is
+    /// handed over last when the window closes by itself (Escape, its close button). Returns the camera the
+    /// window closed on and the last pick, as <see cref="Run()"/> does.</summary>
+    public Camera Run(Func<ViewInputEvent, bool> onEvent)
+    {
+        ArgumentNullException.ThrowIfNull(onEvent);
+        Camera? closedOn = null;
+        Pick? picked = null;
+        var stopping = false;
+        while (closedOn is null)
+        {
+            var state = _windowClosed ? 2u : ViewNative.cadaclysm_view_pump(Live("cadaclysm_view_pump"), 16);
+            if (state != 1 && state != 2) throw ViewNative.Failure();
+            while (closedOn is null && NextEvent(out var e))
+            {
+                if (e is PickEvent p) picked = p.Pick;
+                if (e is CloseEvent c)
+                {
+                    closedOn = c.Camera;
+                    if (!stopping) onEvent(e);
+                }
+                else if (!stopping && !onEvent(e!))
+                {
+                    stopping = true;
+                    CloseWindow();
+                }
+            }
+            if (state == 2 && closedOn is null) throw new ViewException("run: the window closed with no close event");
+        }
+        // The answer the last click left for LastPick, taken as Run() takes it; else the last pick event's.
+        var raw = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1 };
+        if (ViewNative.cadaclysm_view_pick_result(_handle, &raw)) picked = PickOf(raw);
+        MarkClosed();
+        return closedOn with { Pick = picked };
+    }
+
+    /// <summary>The CADACLYSM_VIEW_INPUT_EVENT_* kinds by number, and the CADACLYSM_VIEW_MOD_* bits (1.26).</summary>
+    internal const uint ModShift = 1, ModCtrl = 2, ModAlt = 4, ModMeta = 8;
+
+    /// <summary>A CadaclysmViewInputEvent as its record.</summary>
+    internal static ViewInputEvent EventOf(RawViewInputEvent raw, bool yUp)
+    {
+        bool shift = (raw.Modifiers & ModShift) != 0, ctrl = (raw.Modifiers & ModCtrl) != 0, alt = (raw.Modifiers & ModAlt) != 0, meta = (raw.Modifiers & ModMeta) != 0;
+        var code = raw.Pointer;
+        var pointer = Pointers.FirstOrDefault(p => p.Value == code).Key ?? code.ToString();
+        ViewInputEvent e = raw.Kind switch
+        {
+            1 => new PointerEvent("down", raw.X, raw.Y, raw.Button, shift, ctrl, alt, meta, pointer, raw.PointerId),
+            2 => new PointerEvent("move", raw.X, raw.Y, raw.Button, shift, ctrl, alt, meta, pointer, raw.PointerId),
+            3 => new PointerEvent("up", raw.X, raw.Y, raw.Button, shift, ctrl, alt, meta, pointer, raw.PointerId),
+            4 => new WheelEvent(raw.X, raw.Y, raw.WheelY, shift, ctrl, alt, meta),
+            5 or 6 => new KeyEvent(KeyName(raw), raw.Kind == 5, shift, ctrl, alt, meta, raw.Repeat != 0),
+            7 => new ResizeEvent(raw.Width, raw.Height),
+            8 => new PickEvent(PickOf(raw.Pick, raw.PickViewportLabel)),
+            9 => new SnapEvent(SnapOf(raw.Snap)),
+            10 => new CloseEvent(CameraOf(new[] { raw.Camera.Eye[0], raw.Camera.Eye[1], raw.Camera.Eye[2] },
+                new[] { raw.Camera.Target[0], raw.Camera.Target[1], raw.Camera.Target[2] },
+                new[] { raw.Camera.Up[0], raw.Camera.Up[1], raw.Camera.Up[2] }, raw.Camera.Orthographic != 0, null, yUp)),
+            11 => new TimelineEvent(),
+            _ => throw new ViewException($"next_event: kind {raw.Kind} is not a CADACLYSM_VIEW_INPUT_EVENT_* this SDK knows"),
+        };
+        return e with { TimeMs = raw.TimeMs, Dropped = raw.Dropped };
+    }
+
+    private static string KeyName(RawViewInputEvent raw)
+    {
+        var n = 0;
+        while (n < 32 && raw.Key[n] != 0) n++;
+        return System.Text.Encoding.UTF8.GetString(raw.Key, n);
+    }
+
     /// <summary>Blocks until the window is closed; the camera it ended on and the last pick.</summary>
     public Camera Run()
     {
         var h = Live("cadaclysm_view_run");
         var cam = new RawViewCamera { Size = (uint)sizeof(RawViewCamera) };
-        var pick = new RawViewPick { Size = (uint)sizeof(RawViewPick) };
+        var pick = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1 };
         Ok(ViewNative.cadaclysm_view_run(h, &cam, &pick));
         MarkClosed();
         float[] eye = { cam.Eye[0], cam.Eye[1], cam.Eye[2] }, target = { cam.Target[0], cam.Target[1], cam.Target[2] }, up = { cam.Up[0], cam.Up[1], cam.Up[2] };
@@ -2019,8 +2503,13 @@ public sealed unsafe class View : IDisposable
     /// <summary>A CadaclysmViewPick as the answer: null for no item; Point only where the library set
     /// has_point (Python's `_pick_dict`).</summary>
     internal static Pick? PickOf(RawViewPick raw) =>
-        raw.Item == 0 ? null : new Pick(raw.Item, raw.Node, raw.Face, raw.Clicks,
-            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null, raw.Overlay != 0);
+        raw.Item == 0 && raw.ViewportLabel < 0 ? null : new Pick(raw.Item, raw.Node, raw.Face, raw.Clicks,
+            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null, raw.Overlay != 0, raw.ViewportLabel);
+
+    /// <summary>An input event's pick (CadaclysmViewEventPick) as the answer, as PickOf reads a pick.</summary>
+    internal static Pick? PickOf(RawViewEventPick raw, int label) =>
+        raw.Item == 0 && label < 0 ? null : new Pick(raw.Item, raw.Node, raw.Face, raw.Clicks,
+            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null, raw.Overlay != 0, label);
 
     /// <summary>The buffer a frame of `width` x `height` is read into: a size nobody can allocate is the wrapper's error.</summary>
     internal static byte[] FrameBuffer(ulong width, ulong height)
@@ -2126,7 +2615,7 @@ public sealed unsafe class View : IDisposable
     /// <summary>Levels of detail: parts of `minTriangles` or more (0: the library's 2,048) get coarser
     /// levels, built in the background after each show; a moving frame draws as `motion` says --
     /// "detailed" or "smooth" (refines once the camera rests, see <see cref="WakeMs"/>). null turns levels off.</summary>
-    public void Lod(string? motion = "detailed", uint minTriangles = 0)
+    public void SetLod(string? motion = "detailed", uint minTriangles = 0)
     {
         if (motion is null) { Ok(ViewNative.cadaclysm_view_set_lod(Live("cadaclysm_view_set_lod"), null)); return; }
         var lod = new RawViewLod { Size = (uint)sizeof(RawViewLod), MinTriangles = minTriangles, Motion = Named(LodMotion, motion, "motion") };
@@ -2280,9 +2769,13 @@ public sealed unsafe class View : IDisposable
         Console.Out.Flush();
         Console.Error.Flush();
         using var v = OwnView is null ? new View(viewOptions) : OwnView(viewOptions);
-        var item = o.RgbText is not null ? v.Show(obj, o.RgbText, o.Tolerance ?? 0.05) : v.Show(obj, o.Rgb, o.Tolerance ?? 0.05);
-        if (transforms is not null) item.NodeTransforms(transforms);
-        v.Layer("edges", o.Edges);
+#pragma warning disable CS0618 // RgbText, obsolete, is still honoured and wins for one release
+        var item = o.RgbText is not null ? v.Show(obj, o.RgbText, o.Tolerance ?? 0.05)
+            : o.Rgb is { Text: { } text } ? v.Show(obj, text, o.Tolerance ?? 0.05)
+            : v.Show(obj, o.Rgb is { } rgb && !rgb.IsNone ? rgb.Values : null, o.Tolerance ?? 0.05);
+#pragma warning restore CS0618
+        if (transforms is not null) item.SetNodeTransforms(transforms);
+        v.SetLayer("edges", o.Edges);
         v.Aim(o, obj is Node node ? () => item.FrameNode(node.Index) : () => { });
         if (!orbit && !wgpu) { v.Draw(); return null; }
         var camera = RunOwn is null ? v.Run() : RunOwn(v);

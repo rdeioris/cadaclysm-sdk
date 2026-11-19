@@ -141,6 +141,7 @@ femReader(scene, URL(fileURLWithPath: path).lastPathComponent == "cube.scad", pa
 
 if let license { must("blacksmith license") { try Blacksmith.license(license) } }
 print("blacksmith \(Blacksmith.version()) built \(Blacksmith.buildDate())")
+print("blacksmith build \(Blacksmith.build())")
 print("blacksmith license: \(Blacksmith.licenseInfo())")
 
 // The plate with a hole and a pin, as every wrapper's smoke builds it.

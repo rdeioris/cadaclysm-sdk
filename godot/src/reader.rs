@@ -249,7 +249,7 @@ pub(crate) fn manifold(m: sdk::Manifold) -> VarDictionary {
 
 // ---- health and healing (shared by both libraries, as `manifold` is) ------------------
 
-/// `health`'s and `healed`'s tolerance from GDScript's `float`: anything not finite and
+/// `health`'s and `heal`'s tolerance from GDScript's `float`: anything not finite and
 /// positive (the default 0, a negative, NaN, INF) is the library's default, passed as NaN.
 pub(crate) fn heal_tolerance(tolerance: f64) -> Option<f64> {
     (tolerance.is_finite() && tolerance > 0.0).then_some(tolerance)
@@ -347,14 +347,45 @@ pub(crate) fn heal_report(r: &sdk::HealReport) -> VarDictionary {
     ])
 }
 
-/// `healed`'s three switches as the SDK's `HealKinds`.
+/// `heal`'s three switches as the SDK's `HealKinds`.
 pub(crate) fn heal_kinds(edges: bool, faces: bool, holes: bool) -> sdk::HealKinds {
     sdk::HealKinds { edges, faces, holes }
 }
 
-/// `{body, report}`: what `healed` returns, `body` the new brep or solid.
+/// `{body, report}`: what `heal` returns, `body` the new brep or solid.
 pub(crate) fn healed_pair(body: Variant, report: &sdk::HealReport) -> VarDictionary {
     dict(&[("body", body), ("report", heal_report(report).to_variant())])
+}
+
+// ---- canonical recognition (shared by both libraries, as healing is) ------------------
+
+/// A recognition report as a Dictionary: the `RecognizeReport` fields as keys, `faces`,
+/// `refused` and `edges` as arrays of Dictionaries (`{face, kind, deviation}`, `{face, why,
+/// closest}`, `{edge, kind, deviation}`), `closest` `NAN` for none (Godot has no null number).
+pub(crate) fn recognize_report(r: &sdk::RecognizeReport) -> VarDictionary {
+    let face = |f: &sdk::RecognizedFace| {
+        dict(&[("face", i64::from(f.face).to_variant()), ("kind", gs(&f.kind).to_variant()), ("deviation", f.deviation.to_variant())])
+    };
+    let refusal = |f: &sdk::RecognizeRefusal| {
+        dict(&[("face", i64::from(f.face).to_variant()), ("why", gs(&f.why).to_variant()), ("closest", f.closest.unwrap_or(f64::NAN).to_variant())])
+    };
+    let edge = |e: &sdk::RecognizedEdge| {
+        dict(&[("edge", i64::from(e.edge).to_variant()), ("kind", gs(&e.kind).to_variant()), ("deviation", e.deviation.to_variant())])
+    };
+    dict(&[
+        ("tolerance", r.tolerance.to_variant()),
+        ("faces", rows(&r.faces, face)),
+        ("refused", rows(&r.refused, refusal)),
+        ("edges", rows(&r.edges, edge)),
+        ("edges_left", i64::from(r.edges_left).to_variant()),
+        ("worst_face", r.worst_face.to_variant()),
+        ("worst_edge", r.worst_edge.to_variant()),
+    ])
+}
+
+/// `{body, report}`: what `recognize` returns, `body` the new brep or solid.
+pub(crate) fn recognized_pair(body: Variant, report: &sdk::RecognizeReport) -> VarDictionary {
+    dict(&[("body", body), ("report", recognize_report(report).to_variant())])
 }
 
 /// An edge id for `edge_tolerance` from GDScript's `int`, refused outside 0 to 4294967295.
@@ -373,7 +404,7 @@ pub(crate) fn edge_id(edge: i64) -> Option<u32> {
 /// own space -- where every other wrapper defaults to `"native"`: here a file opened
 /// with no options should simply draw.
 fn open_options(options: &VarDictionary) -> Option<sdk::OpenOptions> {
-    let mut known = vec!["convention", "uv_world", "colors", "schema", "source_metres_per_unit", "name"];
+    let mut known = vec!["convention", "uv_world", "colors", "schema", "source_metres_per_unit", "name", "lightmap_resolution"];
     known.sort_unstable();
     for key in options.keys_array().iter_shared() {
         let key = key.to_string();
@@ -397,6 +428,13 @@ fn open_options(options: &VarDictionary) -> Option<sdk::OpenOptions> {
     }
     if let Some(name) = options.get("name") {
         opened = opened.name(name.to_string());
+    }
+    if let Some(texels) = options.get("lightmap_resolution") {
+        let texels = ok(number(&texels, "lightmap_resolution"))?;
+        if texels.fract() != 0.0 || !(0.0..=f64::from(u32::MAX)).contains(&texels) {
+            return fail(format!("lightmap_resolution: expected a whole number from 0 to 4294967295, not {texels}"));
+        }
+        opened = opened.lightmap_resolution(texels as u32);
     }
     Some(opened)
 }
@@ -698,6 +736,8 @@ pub struct CadaclysmScene {
     sequences: PhantomVar<Array<Gd<CadaclysmSequence>>>,
     #[var(get = get_schedules, no_set)]
     schedules: PhantomVar<Array<Gd<CadaclysmWorkSchedule>>>,
+    #[var(get = get_calendars, no_set)]
+    calendars: PhantomVar<Array<Gd<CadaclysmWorkCalendar>>>,
     #[var(get = get_base, no_set)]
     base: PhantomVar<Option<Gd<CadaclysmLink>>>,
     #[var(get = get_realized, no_set)]
@@ -734,6 +774,7 @@ impl CadaclysmScene {
             states: PhantomVar::default(),
             sequences: PhantomVar::default(),
             schedules: PhantomVar::default(),
+            calendars: PhantomVar::default(),
             base: PhantomVar::default(),
             realized: PhantomVar::default(),
             realize_total: PhantomVar::default(),
@@ -765,7 +806,8 @@ impl CadaclysmScene {
     /// `"unity"`, `"unreal"`, `"blender"`, with `"+file-units"` to keep the file's
     /// units), `uv_world` (world-scale UVs), `colors` (per-vertex colours for a body
     /// painted in more than one), `schema` (an extra EXPRESS `.exp`), and
-    /// `source_metres_per_unit` for a format that states no unit.
+    /// `source_metres_per_unit` for a format that states no unit, and `lightmap_resolution` (a
+    /// lightmap atlas that many texels on a side, 0 for none, read back as `CadaclysmNode.lightmap_uvs`).
     #[func]
     fn open_with(path: GString, options: VarDictionary) -> Option<Gd<CadaclysmScene>> {
         let opened = open_options(&options)?;
@@ -992,6 +1034,14 @@ impl CadaclysmScene {
         (0..count as u32).map(|i| CadaclysmWorkSchedule::wrap(self.shared.clone(), i)).collect()
     }
 
+    /// The file's work calendars: each an `IfcWorkCalendar`, when work happens. Empty where
+    /// the file records none.
+    #[func]
+    fn get_calendars(&self) -> Array<Gd<CadaclysmWorkCalendar>> {
+        let count = with_scene(&self.shared, |s| s.calendars().len()).unwrap_or_default();
+        (0..count as u32).map(|i| CadaclysmWorkCalendar::wrap(self.shared.clone(), i)).collect()
+    }
+
     /// The link the file declares as the mechanism's base, or `null` when it declares
     /// none (the default ground is then the link on the most joints; see `pose`).
     #[func]
@@ -1204,6 +1254,8 @@ pub struct CadaclysmNode {
     bounds: PhantomVar<Aabb>,
     #[var(get = get_mesh, no_set)]
     mesh: PhantomVar<Option<Gd<CadaclysmMesh>>>,
+    #[var(get = get_lightmap_uvs, no_set)]
+    lightmap_uvs: PhantomVar<PackedVector2Array>,
     #[var(get = get_surfaces, no_set)]
     surfaces: PhantomVar<Array<VarDictionary>>,
     #[var(get = get_brep, no_set)]
@@ -1250,6 +1302,7 @@ impl CadaclysmNode {
             edge_colours: PhantomVar::default(),
             curves: PhantomVar::default(),
             isocurves: PhantomVar::default(),
+            lightmap_uvs: PhantomVar::default(),
         })
     }
 
@@ -1402,6 +1455,15 @@ impl CadaclysmNode {
     #[func]
     fn get_mesh(&self) -> Option<Gd<CadaclysmMesh>> {
         self.with(|n| CadaclysmMesh::wrap(n.mesh().copy()))
+    }
+
+    /// A second set of texture coordinates for `mesh`, one a vertex in its order, packed into the
+    /// unit square with no two triangles overlapping: Godot's `TEX_UV2`, what a baked lightmap
+    /// reads. Empty when not asked for at open, for a node with no B-rep, and for a body whose
+    /// charts did not fit. A copy.
+    #[func]
+    fn get_lightmap_uvs(&self) -> PackedVector2Array {
+        self.with(|n| n.lightmap_uvs().map(meshes::uvs).unwrap_or_default()).unwrap_or_default()
     }
 
     /// Its faces as surfaces and trim loops, as dictionaries: `kind`, `kind_name`,
@@ -2419,6 +2481,288 @@ impl CadaclysmWorkSchedule {
     }
 }
 
+/// A repeating set of days (and times of day) in a `CadaclysmWorkTime`'s pattern
+/// (`IfcRecurrencePattern`). `kind` is `"DAILY"`, `"WEEKLY"`, `"MONTHLY_BY_DAY_OF_MONTH"`,
+/// `"MONTHLY_BY_POSITION"`, `"BY_DAY_COUNT"`, `"BY_WEEKDAY_COUNT"`,
+/// `"YEARLY_BY_DAY_OF_MONTH"` or `"YEARLY_BY_POSITION"`. `days` (1..31), `weekdays`
+/// (1 = Monday .. 7 = Sunday) and `months` (1..12) are sorted arrays of ints; `position`,
+/// `interval` and `occurrences` are ints, `null` where none; `periods` is an array of
+/// `[start, end]` pairs in seconds after midnight, empty for all day.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmRecurrence {
+    pattern: sdk::Recurrence,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_days, no_set)]
+    days: PhantomVar<VarArray>,
+    #[var(get = get_weekdays, no_set)]
+    weekdays: PhantomVar<VarArray>,
+    #[var(get = get_months, no_set)]
+    months: PhantomVar<VarArray>,
+    #[var(get = get_position, no_set)]
+    position: PhantomVar<Variant>,
+    #[var(get = get_interval, no_set)]
+    interval: PhantomVar<Variant>,
+    #[var(get = get_occurrences, no_set)]
+    occurrences: PhantomVar<Variant>,
+    #[var(get = get_periods, no_set)]
+    periods: PhantomVar<VarArray>,
+}
+
+fn ints(values: &[u8]) -> VarArray {
+    values.iter().map(|&v| (v as i64).to_variant()).collect()
+}
+
+fn maybe_int(value: Option<i64>) -> Variant {
+    match value {
+        Some(v) => v.to_variant(),
+        None => Variant::nil(),
+    }
+}
+
+/// `[start, end]` pairs as an array of two-float arrays.
+fn pairs(values: &[(f64, f64)]) -> VarArray {
+    values.iter().map(|&(a, b)| VarArray::from(&[a.to_variant(), b.to_variant()]).to_variant()).collect()
+}
+
+#[godot_api]
+impl CadaclysmRecurrence {
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(self.pattern.kind.name())
+    }
+
+    #[func]
+    fn get_days(&self) -> VarArray {
+        ints(&self.pattern.days)
+    }
+
+    #[func]
+    fn get_weekdays(&self) -> VarArray {
+        ints(&self.pattern.weekdays)
+    }
+
+    #[func]
+    fn get_months(&self) -> VarArray {
+        ints(&self.pattern.months)
+    }
+
+    #[func]
+    fn get_position(&self) -> Variant {
+        maybe_int(self.pattern.position.map(i64::from))
+    }
+
+    #[func]
+    fn get_interval(&self) -> Variant {
+        maybe_int(self.pattern.interval.map(i64::from))
+    }
+
+    #[func]
+    fn get_occurrences(&self) -> Variant {
+        maybe_int(self.pattern.occurrences.map(i64::from))
+    }
+
+    #[func]
+    fn get_periods(&self) -> VarArray {
+        pairs(&self.pattern.periods)
+    }
+}
+
+/// A repeating set of working (or, among a calendar's `exceptions`, non-working) periods,
+/// valid between two dates (`IfcWorkTime`). `start` and `finish` are midnight of their day,
+/// in seconds since 1970-01-01T00:00, `NAN` for an open end; the finish day is included.
+/// `pattern` is a `CadaclysmRecurrence`, `null` for every day of the range, all day.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmWorkTime {
+    time: sdk::WorkTime,
+    #[var(get = get_name, no_set)]
+    name: PhantomVar<GString>,
+    #[var(get = get_start, no_set)]
+    start: PhantomVar<f64>,
+    #[var(get = get_finish, no_set)]
+    finish: PhantomVar<f64>,
+    #[var(get = get_pattern, no_set)]
+    pattern: PhantomVar<Option<Gd<CadaclysmRecurrence>>>,
+}
+
+#[godot_api]
+impl CadaclysmWorkTime {
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(&self.time.name)
+    }
+
+    #[func]
+    fn get_start(&self) -> f64 {
+        date(self.time.start)
+    }
+
+    #[func]
+    fn get_finish(&self) -> f64 {
+        date(self.time.finish)
+    }
+
+    #[func]
+    fn get_pattern(&self) -> Option<Gd<CadaclysmRecurrence>> {
+        self.time.pattern.clone().map(|pattern| {
+            Gd::from_object(CadaclysmRecurrence {
+                pattern,
+                kind: PhantomVar::default(),
+                days: PhantomVar::default(),
+                weekdays: PhantomVar::default(),
+                months: PhantomVar::default(),
+                position: PhantomVar::default(),
+                interval: PhantomVar::default(),
+                occurrences: PhantomVar::default(),
+                periods: PhantomVar::default(),
+            })
+        })
+    }
+}
+
+/// When work happens (`IfcWorkCalendar`). From `CadaclysmScene.calendars` or
+/// `CadaclysmTask.calendar`.
+///
+/// `kind` is `"FIRSTSHIFT"`, `"SECONDSHIFT"`, `"THIRDSHIFT"`, `"NOTDEFINED"` or
+/// `"USERDEFINED"` (`kind_name` is a user-defined one's text, `""` otherwise). `working`
+/// and `exceptions` are arrays of `CadaclysmWorkTime`, in file order. Dates are seconds
+/// since 1970-01-01T00:00. The queries return `null` for a date that is not finite or a
+/// `from` after `to`; `Cadaclysm.last_error()` says why.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmWorkCalendar {
+    shared: Shared,
+    index: u32,
+    #[var(rename = index, get = get_index, no_set)]
+    index_: PhantomVar<i64>,
+    #[var(get = get_name, no_set)]
+    name: PhantomVar<GString>,
+    #[var(get = get_identification, no_set)]
+    identification: PhantomVar<GString>,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_kind_name, no_set)]
+    kind_name: PhantomVar<GString>,
+    #[var(get = get_working, no_set)]
+    working: PhantomVar<Array<Gd<CadaclysmWorkTime>>>,
+    #[var(get = get_exceptions, no_set)]
+    exceptions: PhantomVar<Array<Gd<CadaclysmWorkTime>>>,
+}
+
+impl CadaclysmWorkCalendar {
+    fn wrap(shared: Shared, index: u32) -> Gd<CadaclysmWorkCalendar> {
+        Gd::from_object(CadaclysmWorkCalendar {
+            shared,
+            index,
+            index_: PhantomVar::default(),
+            name: PhantomVar::default(),
+            identification: PhantomVar::default(),
+            kind: PhantomVar::default(),
+            kind_name: PhantomVar::default(),
+            working: PhantomVar::default(),
+            exceptions: PhantomVar::default(),
+        })
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&sdk::WorkCalendar<'_>) -> R) -> Option<R> {
+        with_scene(&self.shared, |s| s.calendar(self.index as usize).map(|c| f(&c))).flatten()
+    }
+
+    fn times(times: Vec<sdk::WorkTime>) -> Array<Gd<CadaclysmWorkTime>> {
+        times
+            .into_iter()
+            .map(|time| {
+                Gd::from_object(CadaclysmWorkTime {
+                    time,
+                    name: PhantomVar::default(),
+                    start: PhantomVar::default(),
+                    finish: PhantomVar::default(),
+                    pattern: PhantomVar::default(),
+                })
+            })
+            .collect()
+    }
+}
+
+#[godot_api]
+impl CadaclysmWorkCalendar {
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.index as i64
+    }
+
+    /// Its name, else its identification, else `calendar #k` (k from 1, in file order).
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(self.with(|c| c.name.clone()).unwrap_or_default())
+    }
+
+    /// Its identification, `""` where none.
+    #[func]
+    fn get_identification(&self) -> GString {
+        gs(self.with(|c| c.identification.clone()).unwrap_or_default())
+    }
+
+    /// `"FIRSTSHIFT"`, `"SECONDSHIFT"`, `"THIRDSHIFT"`, `"NOTDEFINED"` or `"USERDEFINED"`.
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(self.with(|c| c.kind.name()).unwrap_or_default())
+    }
+
+    /// The text of a user-defined kind (`kind == "USERDEFINED"`); `""` otherwise.
+    #[func]
+    fn get_kind_name(&self) -> GString {
+        gs(self.with(|c| c.kind_name.clone()).unwrap_or_default())
+    }
+
+    /// Its working times, in file order.
+    #[func]
+    fn get_working(&self) -> Array<Gd<CadaclysmWorkTime>> {
+        Self::times(self.with(|c| c.working.clone()).unwrap_or_default())
+    }
+
+    /// Its exception (non-working) times, in file order.
+    #[func]
+    fn get_exceptions(&self) -> Array<Gd<CadaclysmWorkTime>> {
+        Self::times(self.with(|c| c.exceptions.clone()).unwrap_or_default())
+    }
+
+    /// The working periods overlapping `from`..`to`, clipped to it, sorted and merged: an
+    /// array of `[start, end]` pairs, no two touching or overlapping. `null` for a date that
+    /// is not finite or a `from` after `to`.
+    #[func]
+    fn working_periods(&self, from: f64, to: f64) -> Variant {
+        match self.with(|c| c.working_periods(from, to)).and_then(ok) {
+            Some(periods) => pairs(&periods).to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    /// The working seconds in `from`..`to`. `null` for a date that is not finite or a `from`
+    /// after `to`.
+    #[func]
+    fn working_seconds(&self, from: f64, to: f64) -> Variant {
+        match self.with(|c| c.working_seconds(from, to)).and_then(ok) {
+            Some(seconds) => seconds.to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    /// The date `days` working days and then `seconds` of working time after `from` (before
+    /// it, when negative). A forward result landing at the start of a working day is the end
+    /// of the previous one. `null` for a date that is not finite or when no working time lies
+    /// within 100 years.
+    #[func]
+    fn add_work(&self, from: f64, days: f64, #[opt(default = 0.0)] seconds: f64) -> Variant {
+        match self.with(|c| c.add_work(from, days, seconds)).and_then(ok) {
+            Some(date) => date.to_variant(),
+            None => Variant::nil(),
+        }
+    }
+}
+
 /// One task of a `CadaclysmWorkSchedule`. From `CadaclysmWorkSchedule.tasks`.
 ///
 /// `kind` is `"attendance"`, `"construction"`, `"demolition"`, `"dismantle"`, `"disposal"`,
@@ -2436,6 +2780,10 @@ pub struct CadaclysmTask {
     index_: PhantomVar<i64>,
     #[var(get = get_schedule_index, no_set)]
     schedule_index: PhantomVar<i64>,
+    #[var(get = get_calendar_index, no_set)]
+    calendar_index: PhantomVar<Variant>,
+    #[var(get = get_calendar, no_set)]
+    calendar: PhantomVar<Option<Gd<CadaclysmWorkCalendar>>>,
     #[var(get = get_name, no_set)]
     name: PhantomVar<GString>,
     #[var(get = get_identification, no_set)]
@@ -2464,6 +2812,8 @@ impl CadaclysmTask {
             index,
             index_: PhantomVar::default(),
             schedule_index: PhantomVar::default(),
+            calendar_index: PhantomVar::default(),
+            calendar: PhantomVar::default(),
             name: PhantomVar::default(),
             identification: PhantomVar::default(),
             kind: PhantomVar::default(),
@@ -2496,6 +2846,22 @@ impl CadaclysmTask {
     #[func]
     fn get_schedule_index(&self) -> i64 {
         self.schedule as i64
+    }
+
+    /// The index of the work calendar this task works on (`scene.calendars[i]`), `null`
+    /// where it has none.
+    #[func]
+    fn get_calendar_index(&self) -> Variant {
+        match self.with(|t| t.calendar_index()).flatten() {
+            Some(i) => (i as i64).to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    /// The work calendar this task works on, `null` where it has none.
+    #[func]
+    fn get_calendar(&self) -> Option<Gd<CadaclysmWorkCalendar>> {
+        self.with(|t| t.calendar_index()).flatten().map(|c| CadaclysmWorkCalendar::wrap(self.shared.clone(), c))
     }
 
     /// Its name.
@@ -2555,6 +2921,8 @@ impl CadaclysmTask {
             actual_start: PhantomVar::default(),
             actual_finish: PhantomVar::default(),
             duration: PhantomVar::default(),
+            duration_kind: PhantomVar::default(),
+            work_duration: PhantomVar::default(),
         })
     }
 
@@ -2593,6 +2961,10 @@ pub struct CadaclysmTaskTime {
     actual_finish: PhantomVar<f64>,
     #[var(get = get_duration, no_set)]
     duration: PhantomVar<f64>,
+    #[var(get = get_duration_kind, no_set)]
+    duration_kind: PhantomVar<Variant>,
+    #[var(get = get_work_duration, no_set)]
+    work_duration: PhantomVar<Variant>,
 }
 
 #[godot_api]
@@ -2641,6 +3013,26 @@ impl CadaclysmTaskTime {
     #[func]
     fn get_duration(&self) -> f64 {
         date(self.time.duration)
+    }
+
+    /// How the duration is counted: `"ELAPSEDTIME"`, `"WORKTIME"` or `"NOTDEFINED"`; `null`
+    /// where the file gives none.
+    #[func]
+    fn get_duration_kind(&self) -> Variant {
+        match self.time.duration_kind {
+            Some(kind) => gs(kind.name()).to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    /// The duration in working time, `{"days": ..., "seconds": ...}`: that many working
+    /// days, then that many seconds of working time; `null` where there is none.
+    #[func]
+    fn get_work_duration(&self) -> Variant {
+        match self.time.work_duration {
+            Some(w) => dict(&[("days", w.days.to_variant()), ("seconds", w.seconds.to_variant())]).to_variant(),
+            None => Variant::nil(),
+        }
     }
 }
 
@@ -3119,7 +3511,7 @@ impl CadaclysmBrep {
     /// switch each kind of fix; a kind switched off is refused as `"toggled"`. `tolerance` as
     /// `health`'s. An empty Dictionary on failure, with the reason in `Cadaclysm.last_error()`.
     #[func]
-    fn healed(
+    fn heal(
         &self,
         #[opt(default = 0.0)] tolerance: f64,
         #[opt(default = true)] edges: bool,
@@ -3127,9 +3519,28 @@ impl CadaclysmBrep {
         #[opt(default = true)] holes: bool,
     ) -> VarDictionary {
         let kinds = heal_kinds(edges, faces, holes);
-        self.with(|b| ok(b.healed(heal_tolerance(tolerance), kinds)))
+        self.with(|b| ok(b.heal(heal_tolerance(tolerance), kinds)))
             .flatten()
             .map(|(brep, report)| healed_pair(Gd::from_object(CadaclysmBrep { brep: RefCell::new(Some(brep)) }).to_variant(), &report))
+            .unwrap_or_default()
+    }
+
+    /// This brep with its free-form surfaces and edge curves given their analytic kind,
+    /// beside what was taken, as a Dictionary `{body, report}`: `body` a new `CadaclysmBrep`
+    /// (this one is left as it was), `report` a Dictionary with `RecognizeReport`'s keys --
+    /// `tolerance`, `faces` (`{face, kind, deviation}`, `kind` a String), `refused` (`{face,
+    /// why, closest}`, `why` a String, `closest` `NAN` for none), `edges` (`{edge, kind,
+    /// deviation}`), `edges_left`, `worst_face`, `worst_edge`. A NURBS (or revolved, extruded
+    /// or swept) surface that is a plane, cylinder, cone, sphere or torus within `tolerance`
+    /// becomes exactly that, and an edge curve that is a line, circle or ellipse likewise;
+    /// faces and edges keep their numbers. `tolerance` 0 (the default), a negative, NaN or
+    /// INF takes the library's default, `1e-6` of the body's extent. An empty Dictionary on
+    /// failure (a released brep), with the reason in `Cadaclysm.last_error()`.
+    #[func]
+    fn recognize(&self, #[opt(default = 0.0)] tolerance: f64) -> VarDictionary {
+        self.with(|b| ok(b.recognize(heal_tolerance(tolerance))))
+            .flatten()
+            .map(|(brep, report)| recognized_pair(Gd::from_object(CadaclysmBrep { brep: RefCell::new(Some(brep)) }).to_variant(), &report))
             .unwrap_or_default()
     }
 

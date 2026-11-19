@@ -38,8 +38,8 @@ fn main() -> cadaclysm_sdk::Result<()> {
     view.show_lines(&outline(&frame), "#e4572e")?;
 
     // A flat drawing: no grid (it draws over everything), a white page, looked at from above.
-    view.layer(Layer::Grid, false)?;
-    view.background("white")?;
+    view.set_layer(Layer::Grid, false)?;
+    view.set_background("white")?;
     view.standard(Standard::Top)?;
     view.frame()?;
     if offscreen {
@@ -54,7 +54,7 @@ fn main() -> cadaclysm_sdk::Result<()> {
             match view.last_pick()? {
                 Some(Some(pick)) if pick.item == rectangle.id() => {
                     lit = !lit;
-                    rectangle.colour(if lit { "gold" } else { "steelblue" })?;
+                    rectangle.set_colour(if lit { "gold" } else { "steelblue" })?;
                     println!("clicked the rectangle (face {})", pick.face);
                 }
                 Some(Some(pick)) => println!("clicked item {}", pick.item),

@@ -2,6 +2,20 @@
 return [[
 static const uint32_t CADACLYSM_BLACKSMITH_NONE = 0xffffffff;
 
+static const uint32_t CADACLYSM_BLACKSMITH_CHANNEL_TRANSLATE = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CHANNEL_ROTATE = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CHANNEL_SCALE = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CHANNEL_VISIBLE = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CHANNEL_COLOUR = 4;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CHANNEL_GHOST = 5;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CHANNEL_VALUE = 6;
+
 static const uint32_t CADACLYSM_BLACKSMITH_HOLE_THROUGH = 0;
 
 static const uint32_t CADACLYSM_BLACKSMITH_HOLE_BLIND = 1;
@@ -36,11 +50,85 @@ static const uint32_t CADACLYSM_BLACKSMITH_ORIENT_FIXED = 0;
 
 static const uint32_t CADACLYSM_BLACKSMITH_ORIENT_PATH = 1;
 
+static const uint32_t CADACLYSM_BLACKSMITH_THREAD_ISO_METRIC_COARSE = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_THREAD_ISO_METRIC_FINE = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_THREAD_UNC = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_THREAD_UNF = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_THREAD_LEFT_HANDED = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_THREAD_REVERSE = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_THREAD_COSMETIC = 4;
+
 static const uint32_t CADACLYSM_BLACKSMITH_OUTSIDE = 0;
 
 static const uint32_t CADACLYSM_BLACKSMITH_INSIDE = 1;
 
 static const uint32_t CADACLYSM_BLACKSMITH_ON = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_DRAFT_POSITIVE = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_DRAFT_NEGATIVE = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_DRAFT_VERTICAL = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_DRAFT_MIXED = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_DRAFT_UNDERCUT = 4;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CLOTH_OPTIONS = 20;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CLOTH_STATUS = 8;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_NOTCH_SLIT = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_NOTCH_V = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_NOTCH_T = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_NOTCH_CASTLE = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_NOTCH_U = 4;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_INTERNAL_LINE = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_INTERNAL_FOLD = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_INTERNAL_DART = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_SEVERITY_ERROR = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_SEVERITY_WARNING = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_UNKNOWN_FABRIC = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_UNKNOWN_PATTERN = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_ALLOWANCE_COUNT = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_ZERO_GRAIN = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_NEGATIVE_FABRIC_VALUE = 4;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_NEGATIVE_ALLOWANCE = 5;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_NOTCH_OUT_OF_RANGE = 6;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_RANGE_OUT_OF_RANGE = 7;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_EMPTY_RANGE = 8;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_SEAM_OVERLAP = 9;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_SEAM_LENGTH_MISMATCH = 10;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_ISSUE_UNMEASURABLE = 11;
+
+static const uint32_t CADACLYSM_BLACKSMITH_GARMENT_FABRIC_PARAMS = 20;
 
 static const uint32_t CADACLYSM_BLACKSMITH_HLR_PARALLEL = 0;
 
@@ -72,6 +160,16 @@ static const uint32_t CADACLYSM_BLACKSMITH_INTERPOLATE_CUBIC = 3;
 
 static const uint32_t CADACLYSM_BLACKSMITH_INTERPOLATE_CATMULL_ROM = 4;
 
+static const uint32_t CADACLYSM_BLACKSMITH_CONIC_NONE = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CONIC_CIRCLE = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CONIC_ELLIPSE = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CONIC_HYPERBOLA = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CONIC_PARABOLA = 4;
+
 static const uint32_t CADACLYSM_BLACKSMITH_SVG_TRANSPARENT = 0xffffffff;
 
 static const uint32_t CADACLYSM_BLACKSMITH_SVG_EDGES = 1;
@@ -87,6 +185,74 @@ static const uint32_t CADACLYSM_BLACKSMITH_SVG_SILHOUETTES = 16;
 static const uint32_t CADACLYSM_BLACKSMITH_SVG_HIDDEN_REMOVED = 32;
 
 static const uint32_t CADACLYSM_BLACKSMITH_SVG_HIDDEN_DASHED = 64;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CONTAINS_OUTSIDE = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CONTAINS_INSIDE = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CONTAINS_ON = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELATION_DISJOINT = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELATION_TOUCHING = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELATION_OVERLAPPING = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELATION_A_INSIDE_B = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELATION_B_INSIDE_A = 4;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELATION_EQUAL = 5;
+
+static const uint32_t CADACLYSM_BLACKSMITH_OFFSET_ROUND = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_OFFSET_SHARP = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_OFFSET_SMOOTH = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_OFFSET_CHAMFER = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_OFFSET_END_NONE = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_OFFSET_END_FLAT = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_OFFSET_END_ROUND = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELIEF_NONE = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELIEF_RECTANGULAR = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELIEF_ROUND = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_RELIEF_TEAR = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CORNER_NONE = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CORNER_SQUARE = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CORNER_ROUND = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_CORNER_TEAR = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_HEM_FLAT = 0;
+
+static const uint32_t CADACLYSM_BLACKSMITH_HEM_OPEN = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_HEM_ROLLED = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_HEM_TEARDROP = 3;
+
+static const uint32_t CADACLYSM_BLACKSMITH_FLAT_EXTENTS = 1;
+
+static const uint32_t CADACLYSM_BLACKSMITH_FLAT_TABLE = 2;
+
+static const uint32_t CADACLYSM_BLACKSMITH_FLAT_LABELS = 4;
+
+static const uint32_t CADACLYSM_BLACKSMITH_FLAT_NOTES = 8;
+
+static const uint32_t CADACLYSM_BLACKSMITH_FLAT_DIMENSIONS = 16;
+
+static const uint32_t CADACLYSM_BLACKSMITH_FLAT_FOLDED = 32;
 
 static const uint32_t CADACLYSM_BLACKSMITH_SKETCH_ENTITY_POINT = 0;
 
@@ -218,6 +384,8 @@ static const uint32_t CADACLYSM_BLACKSMITH_VALUE_TRIANGLE = 10;
 
 static const uint32_t CADACLYSM_BLACKSMITH_VALUE_RAY = 11;
 
+typedef struct CadaclysmBlacksmithAnimation CadaclysmBlacksmithAnimation;
+
 typedef struct CadaclysmBlacksmithAssembly CadaclysmBlacksmithAssembly;
 
 typedef struct CadaclysmBlacksmithCheck CadaclysmBlacksmithCheck;
@@ -226,13 +394,23 @@ typedef struct CadaclysmBlacksmithClashes CadaclysmBlacksmithClashes;
 
 typedef struct CadaclysmBlacksmithClassifier CadaclysmBlacksmithClassifier;
 
+typedef struct CadaclysmBlacksmithCloth CadaclysmBlacksmithCloth;
+
 typedef struct CadaclysmBlacksmithCollider CadaclysmBlacksmithCollider;
 
 typedef struct CadaclysmBlacksmithCollisions CadaclysmBlacksmithCollisions;
 
+typedef struct CadaclysmBlacksmithCurveList CadaclysmBlacksmithCurveList;
+
 typedef struct CadaclysmBlacksmithDocument CadaclysmBlacksmithDocument;
 
+typedef struct CadaclysmBlacksmithDraftAnalysis CadaclysmBlacksmithDraftAnalysis;
+
 typedef struct CadaclysmBlacksmithFemMesh CadaclysmBlacksmithFemMesh;
+
+typedef struct CadaclysmBlacksmithFlatPattern CadaclysmBlacksmithFlatPattern;
+
+typedef struct CadaclysmBlacksmithGarment CadaclysmBlacksmithGarment;
 
 typedef struct CadaclysmBlacksmithHeal CadaclysmBlacksmithHeal;
 
@@ -254,6 +432,8 @@ typedef struct CadaclysmBlacksmithMeshThicknesses CadaclysmBlacksmithMeshThickne
 
 typedef struct CadaclysmBlacksmithNurbsCurve CadaclysmBlacksmithNurbsCurve;
 
+typedef struct CadaclysmBlacksmithNurbsSurface CadaclysmBlacksmithNurbsSurface;
+
 typedef struct CadaclysmBlacksmithOperations CadaclysmBlacksmithOperations;
 
 typedef struct CadaclysmBlacksmithPage CadaclysmBlacksmithPage;
@@ -273,6 +453,8 @@ typedef struct CadaclysmBlacksmithRTree CadaclysmBlacksmithRTree;
 typedef struct CadaclysmBlacksmithRTreeHits CadaclysmBlacksmithRTreeHits;
 
 typedef struct CadaclysmBlacksmithRTreePairs CadaclysmBlacksmithRTreePairs;
+
+typedef struct CadaclysmBlacksmithRecognize CadaclysmBlacksmithRecognize;
 
 typedef struct CadaclysmBlacksmithRegions CadaclysmBlacksmithRegions;
 
@@ -301,6 +483,8 @@ typedef struct CadaclysmBlacksmithThicknesses CadaclysmBlacksmithThicknesses;
 typedef struct CadaclysmBlacksmithTool CadaclysmBlacksmithTool;
 
 typedef struct CadaclysmBlacksmithTriangleMesh CadaclysmBlacksmithTriangleMesh;
+
+typedef struct CadaclysmBlacksmithUnrolled CadaclysmBlacksmithUnrolled;
 
 typedef struct CadaclysmBlacksmithAt {
   double point[3];
@@ -372,6 +556,27 @@ typedef void (*CadaclysmBlacksmithDocumentProgress)(const char *node,
                                                     size_t total,
                                                     void *user);
 
+typedef void (*CadaclysmBlacksmithProgress)(const char *phase, size_t done, size_t total, void *user);
+
+typedef struct CadaclysmBlacksmithDraftPoint {
+  double point[3];
+  double uv[2];
+  double normal[3];
+  double angle;
+} CadaclysmBlacksmithDraftPoint;
+
+typedef struct CadaclysmBlacksmithFaceDraft {
+  uint32_t face;
+  double min;
+  double max;
+  double area;
+  double positive;
+  double negative;
+  double vertical;
+  double undercut;
+  uint32_t kind;
+} CadaclysmBlacksmithFaceDraft;
+
 typedef struct CadaclysmBlacksmithFemOptions {
 
   size_t size;
@@ -380,8 +585,6 @@ typedef struct CadaclysmBlacksmithFemOptions {
 
   double max_size;
 } CadaclysmBlacksmithFemOptions;
-
-typedef void (*CadaclysmBlacksmithProgress)(const char *phase, size_t done, size_t total, void *user);
 
 typedef struct CadaclysmBlacksmithFemMeshView {
 
@@ -609,6 +812,58 @@ typedef struct CadaclysmBlacksmithOverlap {
   uint32_t loop_count;
 } CadaclysmBlacksmithOverlap;
 
+typedef struct CadaclysmBlacksmithFacePoint {
+  double point[3];
+  double uv[2];
+  double distance;
+  uint32_t where;
+} CadaclysmBlacksmithFacePoint;
+
+typedef struct CadaclysmBlacksmithEdgePoint {
+  double point[3];
+  double t;
+  double distance;
+  bool on;
+} CadaclysmBlacksmithEdgePoint;
+
+typedef struct CadaclysmBlacksmithEdgeConvexity {
+  uint32_t kind;
+  double angle_min;
+  double angle_max;
+  double at_min[3];
+  double at_max[3];
+  uint32_t samples;
+} CadaclysmBlacksmithEdgeConvexity;
+
+typedef struct CadaclysmBlacksmithAngle {
+  double angle;
+  double at_a[3];
+  double at_b[3];
+  uint32_t kind;
+} CadaclysmBlacksmithAngle;
+
+typedef struct CadaclysmBlacksmithMinimumRadius {
+  double radius;
+  double curvature;
+  double at[3];
+  double uv[2];
+  double direction[3];
+  uint32_t samples;
+} CadaclysmBlacksmithMinimumRadius;
+
+typedef struct CadaclysmBlacksmithAreaProperties {
+  double area;
+  double area_error;
+  double perimeter;
+  double centroid[2];
+  double centroid_error;
+  double second_moments[3];
+  double moments_error;
+  double principal_moments[2];
+  double principal_axes[4];
+  bool accuracy_met;
+} CadaclysmBlacksmithAreaProperties;
+
 typedef struct CadaclysmBlacksmithMassProperties {
   int32_t closed;
   int32_t inverted;
@@ -696,6 +951,23 @@ typedef struct CadaclysmBlacksmithCurveMeshFoot {
   int32_t crossing;
 } CadaclysmBlacksmithCurveMeshFoot;
 
+typedef struct CadaclysmBlacksmithSurfacePoint {
+  double point[3];
+  double distance;
+  double u;
+  double v;
+  double normal[3];
+  int32_t boundary;
+} CadaclysmBlacksmithSurfacePoint;
+
+typedef struct CadaclysmBlacksmithCurveSurfaceFoot {
+  double distance;
+  double t;
+  double point_on_curve[3];
+  struct CadaclysmBlacksmithSurfacePoint surface;
+  int32_t crossing;
+} CadaclysmBlacksmithCurveSurfaceFoot;
+
 typedef struct CadaclysmBlacksmithNearestObject {
   uint32_t which;
   int32_t answer_kind;
@@ -706,7 +978,18 @@ typedef struct CadaclysmBlacksmithNearestObject {
   struct CadaclysmBlacksmithCurveBodyFoot body;
   struct CadaclysmBlacksmithCurvePair pair;
   struct CadaclysmBlacksmithCurveMeshFoot mesh;
+  struct CadaclysmBlacksmithCurveSurfaceFoot surface;
 } CadaclysmBlacksmithNearestObject;
+
+typedef struct CadaclysmBlacksmithSurfaceCurvature {
+  double k1;
+  double k2;
+  double dir1[3];
+  double dir2[3];
+  double gaussian;
+  double mean;
+  double normal[3];
+} CadaclysmBlacksmithSurfaceCurvature;
 
 typedef struct CadaclysmBlacksmithRegion {
   int32_t finite;
@@ -783,6 +1066,27 @@ typedef struct CadaclysmBlacksmithPatchReport {
   struct CadaclysmBlacksmithContinuity internal;
   double corner_angle;
 } CadaclysmBlacksmithPatchReport;
+
+typedef struct CadaclysmBlacksmithCurveInfo {
+  uint32_t plane;
+  int32_t closed;
+  int32_t exact;
+  double error;
+} CadaclysmBlacksmithCurveInfo;
+
+typedef struct CadaclysmBlacksmithLengthMass {
+  double length;
+  double length_error;
+  double centroid[3];
+  double centroid_error;
+  double inertia[9];
+  double inertia_error;
+  double principal_moments[3];
+  double principal_axes[9];
+  double radii[3];
+  int32_t accuracy_met;
+  int32_t from_polyline;
+} CadaclysmBlacksmithLengthMass;
 
 typedef struct CadaclysmBlacksmithJoinReport {
   uint32_t sewn;
@@ -929,6 +1233,52 @@ typedef struct CadaclysmBlacksmithRTreePair {
   uint32_t b;
 } CadaclysmBlacksmithRTreePair;
 
+typedef struct CadaclysmBlacksmithSheetRule {
+  double thickness;
+  double bend_radius;
+  double k_factor;
+  uint32_t relief;
+  double relief_width;
+  double relief_depth;
+  uint32_t corner;
+  double corner_size;
+  double miter_gap;
+} CadaclysmBlacksmithSheetRule;
+
+typedef struct CadaclysmBlacksmithSheetInfo {
+  double thickness;
+  uint32_t fixed_face;
+  uint32_t bend_count;
+} CadaclysmBlacksmithSheetInfo;
+
+typedef struct CadaclysmBlacksmithBendInfo {
+  uint32_t a_face;
+  uint32_t b_face;
+  double radius;
+  double angle;
+  double axis[6];
+  double line[6];
+} CadaclysmBlacksmithBendInfo;
+
+typedef struct CadaclysmBlacksmithFlatBend {
+  double centre[4];
+  double start[4];
+  double end[4];
+  double angle;
+  double radius;
+  double k_factor;
+  uint32_t up;
+  double allowance;
+  double deduction;
+} CadaclysmBlacksmithFlatBend;
+
+typedef struct CadaclysmBlacksmithBend {
+  double line[4];
+  double angle;
+  double radius;
+  double k_factor;
+} CadaclysmBlacksmithBend;
+
 typedef struct CadaclysmBlacksmithSubdParts {
   const double *positions;
   uint32_t vertex_count;
@@ -1023,6 +1373,79 @@ bool cadaclysm_blacksmith_option_get(const char *name, double *out);
 void cadaclysm_blacksmith_solid_free(struct CadaclysmBlacksmithSolid *solid);
 
 void cadaclysm_blacksmith_profile_free(struct CadaclysmBlacksmithProfile *profile);
+
+struct CadaclysmBlacksmithAnimation *cadaclysm_blacksmith_animation_new(void);
+
+struct CadaclysmBlacksmithAnimation *cadaclysm_blacksmith_animation_clone(const struct CadaclysmBlacksmithAnimation *animation);
+
+int32_t cadaclysm_blacksmith_animation_add_track(struct CadaclysmBlacksmithAnimation *animation,
+                                                 const char *target,
+                                                 uint32_t channel,
+                                                 uint32_t mode,
+                                                 const double *times,
+                                                 const double *values,
+                                                 uint32_t count,
+                                                 uint32_t dimension);
+
+bool cadaclysm_blacksmith_animation_set_pivot(struct CadaclysmBlacksmithAnimation *animation,
+                                              uint32_t track,
+                                              const double *pivot3,
+                                              const double *axis3);
+
+uint32_t cadaclysm_blacksmith_animation_track_count(const struct CadaclysmBlacksmithAnimation *animation);
+
+uint32_t cadaclysm_blacksmith_animation_target_count(const struct CadaclysmBlacksmithAnimation *animation);
+
+double cadaclysm_blacksmith_animation_duration(const struct CadaclysmBlacksmithAnimation *animation);
+
+const char *cadaclysm_blacksmith_animation_target(const struct CadaclysmBlacksmithAnimation *animation,
+                                                  uint32_t i);
+
+const char *cadaclysm_blacksmith_animation_track_target(const struct CadaclysmBlacksmithAnimation *animation,
+                                                        uint32_t track);
+
+uint32_t cadaclysm_blacksmith_animation_track_channel(const struct CadaclysmBlacksmithAnimation *animation,
+                                                      uint32_t track);
+
+uint32_t cadaclysm_blacksmith_animation_track_mode(const struct CadaclysmBlacksmithAnimation *animation,
+                                                   uint32_t track);
+
+uint32_t cadaclysm_blacksmith_animation_track_count_keys(const struct CadaclysmBlacksmithAnimation *animation,
+                                                         uint32_t track);
+
+uint32_t cadaclysm_blacksmith_animation_track_dimension(const struct CadaclysmBlacksmithAnimation *animation,
+                                                        uint32_t track);
+
+bool cadaclysm_blacksmith_animation_track_pivot(const struct CadaclysmBlacksmithAnimation *animation,
+                                                uint32_t track,
+                                                double *out6);
+
+bool cadaclysm_blacksmith_animation_track_keys(const struct CadaclysmBlacksmithAnimation *animation,
+                                               uint32_t track,
+                                               double *times,
+                                               uint32_t times_len,
+                                               double *values,
+                                               uint32_t values_len);
+
+bool cadaclysm_blacksmith_animation_track_value_at(const struct CadaclysmBlacksmithAnimation *animation,
+                                                   uint32_t track,
+                                                   double t,
+                                                   double *out,
+                                                   uint32_t out_len);
+
+uint32_t cadaclysm_blacksmith_animation_values_size(const struct CadaclysmBlacksmithAnimation *animation);
+
+bool cadaclysm_blacksmith_animation_values_at(const struct CadaclysmBlacksmithAnimation *animation,
+                                              double t,
+                                              double *out,
+                                              uint32_t out_len);
+
+bool cadaclysm_blacksmith_animation_placement_at(const struct CadaclysmBlacksmithAnimation *animation,
+                                                 uint32_t target,
+                                                 double t,
+                                                 double *out16);
+
+void cadaclysm_blacksmith_animation_free(struct CadaclysmBlacksmithAnimation *animation);
 
 bool cadaclysm_blacksmith_edge_point_at_length(const struct CadaclysmBlacksmithSolid *solid,
                                                uint32_t edge,
@@ -1537,6 +1960,20 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_rib_tool(const struct Cada
                                                                const double *toward,
                                                                double tolerance);
 
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_rib_revolved(const struct CadaclysmBlacksmithSolid *solid,
+                                                                   const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                   const double *axis,
+                                                                   double angle,
+                                                                   const double *toward,
+                                                                   double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_rib_revolved_tool(const struct CadaclysmBlacksmithSolid *solid,
+                                                                        const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                        const double *axis,
+                                                                        double angle,
+                                                                        const double *toward,
+                                                                        double tolerance);
+
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_web(const struct CadaclysmBlacksmithSolid *solid,
                                                           const struct CadaclysmBlacksmithNurbsCurve *const *curves,
                                                           uint32_t count,
@@ -1556,6 +1993,91 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_web_tool(const struct Cada
                                                                double depth,
                                                                bool both_ways,
                                                                double tolerance);
+
+uint32_t cadaclysm_blacksmith_thread_size_count(void);
+
+const char *cadaclysm_blacksmith_thread_size_at(uint32_t index, double *out);
+
+const char *cadaclysm_blacksmith_thread_size_size(uint32_t index);
+
+int32_t cadaclysm_blacksmith_thread_size_find(const char *designation);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_thread(const struct CadaclysmBlacksmithSolid *solid,
+                                                             uint32_t face,
+                                                             const char *designation,
+                                                             double pitch,
+                                                             double diameter,
+                                                             double angle,
+                                                             double length,
+                                                             double offset,
+                                                             uint32_t flags,
+                                                             double tolerance,
+                                                             double *report_out);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_thread_tool(const struct CadaclysmBlacksmithSolid *solid,
+                                                                  uint32_t face,
+                                                                  const char *designation,
+                                                                  double pitch,
+                                                                  double diameter,
+                                                                  double angle,
+                                                                  double length,
+                                                                  double offset,
+                                                                  uint32_t flags,
+                                                                  double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_cosmetic_thread(const struct CadaclysmBlacksmithSolid *solid,
+                                                                      uint32_t face,
+                                                                      const char *designation,
+                                                                      double pitch,
+                                                                      double diameter,
+                                                                      double length,
+                                                                      double offset,
+                                                                      uint32_t flags,
+                                                                      double tolerance);
+
+bool cadaclysm_blacksmith_thread_record(const struct CadaclysmBlacksmithSolid *solid,
+                                        uint32_t face,
+                                        double *out,
+                                        const char **designation_out);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_hole_threaded(const struct CadaclysmBlacksmithSolid *solid,
+                                                                    const double *points,
+                                                                    uint32_t count,
+                                                                    double diameter,
+                                                                    const double *direction,
+                                                                    uint32_t extent,
+                                                                    double depth,
+                                                                    double tip_angle,
+                                                                    uint32_t face,
+                                                                    uint32_t head,
+                                                                    double head_diameter,
+                                                                    double head_depth,
+                                                                    double head_angle,
+                                                                    const char *designation,
+                                                                    double thread_depth,
+                                                                    uint32_t flags,
+                                                                    double tolerance,
+                                                                    double *report_out,
+                                                                    double *bottoms_out,
+                                                                    double *thread_depths_out);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_hole_threaded_tool(const struct CadaclysmBlacksmithSolid *solid,
+                                                                         const double *points,
+                                                                         uint32_t count,
+                                                                         double diameter,
+                                                                         const double *direction,
+                                                                         uint32_t extent,
+                                                                         double depth,
+                                                                         double tip_angle,
+                                                                         uint32_t face,
+                                                                         uint32_t head,
+                                                                         double head_diameter,
+                                                                         double head_depth,
+                                                                         double head_angle,
+                                                                         const char *designation,
+                                                                         double thread_depth,
+                                                                         uint32_t flags,
+                                                                         double tolerance);
 
 struct CadaclysmBlacksmithSweptClashes *cadaclysm_blacksmith_collider_swept_clash(struct CadaclysmBlacksmithCollider *collider,
                                                                                   const double *poses,
@@ -1702,6 +2224,9 @@ char *cadaclysm_blacksmith_document_result_kind(const struct CadaclysmBlacksmith
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_document_result_solid(const struct CadaclysmBlacksmithDocument *doc,
                                                                             const char *id);
 
+struct CadaclysmBlacksmithGarment *cadaclysm_blacksmith_document_result_garment(const struct CadaclysmBlacksmithDocument *doc,
+                                                                                const char *id);
+
 struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_document_result_profile(const struct CadaclysmBlacksmithDocument *doc,
                                                                                 const char *id);
 
@@ -1750,7 +2275,75 @@ char *cadaclysm_blacksmith_document_branch_list(const struct CadaclysmBlacksmith
 char *cadaclysm_blacksmith_document_log(const struct CadaclysmBlacksmithDocument *doc,
                                         const char *branch);
 
+uint64_t cadaclysm_blacksmith_document_revision(const struct CadaclysmBlacksmithDocument *doc);
+
+char *cadaclysm_blacksmith_document_nodes(const struct CadaclysmBlacksmithDocument *doc,
+                                          const char *ids);
+
+char *cadaclysm_blacksmith_document_inputs(const struct CadaclysmBlacksmithDocument *doc,
+                                           const char *id,
+                                           bool transitive);
+
+char *cadaclysm_blacksmith_document_readers(const struct CadaclysmBlacksmithDocument *doc,
+                                            const char *id,
+                                            bool transitive);
+
+char *cadaclysm_blacksmith_document_probe(struct CadaclysmBlacksmithDocument *doc,
+                                          const char *op,
+                                          const char *ids);
+
+void cadaclysm_blacksmith_document_probe_end(struct CadaclysmBlacksmithDocument *doc);
+
+uint32_t cadaclysm_blacksmith_document_result_bezier_count(const struct CadaclysmBlacksmithDocument *doc,
+                                                           const char *id);
+
+bool cadaclysm_blacksmith_document_result_beziers(const struct CadaclysmBlacksmithDocument *doc,
+                                                  const char *id,
+                                                  const double *frame,
+                                                  double *out);
+
+char *cadaclysm_blacksmith_document_meta(const struct CadaclysmBlacksmithDocument *doc,
+                                         const char *app);
+
 void cadaclysm_blacksmith_document_free(struct CadaclysmBlacksmithDocument *doc);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_draft(const struct CadaclysmBlacksmithSolid *solid,
+                                                            const uint32_t *faces,
+                                                            size_t count,
+                                                            const double *plane,
+                                                            double angle,
+                                                            double tolerance,
+                                                            CadaclysmBlacksmithProgress progress,
+                                                            void *user);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_draft_two_sided(const struct CadaclysmBlacksmithSolid *solid,
+                                                                      const uint32_t *faces,
+                                                                      size_t count,
+                                                                      const double *plane,
+                                                                      double above,
+                                                                      double below,
+                                                                      double tolerance,
+                                                                      CadaclysmBlacksmithProgress progress,
+                                                                      void *user);
+
+bool cadaclysm_blacksmith_draft_angle_at(const struct CadaclysmBlacksmithSolid *solid,
+                                         uint32_t face,
+                                         const double *point,
+                                         const double *pull,
+                                         struct CadaclysmBlacksmithDraftPoint *out);
+
+struct CadaclysmBlacksmithDraftAnalysis *cadaclysm_blacksmith_draft_analysis(const struct CadaclysmBlacksmithSolid *solid,
+                                                                             const double *pull,
+                                                                             double threshold,
+                                                                             double tolerance);
+
+uint32_t cadaclysm_blacksmith_draft_analysis_count(const struct CadaclysmBlacksmithDraftAnalysis *analysis);
+
+bool cadaclysm_blacksmith_draft_analysis_face(const struct CadaclysmBlacksmithDraftAnalysis *analysis,
+                                              uint32_t i,
+                                              struct CadaclysmBlacksmithFaceDraft *out);
+
+void cadaclysm_blacksmith_draft_analysis_free(struct CadaclysmBlacksmithDraftAnalysis *analysis);
 
 struct CadaclysmBlacksmithDocument *cadaclysm_bim_document_new(const char *units);
 
@@ -1779,6 +2372,63 @@ struct CadaclysmBlacksmithDocument *cadaclysm_parts_document_new(void);
 struct CadaclysmBlacksmithDocument *cadaclysm_parts_document_load(const char *text);
 
 char *cadaclysm_parts_kinds(void);
+
+struct CadaclysmBlacksmithCloth *cadaclysm_blacksmith_cloth_new(const struct CadaclysmBlacksmithGarment *g,
+                                                                const double *avatar_positions,
+                                                                size_t position_count,
+                                                                const uint32_t *avatar_indices,
+                                                                size_t index_count,
+                                                                const double *options);
+
+struct CadaclysmBlacksmithCloth *cadaclysm_blacksmith_cloth_new_stl(const struct CadaclysmBlacksmithGarment *g,
+                                                                    const uint8_t *stl,
+                                                                    size_t len,
+                                                                    const double *options);
+
+void cadaclysm_blacksmith_cloth_free(struct CadaclysmBlacksmithCloth *c);
+
+bool cadaclysm_blacksmith_cloth_default_options(double *out);
+
+bool cadaclysm_blacksmith_cloth_options(const struct CadaclysmBlacksmithCloth *c, double *out);
+
+bool cadaclysm_blacksmith_cloth_set_options(struct CadaclysmBlacksmithCloth *c,
+                                            const double *options);
+
+bool cadaclysm_blacksmith_cloth_step(struct CadaclysmBlacksmithCloth *c, uint32_t frames);
+
+bool cadaclysm_blacksmith_cloth_status(const struct CadaclysmBlacksmithCloth *c, double *out);
+
+const float *cadaclysm_blacksmith_cloth_positions(struct CadaclysmBlacksmithCloth *c,
+                                                  size_t *count);
+
+const uint32_t *cadaclysm_blacksmith_cloth_triangles(struct CadaclysmBlacksmithCloth *c,
+                                                     size_t *count);
+
+const float *cadaclysm_blacksmith_cloth_rest(struct CadaclysmBlacksmithCloth *c, size_t *count);
+
+const uint32_t *cadaclysm_blacksmith_cloth_vertex_patterns(struct CadaclysmBlacksmithCloth *c,
+                                                           size_t *count);
+
+const double *cadaclysm_blacksmith_cloth_vertex_links(struct CadaclysmBlacksmithCloth *c,
+                                                      size_t *count);
+
+bool cadaclysm_blacksmith_cloth_vertex_link(const struct CadaclysmBlacksmithCloth *c,
+                                            uint32_t vertex,
+                                            double *out);
+
+bool cadaclysm_blacksmith_cloth_pin(struct CadaclysmBlacksmithCloth *c,
+                                    uint32_t vertex,
+                                    const double *at);
+
+bool cadaclysm_blacksmith_cloth_unpin(struct CadaclysmBlacksmithCloth *c, uint32_t vertex);
+
+bool cadaclysm_blacksmith_cloth_drag(struct CadaclysmBlacksmithCloth *c,
+                                     uint32_t vertex,
+                                     const double *target);
+
+bool cadaclysm_blacksmith_cloth_remesh_pattern(struct CadaclysmBlacksmithCloth *c,
+                                               const struct CadaclysmBlacksmithGarment *g,
+                                               uint32_t pattern);
 
 void cadaclysm_blacksmith_fem_options_init(struct CadaclysmBlacksmithFemOptions *options);
 
@@ -1824,6 +2474,126 @@ char *cadaclysm_blacksmith_fem_mesh_msh_text(const struct CadaclysmBlacksmithFem
 
 bool cadaclysm_blacksmith_fem_mesh_save_msh(const struct CadaclysmBlacksmithFemMesh *m,
                                             const char *path);
+
+struct CadaclysmBlacksmithGarment *cadaclysm_blacksmith_garment_new(void);
+
+void cadaclysm_blacksmith_garment_free(struct CadaclysmBlacksmithGarment *g);
+
+uint32_t cadaclysm_blacksmith_garment_add_fabric(struct CadaclysmBlacksmithGarment *g,
+                                                 const char *name,
+                                                 const double *params);
+
+bool cadaclysm_blacksmith_garment_fabric_params(const struct CadaclysmBlacksmithGarment *g,
+                                                uint32_t id,
+                                                double *out);
+
+char *cadaclysm_blacksmith_garment_fabric_name(const struct CadaclysmBlacksmithGarment *g,
+                                               uint32_t id);
+
+uint32_t cadaclysm_blacksmith_garment_add_pattern(struct CadaclysmBlacksmithGarment *g,
+                                                  const char *name,
+                                                  const struct CadaclysmBlacksmithProfile *outline,
+                                                  double grain_x,
+                                                  double grain_y,
+                                                  uint32_t fabric,
+                                                  int32_t layer,
+                                                  const double *allowance,
+                                                  size_t count);
+
+char *cadaclysm_blacksmith_garment_pattern_name(const struct CadaclysmBlacksmithGarment *g,
+                                                uint32_t id);
+
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_garment_pattern_outline(const struct CadaclysmBlacksmithGarment *g,
+                                                                                uint32_t id);
+
+bool cadaclysm_blacksmith_garment_pattern_info(const struct CadaclysmBlacksmithGarment *g,
+                                               uint32_t id,
+                                               double *out);
+
+const double *cadaclysm_blacksmith_garment_pattern_allowance(struct CadaclysmBlacksmithGarment *g,
+                                                             uint32_t id,
+                                                             size_t *count);
+
+bool cadaclysm_blacksmith_garment_pattern_set_frame(struct CadaclysmBlacksmithGarment *g,
+                                                    uint32_t id,
+                                                    const double *frame);
+
+bool cadaclysm_blacksmith_garment_pattern_frame(const struct CadaclysmBlacksmithGarment *g,
+                                                uint32_t id,
+                                                double *out);
+
+bool cadaclysm_blacksmith_garment_pattern_set_wrap(struct CadaclysmBlacksmithGarment *g,
+                                                   uint32_t id,
+                                                   const double *wrap);
+
+bool cadaclysm_blacksmith_garment_pattern_add_notch(struct CadaclysmBlacksmithGarment *g,
+                                                    uint32_t id,
+                                                    double at,
+                                                    uint32_t kind,
+                                                    double depth);
+
+const double *cadaclysm_blacksmith_garment_pattern_notches(struct CadaclysmBlacksmithGarment *g,
+                                                           uint32_t id,
+                                                           size_t *count);
+
+bool cadaclysm_blacksmith_garment_pattern_add_internal(struct CadaclysmBlacksmithGarment *g,
+                                                       uint32_t id,
+                                                       uint32_t kind,
+                                                       const struct CadaclysmBlacksmithProfile *path);
+
+uint32_t cadaclysm_blacksmith_garment_add_seam(struct CadaclysmBlacksmithGarment *g,
+                                               uint32_t pa,
+                                               double a_from,
+                                               double a_to,
+                                               uint32_t pb,
+                                               double b_from,
+                                               double b_to,
+                                               bool reversed);
+
+bool cadaclysm_blacksmith_garment_seam(const struct CadaclysmBlacksmithGarment *g,
+                                       uint32_t id,
+                                       double *out);
+
+bool cadaclysm_blacksmith_garment_remove_pattern(struct CadaclysmBlacksmithGarment *g, uint32_t id);
+
+bool cadaclysm_blacksmith_garment_remove_seam(struct CadaclysmBlacksmithGarment *g, uint32_t id);
+
+const uint32_t *cadaclysm_blacksmith_garment_patterns(struct CadaclysmBlacksmithGarment *g,
+                                                      size_t *count);
+
+const uint32_t *cadaclysm_blacksmith_garment_seams(struct CadaclysmBlacksmithGarment *g,
+                                                   size_t *count);
+
+const uint32_t *cadaclysm_blacksmith_garment_fabrics(struct CadaclysmBlacksmithGarment *g,
+                                                     size_t *count);
+
+uint32_t cadaclysm_blacksmith_garment_validate(struct CadaclysmBlacksmithGarment *g,
+                                               double accuracy);
+
+bool cadaclysm_blacksmith_garment_issue(const struct CadaclysmBlacksmithGarment *g,
+                                        uint32_t i,
+                                        double *out);
+
+char *cadaclysm_blacksmith_garment_issue_message(const struct CadaclysmBlacksmithGarment *g,
+                                                 uint32_t i);
+
+const double *cadaclysm_blacksmith_garment_cut_line(struct CadaclysmBlacksmithGarment *g,
+                                                    uint32_t pattern,
+                                                    double tolerance,
+                                                    size_t *count);
+
+const double *cadaclysm_blacksmith_garment_range_points(struct CadaclysmBlacksmithGarment *g,
+                                                        uint32_t pattern,
+                                                        double from,
+                                                        double to,
+                                                        double tolerance,
+                                                        size_t *count);
+
+char *cadaclysm_blacksmith_garment_to_aama(const struct CadaclysmBlacksmithGarment *g,
+                                           double tolerance,
+                                           const char *author);
+
+struct CadaclysmBlacksmithGarment *cadaclysm_blacksmith_garment_from_aama(const char *text);
 
 struct CadaclysmBlacksmithHeal *cadaclysm_blacksmith_healed(const struct CadaclysmBlacksmithSolid *solid,
                                                             double tolerance,
@@ -1888,6 +2658,29 @@ double cadaclysm_blacksmith_vertex_tolerance(const struct CadaclysmBlacksmithSol
                                              double x,
                                              double y,
                                              double z);
+
+struct CadaclysmBlacksmithRecognize *cadaclysm_blacksmith_recognized(const struct CadaclysmBlacksmithSolid *solid,
+                                                                     double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_recognize_body(const struct CadaclysmBlacksmithRecognize *r);
+
+void cadaclysm_blacksmith_recognize_free(struct CadaclysmBlacksmithRecognize *r);
+
+bool cadaclysm_blacksmith_recognize_summary(const struct CadaclysmBlacksmithRecognize *r,
+                                            uint32_t *counts,
+                                            double *sizes);
+
+uint32_t cadaclysm_blacksmith_recognize_faces(const struct CadaclysmBlacksmithRecognize *r,
+                                              uint32_t *items,
+                                              double *sizes);
+
+uint32_t cadaclysm_blacksmith_recognize_refused(const struct CadaclysmBlacksmithRecognize *r,
+                                                uint32_t *items,
+                                                double *sizes);
+
+uint32_t cadaclysm_blacksmith_recognize_edges(const struct CadaclysmBlacksmithRecognize *r,
+                                              uint32_t *items,
+                                              double *sizes);
 
 struct CadaclysmBlacksmithHits *cadaclysm_blacksmith_profile_hits(const struct CadaclysmBlacksmithProfile *a,
                                                                   const struct CadaclysmBlacksmithProfile *b,
@@ -2148,6 +2941,76 @@ bool cadaclysm_blacksmith_history_deleted_at(const struct CadaclysmBlacksmithHis
                                              uint32_t *operand,
                                              uint64_t *id);
 
+int32_t cadaclysm_blacksmith_face_point(const struct CadaclysmBlacksmithSolid *solid,
+                                        uint32_t face,
+                                        const double *p,
+                                        double tolerance,
+                                        struct CadaclysmBlacksmithFacePoint *out);
+
+bool cadaclysm_blacksmith_face_inner_point(const struct CadaclysmBlacksmithSolid *solid,
+                                           uint32_t face,
+                                           struct CadaclysmBlacksmithFacePoint *out);
+
+int32_t cadaclysm_blacksmith_edge_point(const struct CadaclysmBlacksmithSolid *solid,
+                                        uint32_t edge,
+                                        const double *p,
+                                        double tolerance,
+                                        struct CadaclysmBlacksmithEdgePoint *out);
+
+bool cadaclysm_blacksmith_edge_inner_point(const struct CadaclysmBlacksmithSolid *solid,
+                                           uint32_t edge,
+                                           struct CadaclysmBlacksmithEdgePoint *out);
+
+bool cadaclysm_blacksmith_face_size(const struct CadaclysmBlacksmithSolid *solid,
+                                    uint32_t face,
+                                    double *out);
+
+bool cadaclysm_blacksmith_edge_convexity(const struct CadaclysmBlacksmithSolid *solid,
+                                         uint32_t edge,
+                                         double angular_tolerance,
+                                         uint32_t samples,
+                                         struct CadaclysmBlacksmithEdgeConvexity *out);
+
+bool cadaclysm_blacksmith_edges_convexity(const struct CadaclysmBlacksmithSolid *solid,
+                                          double angular_tolerance,
+                                          uint32_t *out);
+
+int32_t cadaclysm_blacksmith_tangent_faces(const struct CadaclysmBlacksmithSolid *solid,
+                                           uint32_t face,
+                                           double angular_tolerance,
+                                           uint32_t *out);
+
+int32_t cadaclysm_blacksmith_tangent_edges(const struct CadaclysmBlacksmithSolid *solid,
+                                           uint32_t edge,
+                                           double angular_tolerance,
+                                           uint32_t *out);
+
+int32_t cadaclysm_blacksmith_tangent_face_groups(const struct CadaclysmBlacksmithSolid *solid,
+                                                 double angular_tolerance,
+                                                 uint32_t *out);
+
+bool cadaclysm_blacksmith_angle_points(const double *a,
+                                       const double *vertex,
+                                       const double *b,
+                                       double *out);
+
+bool cadaclysm_blacksmith_angle_between(const struct CadaclysmBlacksmithSolid *a,
+                                        uint32_t kind_a,
+                                        uint32_t index_a,
+                                        const struct CadaclysmBlacksmithSolid *b,
+                                        uint32_t kind_b,
+                                        uint32_t index_b,
+                                        struct CadaclysmBlacksmithAngle *out);
+
+bool cadaclysm_blacksmith_face_minimum_radius(const struct CadaclysmBlacksmithSolid *solid,
+                                              uint32_t face,
+                                              uint32_t samples,
+                                              struct CadaclysmBlacksmithMinimumRadius *out);
+
+bool cadaclysm_blacksmith_profile_area_properties(const struct CadaclysmBlacksmithProfile *profile,
+                                                  double accuracy,
+                                                  struct CadaclysmBlacksmithAreaProperties *out);
+
 bool cadaclysm_blacksmith_mass_properties(const struct CadaclysmBlacksmithSolid *solid,
                                           double accuracy,
                                           struct CadaclysmBlacksmithMassProperties *out);
@@ -2236,6 +3099,8 @@ int32_t cadaclysm_blacksmith_nurbs_curve_closest_object(const struct CadaclysmBl
                                                         uint32_t n_projectors,
                                                         const struct CadaclysmBlacksmithTriangleMesh *const *meshes,
                                                         uint32_t n_meshes,
+                                                        const struct CadaclysmBlacksmithNurbsSurface *const *surfaces,
+                                                        uint32_t n_surfaces,
                                                         double max_distance,
                                                         double tolerance,
                                                         struct CadaclysmBlacksmithNearestObject *out);
@@ -2266,6 +3131,107 @@ int32_t cadaclysm_blacksmith_triangle_mesh_curve_closest_points(const struct Cad
                                                                 const struct CadaclysmBlacksmithNurbsCurve *curve,
                                                                 double max_distance,
                                                                 struct CadaclysmBlacksmithCurveMeshFoot *out);
+
+struct CadaclysmBlacksmithNurbsSurface *cadaclysm_blacksmith_nurbs_surface_new(const double *points,
+                                                                               uint32_t n_u,
+                                                                               uint32_t n_v,
+                                                                               uint32_t degree_u,
+                                                                               uint32_t degree_v,
+                                                                               const double *weights,
+                                                                               const double *knots_u,
+                                                                               uint32_t n_knots_u,
+                                                                               const double *knots_v,
+                                                                               uint32_t n_knots_v);
+
+struct CadaclysmBlacksmithNurbsSurface *cadaclysm_blacksmith_solid_face_surface(const struct CadaclysmBlacksmithSolid *solid,
+                                                                                uint32_t face);
+
+void cadaclysm_blacksmith_nurbs_surface_free(struct CadaclysmBlacksmithNurbsSurface *surface);
+
+bool cadaclysm_blacksmith_nurbs_surface_degrees(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                uint32_t *out);
+
+bool cadaclysm_blacksmith_nurbs_surface_counts(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                               uint32_t *out);
+
+bool cadaclysm_blacksmith_nurbs_surface_domain(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                               double *out);
+
+bool cadaclysm_blacksmith_nurbs_surface_point_at(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                 double u,
+                                                 double v,
+                                                 double *out);
+
+bool cadaclysm_blacksmith_nurbs_surface_normal_at(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                  double u,
+                                                  double v,
+                                                  double *out);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_nurbs_surface_to_sheet(const struct CadaclysmBlacksmithNurbsSurface *surface);
+
+int32_t cadaclysm_blacksmith_nurbs_surface_closest_point(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                         const double *p,
+                                                         double max_distance,
+                                                         struct CadaclysmBlacksmithSurfacePoint *out);
+
+int32_t cadaclysm_blacksmith_nurbs_surface_curve_closest_points(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                                const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                double max_distance,
+                                                                struct CadaclysmBlacksmithCurveSurfaceFoot *out);
+
+bool cadaclysm_blacksmith_nurbs_surface_control_points(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                       double *xyz);
+
+bool cadaclysm_blacksmith_nurbs_surface_weights(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                double *w);
+
+bool cadaclysm_blacksmith_nurbs_surface_knots(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                              uint32_t dir,
+                                              double *k);
+
+struct CadaclysmBlacksmithNurbsSurface *cadaclysm_blacksmith_nurbs_surface_elevated(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                                                    uint32_t dir,
+                                                                                    uint32_t by);
+
+struct CadaclysmBlacksmithNurbsSurface *cadaclysm_blacksmith_nurbs_surface_knot_inserted(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                                                         uint32_t dir,
+                                                                                         double t,
+                                                                                         uint32_t times);
+
+struct CadaclysmBlacksmithNurbsSurface *cadaclysm_blacksmith_nurbs_surface_knots_refined(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                                                         uint32_t dir,
+                                                                                         const double *knots,
+                                                                                         uint32_t count);
+
+struct CadaclysmBlacksmithNurbsSurface *cadaclysm_blacksmith_nurbs_surface_knot_removed(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                                                        uint32_t dir,
+                                                                                        double t,
+                                                                                        uint32_t times,
+                                                                                        double tolerance,
+                                                                                        uint32_t *removed);
+
+struct CadaclysmBlacksmithNurbsSurface *cadaclysm_blacksmith_nurbs_surface_extended(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                                                    uint32_t side,
+                                                                                    double length);
+
+bool cadaclysm_blacksmith_nurbs_surface_second_derivatives(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                           double u,
+                                                           double v,
+                                                           double *out);
+
+bool cadaclysm_blacksmith_nurbs_surface_curvature(const struct CadaclysmBlacksmithNurbsSurface *surface,
+                                                  double u,
+                                                  double v,
+                                                  struct CadaclysmBlacksmithSurfaceCurvature *out);
+
+struct CadaclysmBlacksmithNurbsSurface *cadaclysm_blacksmith_nurbs_surface_hermite(const double *u,
+                                                                                   uint32_t n_u,
+                                                                                   const double *v,
+                                                                                   uint32_t n_v,
+                                                                                   const double *points,
+                                                                                   const double *du,
+                                                                                   const double *dv,
+                                                                                   const double *twists);
 
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_merge(const struct CadaclysmBlacksmithSolid *a,
                                                             const struct CadaclysmBlacksmithSolid *b,
@@ -2360,6 +3326,50 @@ struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_offset_on
                                                                                        double distance,
                                                                                        double tolerance,
                                                                                        double *error_out);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_pulled_back(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                   const struct CadaclysmBlacksmithSolid *solid,
+                                                                                   uint32_t face,
+                                                                                   double tolerance,
+                                                                                   double *error_out);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_pushed_up(const struct CadaclysmBlacksmithNurbsCurve *uv,
+                                                                                 const struct CadaclysmBlacksmithSolid *solid,
+                                                                                 uint32_t face,
+                                                                                 double tolerance,
+                                                                                 double *error_out);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_fitted_to_face(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                      const struct CadaclysmBlacksmithSolid *solid,
+                                                                                      uint32_t face,
+                                                                                      const double *direction,
+                                                                                      const double *knots,
+                                                                                      size_t knot_count,
+                                                                                      double tolerance,
+                                                                                      double *error_out);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_through_on_face(const struct CadaclysmBlacksmithSolid *solid,
+                                                                                       uint32_t face,
+                                                                                       const double *xyz,
+                                                                                       size_t count,
+                                                                                       bool closed,
+                                                                                       double tolerance,
+                                                                                       double *error_out);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_through_uv_on_face(const struct CadaclysmBlacksmithSolid *solid,
+                                                                                          uint32_t face,
+                                                                                          const double *uv,
+                                                                                          size_t count,
+                                                                                          bool closed,
+                                                                                          double tolerance,
+                                                                                          double *error_out);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_short_path_on_face(const struct CadaclysmBlacksmithSolid *solid,
+                                                                                          uint32_t face,
+                                                                                          const double *a,
+                                                                                          const double *b,
+                                                                                          double tolerance,
+                                                                                          double *error_out);
 
 struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_pulled_to_face(const struct CadaclysmBlacksmithNurbsCurve *curve,
                                                                                       const struct CadaclysmBlacksmithSolid *solid,
@@ -2574,6 +3584,130 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_fillet_surfaces(const stru
                                                                       struct CadaclysmBlacksmithNurbsCurve **rail_b,
                                                                       double *error_out);
 
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_knot_inserted(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                     double t,
+                                                                                     uint32_t times);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_knots_refined(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                     const double *knots,
+                                                                                     uint32_t count);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_knot_removed(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                    double t,
+                                                                                    uint32_t times,
+                                                                                    double tolerance,
+                                                                                    uint32_t *removed);
+
+bool cadaclysm_blacksmith_nurbs_curve_compatible(const struct CadaclysmBlacksmithNurbsCurve *const *curves,
+                                                 size_t count,
+                                                 struct CadaclysmBlacksmithNurbsCurve **out);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_reparametrized(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                      double lo,
+                                                                                      double hi);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_uniform(const struct CadaclysmBlacksmithNurbsCurve *curve);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_non_rational(const struct CadaclysmBlacksmithNurbsCurve *curve);
+
+bool cadaclysm_blacksmith_nurbs_curve_greville(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                               double *params,
+                                               double *xyz);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_periodic(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                bool smooth);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_mean(const struct CadaclysmBlacksmithNurbsCurve *a,
+                                                                            const struct CadaclysmBlacksmithNurbsCurve *b,
+                                                                            double tolerance);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_lined_up(const struct CadaclysmBlacksmithNurbsCurve *a,
+                                                                                const struct CadaclysmBlacksmithNurbsCurve *b,
+                                                                                double tolerance);
+
+int32_t cadaclysm_blacksmith_nurbs_curve_directions_match(const struct CadaclysmBlacksmithNurbsCurve *a,
+                                                          const struct CadaclysmBlacksmithNurbsCurve *b,
+                                                          double tolerance);
+
+int32_t cadaclysm_blacksmith_nurbs_curve_conic_type(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                    double tolerance);
+
+uint32_t cadaclysm_blacksmith_curve_list_count(const struct CadaclysmBlacksmithCurveList *list);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_curve_list_curve(const struct CadaclysmBlacksmithCurveList *list,
+                                                                            uint32_t i);
+
+bool cadaclysm_blacksmith_curve_list_info(const struct CadaclysmBlacksmithCurveList *list,
+                                          uint32_t i,
+                                          struct CadaclysmBlacksmithCurveInfo *out);
+
+void cadaclysm_blacksmith_curve_list_free(struct CadaclysmBlacksmithCurveList *list);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_nurbs_curve_spiral(const double *axis,
+                                                                              const double *start,
+                                                                              double pitch,
+                                                                              double turns,
+                                                                              double end_radius,
+                                                                              double *error_out);
+
+bool cadaclysm_blacksmith_nurbs_curve_length_between(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                     double t0,
+                                                     double t1,
+                                                     double accuracy,
+                                                     struct CadaclysmBlacksmithLength *out);
+
+bool cadaclysm_blacksmith_nurbs_curve_point_at_normalized_length(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                 double f,
+                                                                 double accuracy,
+                                                                 struct CadaclysmBlacksmithAt *out);
+
+struct CadaclysmBlacksmithSamples *cadaclysm_blacksmith_nurbs_curve_points_at_normalized_lengths(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                                 const double *f,
+                                                                                                 uint32_t n,
+                                                                                                 double accuracy);
+
+struct CadaclysmBlacksmithSamples *cadaclysm_blacksmith_nurbs_curve_divide_equidistant(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                       double distance);
+
+struct CadaclysmBlacksmithSamples *cadaclysm_blacksmith_nurbs_curve_divide_as_contour(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                                                      const double *from,
+                                                                                      const double *to,
+                                                                                      double interval);
+
+bool cadaclysm_blacksmith_nurbs_curve_mass(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                           double accuracy,
+                                           struct CadaclysmBlacksmithLengthMass *out);
+
+struct CadaclysmBlacksmithCurveList *cadaclysm_blacksmith_nurbs_curve_face_isocurves(const struct CadaclysmBlacksmithSolid *solid,
+                                                                                     uint32_t face,
+                                                                                     bool along_u,
+                                                                                     double at,
+                                                                                     double tolerance);
+
+uint32_t cadaclysm_blacksmith_face_iso_intervals(const struct CadaclysmBlacksmithSolid *solid,
+                                                 uint32_t face,
+                                                 bool along_u,
+                                                 double at,
+                                                 double *out,
+                                                 uint32_t capacity);
+
+int32_t cadaclysm_blacksmith_nurbs_curve_is_isoparametric(const struct CadaclysmBlacksmithNurbsCurve *curve,
+                                                          const struct CadaclysmBlacksmithSolid *solid,
+                                                          uint32_t face,
+                                                          double tolerance,
+                                                          double *at_out);
+
+struct CadaclysmBlacksmithCurveList *cadaclysm_blacksmith_solid_section_curves(const struct CadaclysmBlacksmithSolid *solid,
+                                                                               const double *origin,
+                                                                               const double *normal,
+                                                                               double tolerance);
+
+struct CadaclysmBlacksmithCurveList *cadaclysm_blacksmith_solid_contour_curves(const struct CadaclysmBlacksmithSolid *solid,
+                                                                               const double *from,
+                                                                               const double *to,
+                                                                               double interval,
+                                                                               double tolerance);
+
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_by_curve(const struct CadaclysmBlacksmithSolid *sheet,
                                                                      const struct CadaclysmBlacksmithNurbsCurve *curve,
                                                                      const double *direction,
@@ -2640,6 +3774,8 @@ const char *cadaclysm_blacksmith_license_info(void);
 uint64_t cadaclysm_blacksmith_license_notice_count(void);
 
 const char *cadaclysm_blacksmith_build_date(void);
+
+const char *cadaclysm_blacksmith_build(void);
 
 struct CadaclysmBlacksmithMesh cadaclysm_blacksmith_mesh(const struct CadaclysmBlacksmithSolid *solid,
                                                          double tolerance);
@@ -2889,6 +4025,22 @@ struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_from_loops(const
 
 struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_close_loop(const struct CadaclysmBlacksmithProfile *profile);
 
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_from_pieces(const char *json,
+                                                                            bool closed,
+                                                                            double tolerance);
+
+char *cadaclysm_blacksmith_profile_pieces_json(const struct CadaclysmBlacksmithProfile *profile);
+
+char *cadaclysm_blacksmith_profile_fillet_corner(const struct CadaclysmBlacksmithProfile *a,
+                                                 const struct CadaclysmBlacksmithProfile *b,
+                                                 double radius,
+                                                 double tolerance);
+
+bool cadaclysm_blacksmith_profile_bounds(const struct CadaclysmBlacksmithProfile *profile,
+                                         double *out);
+
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_reversed(const struct CadaclysmBlacksmithProfile *profile);
+
 struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_polyline(const double *xy,
                                                                          size_t count,
                                                                          bool closed);
@@ -3034,6 +4186,66 @@ struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_list_get(const s
 
 void cadaclysm_blacksmith_profile_list_free(struct CadaclysmBlacksmithProfileList *list);
 
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_union(const struct CadaclysmBlacksmithProfile *a,
+                                                                          const struct CadaclysmBlacksmithProfile *b,
+                                                                          double tolerance);
+
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_difference(const struct CadaclysmBlacksmithProfile *a,
+                                                                               const struct CadaclysmBlacksmithProfile *b,
+                                                                               double tolerance);
+
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_regions(const struct CadaclysmBlacksmithProfile *const *profiles,
+                                                                            size_t count,
+                                                                            double tolerance);
+
+int32_t cadaclysm_blacksmith_profile_contains(const struct CadaclysmBlacksmithProfile *p,
+                                              double x,
+                                              double y,
+                                              double tolerance);
+
+int32_t cadaclysm_blacksmith_profile_relationship(const struct CadaclysmBlacksmithProfile *a,
+                                                  const struct CadaclysmBlacksmithProfile *b,
+                                                  double tolerance);
+
+bool cadaclysm_blacksmith_profile_deviation(const struct CadaclysmBlacksmithProfile *a,
+                                            const struct CadaclysmBlacksmithProfile *b,
+                                            double tolerance,
+                                            double *out10);
+
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_offset_corner(const struct CadaclysmBlacksmithProfile *p,
+                                                                                  double distance,
+                                                                                  double tolerance,
+                                                                                  uint32_t corner);
+
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_offset_open(const struct CadaclysmBlacksmithProfile *p,
+                                                                                double distance,
+                                                                                double tolerance,
+                                                                                uint32_t corner,
+                                                                                uint32_t end);
+
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_reduce_segments(const struct CadaclysmBlacksmithProfile *p,
+                                                                                double tolerance,
+                                                                                bool open);
+
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_merge_colinear(const struct CadaclysmBlacksmithProfile *p,
+                                                                               double angle_tolerance,
+                                                                               bool open,
+                                                                               bool include_seam);
+
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_break_at_kinks(const struct CadaclysmBlacksmithProfile *p,
+                                                                                   double angle,
+                                                                                   bool open);
+
+int32_t cadaclysm_blacksmith_profile_is_convex(const struct CadaclysmBlacksmithProfile *p,
+                                               bool strict);
+
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_make_closed(const struct CadaclysmBlacksmithProfile *p,
+                                                                            double tolerance);
+
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_with_seam(const struct CadaclysmBlacksmithProfile *p,
+                                                                          double x,
+                                                                          double y);
+
 uint32_t cadaclysm_blacksmith_face_count(const struct CadaclysmBlacksmithSolid *solid);
 
 uint32_t cadaclysm_blacksmith_select_face(const struct CadaclysmBlacksmithSolid *solid,
@@ -3173,6 +4385,191 @@ bool cadaclysm_blacksmith_rtree_pairs_at(const struct CadaclysmBlacksmithRTreePa
                                          struct CadaclysmBlacksmithRTreePair *out);
 
 void cadaclysm_blacksmith_rtree_pairs_free(struct CadaclysmBlacksmithRTreePairs *pairs);
+
+bool cadaclysm_blacksmith_sheet_rule_default(double thickness,
+                                             struct CadaclysmBlacksmithSheetRule *out);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_base(const struct CadaclysmBlacksmithProfile *profile,
+                                                                 const double *frame,
+                                                                 const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                 double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_contour(const double *path,
+                                                                    size_t point_count,
+                                                                    const double *frame,
+                                                                    double width,
+                                                                    const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                    double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_flange(const struct CadaclysmBlacksmithSolid *solid,
+                                                                   const uint32_t *edges,
+                                                                   size_t count,
+                                                                   double angle,
+                                                                   double length,
+                                                                   const double *offsets,
+                                                                   const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                   double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_hem(const struct CadaclysmBlacksmithSolid *solid,
+                                                                const uint32_t *edges,
+                                                                size_t count,
+                                                                uint32_t kind,
+                                                                double length,
+                                                                double gap,
+                                                                double angle,
+                                                                const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_fold(const struct CadaclysmBlacksmithSolid *solid,
+                                                                 uint32_t face,
+                                                                 const double *line,
+                                                                 double angle,
+                                                                 const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                 double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_rip(const struct CadaclysmBlacksmithSolid *solid,
+                                                                const uint32_t *edges,
+                                                                size_t count,
+                                                                double gap,
+                                                                double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_convert(const struct CadaclysmBlacksmithSolid *solid,
+                                                                    uint32_t fixed_face,
+                                                                    const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                    double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_corner_relief(const struct CadaclysmBlacksmithSolid *solid,
+                                                                          const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                          double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_rip_points(const struct CadaclysmBlacksmithSolid *solid,
+                                                                       uint32_t face,
+                                                                       const double *points,
+                                                                       double gap,
+                                                                       double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_rip_face(const struct CadaclysmBlacksmithSolid *solid,
+                                                                     uint32_t face,
+                                                                     double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_join(const struct CadaclysmBlacksmithSolid *solid,
+                                                                 uint32_t edge_a,
+                                                                 uint32_t edge_b,
+                                                                 const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                 double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_fillet(const struct CadaclysmBlacksmithSolid *solid,
+                                                                   const uint32_t *edges,
+                                                                   size_t count,
+                                                                   double radius,
+                                                                   const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                   double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sheet_chamfer(const struct CadaclysmBlacksmithSolid *solid,
+                                                                    const uint32_t *edges,
+                                                                    size_t count,
+                                                                    double distance,
+                                                                    const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                    double tolerance);
+
+bool cadaclysm_blacksmith_is_sheet_metal(const struct CadaclysmBlacksmithSolid *solid,
+                                         double tolerance);
+
+int32_t cadaclysm_blacksmith_sheet_bend_faces(const struct CadaclysmBlacksmithSolid *solid,
+                                              double tolerance,
+                                              uint32_t *out);
+
+bool cadaclysm_blacksmith_sheet_info(const struct CadaclysmBlacksmithSolid *solid,
+                                     uint32_t fixed_face,
+                                     double tolerance,
+                                     struct CadaclysmBlacksmithSheetInfo *out);
+
+int32_t cadaclysm_blacksmith_sheet_bends(const struct CadaclysmBlacksmithSolid *solid,
+                                         uint32_t fixed_face,
+                                         double tolerance,
+                                         struct CadaclysmBlacksmithBendInfo *out);
+
+struct CadaclysmBlacksmithFlatPattern *cadaclysm_blacksmith_flat_pattern(const struct CadaclysmBlacksmithSolid *solid,
+                                                                         uint32_t fixed_face,
+                                                                         const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                         double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_flat_pattern_body(const struct CadaclysmBlacksmithFlatPattern *fp);
+
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_flat_pattern_profile(const struct CadaclysmBlacksmithFlatPattern *fp);
+
+bool cadaclysm_blacksmith_flat_pattern_frame(const struct CadaclysmBlacksmithFlatPattern *fp,
+                                             double *out);
+
+uint32_t cadaclysm_blacksmith_flat_pattern_bend_count(const struct CadaclysmBlacksmithFlatPattern *fp);
+
+bool cadaclysm_blacksmith_flat_pattern_bend(const struct CadaclysmBlacksmithFlatPattern *fp,
+                                            uint32_t i,
+                                            struct CadaclysmBlacksmithFlatBend *out);
+
+uint32_t cadaclysm_blacksmith_flat_pattern_fold_bend_count(const struct CadaclysmBlacksmithFlatPattern *fp);
+
+bool cadaclysm_blacksmith_flat_pattern_fold_bend(const struct CadaclysmBlacksmithFlatPattern *fp,
+                                                 uint32_t i,
+                                                 struct CadaclysmBlacksmithBend *out);
+
+char *cadaclysm_blacksmith_flat_pattern_dxf(const struct CadaclysmBlacksmithFlatPattern *fp,
+                                            uint32_t units,
+                                            uint32_t flags);
+
+void cadaclysm_blacksmith_flat_pattern_free(struct CadaclysmBlacksmithFlatPattern *fp);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_fold_flat(const struct CadaclysmBlacksmithProfile *profile,
+                                                                const double *frame,
+                                                                const struct CadaclysmBlacksmithBend *bends,
+                                                                size_t count,
+                                                                const struct CadaclysmBlacksmithSheetRule *rule,
+                                                                double tolerance);
+
+int32_t cadaclysm_blacksmith_page_add_flat_pattern(struct CadaclysmBlacksmithPage *page,
+                                                   const struct CadaclysmBlacksmithFlatPattern *fp,
+                                                   double x,
+                                                   double y,
+                                                   uint32_t flags);
+
+struct CadaclysmBlacksmithUnrolled *cadaclysm_blacksmith_unroll(const struct CadaclysmBlacksmithSolid *solid,
+                                                                const uint32_t *faces,
+                                                                size_t face_count,
+                                                                const struct CadaclysmBlacksmithNurbsCurve *const *curves,
+                                                                size_t curve_count,
+                                                                const double *points,
+                                                                size_t point_count,
+                                                                bool explode,
+                                                                double tolerance);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_unrolled_sheet(const struct CadaclysmBlacksmithUnrolled *u);
+
+uint32_t cadaclysm_blacksmith_unrolled_face_count(const struct CadaclysmBlacksmithUnrolled *u);
+
+bool cadaclysm_blacksmith_unrolled_faces(const struct CadaclysmBlacksmithUnrolled *u,
+                                         uint32_t *out);
+
+uint32_t cadaclysm_blacksmith_unrolled_curve_piece_count(const struct CadaclysmBlacksmithUnrolled *u,
+                                                         uint32_t curve);
+
+struct CadaclysmBlacksmithNurbsCurve *cadaclysm_blacksmith_unrolled_curve_piece(const struct CadaclysmBlacksmithUnrolled *u,
+                                                                                uint32_t curve,
+                                                                                uint32_t piece);
+
+int32_t cadaclysm_blacksmith_unrolled_point(const struct CadaclysmBlacksmithUnrolled *u,
+                                            uint32_t i,
+                                            double *out);
+
+uint32_t cadaclysm_blacksmith_unrolled_not_developable_count(const struct CadaclysmBlacksmithUnrolled *u);
+
+bool cadaclysm_blacksmith_unrolled_not_developable(const struct CadaclysmBlacksmithUnrolled *u,
+                                                   uint32_t *out);
+
+uint32_t cadaclysm_blacksmith_unrolled_cut_count(const struct CadaclysmBlacksmithUnrolled *u);
+
+bool cadaclysm_blacksmith_unrolled_cuts(const struct CadaclysmBlacksmithUnrolled *u, uint32_t *out);
+
+void cadaclysm_blacksmith_unrolled_free(struct CadaclysmBlacksmithUnrolled *u);
 
 struct CadaclysmBlacksmithSketch *cadaclysm_blacksmith_sketch_new(void);
 

@@ -203,7 +203,7 @@ static void a_quaternion_turns_as_its_transform_does() {
     Quaternion part = must(Quaternion::slerp(Quaternion(), q, 0.25), "slerp");
     check(within(part.angle(), PI / 8, 1e-12), "a quarter of the way turns " + std::to_string(part.angle()));
     near4(must(q * q.conjugate(), "q * conjugate"), {1, 0, 0, 0}, 1e-12, "q * q.conjugate()");
-    check(must(quat(0, 0, 0, 2).normalized(), "normalized") == quat(0, 0, 0, 1), "(0, 0, 0, 2).normalized()");
+    check(must(quat(0, 0, 0, 2).normalize(), "normalized") == quat(0, 0, 0, 1), "(0, 0, 0, 2).normalize()");
     // Python's figures alone miss a sign flip in the product: every component pinned.
     check(must(quat(1, 2, 3, 4) * quat(5, 6, 7, 8), "product") == quat(-60, 12, 30, 24), "(1, 2, 3, 4) * (5, 6, 7, 8)");
     // Two general rotations: the product turns as the composed transforms do.
@@ -229,17 +229,17 @@ static void a_quaternion_far_from_unit_length_normalises() {
     const double half = std::sqrt(0.5);
     for (double k : {1e200, 1e-170}) {
         std::string at_k = " at k = " + std::to_string(k);
-        check(must(quat(k, 0, 0, 0).normalized(), "normalized") == quat(1, 0, 0, 0), "(k, 0, 0, 0).normalized()" + at_k);
-        check(must(quat(0, 0, 0, -k).normalized(), "normalized") == quat(0, 0, 0, -1), "(0, 0, 0, -k).normalized()" + at_k);
+        check(must(quat(k, 0, 0, 0).normalize(), "normalized") == quat(1, 0, 0, 0), "(k, 0, 0, 0).normalize()" + at_k);
+        check(must(quat(0, 0, 0, -k).normalize(), "normalized") == quat(0, 0, 0, -1), "(0, 0, 0, -k).normalize()" + at_k);
         Quaternion kk = quat(k, k, 0, 0);
-        near4(must(kk.normalized(), "normalized"), {half, half, 0, 0}, 1e-12, "(k, k, 0, 0).normalized()" + at_k);
+        near4(must(kk.normalize(), "normalized"), {half, half, 0, 0}, 1e-12, "(k, k, 0, 0).normalize()" + at_k);
         check(std::fabs(kk.length() - k * std::sqrt(2.0)) <= 1e-15 * k * std::sqrt(2.0), "(k, k, 0, 0).length" + at_k);
         check(within(kk.angle(), PI / 2, 1e-12), "(k, k, 0, 0).angle" + at_k);
         std::optional<Vec3> axis = quat(0, k, k, 0).axis();
         check(axis.has_value(), "(0, k, k, 0) has an axis" + at_k);
         if (axis) near3(*axis, {half, half, 0}, 1e-12, "(0, k, k, 0).axis" + at_k);
     }
-    refused(quat(0, 0, 0, 0).normalized(), "Quaternion.normalized: the quaternion is zero", "a zero quaternion normalised");
+    refused(quat(0, 0, 0, 0).normalize(), "Quaternion.normalized: the quaternion is zero", "a zero quaternion normalised");
 }
 
 // 6. A solid takes any affine map.

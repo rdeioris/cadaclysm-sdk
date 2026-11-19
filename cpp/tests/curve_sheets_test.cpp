@@ -364,6 +364,15 @@ static Result<void> holes_ribs_webs_and_patterns() {
     Solid slab = must(l.rib_tool(diag, side, 4, RibSide::front), "rib_tool");
     check(near(volume_of(slab), 1250, 1e-6), "rib_tool volume " + num(volume_of(slab)));
 
+    Solid hub = must(must(Solid::cylinder(20, 10), "flange").join(must(Solid::cylinder(5, 30), "boss")), "hub");
+    NurbsCurve flank = line({15, 0, 10}, {5, 0, 25});
+    const double gusset = 75 * 25.0 / 3 * PI / 6;
+    Solid swung = must(hub.rib_revolved(flank, {0, 0, 0}, {0, 0, 1}, PI / 6), "rib_revolved");
+    check(near(volume_of(swung) - volume_of(hub), gusset, 1e-3), "rib_revolved added " + num(volume_of(swung) - volume_of(hub)));
+    Solid wedge = must(hub.rib_revolved_tool(flank, {0, 0, 0}, {0, 0, 1}, PI / 6), "rib_revolved_tool");
+    check(near(volume_of(wedge), gusset, 1e-3), "rib_revolved_tool volume " + num(volume_of(wedge)));
+    refused(hub.rib_revolved(flank, {0, 0, 0}, {0, 0, 1}, 0), "rib_revolved: angle 0 is not in (0, 2 pi)", "", "rib_revolved of angle 0");
+
     Solid tray = must(block(60, 40, 20, 30, 20, 10).cut(block(56, 36, 18, 30, 20, 11)), "tray");
     Frame top = must(Frame::make({0, 0, 10}, {1, 0, 0}, {0, -1, 0}, {0, 0, -1}), "web plane");
     Solid webbed = must(tray.web(many(line({10, 20, 10}, {50, 20, 10})), top, 3), "web");
@@ -394,20 +403,107 @@ static Result<void> a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap
     return {};
 }
 
+// 6d: curves on a surface -- a uv curve pushed up onto a sphere of radius 3 and pulled back, the
+// shortest path between two uv points a great-circle arc
+static double dist3(const Vec3& a, const Vec3& b) {
+    return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+}
+
+static Result<void> curves_on_a_sphere_push_up_pull_back_and_take_the_short_path() {
+    Solid sphere = must(Solid::sphere(3.0), "sphere");
+    NurbsCurve uv = must(NurbsCurve::make({{0.1, 0.2, 0}, {0.7, 0.5, 0}, {1.3, 0.1, 0}, {1.9, -0.3, 0}}, 3), "uv curve");
+    NurbsCurve up = must(uv.push_up(sphere, 0, 1e-4), "push_up");
+    NurbsCurve back = must(up.pull_back(sphere, 0, 1e-4), "pull_back");
+    // the C ABI's own figures, read through the raw calls: the wrapper must hand back the same
+    // nonzero errors, not the zeros it held before the calls wrote them
+    double raw_up_error = 0.0;
+    CadaclysmBlacksmithNurbsCurve* raw_up = ::cadaclysm_blacksmith_nurbs_curve_pushed_up(uv.handle(), sphere.handle(), 0, 1e-4, &raw_up_error);
+    check(raw_up != nullptr && raw_up_error > 0, "push_up: the raw call reports a nonzero error");
+    ::cadaclysm_blacksmith_nurbs_curve_free(raw_up);
+    check(up.fit_error().has_value() && *up.fit_error() == raw_up_error, "push_up: fit_error is the C ABI's own error");
+    double raw_back_error = 0.0;
+    CadaclysmBlacksmithNurbsCurve* raw_back = ::cadaclysm_blacksmith_nurbs_curve_pulled_back(up.handle(), sphere.handle(), 0, 1e-4, &raw_back_error);
+    check(raw_back != nullptr && raw_back_error > 0, "pull_back: the raw call reports a nonzero error");
+    ::cadaclysm_blacksmith_nurbs_curve_free(raw_back);
+    check(back.fit_error().has_value() && *back.fit_error() == raw_back_error, "pull_back: fit_error is the C ABI's own error");
+    std::pair<double, double> domain = must(up.domain(), "domain");
+    const Vec3 origin = {0, 0, 0};
+    for (int k = 0; k <= 20; ++k) {
+        double t = domain.first + (domain.second - domain.first) * k / 20.0;
+        check(std::abs(dist3(must(up.point(t), "point"), origin) - 3) <= 1e-4, "push_up: off the sphere at " + std::to_string(t));
+        Vec3 p = must(back.point(t), "point");
+        Vec3 q = must(uv.point(t), "point");
+        check(dist3(p, q) <= 1e-3 && p[2] == 0, "pull_back: the uv curve strays at " + std::to_string(t));
+    }
+    // the sphere's point at (u, v) is 3 (cos v cos u, cos v sin u, sin v)
+    const Vec3 pa = {3 * std::cos(0.3), 0, 3 * std::sin(0.3)};
+    const Vec3 pb = {3 * std::cos(-0.4) * std::cos(1.2), 3 * std::cos(-0.4) * std::sin(1.2), 3 * std::sin(-0.4)};
+    NurbsCurve path = must(NurbsCurve::short_path(sphere, 0, bs::Vec2{0, 0.3}, bs::Vec2{1.2, -0.4}, 1e-4), "short_path");
+    std::pair<double, double> pd = must(path.domain(), "domain");
+    double length = 0;
+    Vec3 prev = must(path.point(pd.first), "point");
+    for (int k = 1; k <= 2000; ++k) {
+        Vec3 next = must(path.point(pd.first + (pd.second - pd.first) * k / 2000.0), "point");
+        length += dist3(prev, next);
+        prev = next;
+    }
+    double angle = std::acos(std::cos(0.3) * std::cos(-0.4) * std::cos(1.2) + std::sin(0.3) * std::sin(-0.4));
+    check(dist3(must(path.point(pd.first), "point"), pa) <= 1e-4 && dist3(must(path.point(pd.second), "point"), pb) <= 1e-4,
+          "short_path: the ends are not the two uv points");
+    check(std::abs(length - 3 * angle) <= 1e-4, "short_path: length " + std::to_string(length) + " vs " + std::to_string(3 * angle));
+    refused(NurbsCurve::short_path(sphere, 0, bs::Vec2{0, 0.3}, bs::Vec2{0, 0.3}, 1e-4), "nurbs_curve_short_path_on_face: ", "",
+            "short_path with a == b");
+    return {};
+}
+
+// 6e: a curve fitted to a face's own parameter -- a slanted line projected across a cylinder of
+// radius 3 along -x, parametrised by the side's height
+static Result<void> a_curve_fits_to_a_faces_own_parameter() {
+    Solid cyl = must(Solid::cylinder(3.0, 5.0), "cylinder");
+    NurbsCurve line = must(NurbsCurve::make({{4, 1, 5}, {4, -1, 0}}, 1), "line");
+    std::uint32_t side = 0;
+    std::optional<NurbsCurve> found;
+    for (std::uint32_t f = 0; f < 3 && !found; ++f) {
+        Result<NurbsCurve> tried = line.fit_to_face(cyl, f, Vec3{-1, 0, 0}, std::vector<double>{1.25, 2.5}, 1e-4);
+        if (tried.ok()) {
+            found.emplace(std::move(tried).value());
+            side = f;
+        }
+    }
+    if (!found) {
+        check(false, "fit_to_face: no face of the cylinder took the line");
+        return {};
+    }
+    const NurbsCurve& fit = *found;
+    check(fit.fit_error() && *fit.fit_error() <= 1e-4, "fit_to_face: fit error");
+    std::pair<double, double> domain = must(fit.domain(), "domain");
+    check(domain.first == 0.0 && domain.second == 5.0, "fit_to_face: domain " + num(domain.first) + ".." + num(domain.second));
+    std::vector<double> knots = must(fit.knots(), "knots");
+    check(std::find(knots.begin(), knots.end(), 1.25) != knots.end() && std::find(knots.begin(), knots.end(), 2.5) != knots.end(),
+          "fit_to_face: the knots miss 1.25 or 2.5");
+    for (double t : {0.0, 1.3, 3.7, 5.0}) {
+        double y = -1 + 2 * t / 5;
+        check(dist3(must(fit.point(t), "point"), Vec3{std::sqrt(9 - y * y), y, t}) <= 1e-4, "fit_to_face: off the trace at " + num(t));
+    }
+    NurbsCurve short_line = must(NurbsCurve::make({{3, 0, 1}, {3, 0, 4}}, 1), "short line");
+    refused(short_line.fit_to_face(cyl, side), "nurbs_curve_fitted_to_face: ", "has to cross the face", "fit_to_face of a short line");
+    return {};
+}
+
 // 7: continuity_match_and_blend
 static Result<void> continuity_match_and_blend() {
     Solid a = must(Solid::loft_curves(many(line({-1, 0, 0}, {0, 0, 0}), line({-1, 1, 0}, {0, 1, 0})), 1), "a");
     Solid b = must(Solid::loft_curves(many(line({0, 0, 0}, {0, 0, 1}), line({0, 1, 0}, {0, 1, 1})), 1), "b");
     Continuity r = must(a.continuity("u1", b, "u0", 0, 0, 32), "continuity");
     check(r.gap <= 1e-12 && std::fabs(r.angle - PI / 2) <= 1e-9 && r.samples >= 33, "a meets b square: angle " + num(r.angle));
-    Solid m = must(a.matched("u1", b, "u0", 1), "matched");
+    Solid m = must(a.match("u1", b, "u0", 1), "matched");
     r = must(m.continuity("u1", b, "u0"), "matched continuity");
     check(r.gap <= 1e-10 && r.angle <= 1e-8, "matched at G1: gap " + num(r.gap) + ", angle " + num(r.angle));
     Solid blend = must(Solid::blend_sides(a, "u0", b, "u1", 2), "blend_sides");
     r = must(blend.continuity("v0", a, "u0"), "blend continuity");
     check(r.gap <= 1e-10 && r.angle <= 1e-8 && r.curvature <= 1e-6, "blend at G2: " + num(r.gap) + ", " + num(r.angle) + ", " + num(r.curvature));
     refused(a.continuity("w2", b, "u0"), "a side is 'u0', 'u1', 'v0' or 'v1', not 'w2'", "", "continuity side");
-    refused(a.matched("u1", b, "u0", 3), "match_side: ", "", "match_side level 3");
+    refused(a.match("u1", b, "u0", 3), "match_side: ", "", "match_side level 3");
     return {};
 }
 
@@ -798,6 +894,8 @@ int main(int argc, char** argv) {
         {"mirror_join_squares_a_half_roof_to_its_mirror", mirror_join_squares_a_half_roof_to_its_mirror},
         {"holes_ribs_webs_and_patterns", holes_ribs_webs_and_patterns},
         {"a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap", a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap},
+        {"curves_on_a_sphere_push_up_pull_back_and_take_the_short_path", curves_on_a_sphere_push_up_pull_back_and_take_the_short_path},
+        {"a_curve_fits_to_a_faces_own_parameter", a_curve_fits_to_a_faces_own_parameter},
         {"continuity_match_and_blend", continuity_match_and_blend},
         {"n_sided_patch_fills_a_pentagon_of_strips", n_sided_patch_fills_a_pentagon_of_strips},
         {"fillet_surfaces_rolls_a_ball_between_two_sheets", fillet_surfaces_rolls_a_ball_between_two_sheets},

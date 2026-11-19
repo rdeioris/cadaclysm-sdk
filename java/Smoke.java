@@ -352,6 +352,77 @@ public final class Smoke {
                 if (!noSchedule.schedules().isEmpty()) fail("schedules: the cube has schedules");
             }
 
+            // Work calendars: samples/schedule-calendar.ifc, at parity with the Python reference's
+            // test_a_file_reads_its_work_calendar and the two tests after it.
+            Path calendarPath = Path.of(path).toAbsolutePath().getParent().resolve("schedule-calendar.ifc");
+            try (Cad.Scene calendarScene = Cad.open(calendarPath.toString())) {
+                final double day = 86400.0, monday = 1772409600.0, t0 = 1772438400.0;
+                List<Cad.WorkCalendar> calendars = calendarScene.calendars();
+                if (calendars.size() != 1) fail("calendars: the file does not carry one calendar");
+                Cad.WorkCalendar cal = calendars.get(0);
+                if (!cal.name().equals("Site calendar") || !cal.identification().equals("CAL-1")
+                        || !cal.kind().equals("FIRSTSHIFT") || !cal.kindName().isEmpty())
+                    fail("calendars: the calendar is not Site calendar, CAL-1, FIRSTSHIFT");
+                if (cal.working().size() != 1 || cal.exceptions().size() != 1) fail("calendars: the work times are off in number");
+                Cad.WorkTime weekdays = cal.working().get(0);
+                if (!weekdays.name().equals("Weekdays") || weekdays.start() == null || weekdays.start() != monday - 60 * day
+                        || weekdays.finish() != null)
+                    fail("calendars: Weekdays' name or dates are off");
+                Cad.Recurrence p = weekdays.pattern();
+                if (p == null || !p.kind().equals("WEEKLY") || !p.days().isEmpty() || !p.weekdays().equals(List.of(1, 2, 3, 4, 5))
+                        || !p.months().isEmpty() || p.position() != null || p.interval() != null || p.occurrences() != null)
+                    fail("calendars: Weekdays' pattern is off");
+                if (p.periods().size() != 2 || p.periods().get(0)[0] != 28800 || p.periods().get(0)[1] != 43200
+                        || p.periods().get(1)[0] != 46800 || p.periods().get(1)[1] != 61200)
+                    fail("calendars: Weekdays' periods are off");
+                Cad.WorkTime easter = cal.exceptions().get(0);
+                if (!easter.name().equals("Easter Monday") || easter.start() != null || easter.finish() != null
+                        || easter.pattern() == null || !easter.pattern().kind().equals("YEARLY_BY_DAY_OF_MONTH")
+                        || !easter.pattern().days().equals(List.of(6)) || !easter.pattern().months().equals(List.of(4))
+                        || !easter.pattern().periods().isEmpty())
+                    fail("calendars: Easter Monday is off");
+                Cad.Task slab = calendarScene.schedules().get(0).tasks().get(0);
+                if (slab.calendarIndex() == null || slab.calendarIndex() != 0 || slab.calendar() == null
+                        || slab.calendar().index() != cal.index())
+                    fail("calendars: Slab's calendar is off");
+                if (!"WORKTIME".equals(slab.time().durationKind()) || slab.time().workDuration() == null
+                        || slab.time().workDuration().days() != 10 || slab.time().workDuration().seconds() != 0)
+                    fail("calendars: Slab's work duration is off");
+                List<double[]> week = cal.workingPeriods(monday, monday + 7 * day);
+                if (week.size() != 10 || week.get(0)[0] != 1772438400.0 || week.get(0)[1] != 1772452800.0)
+                    fail("calendars: the week's periods are off");
+                if (cal.workingSeconds(monday, monday + 7 * day) != 10 * 4 * 3600.0) fail("calendars: the week's working seconds are off");
+                if (!cal.workingPeriods(1775433600, 1775520000).isEmpty()) fail("calendars: Easter Monday has working periods");
+                if (cal.addWork(1772438400, 10, 0) != 1773421200.0) fail("calendars: addWork is off");
+                try {
+                    cal.workingPeriods(1, 0);
+                    fail("calendars: a reversed range was accepted");
+                } catch (Cad.CadaclysmException e) {
+                    if (!e.getMessage().equals("from must not be after to"))
+                        fail("calendars: a reversed range was refused with " + e.getMessage());
+                }
+                try {
+                    cal.workingSeconds(Double.NaN, 0);
+                    fail("calendars: a NaN date was accepted");
+                } catch (Cad.CadaclysmException e) {
+                    if (!e.getMessage().equals("from and to must be finite"))
+                        fail("calendars: a NaN date was refused with " + e.getMessage());
+                }
+                try {
+                    cal.addWork(t0, Double.POSITIVE_INFINITY, 0);
+                    fail("calendars: an infinite span was accepted");
+                } catch (Cad.CadaclysmException e) {
+                    if (!e.getMessage().equals("from and to must be finite"))
+                        fail("calendars: an infinite span was refused with " + e.getMessage());
+                }
+                System.out.println("calendars: Site calendar reads as the file records it, and answers its queries");
+            }
+            try (Cad.Scene plainScene = Cad.open(Path.of(path).toAbsolutePath().getParent().resolve("schedule.ifc").toString())) {
+                if (!plainScene.calendars().isEmpty()) fail("calendars: schedule.ifc has calendars");
+                Cad.Task plainSlab = plainScene.schedules().get(0).tasks().get(0);
+                if (plainSlab.calendarIndex() != null || plainSlab.calendar() != null)
+                    fail("calendars: Slab has a calendar in schedule.ifc");
+            }
             // pose([]) on the cube sample (no mechanism) fails with a message naming that, as
             // the Python reference's test_a_bad_pose_raises checks on the same file.
             Path cubePath = Path.of(path).toAbsolutePath().getParent().resolve("cube.scad");
@@ -521,6 +592,33 @@ public final class Smoke {
                 }
             }
 
+            // Lightmap coordinates: off unless asked, two floats a vertex, in the unit square, no
+            // material uvs with them. A faced STEP (samples/mechanism.stp has no faces).
+            Path faced = sampleRoot == null ? null : sampleRoot.resolve("crates/cadaclysm-acis/tests/fixtures/fusion/rhino-fillet-mixed-radii.stp");
+            if (faced != null && Files.exists(faced)) {
+                try (Cad.Scene plain = Cad.open(faced.toString(), Cad.OpenOptions.defaults())) {
+                    for (Cad.Node n : plain.walk()) if (n.lightmapUvs() != null) fail("a lightmap arrived unasked");
+                }
+                Cad.OpenOptions asked = new Cad.OpenOptions(Cad.Convention.NATIVE, false, false, null, false, 0.0, 256);
+                try (Cad.Scene lit = Cad.open(faced.toString(), asked)) {
+                    int litCount = 0;
+                    for (Cad.Node n : lit.walk()) {
+                        java.nio.FloatBuffer uvs = n.lightmapUvs();
+                        if (uvs == null) continue;
+                        Cad.Mesh litMesh = n.mesh();
+                        if (litMesh == null || uvs.remaining() != litMesh.vertexCount() * 2) fail("lightmap uvs are not two floats a vertex");
+                        for (int i = 0; i < uvs.remaining(); i++) { float f = uvs.get(i); if (f < 0f || f > 1f) fail("a lightmap uv is outside the unit square"); }
+                        if (litMesh.uvs() != null) fail("material uvs came with the lightmap");
+                        litCount++;
+                    }
+                    if (litCount == 0) fail("a faced STEP came back with no lightmap");
+                    System.out.printf("lightmapUvs: %d lit nodes%n", litCount);
+                }
+                boolean refused = false;
+                try { new Cad.OpenOptions(Cad.Convention.NATIVE, false, false, null, false, 0.0, -1); } catch (IllegalArgumentException e) { refused = true; }
+                if (!refused) fail("a negative lightmap resolution was taken");
+            }
+
             byte[] bytes = Files.readAllBytes(Path.of(path));
             Cad.Mesh borrowed;
             try (Cad.Scene again = Cad.openMemory(bytes, Path.of(path).getFileName().toString())) {
@@ -601,6 +699,7 @@ public final class Smoke {
             System.out.println("colour: Cad.packed(\"navy\")=0x000080, packed(\"bogus\") refused, stroke(\"Red\") drew #ff0000, withBackground(\"Navy\") drew #000080");
         }
         readerHealth();
+        readerRecognize(path);
     }
 
     // The kernel: the plate with a hole and a pin, filleted, as STEP -- then read back.
@@ -609,6 +708,7 @@ public final class Smoke {
     private static void kernel(String license) throws IOException {
         if (license != null) Blacksmith.license(license);
         System.out.println("blacksmith " + Blacksmith.version() + " built " + Blacksmith.buildDate());
+        System.out.println("blacksmith build " + Blacksmith.build());
         System.out.println("license: " + Blacksmith.licenseInfo());
 
         try (Blacksmith.Profile hole = Blacksmith.Profile.circle(4);
@@ -645,13 +745,23 @@ public final class Smoke {
             wallThickness();
             measure();
             closestPoint();
+            inspect();
             curveClosestPoints();
             triangleMeshClosestPoints();
+            nurbsSurfaceClosestPoints();
+            nurbsToolbox();
             nurbsCurves();
             sheetsFromCurves();
             rtree();
             interpolator();
+            animation();
             merge();
+            draft();
+            sheetMetal();
+            sheetRipsAndCorners();
+            unroll();
+            curvesAsObjects();
+            profileToolkit();
             rtreeRays();
             subd();
             sketch();
@@ -660,6 +770,7 @@ public final class Smoke {
             materials();
             mechanism();
             kernelHealth();
+            kernelRecognize();
             identity();
             document();
             solidDrawing();
@@ -796,7 +907,7 @@ public final class Smoke {
                             if (brep != null) {
                                 Cad.Manifold read = brep.manifold();
                                 if (!read.isClosed() || read.faces() != 15) fail("the read body is not the closed manifold written: " + read);
-                                Cad.Sewn sewn = brep.sewed(null, null);
+                                Cad.Sewn sewn = brep.sew(null, null);
                                 try (Cad.Brep sewnBrep = sewn.brep()) {
                                     if (sewn.report().freeBefore() != read.boundaryEdges() || brep.manifold().boundaryEdges() != read.boundaryEdges())
                                         fail("sewed reports " + sewn.report().freeBefore() + " free edges before, the brep has " + read.boundaryEdges());
@@ -929,10 +1040,10 @@ public final class Smoke {
                 System.out.printf("blacksmith f64 twins: mesh64 %d triangles, bounds64 max z %s%n", kMesh64.triangleCount(), kBounds64.max()[2]);
             }
 
-            try (Blacksmith.Solid box = Blacksmith.Solid.cuboid(1, 2, 3); Blacksmith.Solid big = box.scaled(2)) {
+            try (Blacksmith.Solid box = Blacksmith.Solid.cuboid(1, 2, 3); Blacksmith.Solid big = box.scale(2)) {
                 Blacksmith.Bounds bb = big.bounds();
                 if (Math.abs(bb.max()[0] - bb.min()[0] - 2) > 1e-9 || Math.abs(bb.max()[2] - bb.min()[2] - 6) > 1e-9) fail("scaled bounds");
-                try { box.scaled(0); fail("scaled(0) not refused"); }
+                try { box.scale(0); fail("scaled(0) not refused"); }
                 catch (Blacksmith.BuildException e) { if (!e.getMessage().startsWith("scaled:")) fail("scaled message: " + e.getMessage()); }
             }
 
@@ -2525,7 +2636,7 @@ public final class Smoke {
                  Blacksmith.Solid arm = Blacksmith.Solid.cuboid(3, 0.2, 0.2);
                  Blacksmith.Solid out = arm.translate(1.5, 0, 0)) {
                 Blacksmith.Box g = got.boundsBox(SWEPT_TOL);
-                Blacksmith.Box w = out.boundsBox(SWEPT_TOL).moved(new double[] {0, 0, 0, co, si, 0, -si, co, 0, 0, 0, 1});
+                Blacksmith.Box w = out.boundsBox(SWEPT_TOL).move(new double[] {0, 0, 0, co, si, 0, -si, co, 0, 0, 0, 1});
                 for (int k = 0; k < 3; k++) {
                     if (g.lo()[k] < w.lo()[k] - 1e-6 || g.hi()[k] > w.hi()[k] + 1e-6)
                         fail("assembly swept clash: the overlap " + Arrays.toString(g.lo()) + Arrays.toString(g.hi())
@@ -2536,7 +2647,7 @@ public final class Smoke {
             }
         }
         // 4. a pin on the arm's link inside a bore on the ground link, the hinge joining them:
-        // catches `joined` dropped on its way to the kernel
+        // catches `join` dropped on its way to the kernel
         try (Blacksmith.Assembly pinned = new Blacksmith.Assembly("pinned")) {
             rigPlace(pinned, 0.6, 0.6, 0.6, at(0, 0, 0), "bore");
             rigPlace(pinned, 0.2, 0.2, 0.2, at(0, 0, 0), "pin");
@@ -2895,7 +3006,7 @@ public final class Smoke {
         try (Blacksmith.Solid box = Blacksmith.Solid.cuboid(10, 10, 10);
              Blacksmith.Solid rod = Blacksmith.Solid.cylinder(2, 20);
              Blacksmith.Solid pin = rod.translate(0, 0, -10)) {
-            return new Blacksmith.Solid[] {box.tracked(), pin.tracked()};
+            return new Blacksmith.Solid[] {box.track(), pin.track()};
         }
     }
 
@@ -2922,8 +3033,8 @@ public final class Smoke {
     // 1. tracking numbers faces and edges, and an untracked solid has no ids
     private static void identityTracking() {
         try (Blacksmith.Solid plain = Blacksmith.Solid.cuboid(1, 2, 3);
-             Blacksmith.Solid t = plain.tracked();
-             Blacksmith.Solid tt = t.tracked()) {
+             Blacksmith.Solid t = plain.track();
+             Blacksmith.Solid tt = t.track()) {
             idCheck(!plain.isTracked(), "1: a plain cuboid is untracked");
             idCheck(plain.faceId(0).isEmpty() && plain.edgeId(0).isEmpty() && plain.faceOrigins(0).isEmpty(),
                     "1: an untracked solid has ids or origins: " + plain.faceId(0) + " " + plain.edgeId(0));
@@ -2978,8 +3089,10 @@ public final class Smoke {
             }
             idCheck(frozen, "2: a history's lists are unmodifiable");
             Blacksmith.History e = cut.edgeHistory(block, pin);
-            idCheck(e.kept().size() == 12 && e.deleted().equals(List.of(origin(1, 1), origin(1, 2), origin(1, 3)))
-                    && e.generated().size() == 3 && e.modified().isEmpty(), "2: the edge history's shape: " + e + " " + e.deleted());
+            // The pin's two rims gone, the bore's two new, the pin's seam cut down to the bore's (re-pinned 2026-11-16: the exact route keeps the pin's seam).
+            idCheck(e.kept().size() == 12 && e.deleted().equals(List.of(origin(1, 1), origin(1, 3)))
+                    && e.generated().size() == 2 && e.modified().equals(List.of(new Blacksmith.History.Modified(origin(1, 2), List.of(15L)))),
+                    "2: the edge history's shape: " + e + " " + e.deleted() + " " + e.modified());
             idRefused("2: an untracked input", () -> cut.history(block, plainBox), "history: input 1 is not tracked");
             idMatches("2: one input of two", () -> cut.history(block), "^history: face \\d+ names operand 1.*");
             idRefused("2: an untracked result", () -> plainBox.edgeHistory(block), "edge_history: the result is not tracked");
@@ -2989,10 +3102,10 @@ public final class Smoke {
     // 3. a union renumbers the second operand's clashing ids
     private static void identityUnion() {
         try (Blacksmith.Solid a0 = Blacksmith.Solid.cuboid(10, 10, 10);
-             Blacksmith.Solid a = a0.tracked();
+             Blacksmith.Solid a = a0.track();
              Blacksmith.Solid b0 = Blacksmith.Solid.cuboid(10, 10, 10);
              Blacksmith.Solid b1 = b0.translate(5, 5, 5);
-             Blacksmith.Solid b = b1.tracked();
+             Blacksmith.Solid b = b1.track();
              Blacksmith.Solid joined = a.join(b)) {
             idCheck(joined.faces() == 12, "3: the union has " + joined.faces() + " faces, not 12");
             Set<Long> firsts = new HashSet<>();
@@ -3018,7 +3131,7 @@ public final class Smoke {
     // 4. a split halves the sides, and its bodies keep the split's origins
     private static void identitySplit() {
         try (Blacksmith.Solid b0 = Blacksmith.Solid.cuboid(2, 4, 6);
-             Blacksmith.Solid block = b0.tracked()) {
+             Blacksmith.Solid block = b0.track()) {
             List<Blacksmith.Solid> pieces = block.splitByPlane(XY);
             try {
                 idCheck(pieces.size() == 2, "4: the split made " + pieces.size() + " pieces");
@@ -3061,7 +3174,7 @@ public final class Smoke {
     // 5. a fillet's round is generated
     private static void identityFillet() {
         try (Blacksmith.Solid b0 = Blacksmith.Solid.cuboid(10, 10, 10);
-             Blacksmith.Solid block = b0.tracked();
+             Blacksmith.Solid block = b0.track();
              Blacksmith.Solid rounded = block.fillet(new int[] {0}, 1.0)) {
             idCheck(rounded.faces() == 7, "5: the rounded box has " + rounded.faces() + " faces");
             int round = -1;
@@ -3077,10 +3190,10 @@ public final class Smoke {
     // 6. a flush join with merge names one origin per input (the Merged step)
     private static void identityMergedJoin() {
         try (Blacksmith.Solid a0 = Blacksmith.Solid.cuboid(10, 10, 10);
-             Blacksmith.Solid a = a0.tracked();
+             Blacksmith.Solid a = a0.track();
              Blacksmith.Solid b0 = Blacksmith.Solid.cuboid(4, 10, 10);
              Blacksmith.Solid b1 = b0.translate(7, 0, 0);
-             Blacksmith.Solid b = b1.tracked();
+             Blacksmith.Solid b = b1.track();
              Blacksmith.Solid merged = a.join(b, 0.05, true)) {
             idCheck(merged.faces() == 6, "6: the merged join has " + merged.faces() + " faces");
             int two = 0;
@@ -3519,6 +3632,95 @@ public final class Smoke {
                         "pattern_feature read " + r + ", volume " + vol);
             }
         }
+        // threads: the size table, a modelled M10 on a rod, a tapped M8, a cosmetic round trip
+        {
+            List<Blacksmith.ThreadSize> sizes = Blacksmith.threadSizes();
+            Blacksmith.ThreadSize last = sizes.get(sizes.size() - 1);
+            cs(sizes.size() == 108 && sizes.get(0).designation().equals("M1") && last.designation().equals("1-1/2-12 UNF")
+                    && last.size().equals("1-1/2") && last.family() == Blacksmith.ThreadFamily.UNF && last.clearance().isEmpty(),
+                    "thread_sizes read " + sizes.size() + ": " + sizes.get(0) + " .. " + last);
+            Blacksmith.ThreadSize m10 = Blacksmith.threadSize("M10");
+            cs(m10.family() == Blacksmith.ThreadFamily.ISO_METRIC_COARSE && m10.designation().equals("M10") && m10.size().equals("M10")
+                    && m10.major() == 10.0 && m10.pitch() == 1.5 && m10.tapDrill() == 8.5
+                    && Math.abs(m10.minor() - (10 - 1.25 * Math.sqrt(3) / 2 * 1.5)) <= 1e-12
+                    && m10.clearance().equals(Map.of("fine", 10.5, "medium", 11.0, "coarse", 12.0)), "thread_size M10 read " + m10);
+            cs(Blacksmith.threadSize("1/4-20").designation().equals("1/4-20 UNC")
+                    && Blacksmith.threadSize("m10 x 1.25").designation().equals("M10x1.25"), "thread_size's forgiving lookup");
+            try {
+                Blacksmith.threadSize("M7x9");
+                cs(false, "thread_size M7x9 was not refused");
+            } catch (Blacksmith.BuildException expected) {
+                cs(expected.getMessage().equals("thread_size_find: \"M7x9\" is not a size in the table"), expected.getMessage());
+            }
+            try (Blacksmith.Solid rod = Blacksmith.Solid.cylinder(5, 12)) {
+                int cyl = 0;
+                while (!rod.faceKind(cyl).equals("cylinder")) cyl++;
+                Blacksmith.Threaded threaded = rod.thread(cyl, "M10");
+                Blacksmith.ThreadReport tr = threaded.report();
+                try (Blacksmith.Solid body = threaded.solid()) {
+                    double removed = Math.PI * 25 * 12 - body.mass(1e-4).volume();
+                    cs(Math.abs(removed - 160.77942917686894) <= 1e-4 * 160.77942917686894, "thread removed " + removed);
+                }
+                cs(!tr.internal() && tr.major() == 10 && tr.pitch() == 1.5 && Math.abs(tr.length() - 12) <= 1e-9 && Math.abs(tr.turns() - 10) <= 1e-9
+                        && Math.abs(tr.start()[2]) <= 1e-9 && Math.abs(tr.direction()[2] - 1) <= 1e-9 && tr.facesAdded() > 0, "thread's report " + tr);
+                try (Blacksmith.Solid coil = rod.threadTool(cyl, m10.designation())) {
+                    cs(coil.mass(0).volume() > 0, "thread_tool's volume " + coil.mass(0).volume());
+                }
+                try (Blacksmith.Solid marked = rod.cosmeticThread(cyl, "m10", null, null, 8.0, 1.0, true, true, null)) {
+                    Blacksmith.ThreadRecord rec = marked.threadRecord(cyl);
+                    cs(new Blacksmith.ThreadRecord("M10", 10.0, 1.5, 8.0, 1.0, false, true, true).equals(rec) && marked.faces() == rod.faces(),
+                            "cosmetic_thread read " + rec);
+                    List<Blacksmith.FaceThreadRecord> all = marked.threadRecords();
+                    cs(all.size() == 1 && all.get(0).face() == cyl, "thread_records read " + all);
+                }
+                cs(rod.threadRecord(cyl) == null, "a bare rod has a thread record");
+                final int f = cyl;
+                try {
+                    rod.thread(f, null, null, null, null, 0.0, false, false, Math.PI / 3, null).solid().close();
+                    cs(false, "a thread of no size was not refused");
+                } catch (Blacksmith.BuildException expected) {
+                    cs(expected.getMessage().equals("thread: neither a size nor a pitch is given"), expected.getMessage());
+                }
+                try {
+                    rod.threadTool(f, "M10", null, null, 6.0, 8.0, false, false, Math.PI / 3, null).close();
+                    cs(false, "a thread past the face was not refused");
+                } catch (Blacksmith.BuildException expected) {
+                    cs(expected.getMessage().equals("thread_tool: offset 8 and length 6 run past the face's length 12"), expected.getMessage());
+                }
+                try {
+                    rod.threadRecord(3);
+                    cs(false, "thread_record of face 3 was not refused");
+                } catch (Blacksmith.BuildException expected) {
+                    cs(expected.getMessage().equals("thread_record: face 3 is not one of the solid's 3"), expected.getMessage());
+                }
+            }
+            try (Blacksmith.Solid blk = Blacksmith.Solid.cuboid(40, 30, 20).translate(20, 15, 10)) {
+                Blacksmith.Drilled tapped = blk.hole(v(10, 15, 20), 0, "M8");
+                try (Blacksmith.Solid body = tapped.solid()) {
+                    double removed = 24000 - body.mass(1e-4).volume();
+                    cs(Math.abs(removed - 833.1391195130168) <= 1e-4 * 833.1391195130168, "tapped hole removed " + removed);
+                }
+                Blacksmith.HoleReport hr = tapped.report();
+                cs(hr.holes() == 1 && hr.threadDepths().size() == 1 && Math.abs(hr.threadDepths().get(0) - 20) <= 1e-9, "tapped hole's report " + hr);
+                Blacksmith.Drilled bare = blk.hole(new double[][] {v(10, 15, 20)}, 0, null, Blacksmith.HoleExtent.THROUGH, null, Math.toRadians(118),
+                        null, Blacksmith.HoleHead.SIMPLE, 0, 0, Math.toRadians(90), Blacksmith.threadSize("M8").designation(), null, false, false, null);
+                try (Blacksmith.Solid body = bare.solid()) {
+                    List<Blacksmith.FaceThreadRecord> recs = body.threadRecords();
+                    Blacksmith.ThreadRecord r = recs.isEmpty() ? null : recs.get(0).record();
+                    cs(recs.size() == 1 && r.designation().equals("M8") && r.major() == 8.0 && r.pitch() == 1.25 && r.internal() && !r.leftHanded()
+                            && Math.abs(r.length() - 20) <= 1e-9, "tapped hole, not modelled, read " + recs);
+                }
+                try (Blacksmith.Solid bit = blk.holeTool(v(10, 15, 20), 0, "M8")) {
+                    cs(bit.mass(0).volume() > 0, "tapped hole_tool's volume " + bit.mass(0).volume());
+                }
+                try {
+                    blk.hole(v(10, 15, 20), 9, "M8").solid().close();
+                    cs(false, "a tapped hole off the band was not refused");
+                } catch (Blacksmith.BuildException expected) {
+                    cs(expected.getMessage().equals("hole_threaded: the diameter 9 is not in the thread's band [6.491, 7.188]"), expected.getMessage());
+                }
+            }
+        }
         // an L bracket's rib along the diagonal in the plane y = 15
         try (Blacksmith.Solid foot = Blacksmith.Solid.cuboid(40, 30, 5).translate(20, 15, 2.5);
              Blacksmith.Solid upright = Blacksmith.Solid.cuboid(5, 30, 40).translate(2.5, 15, 20);
@@ -3529,6 +3731,24 @@ public final class Smoke {
                  Blacksmith.Solid slab = l.ribTool(diag, plane, 4, Blacksmith.RibSide.FRONT, null, null)) {
                 double a = ribbed.mass(0).volume(), b = slab.mass(0).volume();
                 cs(Math.abs(a - 12500) <= 1e-6 * 12500 && Math.abs(b - 1250) <= 1e-6 * 1250, "rib read " + a + ", rib_tool " + b);
+            }
+        }
+        // a revolved rib on a hub: a 30-degree gusset between the flange and the boss (Pappus)
+        try (Blacksmith.Solid flange = Blacksmith.Solid.cylinder(20, 10);
+             Blacksmith.Solid boss = Blacksmith.Solid.cylinder(5, 30);
+             Blacksmith.Solid hub = flange.join(boss);
+             Blacksmith.NurbsCurve flank = line(v(15, 0, 10), v(5, 0, 25))) {
+            double gusset = 75 * 25.0 / 3 * Math.PI / 6;
+            try (Blacksmith.Solid swung = hub.ribRevolved(flank, v(0, 0, 0), v(0, 0, 1), Math.PI / 6);
+                 Blacksmith.Solid wedge = hub.ribRevolvedTool(flank, v(0, 0, 0), v(0, 0, 1), Math.PI / 6, null, null)) {
+                double added = swung.mass(0).volume() - hub.mass(0).volume(), alone = wedge.mass(0).volume();
+                cs(Math.abs(added - gusset) <= 1e-3 * gusset && Math.abs(alone - gusset) <= 1e-3 * gusset,
+                        "rib_revolved added " + added + ", rib_revolved_tool " + alone);
+            }
+            try (Blacksmith.Solid none = hub.ribRevolved(flank, v(0, 0, 0), v(0, 0, 1), 0)) {
+                cs(false, "a revolved rib of angle 0 was not refused");
+            } catch (Blacksmith.BuildException expected) {
+                cs(expected.getMessage().startsWith("rib_revolved: angle 0 is not in (0, 2 pi)"), expected.getMessage());
             }
         }
         // a tray's web across its floor, from the rim plane down
@@ -3723,7 +3943,7 @@ public final class Smoke {
             // gap_at and angle_at are different places: the angle is flat along this seam, the gap is zero all along it, but
             // every point lies on the seam x = 0, z = 0.
             cs(Math.abs(k.gapAt()[0]) < 1e-9 && Math.abs(k.angleAt()[0]) < 1e-9 && Math.abs(k.angleAt()[2]) < 1e-9, "the seam points read " + Arrays.toString(k.angleAt()));
-            try (Blacksmith.Solid m = a.matched("u1", b, "u0", 1, 0, 0)) {
+            try (Blacksmith.Solid m = a.match("u1", b, "u0", 1, 0, 0)) {
                 Blacksmith.Continuity r = m.continuity("u1", b, "u0");
                 cs(r.gap() <= 1e-10 && r.angle() <= 1e-8, "the matched seam reads " + r);
             }
@@ -3742,7 +3962,7 @@ public final class Smoke {
             }
             String side = refused(() -> a.continuity("w2", b, "u0"));
             cs(side.equals("a side is 'u0', 'u1', 'v0' or 'v1', not 'w2'"), "a bad side gave '" + side + "'");
-            String level = refused(() -> a.matched("u1", b, "u0", 3, 0, 0).close());
+            String level = refused(() -> a.match("u1", b, "u0", 3, 0, 0).close());
             cs(level.startsWith("match_side: "), "level 3 gave '" + level + "'");
             String sideB = refused(() -> Blacksmith.Solid.blendSides(a, "u0", b, "x1").close());
             cs(sideB.equals("a side is 'u0', 'u1', 'v0' or 'v1', not 'x1'"), "a bad blend side gave '" + sideB + "'");
@@ -3958,20 +4178,20 @@ public final class Smoke {
             try (Blacksmith.NurbsCurve fit = Blacksmith.NurbsCurve.fit(wave, 3, 1e-4)) {
                 nc(fit.fitError() != null && fit.fitError() >= 0 && fit.fitError() <= 1e-4, "fit error is " + fit.fitError());
             }
-            try (Blacksmith.NurbsCurve rev = c.reversed()) {
+            try (Blacksmith.NurbsCurve rev = c.reverse()) {
                 nc(dist(rev.point(lo), c.point(hi)) < 1e-12, "reversed does not start where the curve ends");
             }
             double mid = 0.5 * (lo + hi);
-            try (Blacksmith.NurbsCurve cut = c.trimmed(lo, mid)) {
+            try (Blacksmith.NurbsCurve cut = c.trim(lo, mid)) {
                 nc(Arrays.equals(cut.domain(), new double[] {lo, mid}), "trimmed domain reads " + Arrays.toString(cut.domain()));
             }
-            try (Blacksmith.NurbsCurve longer = c.extended(0.5)) {
+            try (Blacksmith.NurbsCurve longer = c.extend(0.5)) {
                 nc(longer.domain()[1] > hi && dist(longer.point(hi), c.point(hi)) < 1e-9, "extended does not run on past the end");
             }
-            try (Blacksmith.NurbsCurve before = c.extended(0.5, true)) {
+            try (Blacksmith.NurbsCurve before = c.extend(0.5, true)) {
                 nc(before.domain()[0] < lo, "extended at the start does not reach back");
             }
-            try (Blacksmith.NurbsCurve up = c.elevated(2)) {
+            try (Blacksmith.NurbsCurve up = c.elevate(2)) {
                 nc(up.degree() == 5, "elevated by 2 reads degree " + up.degree());
             }
         }
@@ -3979,10 +4199,10 @@ public final class Smoke {
         // 3. joined
         try (Blacksmith.NurbsCurve lead = new Blacksmith.NurbsCurve(new double[][] {{2, -3, 0}, {2, 0, 0}}, 1);
              Blacksmith.NurbsCurve arc = quarterCircle();
-             Blacksmith.NurbsCurve back = arc.reversed();
+             Blacksmith.NurbsCurve back = arc.reverse();
              Blacksmith.NurbsCurve tail = new Blacksmith.NurbsCurve(
                      new double[][] {{0, 2, 0}, {-1, 2.5, 0}, {-2, 2, 1}, {-3, 3, 0}, {-4, 2, 0}, {-5, 2, 2}}, 5);
-             Blacksmith.NurbsCurve j = Blacksmith.NurbsCurve.joined(List.of(lead, back, tail))) {
+             Blacksmith.NurbsCurve j = Blacksmith.NurbsCurve.join(List.of(lead, back, tail))) {
             nc(j.degree() == 5 && Arrays.equals(j.domain(), new double[] {0, 3}), "joined degree/domain read " + j);
             double[][] want = {{2, -3, 0}, {2, 0, 0}, {0, 2, 0}, {-5, 2, 2}};
             for (int t = 0; t < 4; t++) nc(dist(j.point(t), want[t]) < 1e-12, "joined point at " + t + " is off");
@@ -3990,12 +4210,12 @@ public final class Smoke {
                 nc(Math.abs(dist(j.point(1 + i / 20.0), new double[] {0, 0, 0}) - 2) < 1e-12, "the arc part of the join leaves the circle at " + i);
                 nc(dist(j.point(2 + i / 20.0), tail.point(i / 20.0)) < 1e-12, "the tail part of the join leaves the tail at " + i);
             }
-            try (Blacksmith.NurbsCurve one = Blacksmith.NurbsCurve.joined(List.of(arc))) {
+            try (Blacksmith.NurbsCurve one = Blacksmith.NurbsCurve.join(List.of(arc))) {
                 nc(Arrays.deepEquals(one.controlPoints(), arc.controlPoints()), "joining one curve changed its control points");
             }
-            String gap = refused(() -> Blacksmith.NurbsCurve.joined(List.of(lead, tail)).close());
+            String gap = refused(() -> Blacksmith.NurbsCurve.join(List.of(lead, tail)).close());
             nc(gap.matches("(?s)^nurbs_curve_joined: curve 1 .* curve 0.*"), "a gap in a join gave '" + gap + "'");
-            String none = refused(() -> Blacksmith.NurbsCurve.joined(List.of()).close());
+            String none = refused(() -> Blacksmith.NurbsCurve.join(List.of()).close());
             nc(none.startsWith("nurbs_curve_joined: "), "joining nothing gave '" + none + "'");
         }
 
@@ -4065,9 +4285,9 @@ public final class Smoke {
         try (Blacksmith.Solid sphere = Blacksmith.Solid.sphere(3);
              Blacksmith.NurbsCurve line = new Blacksmith.NurbsCurve(new double[][] {{-2, 0.5, 10}, {2, -0.5, 10}}, 1);
              Blacksmith.NurbsCurve through = new Blacksmith.NurbsCurve(new double[][] {{-5, 1, 1}, {5, 1, 1}}, 1);
-             Blacksmith.NurbsCurve on = line.projectedToFace(sphere, 0, new double[] {0, 0, -1}, 1e-4);
-             Blacksmith.NurbsCurve pulled = line.pulledToFace(sphere, 0, 1e-4);
-             Blacksmith.NurbsCurve flat = line.projectedToPlane(new double[] {0, 0, 1}, new double[] {0, 0, 1});
+             Blacksmith.NurbsCurve on = line.projectToFace(sphere, 0, new double[] {0, 0, -1}, 1e-4);
+             Blacksmith.NurbsCurve pulled = line.pullToFace(sphere, 0, 1e-4);
+             Blacksmith.NurbsCurve flat = line.projectToPlane(new double[] {0, 0, 1}, new double[] {0, 0, 1});
              Blacksmith.NurbsCurve quarter = quarterCircle();
              Blacksmith.NurbsCurve blend = Blacksmith.NurbsCurve.blend(quarter, true, through, false, 2, 1.0)) {
             nc(on.fitError() != null && on.fitError() <= 1e-4, "the projection's fit error is " + on.fitError());
@@ -4088,17 +4308,19 @@ public final class Smoke {
         // 6. refusals name the call
         try (Blacksmith.NurbsCurve q = quarterCircle(); Blacksmith.Solid box = Blacksmith.Solid.cuboid(1, 1, 1)) {
             double[][] two = {{0, 0, 0}, {1, 0, 0}};
+            // Any face kind has isocurves now: the cube's plane face 0 included.
+            Blacksmith.NurbsCurve.isocurve(box, 0, true, 0.5).close();
             Object[][] rows = {
                 {"nurbs_curve_new", (Runnable) () -> new Blacksmith.NurbsCurve(two, 9).close()},
                 {"nurbs_curve_new", (Runnable) () -> new Blacksmith.NurbsCurve(two, 1, new double[] {1, -1}, null).close()},
                 {"nurbs_curve_through", (Runnable) () -> Blacksmith.NurbsCurve.through(two, 3, false).close()},
                 {"nurbs_curve_fit", (Runnable) () -> Blacksmith.NurbsCurve.fit(two, 1, -1).close()},
                 {"nurbs_curve_from_edge", (Runnable) () -> Blacksmith.NurbsCurve.fromEdge(box, 999).close()},
-                {"nurbs_curve_from_face_isocurve", (Runnable) () -> Blacksmith.NurbsCurve.isocurve(box, 0, true, 0.5).close()},
+                {"nurbs_curve_from_face_isocurve", (Runnable) () -> Blacksmith.NurbsCurve.isocurve(box, 99, true, 0.5).close()},
                 {"nurbs_curve_blend", (Runnable) () -> Blacksmith.NurbsCurve.blend(q, true, q, true, 3, 1.0).close()},
-                {"nurbs_curve_projected_to_plane", (Runnable) () -> q.projectedToPlane(new double[] {0, 0, 0}, new double[] {0, 0, 1}, new double[] {1, 0, 0}).close()},
-                {"nurbs_curve_trimmed", (Runnable) () -> q.trimmed(0.5, 0.2).close()},
-                {"nurbs_curve_extended", (Runnable) () -> q.extended(0).close()},
+                {"nurbs_curve_projected_to_plane", (Runnable) () -> q.projectToPlane(new double[] {0, 0, 0}, new double[] {0, 0, 1}, new double[] {1, 0, 0}).close()},
+                {"nurbs_curve_trimmed", (Runnable) () -> q.trim(0.5, 0.2).close()},
+                {"nurbs_curve_extended", (Runnable) () -> q.extend(0).close()},
                 {"nurbs_curve_point", (Runnable) () -> q.point(2)},
                 {"nurbs_curve_derivatives", (Runnable) () -> q.derivatives(0.5, 9)},
                 {"nurbs_curve_divide_by_count", (Runnable) () -> q.divideByCount(0)},
@@ -4112,9 +4334,67 @@ public final class Smoke {
             nc(weights.equals("nurbs_curve_new: 3 weights for 2 points; give one per point"), "three weights for two points gave '" + weights + "'");
         }
 
+        // 6b. curves on a surface: a uv curve pushed up onto a sphere of radius 3 and pulled back,
+        // the shortest path between two uv points a great-circle arc
+        try (Blacksmith.Solid sphere = Blacksmith.Solid.sphere(3);
+             Blacksmith.NurbsCurve uv = new Blacksmith.NurbsCurve(new double[][] {{0.1, 0.2, 0}, {0.7, 0.5, 0}, {1.3, 0.1, 0}, {1.9, -0.3, 0}}, 3);
+             Blacksmith.NurbsCurve up = uv.pushUp(sphere, 0, 1e-4);
+             Blacksmith.NurbsCurve back = up.pullBack(sphere, 0, 1e-4);
+             Blacksmith.NurbsCurve path = Blacksmith.NurbsCurve.shortPath(sphere, 0, new double[] {0, 0.3}, new double[] {1.2, -0.4}, 1e-4)) {
+            double[] origin = {0, 0, 0};
+            double lo = up.domain()[0], hi = up.domain()[1];
+            for (int k = 0; k <= 20; k++) {
+                double t = lo + (hi - lo) * k / 20.0;
+                nc(Math.abs(dist(up.point(t), origin) - 3) <= 1e-4, "push_up: off the sphere at " + t);
+                double[] p = back.point(t), q = uv.point(t);
+                nc(dist(p, q) <= 1e-3 && p[2] == 0, "pull_back: uv at " + t + " reads " + Arrays.toString(p) + ", not " + Arrays.toString(q));
+            }
+            // the sphere's point at (u, v) is 3 (cos v cos u, cos v sin u, sin v)
+            double[] pa = {3 * Math.cos(0.3), 0, 3 * Math.sin(0.3)};
+            double[] pb = {3 * Math.cos(-0.4) * Math.cos(1.2), 3 * Math.cos(-0.4) * Math.sin(1.2), 3 * Math.sin(-0.4)};
+            double plo = path.domain()[0], phi = path.domain()[1], length = 0;
+            for (int k = 0; k < 2000; k++) length += dist(path.point(plo + (phi - plo) * (k + 1) / 2000.0), path.point(plo + (phi - plo) * k / 2000.0));
+            double angle = Math.acos(Math.cos(0.3) * Math.cos(-0.4) * Math.cos(1.2) + Math.sin(0.3) * Math.sin(-0.4));
+            nc(dist(path.point(plo), pa) <= 1e-4 && dist(path.point(phi), pb) <= 1e-4 && Math.abs(length - 3 * angle) <= 1e-4,
+                    "short_path: " + Arrays.toString(path.point(plo)) + " to " + Arrays.toString(path.point(phi)) + ", length " + length + " vs " + 3 * angle);
+            String said = refused(() -> Blacksmith.NurbsCurve.shortPath(sphere, 0, new double[] {0, 0.3}, new double[] {0, 0.3}, 1e-4).close());
+            nc(said.startsWith("nurbs_curve_short_path_on_face: "), "short_path: a == b refused as '" + said + "'");
+        }
+
+        // 6c. a curve fitted to a face's own parameter: a slanted line projected across a cylinder
+        // of radius 3 along -x, parametrised by the side's height
+        try (Blacksmith.Solid cyl = Blacksmith.Solid.cylinder(3, 5);
+             Blacksmith.NurbsCurve line = new Blacksmith.NurbsCurve(new double[][] {{4, 1, 5}, {4, -1, 0}}, 1);
+             Blacksmith.NurbsCurve shortLine = new Blacksmith.NurbsCurve(new double[][] {{3, 0, 1}, {3, 0, 4}}, 1)) {
+            Blacksmith.NurbsCurve fit = null;
+            int side = -1;
+            for (int f = 0; f < 3 && fit == null; f++) {
+                try {
+                    fit = line.fitToFace(cyl, f, new double[] {-1, 0, 0}, new double[] {1.25, 2.5}, 1e-4);
+                    side = f;
+                } catch (Blacksmith.BuildException e) {
+                    // not the side
+                }
+            }
+            nc(fit != null, "fit_to_face: no face of the cylinder took the line");
+            try (Blacksmith.NurbsCurve fitted = fit) {
+                nc(fitted.fitError() != null && fitted.fitError() <= 1e-4, "fit_to_face: fit error " + fitted.fitError());
+                nc(fitted.domain()[0] == 0.0 && fitted.domain()[1] == 5.0, "fit_to_face: domain " + Arrays.toString(fitted.domain()));
+                double[] knots = fitted.knots();
+                nc(Arrays.stream(knots).anyMatch(k -> k == 1.25) && Arrays.stream(knots).anyMatch(k -> k == 2.5), "fit_to_face: knots " + Arrays.toString(knots));
+                for (double t : new double[] {0, 1.3, 3.7, 5}) {
+                    double y = -1 + 2 * t / 5;
+                    nc(dist(fitted.point(t), new double[] {Math.sqrt(9 - y * y), y, t}) <= 1e-4, "fit_to_face: at " + t + " reads " + Arrays.toString(fitted.point(t)));
+                }
+            }
+            int sideFace = side;
+            String said = refused(() -> shortLine.fitToFace(cyl, sideFace).close());
+            nc(said.contains("has to cross the face"), "fit_to_face: a short line refused as '" + said + "'");
+        }
+
         // 7. maps and values
         try (Blacksmith.NurbsCurve c = new Blacksmith.NurbsCurve(new double[][] {{0, 0, 0}, {1, 1, 1}, {2, 0, 0}}, 2, new double[] {1, 0.5, 1}, null);
-             Blacksmith.NurbsCurve moved = c.transformed(Blacksmith.Transform.translation(new double[] {1, 2, 3}))) {
+             Blacksmith.NurbsCurve moved = c.transform(Blacksmith.Transform.translation(new double[] {1, 2, 3}))) {
             double[] was = c.point(0.5), now = moved.point(0.5);
             nc(dist(now, new double[] {was[0] + 1, was[1] + 2, was[2] + 3}) < 1e-12, "the translated curve's point is off");
             nc(Arrays.equals(moved.weights(), c.weights()), "a map changed the weights");
@@ -4274,6 +4554,407 @@ public final class Smoke {
         } catch (Blacksmith.BuildException | IllegalStateException e) {
             return e.getMessage();
         }
+    }
+
+    /** Curves as objects: crates/cadaclysm-blacksmith-capi/tests/curve_objects_abi.rs's closed
+     *  forms -- a helix, a line's lengths by fraction, divisions and mass, a box face's isocurve,
+     *  a box's section and contours, and every refusal by its call's name. */
+    private static void curvesAsObjects() {
+        double[] z = {0, 0, 1};
+        try (Blacksmith.NurbsCurve helix = Blacksmith.NurbsCurve.spiral(new double[] {0, 0, 0, 0, 0, 1}, new double[] {2, 0, 0}, 1, 2);
+             Blacksmith.NurbsCurve line = new Blacksmith.NurbsCurve(new double[][] {{0, 0, 0}, {10, 0, 0}}, 1);
+             Blacksmith.NurbsCurve off = new Blacksmith.NurbsCurve(new double[][] {{2, 0, 0}, {2, 0, 2}}, 1);
+             Blacksmith.Solid cube = Blacksmith.Solid.cuboid(1, 1, 1);
+             Blacksmith.Solid box = Blacksmith.Solid.cuboid(40, 30, 20)) {
+            // A helix about z from (2, 0, 0), pitch 1, two turns: it ends at (2, 0, 2).
+            Double fit = helix.fitError();
+            if (fit == null || fit <= 0 || fit > 1e-6) fail("spiral: fit error " + fit);
+            double[] dom = helix.domain();
+            if (dist(helix.point(dom[0]), new double[] {2, 0, 0}) > 1e-12 || dist(helix.point(dom[1]), new double[] {2, 0, 2}) > 1e-12) {
+                fail("spiral: ends " + Arrays.toString(helix.point(dom[0])) + " " + Arrays.toString(helix.point(dom[1])));
+            }
+            // The line (0, 0, 0)-(10, 0, 0) over [0, 1].
+            Blacksmith.Length between = line.lengthBetween(0.2, 0.5);
+            if (Math.abs(between.length() - 3) > 1e-12) fail("length between: " + between);
+            Blacksmith.At quarter = line.pointAtNormalizedLength(0.25);
+            if (Math.abs(quarter.point()[0] - 2.5) > 1e-12) fail("point at normalized length: " + Arrays.toString(quarter.point()));
+            List<Blacksmith.At> several = line.pointsAtNormalizedLengths(new double[] {1, 0, 0.5});
+            if (several.size() != 3 || several.get(0).point()[0] != 10 || several.get(1).point()[0] != 0 || Math.abs(several.get(2).point()[0] - 5) > 1e-12) {
+                fail("points at normalized lengths: " + several.size());
+            }
+            if (!line.pointsAtNormalizedLengths(new double[0]).isEmpty()) fail("points at normalized lengths: none asked, some given");
+            if (line.divideEquidistant(3).size() != 4) fail("divide equidistant: " + line.divideEquidistant(3).size() + " points, not 4");
+            List<Blacksmith.At> contour = line.divideAsContour(new double[] {0, 0, 0}, new double[] {10, 0, 0}, 2.5);
+            if (contour.size() != 5 || Math.abs(contour.get(4).point()[0] - 10) > 1e-12) fail("divide as contour: " + contour.size() + " points");
+            // Its mass: length 10, centroid (5, 0, 0), principal moments 0, L^3/12, L^3/12.
+            Blacksmith.LengthMass m = line.mass();
+            double i = 1000.0 / 12;
+            if (Math.abs(m.length() - 10) > 1e-12 || dist(m.centroid(), new double[] {5, 0, 0}) > 1e-12 || !m.accuracyMet() || m.fromPolyline()) {
+                fail("curve mass: length " + m.length() + ", centroid " + Arrays.toString(m.centroid()));
+            }
+            double[] pm = m.principalMoments();
+            if (Math.abs(pm[0]) > 1e-9 || Math.abs(pm[1] - i) > 1e-9 || Math.abs(pm[2] - i) > 1e-9) fail("curve mass: principal moments " + Arrays.toString(pm));
+            if (Math.abs(m.inertia()[4] - i) > 1e-9 || Math.abs(m.inertia()[8] - i) > 1e-9 || Math.abs(Math.abs(m.principalAxes()[0]) - 1) > 1e-12
+                    || Math.abs(m.radii()[2] - Math.sqrt(i / 10)) > 1e-9) {
+                fail("curve mass: inertia " + Arrays.toString(m.inertia()) + ", axes " + Arrays.toString(m.principalAxes()) + ", radii " + Arrays.toString(m.radii()));
+            }
+            // The unit cube's face 0 along u at 0: one exact piece of length 1, isoparametric along u.
+            List<double[]> intervals = cube.faceIsoIntervals(0, true, 0);
+            if (intervals.isEmpty() || intervals.get(intervals.size() - 1)[1] <= intervals.get(0)[0]) fail("face iso intervals: " + intervals.size());
+            List<Blacksmith.NurbsCurve> isos = Blacksmith.NurbsCurve.faceIsocurves(cube, 0, true, 0, 0);
+            if (isos.size() != 1) fail("face isocurves: " + isos.size() + ", not 1");
+            try (Blacksmith.NurbsCurve iso = isos.get(0)) {
+                if (iso.fitError() == null || iso.fitError() > 1e-12 || Math.abs(iso.length(1e-12).length() - 1) > 1e-12) {
+                    fail("face isocurves: fit " + iso.fitError() + ", length " + iso.length(1e-12).length());
+                }
+                Blacksmith.Isoparametric kind = iso.isIsoparametric(cube, 0, 0);
+                if (kind == null || !kind.direction().equals("u") || Math.abs(kind.at()) > 1e-9) fail("is isoparametric: " + kind);
+            }
+            Blacksmith.Isoparametric offKind = off.isIsoparametric(cube, 0, 0);
+            if (offKind != null) fail("is isoparametric: a curve off the face gave " + offKind);
+            if (!Blacksmith.NurbsCurve.faceIsocurves(cube, 0, true, 1e6, 0).isEmpty()) fail("face isocurves: some past the face");
+            // A 40 x 30 x 20 box cut at z = 3: one closed exact loop of 140.
+            List<Blacksmith.SectionCurve> section = box.sectionCurves(new double[] {0, 0, 3}, z);
+            try {
+                if (section.size() != 1) fail("section curves: " + section.size() + ", not 1");
+                Blacksmith.SectionCurve c = section.get(0);
+                if (!c.closed() || !c.exact() || c.error() != 0 || c.plane() != 0) fail("section curves: " + c);
+                if (Math.abs(c.curve().length(1e-12).length() - 140) > 1e-9) fail("section curves: length " + c.curve().length(1e-12).length());
+            } finally {
+                for (Blacksmith.SectionCurve c : section) c.close();
+            }
+            if (!box.sectionCurves(new double[] {0, 0, 50}, z).isEmpty()) fail("section curves: a plane past the box cut something");
+            // Contours from z = -10 to 10 every 5: five loops, planes 0 to 4, at their heights.
+            List<Blacksmith.SectionCurve> contours = box.contourCurves(new double[] {0, 0, -10}, new double[] {0, 0, 10}, 5);
+            try {
+                if (contours.size() != 5) fail("contour curves: " + contours.size() + ", not 5");
+                for (int k = 0; k < 5; k++) {
+                    Blacksmith.SectionCurve c = contours.get(k);
+                    double h = c.curve().point(c.curve().domain()[0])[2];
+                    if (c.plane() != k || !c.closed() || !c.exact() || Math.abs(h - (-10 + 5.0 * k)) > 1e-12) fail("contour curves: " + k + ": " + c + " at z " + h);
+                }
+            } finally {
+                for (Blacksmith.SectionCurve c : contours) c.close();
+            }
+            // Refusals carry the C name.
+            Object[][] rows = {
+                {"nurbs_curve_spiral", (Runnable) () -> Blacksmith.NurbsCurve.spiral(new double[] {0, 0, 0, 0, 0, 1}, new double[] {2, 0, 0}, 1, 0).close()},
+                {"nurbs_curve_length_between", (Runnable) () -> line.lengthBetween(0.5, 0.2)},
+                {"nurbs_curve_point_at_normalized_length", (Runnable) () -> line.pointAtNormalizedLength(1.5)},
+                {"nurbs_curve_divide_equidistant", (Runnable) () -> line.divideEquidistant(0)},
+                {"nurbs_curve_divide_as_contour", (Runnable) () -> line.divideAsContour(new double[] {0, 0, 0}, new double[] {0, 0, 0}, 1)},
+                {"nurbs_curve_mass", (Runnable) () -> line.mass(Double.NaN)},
+                {"nurbs_curve_face_isocurves", (Runnable) () -> Blacksmith.NurbsCurve.faceIsocurves(cube, 99, true, 0)},
+                {"face_iso_intervals", (Runnable) () -> cube.faceIsoIntervals(99, true, 0)},
+                {"nurbs_curve_is_isoparametric", (Runnable) () -> line.isIsoparametric(cube, 99)},
+                {"solid_section_curves", (Runnable) () -> box.sectionCurves(new double[] {0, 0, 0}, new double[] {0, 0, 0})},
+                {"solid_contour_curves", (Runnable) () -> box.contourCurves(new double[] {0, 0, 0}, z, 0)},
+            };
+            for (Object[] row : rows) {
+                String said = refused((Runnable) row[1]);
+                if (!said.startsWith(row[0] + ": ")) fail("curves as objects: '" + row[0] + "' refused with '" + said + "'");
+            }
+        }
+        System.out.println("curves as objects: a helix, lengths by fraction, divisions, a line's mass, a box face's isocurve, a section and five contours; refusals");
+    }
+
+    /** Sheet metal: Python's test_sheet_metal_a_tray_reads_unfolds_and_folds_back and
+     *  test_sheet_metal_refusals_are_named -- a 60 x 40 plate, 1 thick, flanged 15 up on its four
+     *  top edges at R 1, K 0.44, unfolds to the closed-form flat and folds back. */
+    private static void sheetMetal() {
+        Blacksmith.SheetRule rule = new Blacksmith.SheetRule(1.0);
+        Blacksmith.SheetRule lib = Blacksmith.SheetRule.defaultFor(1.0);
+        // The library's default spells the derived sizes out: relief T x T/2, corner 2T, gap T/10.
+        if (!lib.equals(new Blacksmith.SheetRule(1.0, 1.0, 0.44, Blacksmith.SheetRelief.RECTANGULAR, 1.0, 0.5, Blacksmith.SheetCorner.ROUND, 2.0, 0.1))) {
+            fail("sheet rule: the library's default " + lib + ", not " + rule + " with its sizes spelled out");
+        }
+        try (Blacksmith.Profile rect = Blacksmith.Profile.rect(60, 40);
+             Blacksmith.Solid plate = Blacksmith.Solid.sheetBase(rect, rule);
+             Blacksmith.Solid cube = Blacksmith.Solid.cuboid(10, 10, 10)) {
+            int top = facingAt(plate, 0, 0, 1, 0);
+            List<Blacksmith.Edge> edges = new ArrayList<>();
+            for (Blacksmith.Edge e : plate.edges()) for (int f : e.faces()) if (f == top) edges.add(e);
+            if (edges.size() != 4) fail("sheet metal: " + edges.size() + " top edges, not 4");
+            try (Blacksmith.Solid tray = plate.sheetFlange(edges, Math.PI / 2, 15, rule)) {
+                if (!tray.isSheetMetal() || cube.isSheetMetal()) fail("sheet metal: is_sheet_metal");
+                Blacksmith.SheetInfo info = tray.sheetInfo();
+                if (Math.abs(info.thickness() - 1) > 1e-9 || info.bends().size() != 4) fail("sheet info: " + info);
+                for (Blacksmith.BendInfo b : info.bends()) {
+                    if (Math.abs(b.radius() - 1) > 1e-9 || Math.abs(Math.abs(b.angle()) - Math.PI / 2) > 1e-9) fail("sheet info: bend " + b);
+                }
+                int[] bendFaces = tray.sheetBendFaces();
+                if (bendFaces.length != 8) fail("sheet bend faces: " + Arrays.toString(bendFaces));
+                double allowance = Math.PI / 2 * 1.44;
+                try (Blacksmith.FlatPattern flat = tray.flatPattern(facingAt(tray, 0, 0, 1, 0), rule)) {
+                    if (flat.bends().size() != 4) fail("flat pattern: " + flat.bends().size() + " bends");
+                    for (Blacksmith.FlatBend b : flat.bends()) {
+                        if (!b.up() || Math.abs(b.allowance() - allowance) > 1e-9) fail("flat pattern: bend " + b);
+                    }
+                    double want = 2400 - Math.PI + 2 * (58 + 38) * (15 - 2 + allowance);
+                    try (Blacksmith.Solid body = flat.body()) {
+                        double got = body.mass(0).volume();
+                        if (Math.abs(got - want) > 1e-6 * want) fail("flat pattern: volume " + got + ", not " + want);
+                    }
+                    String text = flat.dxf(Blacksmith.PageUnits.MILLIMETRES, true, true, true, false, false, false);
+                    for (String s : new String[] {"OUTLINE", "BEND_UP", "BEND_EXTENT", "BEND_TABLE", "B4 UP 90"}) {
+                        if (!text.contains(s)) fail("flat pattern dxf: no " + s);
+                    }
+                    if (flat.dxf(Blacksmith.PageUnits.MILLIMETRES, true, false, true, false, false, false).contains("BEND_TABLE")) fail("flat pattern dxf: a table");
+                    try (Blacksmith.Page page = new Blacksmith.Page(Blacksmith.PageUnits.MILLIMETRES)) {
+                        page.addFlatPattern(flat, 0, 0, false, false, false, false, false, false);
+                        int plain = page.entityCount();
+                        page.addFlatPattern(flat, 200, 0, true, false, false, false, false, false);
+                        if (page.entityCount() - plain != plain + 8) fail("page: " + plain + " then " + page.entityCount() + " entities");
+                        // The drawing view: a note a bend, a ruled table (6 + 8 rules, 35 cells), two dimensions of six.
+                        int[][] views = {{1, 0, 0, 4}, {0, 1, 0, 6 + 8 + 35}, {0, 0, 1, 12}};
+                        for (int[] v : views) {
+                            int before = page.entityCount();
+                            page.addFlatPattern(flat, 400, 0, false, v[1] == 1, false, v[0] == 1, v[2] == 1, false);
+                            if (page.entityCount() - before != plain + v[3]) fail("page view: " + (page.entityCount() - before) + " added");
+                        }
+                    }
+                    String drawn = flat.dxf(Blacksmith.PageUnits.MILLIMETRES, true, true, true, true, true, true);
+                    for (String s : new String[] {"BEND_NOTE", "DIMENSION", "FOLDED", "K-FACTOR", "DEDUCTION"}) {
+                        if (!drawn.contains(s)) fail("flat pattern drawing: no " + s);
+                    }
+                    try (Blacksmith.Profile outline = flat.profile();
+                         Blacksmith.Solid again = Blacksmith.Solid.foldFlat(outline, flat.foldBends(), rule, flat.frame())) {
+                        double v = again.mass(0).volume(), t = tray.mass(0).volume();
+                        if (Math.abs(v - t) > 1e-6 * t) fail("fold flat: volume " + v + ", not " + t);
+                    }
+                }
+            }
+            String notSheet = refused(() -> cube.sheetInfo());
+            if (!notSheet.startsWith("sheet_info: ")) fail("sheet info: a cube gave '" + notSheet + "'");
+        }
+        System.out.println("sheet metal: a tray read, unfolded to the closed form, drawn, folded back; a cube refused");
+    }
+
+    /** Sheet metal rips, join and corner breaks: Python's
+     *  test_sheet_metal_rips_joins_and_corner_breaks -- a 60 x 40 plate, 1 thick, ripped across
+     *  by a 0.5 slot, rounded and chamfered on its thickness edges; a cube's face rip and a join of
+     *  one edge to itself refused. */
+    private static void sheetRipsAndCorners() {
+        Blacksmith.SheetRule rule = new Blacksmith.SheetRule(1.0);
+        try (Blacksmith.Profile rect = Blacksmith.Profile.rect(60, 40);
+             Blacksmith.Solid plate = Blacksmith.Solid.sheetBase(rect, rule);
+             Blacksmith.Solid cube = Blacksmith.Solid.cuboid(10, 10, 10)) {
+            int top = facingAt(plate, 0, 0, 1, 0), bottom = facingAt(plate, 0, 0, -1, -1);
+            try (Blacksmith.Solid ripped = plate.sheetRipPoints(top, new double[] {0, -20, 0}, new double[] {0, 20, 0}, 0.5, Double.NaN)) {
+                double got = ripped.mass(0).volume(), want = 2400 - 40 * 0.5;
+                if (Math.abs(got - want) > 1e-6 * want) fail("sheet rip points: volume " + got + ", not " + want);
+            }
+            String face = refused(() -> cube.sheetRipFace(0).close());
+            if (!face.startsWith("sheet_rip_face: ")) fail("sheet rip face: a cube gave '" + face + "'");
+            List<Blacksmith.Edge> across = new ArrayList<>(), rims = new ArrayList<>();
+            for (Blacksmith.Edge e : plate.edges()) {
+                boolean onTop = false, onBottom = false;
+                for (int f : e.faces()) {
+                    onTop |= f == top;
+                    onBottom |= f == bottom;
+                }
+                if (onTop) rims.add(e);
+                if (!onTop && !onBottom) across.add(e);
+            }
+            if (across.size() != 4) fail("sheet fillet: " + across.size() + " thickness edges, not 4");
+            try (Blacksmith.Solid round = plate.sheetFillet(across, 3, rule);
+                 Blacksmith.Solid cut = plate.sheetChamfer(across.subList(0, 2), 2, rule)) {
+                if (!round.isSheetMetal()) fail("sheet fillet: not sheet metal");
+                double got = round.mass(0).volume(), want = 2400 - (4 - Math.PI) * 9;
+                if (Math.abs(got - want) > 1e-6 * want) fail("sheet fillet: volume " + got + ", not " + want);
+                double gotC = cut.mass(0).volume(), wantC = 2400 - 4;
+                if (Math.abs(gotC - wantC) > 1e-6 * wantC) fail("sheet chamfer: volume " + gotC + ", not " + wantC);
+            }
+            String join = refused(() -> plate.sheetJoin(rims.get(0), rims.get(0), rule).close());
+            if (!join.startsWith("sheet_join: ")) fail("sheet join: one edge twice gave '" + join + "'");
+        }
+        System.out.println("sheet metal rips: a plate ripped across, rounded and chamfered; a face rip and a self-join refused");
+    }
+
+    /** The 2D profile toolkit: Python's test_profile_union_difference_and_regions_are_exact,
+     *  test_profile_contains_relationship_and_deviation, test_profile_offset_corner_and_end_styles
+     *  and test_profile_polyline_tools -- every figure exact, worked by hand. */
+    private static void profileToolkit() {
+        try (Blacksmith.Profile a = Blacksmith.Profile.rect(10, 10);
+             Blacksmith.Profile b = a.translate(5, 5);
+             Blacksmith.Profile c5 = Blacksmith.Profile.circle(5);
+             Blacksmith.Profile c6 = Blacksmith.Profile.circle(6);
+             Blacksmith.Profile c2 = Blacksmith.Profile.circle(2);
+             Blacksmith.Profile far = a.translate(20, 0);
+             Blacksmith.Profile next = a.translate(10, 0);
+             Blacksmith.Profile half = a.translate(5, 0);
+             Blacksmith.Profile same = Blacksmith.Profile.rect(10, 10)) {
+            // 1. union, difference, regions
+            List<Blacksmith.Profile> union = a.union(b);
+            if (union.size() != 1 || !nearRel(ptArea(union.get(0)), 175, 1e-9)) fail("profile union: " + union.size() + " profiles");
+            List<Blacksmith.Profile> diff = a.difference(b);
+            if (diff.size() != 1 || !nearRel(ptArea(diff.get(0)), 75, 1e-9)) fail("profile difference: " + diff.size() + " profiles");
+            List<Blacksmith.Profile> ring = c5.difference(c2);
+            if (ring.size() != 1 || !nearRel(ptArea(ring.get(0)), 21 * Math.PI, 1e-9)) fail("profile difference: the ring is not 21 pi");
+            double[] regionAreas = Blacksmith.Profile.regions(List.of(a, b)).stream().mapToDouble(Smoke::ptArea).sorted().toArray();
+            if (regionAreas.length != 3 || !nearRel(regionAreas[0], 25, 1e-9) || !nearRel(regionAreas[1], 75, 1e-9) || !nearRel(regionAreas[2], 75, 1e-9)) {
+                fail("profile regions: areas " + Arrays.toString(regionAreas) + ", not [25, 75, 75]");
+            }
+            // 2. contains and relationship
+            List<String> where = List.of(a.contains(new double[] {0, 0}), a.contains(new double[] {5, 0}), a.contains(new double[] {6, 0}));
+            if (!where.equals(List.of("inside", "on", "outside"))) fail("profile contains: " + where);
+            List<Blacksmith.ProfileRelation> rels = List.of(a.relationship(far), a.relationship(next), a.relationship(half), c2.relationship(a),
+                    a.relationship(c2), a.relationship(same));
+            List<Blacksmith.ProfileRelation> wantRels = List.of(Blacksmith.ProfileRelation.DISJOINT, Blacksmith.ProfileRelation.TOUCHING,
+                    Blacksmith.ProfileRelation.OVERLAPPING, Blacksmith.ProfileRelation.A_INSIDE_B, Blacksmith.ProfileRelation.B_INSIDE_A,
+                    Blacksmith.ProfileRelation.EQUAL);
+            if (!rels.equals(wantRels)) fail("profile relationship: " + rels + ", not " + wantRels);
+            // 3. deviation
+            Blacksmith.Deviation dev = c5.deviation(c6, 1e-6);
+            if (Math.abs(dev.maxDistance() - 1) > 1e-6 || Math.abs(dev.minDistance() - 1) > 1e-6) fail("profile deviation: two circles read " + dev);
+            dev = a.deviation(c5, 1e-6);
+            if (Math.abs(dev.maxDistance() - (5 * Math.sqrt(2) - 5)) > 1e-6 || Math.abs(dev.minDistance()) > 1e-6) {
+                fail("profile deviation: the square and the circle read " + dev);
+            }
+            if (Math.abs(Math.hypot(dev.maxA()[0], dev.maxA()[1]) - 5 * Math.sqrt(2)) > 1e-5) fail("profile deviation: the farthest point is no corner: " + dev);
+            // 4. offset corner and end styles
+            double sharp = ptArea(a.offset(1, 1e-3, Blacksmith.OffsetCorner.SHARP).get(0));
+            double chamfer = ptArea(a.offset(1, 1e-3, Blacksmith.OffsetCorner.CHAMFER).get(0));
+            double smooth = ptArea(a.offset(1, 1e-3, Blacksmith.OffsetCorner.SMOOTH).get(0));
+            double round = ptArea(a.offset(1, 1e-3, Blacksmith.OffsetCorner.ROUND).get(0));
+            if (!nearRel(sharp, 144, 1e-6) || !nearRel(chamfer, 142, 1e-6) || !nearRel(smooth, 144 - 4.0 / 6, 1e-6) || !nearRel(round, 140 + Math.PI, 1e-4)) {
+                fail("profile offset: sharp " + sharp + ", chamfer " + chamfer + ", smooth " + smooth + ", round " + round);
+            }
+            try (Blacksmith.Profile line = Blacksmith.Profile.polyline(new double[][] {{0, 0}, {10, 0}}, false)) {
+                double flatEnds = ptArea(line.offsetOpen(1, 1e-3, Blacksmith.OffsetCorner.ROUND, Blacksmith.OffsetEnd.FLAT).get(0));
+                double roundEnds = ptArea(line.offsetOpen(1, 1e-3, Blacksmith.OffsetCorner.ROUND, Blacksmith.OffsetEnd.ROUND).get(0));
+                if (!nearRel(flatEnds, 20, 1e-9) || !nearRel(roundEnds, 20 + Math.PI, 1e-4)) fail("profile offset_open: flat ends " + flatEnds + ", round ends " + roundEnds);
+                List<Blacksmith.Profile> right = line.offsetOpen(1);
+                if (right.size() != 1) fail("profile offset_open: the one-sided offset is " + right.size() + " profiles");
+                double[] rb = right.get(0).beziers();
+                for (int k = 0; k < rb.length; k += 4) {
+                    if (Math.abs(rb[k + 1] / rb[k + 3] + 1) > 1e-9) fail("profile offset_open: the one-sided offset runs at y " + rb[k + 1] / rb[k + 3] + ", not -1");
+                }
+            }
+            // 5. polyline tools
+            try (Blacksmith.Profile colinear = Blacksmith.Profile.polyline(new double[][] {{0, 0}, {2, 0}, {4, 0}, {4, 4}, {0, 4}}, true);
+                 Blacksmith.Profile merged = colinear.mergeColinear(1e-9)) {
+                if (merged.beziers().length / 16 != 4) fail("profile merge_colinear: " + merged.beziers().length / 16 + " sides, not 4");
+                if (!colinear.isConvex() || colinear.isConvex(true)) fail("profile is_convex: the colinear square is not convex, or is strictly");
+            }
+            List<Blacksmith.Profile> kinks = a.breakAtKinks(0.1);
+            if (kinks.size() != 4) fail("profile break_at_kinks: " + kinks.size() + " pieces, not 4");
+            try (Blacksmith.Profile seamed = a.withSeam(new double[] {0, -5})) {
+                double[] sb = seamed.beziers();
+                if (!nearRel(ptArea(seamed), 100, 1e-9) || Math.abs(sb[0]) > 1e-12 || Math.abs(sb[1] + 5) > 1e-12) {
+                    fail("profile with_seam: area " + ptArea(seamed) + ", start (" + sb[0] + ", " + sb[1] + ")");
+                }
+            }
+            try (Blacksmith.Profile gap = Blacksmith.Profile.polyline(new double[][] {{0, 0}, {4, 0}, {4, 4}, {0, 4}, {0, 0.0005}}, false);
+                 Blacksmith.Profile closed = gap.makeClosed(0.001)) {
+                if (Math.abs(ptArea(closed) - 16) > 0.01) fail("profile make_closed: area " + ptArea(closed) + ", not 16");
+                String wide = refused(() -> gap.makeClosed(1e-5));
+                if (!wide.startsWith("profile_make_closed: the ends are 0.0005 apart")) fail("profile make_closed: a 1e-5 tolerance gave '" + wide + "'");
+            }
+            try (Blacksmith.Profile zig = Blacksmith.Profile.polyline(new double[][] {{0, 0}, {1, 0.001}, {2, 0}, {3, 0.001}, {4, 0}, {4, 4}, {0, 4}}, true);
+                 Blacksmith.Profile reduced = zig.reduceSegments(0.01, false)) {
+                if (reduced.beziers().length / 16 != 4) fail("profile reduce_segments: " + reduced.beziers().length / 16 + " sides, not 4");
+            }
+            // 6. a refusal carries the C name
+            String nan = refused(() -> a.contains(new double[] {Double.NaN, 0}));
+            if (!nan.startsWith("profile_contains: ")) fail("profile contains: a NaN point gave '" + nan + "'");
+            System.out.println("profile toolkit: union 175, difference 75, regions [25, 75, 75]; contains, six relations, deviation; offsets sharp "
+                    + sharp + " chamfer " + chamfer + " smooth " + smooth + "; polyline tools; refusal");
+        }
+    }
+
+    /** A profile's area, from its area properties. */
+    private static double ptArea(Blacksmith.Profile p) {
+        return p.areaProperties().area();
+    }
+
+    /** {@code a} within {@code rel} of {@code b}, relative. */
+    private static boolean nearRel(double a, double b, double rel) {
+        return Math.abs(a - b) <= rel * Math.abs(b);
+    }
+
+    /** Unroll: Python's test_unroll_a_cylinder_with_points -- a radius-5, 10-high can laid flat
+     *  keeps its area, a point on the wall lands in the plane and one off it lands nowhere. */
+    private static void unroll() {
+        try (Blacksmith.Solid can = Blacksmith.Solid.cylinder(5, 10)) {
+            Blacksmith.Unrolled flat = can.unroll(null, null, new double[][] {{5, 0, 1}, {50, 50, 50}}, false, Double.NaN);
+            try (Blacksmith.Solid sheet = flat.sheet()) {
+                int[] faces = flat.faces().clone();
+                Arrays.sort(faces);
+                if (!Arrays.equals(faces, new int[] {0, 1, 2}) || flat.notDevelopable().length != 0) fail("unroll: " + flat);
+                if (flat.cuts().length < 1) fail("unroll: no cuts");
+                double want = 2 * Math.PI * 5 * 10 + 2 * Math.PI * 25, got = sheet.mass(0).area();
+                if (Math.abs(got - want) > 1e-6 * want) fail("unroll: area " + got + ", not " + want);
+                double[] p = flat.points().get(0);
+                if (p == null || Math.abs(p[2]) > 1e-9) fail("unroll: point 0 " + Arrays.toString(p));
+                if (flat.points().get(1) != null) fail("unroll: point 1 " + Arrays.toString(flat.points().get(1)));
+            }
+        }
+        System.out.println("unroll: a can laid flat keeps its area; a point on it lands, one off it does not");
+    }
+
+    /** The face of {@code s} whose outward normal is {@code (x, y, z)} and whose frame origin has z {@code z0}, or -1. */
+    private static int facingAt(Blacksmith.Solid s, double x, double y, double z, double z0) {
+        for (int f = 0; f < s.faces(); f++) {
+            double[] fr = s.faceFrame(f);
+            if (Math.abs(fr[9] - x) < 1e-9 && Math.abs(fr[10] - y) < 1e-9 && Math.abs(fr[11] - z) < 1e-9 && Math.abs(fr[2] - z0) < 1e-9) return f;
+        }
+        return -1;
+    }
+
+    /** Draft: Python's test_draft_a_box_side_to_the_closed_form, test_draft_analysis_reads_a_boxs_six_kinds
+     *  and test_draft_refusals_are_named -- a 2 x 3 x 4 box's +x side drafted 5 degrees about its
+     *  bottom loses a wedge of h^2 w tan(5)/2. */
+    private static void draft() {
+        double a = Math.toRadians(5);
+        try (Blacksmith.Solid block = Blacksmith.Solid.cuboid(2, 3, 4)) {
+            int side = facing(block, 1, 0, 0), top = facing(block, 0, 0, 1), bottom = facing(block, 0, 0, -1);
+            try (Blacksmith.Solid drafted = block.draft(new int[] {side}, planeAt(-2), a);
+                 Blacksmith.Solid both = block.draftTwoSided(new int[] {side}, planeAt(0), a, a)) {
+                if (drafted.faces() != 6) fail("draft: " + drafted.faces() + " faces, not 6");
+                double want = 24 - 16 * 3 * Math.tan(a) / 2, got = drafted.mass(0).volume();
+                if (Math.abs(got - want) > 1e-9 * want) fail("draft: volume " + got + ", not " + want);
+                Blacksmith.DraftPoint at = drafted.draftAngleAt(side, new double[] {5, 0, 0}, new double[] {0, 0, 2});
+                if (Math.abs(at.angle() - a) > 1e-12 || at.uv() == null) fail("draft angle at: " + at);
+                if (Math.abs(at.normal()[0] - Math.cos(a)) > 1e-12 || Math.abs(at.normal()[2] - Math.sin(a)) > 1e-12) fail("draft angle at: normal " + at);
+                double wantBoth = 24 - 2 * (4 * 3 * Math.tan(a) / 2), gotBoth = both.mass(0).volume();
+                if (Math.abs(gotBoth - wantBoth) > 1e-9 * wantBoth) fail("draft two-sided: volume " + gotBoth + ", not " + wantBoth);
+                // The box's analysis: the top positive, the bottom negative, the four sides vertical.
+                List<Blacksmith.FaceDraft> rows = block.draftAnalysis(new double[] {0, 0, 1});
+                if (rows.size() != 6) fail("draft analysis: " + rows.size() + " rows");
+                for (int i = 0; i < rows.size(); i++) {
+                    Blacksmith.FaceDraft r = rows.get(i);
+                    String kind = r.face() == top ? "positive" : r.face() == bottom ? "negative" : "vertical";
+                    if (r.face() != i || !r.kind().equals(kind) || r.undercut() != 0 || r.area() <= 0) fail("draft analysis: " + r + ", not " + kind);
+                }
+                Blacksmith.FaceDraft t = rows.get(top);
+                if (Math.abs(t.min() - Math.PI / 2) > 1e-9 || Math.abs(t.area() - 6) > 1e-9 || t.positive() != t.area()) fail("draft analysis: top " + t);
+                Blacksmith.FaceDraft s = drafted.draftAnalysis(new double[] {0, 0, 1}, Math.PI / 180, Double.NaN).get(side);
+                if (!s.kind().equals("positive") || Math.abs(s.min() - a) > 1e-9) fail("draft analysis: the drafted side " + s);
+            }
+            // Refusals: the top lies parallel to the neutral plane; a face past the end; a threshold of 2.
+            String flat = refused(() -> block.draft(new int[] {top}, planeAt(0), 0.1).close());
+            if (!flat.startsWith("draft: ")) fail("draft: the top gave '" + flat + "'");
+            String nine = refused(() -> block.draftAngleAt(9, new double[] {0, 0, 0}, new double[] {0, 0, 1}));
+            if (!nine.startsWith("draft_angle_at: ")) fail("draft angle at: face 9 gave '" + nine + "'");
+            String steep = refused(() -> block.draftAnalysis(new double[] {0, 0, 1}, 2.0));
+            if (!steep.startsWith("draft_analysis: ")) fail("draft analysis: threshold 2 gave '" + steep + "'");
+        }
+        System.out.println("draft: a box side at 5 degrees, two-sided, the angle at a point, the analysis's kinds, refusals");
+    }
+
+    /** The frame of the plane z = {@code z}, its z the pull. */
+    private static double[] planeAt(double z) {
+        return new double[] {0, 0, z, 1, 0, 0, 0, 1, 0, 0, 0, 1};
+    }
+
+    /** The face of {@code s} whose outward normal is {@code (x, y, z)}, or -1. */
+    private static int facing(Blacksmith.Solid s, double x, double y, double z) {
+        for (int f = 0; f < s.faces(); f++) {
+            double[] fr = s.faceFrame(f);
+            if (Math.abs(fr[9] - x) < 1e-9 && Math.abs(fr[10] - y) < 1e-9 && Math.abs(fr[11] - z) < 1e-9) return f;
+        }
+        return -1;
     }
 
     /** The R-tree: Python's test_rtree_*, trimmed to what proves the marshalling (rtree plan 3). */
@@ -4580,6 +5261,143 @@ public final class Smoke {
         String negative = refused(() -> Blacksmith.Profile.circumscribedPolygon(new double[] {0, 0}, 10, -1).close());
         if (!negative.startsWith("profile_circumscribed_polygon: a polygon has at least 3 sides, not 0")) fail("circumscribed polygon: -1 sides gave '" + negative + "'");
         System.out.println("interpolator: five modes on the squares, a helix sampled, refusals and lifetime; circumscribed polygon touches its circle");
+    }
+
+    /** Kernel animation tracks: Python's test_animation_*, trimmed to what proves the marshalling. */
+    private static void animation() {
+        double[] identity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        // 1. the turntable: rotate about a pivot, placement by name and index, T * R * S
+        try (Blacksmith.Animation a = new Blacksmith.Animation()) {
+            if (a.size() != 0 || a.duration() != 0 || !a.targets().isEmpty() || a.valuesAt(1).length != 0) fail("animation: an empty one is not empty");
+            int k = a.rotate("nut", List.of(Blacksmith.AnimationKey.of(0, 0), Blacksmith.AnimationKey.of(4, 360)), new double[] {1, 2, 0}, null);
+            if (k != 0 || a.size() != 1 || !a.targets().equals(List.of("nut")) || a.duration() != 4) fail("animation: the turntable reads back wrong");
+            double[] turned = a.placementAt("nut", 1);
+            double[] moved = movedBy(turned, 2, 2, 0);
+            if (!near(moved, new double[] {1, 3, 0}, 1e-12)) fail("animation: the turntable at 1 moved (2,2,0) to " + Arrays.toString(moved));
+            if (!near(a.placementAt(0, 1), turned, 1e-12)) fail("animation: placement by index differs from by name");
+            if (!near(a.placementAt("nut", 4), identity, 1e-12)) fail("animation: a full turn is not the identity");
+            double[] quarter = a.valueAt(0, 1);
+            if (quarter.length != 1 || !within(quarter[0], 90, 1e-9)) fail("animation: the rotate value at 1 is not [90]");
+            Blacksmith.AnimationTrack tr = a.track(0);
+            if (tr.channel() != Blacksmith.AnimationChannel.ROTATE || tr.mode() != Blacksmith.InterpolatorMode.LINEAR
+                    || !Arrays.equals(tr.pivot(), new double[] {1, 2, 0}) || !Arrays.equals(tr.axis(), new double[] {0, 0, 1}))
+                fail("animation: the rotate track's pivot or axis");
+            a.colour("lamp", List.of(Blacksmith.AnimationKey.of(0, 1, 0, 0)));
+            if (!near(a.placementAt("lamp", 2), identity, 1e-12)) fail("animation: a target with no placement track is not the identity");
+            String nobody = refused(() -> a.placementAt("nobody", 0));
+            if (!nobody.equals("animation: no target nobody")) fail("animation: a missing target gave '" + nobody + "'");
+            a.translate("box", List.of(Blacksmith.AnimationKey.of(0, 0, 0, 0), Blacksmith.AnimationKey.of(2, 10, 0, 0)));
+            a.scale("box", List.of(Blacksmith.AnimationKey.of(0, 2, 2, 2)), new double[] {1, 0, 0});
+            double[] box = movedBy(a.placementAt("box", 1), 2, 0, 0);
+            if (!near(box, new double[] {8, 0, 0}, 1e-12)) fail("animation: T * S at 1 did not move (2,0,0) to (8,0,0): " + Arrays.toString(box));
+        }
+        // 2. read-back of every field
+        try (Blacksmith.Animation a = new Blacksmith.Animation()) {
+            List<Blacksmith.AnimationKey> keys = List.of(Blacksmith.AnimationKey.of(0, 1, 2), Blacksmith.AnimationKey.of(1, 3, 5), Blacksmith.AnimationKey.of(3, 8, 13));
+            if (a.value("dial", keys, Blacksmith.InterpolatorMode.CUBIC) != 0) fail("animation: the first track is not 0");
+            if (a.colour("lamp", List.of(Blacksmith.AnimationKey.of(0.5, 1, 0, 0), Blacksmith.AnimationKey.of(2, 0, 0.5, 1))) != 1) fail("animation: the second track is not 1");
+            Blacksmith.AnimationTrack tr = a.track(0);
+            if (!tr.target().equals("dial") || tr.channel() != Blacksmith.AnimationChannel.VALUE || tr.mode() != Blacksmith.InterpolatorMode.CUBIC || tr.dimension() != 2)
+                fail("animation: the dial reads " + tr);
+            if (!Arrays.equals(tr.times(), new double[] {0, 1, 3}) || tr.values().length != 3 || !Arrays.equals(tr.values()[2], new double[] {8, 13})
+                    || !Arrays.equals(tr.values()[0], new double[] {1, 2})) fail("animation: the dial's times or values");
+            if (!Arrays.equals(tr.pivot(), new double[] {0, 0, 0}) || !Arrays.equals(tr.axis(), new double[] {0, 0, 1})) fail("animation: the default pivot or axis");
+            if (!tr.equals(a.track(0)) || tr.equals(a.track(1)) || tr.hashCode() != a.track(0).hashCode()) fail("animation: tracks are not equal by value");
+            Blacksmith.AnimationTrack lamp = a.track(1);
+            if (!lamp.target().equals("lamp") || lamp.channel() != Blacksmith.AnimationChannel.COLOUR || lamp.dimension() != 3
+                    || !Arrays.equals(lamp.values()[1], new double[] {0, 0.5, 1})) fail("animation: the lamp's fields");
+            a.visible("lamp", List.of(Blacksmith.AnimationKey.of(0, 1), Blacksmith.AnimationKey.of(2, 0)));
+            Blacksmith.AnimationTrack vis = a.track(2);
+            if (vis.dimension() != 1 || vis.mode() != Blacksmith.InterpolatorMode.NEAREST || vis.values()[0][0] != 1 || vis.values()[1][0] != 0)
+                fail("animation: the visible track's fields");
+            if (!a.targets().equals(List.of("dial", "lamp")) || a.duration() != 3) fail("animation: targets or duration after three tracks");
+            String tooFar = refused(() -> a.track(9));
+            if (!tooFar.startsWith("animation_track_target: track 9 is not below 3")) fail("animation: track(9) gave '" + tooFar + "'");
+        }
+        // 3. valuesAt order and shapes
+        try (Blacksmith.Animation a = new Blacksmith.Animation()) {
+            a.value("speed", List.of(Blacksmith.AnimationKey.of(0, 0), Blacksmith.AnimationKey.of(2, 4)));
+            a.translate("box", List.of(Blacksmith.AnimationKey.of(0, 0, 0, 0), Blacksmith.AnimationKey.of(2, 2, 4, 6)));
+            a.ghost("box", List.of(Blacksmith.AnimationKey.of(0, 0), Blacksmith.AnimationKey.of(1, 1)));
+            double[][] v = a.valuesAt(1);
+            if (v.length != 3 || v[0].length != 1 || v[1].length != 3 || v[2].length != 1) fail("animation: valuesAt shapes");
+            if (!within(v[0][0], 2, 1e-12) || !near(v[1], new double[] {1, 2, 3}, 1e-12) || v[2][0] != 1) fail("animation: valuesAt numbers");
+            for (int k = 0; k < 3; k++) if (!Arrays.equals(v[k], a.valueAt(k, 1))) fail("animation: valuesAt " + k + " is not valueAt");
+        }
+        // 4. nearest holds; modes differ on uneven keys
+        try (Blacksmith.Animation a = new Blacksmith.Animation()) {
+            a.value("step", List.of(Blacksmith.AnimationKey.of(0, 0), Blacksmith.AnimationKey.of(2, 10), Blacksmith.AnimationKey.of(3, 20)), Blacksmith.InterpolatorMode.NEAREST);
+            double[] ts = {-1, 0, 1.99, 2, 2.5, 3, 9}, want = {0, 0, 0, 10, 10, 20, 20}, got = new double[ts.length];
+            for (int k = 0; k < ts.length; k++) got[k] = a.valueAt(0, ts[k])[0];
+            if (!Arrays.equals(got, want)) fail("animation: nearest gave " + Arrays.toString(got));
+            a.addTrack("flag", Blacksmith.AnimationChannel.VISIBLE, List.of(Blacksmith.AnimationKey.of(0, 0), Blacksmith.AnimationKey.of(1, 1)), Blacksmith.InterpolatorMode.LINEAR);
+            if (a.valueAt(1, 0.9)[0] != 0 || a.track(1).mode() != Blacksmith.InterpolatorMode.LINEAR) fail("animation: a visible track did not hold");
+            List<Blacksmith.AnimationKey> uneven = List.of(Blacksmith.AnimationKey.of(0, 0), Blacksmith.AnimationKey.of(1, 1), Blacksmith.AnimationKey.of(3, 0));
+            int cubic = a.value("c", uneven, Blacksmith.InterpolatorMode.CUBIC);
+            int catmull = a.value("r", uneven, Blacksmith.InterpolatorMode.CATMULL_ROM);
+            int cosine = a.value("o", List.of(Blacksmith.AnimationKey.of(0, 0), Blacksmith.AnimationKey.of(2, 10)), Blacksmith.InterpolatorMode.COSINE);
+            if (!within(a.valueAt(cubic, 2)[0], 0.625, 1e-12)) fail("animation: cubic gave " + a.valueAt(cubic, 2)[0]);
+            if (!within(a.valueAt(catmull, 2)[0], 0.5625, 1e-12)) fail("animation: catmull-rom gave " + a.valueAt(catmull, 2)[0]);
+            if (!within(a.valueAt(cosine, 0.5)[0], 10 * (1 - Math.cos(Math.PI / 4)) / 2, 1e-12)) fail("animation: cosine");
+            if (a.track(cubic).mode() != Blacksmith.InterpolatorMode.CUBIC || a.track(catmull).mode() != Blacksmith.InterpolatorMode.CATMULL_ROM
+                    || a.track(cosine).mode() != Blacksmith.InterpolatorMode.COSINE) fail("animation: modes read back");
+        }
+        // 5. refusals: the kernel's with its prefix, ours before the call
+        try (Blacksmith.Animation a = new Blacksmith.Animation()) {
+            String times = refused(() -> a.value("x", List.of(Blacksmith.AnimationKey.of(0, 0), Blacksmith.AnimationKey.of(1.5, 1), Blacksmith.AnimationKey.of(1, 2))));
+            if (!times.startsWith("animation_add_track: times must increase: key 2 at 1 after 1.5")) fail("animation: unordered times gave '" + times + "'");
+            String dim = refused(() -> a.translate("x", List.of(Blacksmith.AnimationKey.of(0, 1))));
+            if (!dim.startsWith("animation_add_track: ")) fail("animation: a one-number translate gave '" + dim + "'");
+            String unequal = refused(() -> a.value("x", List.of(Blacksmith.AnimationKey.of(0, 1, 2), Blacksmith.AnimationKey.of(1, 1, 2, 3))));
+            if (!unequal.equals("animation: key values differ in length")) fail("animation: unequal values gave '" + unequal + "'");
+            String pivot = refused(() -> a.rotate("r", List.of(Blacksmith.AnimationKey.of(0, 0)), new double[] {1, 2}, null));
+            if (!pivot.equals("animation: pivot is 2 numbers, not 3")) fail("animation: a short pivot gave '" + pivot + "'");
+            String shortAxis = refused(() -> a.rotate("r", List.of(Blacksmith.AnimationKey.of(0, 0)), null, new double[] {0, 0, 0}));
+            if (!shortAxis.equals("animation_set_pivot: the axis is too short")) fail("animation: a zero axis gave '" + shortAxis + "'");
+            if (a.size() != 0) fail("animation: a refusal left a track behind");
+            int k = a.value("x", List.of(Blacksmith.AnimationKey.of(0, 0)));
+            String onValue = refused(() -> a.setPivot(k, new double[] {0, 0, 0}));
+            if (!onValue.startsWith("animation_set_pivot: track 0 is value")) fail("animation: a pivot on a value track gave '" + onValue + "'");
+            String nanT = refused(() -> a.valueAt(k, Double.NaN));
+            if (!nanT.startsWith("animation_track_value_at: t NaN is not finite")) fail("animation: t NaN gave '" + nanT + "'");
+            String far = refused(() -> a.valueAt(9, 0));
+            if (!far.startsWith("animation_track_value_at: track 9 is not below 1")) fail("animation: track 9 gave '" + far + "'");
+        }
+        // 6. clone independence; close twice, then every call refuses
+        {
+            Blacksmith.Animation a = new Blacksmith.Animation();
+            a.translate("box", List.of(Blacksmith.AnimationKey.of(0, 0, 0, 0), Blacksmith.AnimationKey.of(1, 1, 0, 0)));
+            Blacksmith.Animation b = a.clone();
+            b.value("dial", List.of(Blacksmith.AnimationKey.of(0, 5), Blacksmith.AnimationKey.of(7, 6)));
+            if (a.size() != 1 || b.size() != 2 || a.duration() != 1 || b.duration() != 7 || a.targets().size() != 1 || b.targets().size() != 2)
+                fail("animation: a clone is not independent");
+            a.close();
+            a.close();
+            if (!a.closed() || !a.toString().equals("Animation(closed)")) fail("animation: close did not close");
+            if (!b.track(0).target().equals("box")) fail("animation: the clone did not outlive its source");
+            Map<String, Runnable> after = new java.util.LinkedHashMap<>();
+            after.put("size", () -> a.size());
+            after.put("duration", () -> a.duration());
+            after.put("targets", () -> a.targets());
+            after.put("track", () -> a.track(0));
+            after.put("valueAt", () -> a.valueAt(0, 0));
+            after.put("valuesAt", () -> a.valuesAt(0));
+            after.put("placementAt", () -> a.placementAt(0, 0));
+            after.put("addTrack", () -> a.value("x", List.of(Blacksmith.AnimationKey.of(0, 0))));
+            after.put("setPivot", () -> a.setPivot(0, new double[] {0, 0, 0}));
+            after.put("clone", () -> a.clone());
+            for (Map.Entry<String, Runnable> c : after.entrySet()) {
+                String said = refused(c.getValue());
+                if (!said.equals("animation: closed")) fail("animation " + c.getKey() + ": a closed one gave '" + said + "'");
+            }
+            b.close();
+        }
+        System.out.println("animation: the turntable, read-back, valuesAt, holds, refusals, clones and lifetime all read back");
+    }
+
+    /** The point (x, y, z) moved by a column-major 4x4. */
+    private static double[] movedBy(double[] m, double x, double y, double z) {
+        return new double[] {m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13], m[2] * x + m[6] * y + m[10] * z + m[14]};
     }
 
     /** Merge and regions: Python's test_merge_* and test_a_merged_body_is_refused_*, trimmed to
@@ -5021,6 +5839,139 @@ public final class Smoke {
 
     /** Closest point from a point: Python's test_closest_point_* .. test_a_nurbs_curve_closest_point_*,
      *  every figure a closed form written out here (closest-point P3). */
+
+    private static void ins(boolean ok, String what) {
+        if (!ok) fail("inspect: " + what);
+    }
+
+    private static boolean close(double a, double b, double tol) {
+        return Math.abs(a - b) <= tol;
+    }
+
+    private static int topFace(Blacksmith.Solid s) {
+        int best = 0;
+        for (int f = 1; f < s.faces(); f++)
+            if (s.faceInnerPoint(f).point()[2] > s.faceInnerPoint(best).point()[2]) best = f;
+        return best;
+    }
+
+    // Point, edge and face queries: Python's test_a_point_on_a_face_reads_inside_boundary_or_off ..
+    // test_area_properties_of_a_plate_with_a_hole, every closed form as a literal.
+    private static void inspect() {
+        try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(2, 2, 2);
+             Blacksmith.Solid bore0 = Blacksmith.Solid.cylinder(0.5, 4);
+             Blacksmith.Solid bore = bore0.translate(0, 0, -2);
+             Blacksmith.Solid bored = cube.cut(bore, Double.NaN);
+             Blacksmith.Solid block0 = Blacksmith.Solid.cuboid(40, 30, 10);
+             Blacksmith.Solid block = block0.translate(0, 0, 5);
+             Blacksmith.Solid pocket0 = Blacksmith.Solid.cuboid(20, 10, 8);
+             Blacksmith.Solid pocket = pocket0.translate(0, 0, 6);
+             Blacksmith.Solid pocketed = block.cut(pocket);
+             Blacksmith.Solid rounded = cube.fillet(java.util.stream.IntStream.range(0, 12).toArray(), 0.3);
+             Blacksmith.Solid rod = Blacksmith.Solid.cylinder(1, 3);
+             Blacksmith.Solid ball = Blacksmith.Solid.sphere(1);
+             Blacksmith.Profile rect = Blacksmith.Profile.rect(6, 2);
+             Blacksmith.Profile hole = Blacksmith.Profile.circle(0.5);
+             Blacksmith.Profile holed = rect.withHole(hole)) {
+            // 1. a point on a face: inside, boundary, off; the face's size; the refusals
+            int top = topFace(cube);
+            Blacksmith.FacePoint inner = cube.faceInnerPoint(top);
+            ins(inner.where().equals("inside") && inner.distance() < 1e-12, "face_inner_point: " + inner);
+            ins(cube.facePoint(top, new double[] {0.2, 0.1, 1.0}).where().equals("inside"), "face_point: (0.2, 0.1, 1) is not inside");
+            ins(cube.facePoint(top, new double[] {1.0, 0.1, 1.0}, 1e-6).where().equals("boundary"), "face_point: (1, 0.1, 1) is not on the boundary");
+            Blacksmith.FacePoint off = cube.facePoint(top, new double[] {0.2, 0.1, 1.5});
+            ins(off.where().equals("off") && close(off.distance(), 0.5, 1e-12) && close(off.point()[2], 1.0, 1e-12) && close(off.point()[0], 0.2, 1e-12),
+                    "face_point: above the top reads " + off);
+            ins(cube.facePoint(top, new double[] {0.2, 0.1, 1.001}, 1e-4).where().equals("off"), "face_point: 1e-3 above is not off at 1e-4");
+            ins(cube.facePoint(top, new double[] {0.2, 0.1, 1.001}, 1e-2).where().equals("inside"), "face_point: 1e-3 above is not inside at 1e-2");
+            double[] size = cube.faceSize(top);
+            ins(close(size[0], 2, 1e-9) && close(size[1], 2, 1e-9), "face_size: " + Arrays.toString(size));
+            int btop = topFace(bored);
+            ins(bored.facePoint(btop, new double[] {0, 0, 1}).where().equals("off"), "face_point: the bore's middle is not off the top");
+            ins(bored.facePoint(btop, new double[] {0.5, 0, 1}, 1e-6).where().equals("boundary"), "face_point: the bore's rim is not on the boundary");
+            String r1 = refused(() -> cube.facePoint(99, new double[] {0, 0, 0}));
+            ins(r1.startsWith("face_point: face 99 of "), "face_point: face 99 gave '" + r1 + "'");
+            String r2 = refused(() -> cube.facePoint(0, new double[] {0, 0, 0}, -1.0));
+            ins(r2.startsWith("face_point: tolerance must be positive and finite"), "face_point: tolerance -1 gave '" + r2 + "'");
+            ins(refused(() -> cube.faceInnerPoint(6)).startsWith("face_inner_point: face 6 of 6"), "face_inner_point: face 6 is not refused");
+            ins(refused(() -> cube.faceSize(6)).startsWith("face_size: face 6 of 6"), "face_size: face 6 is not refused");
+            // 2. a point on an edge, and its parameter
+            Blacksmith.Edge edge = cube.edges().get(0);
+            Blacksmith.EdgePoint mid = cube.edgeInnerPoint(edge);
+            ins(mid.on() && mid.distance() == 0.0, "edge_inner_point: " + mid);
+            ins(cube.edgePoint(0, mid.point()).on(), "edge_point: the inner point is not on");
+            double[] far = {3 * mid.point()[0] + 1, 3 * mid.point()[1] + 1, 3 * mid.point()[2] + 1};
+            Blacksmith.EdgePoint e = cube.edgePoint(edge, far);
+            ins(!e.on() && e.distance() > 0.5, "edge_point: far reads " + e);
+            Blacksmith.Solid.EdgeFoot foot = cube.edgeClosestPoint(0, far);
+            ins(e.t() == foot.t() && Arrays.equals(e.point(), foot.point()) && e.distance() == foot.distance(), "edge_point: " + e + " is not edge_closest_point's");
+            ins(refused(() -> cube.edgePoint(12, far)).startsWith("edge_point: edge 12 of 12"), "edge_point: edge 12 is not refused");
+            ins(refused(() -> cube.edgeInnerPoint(12)).startsWith("edge_inner_point: edge 12 of 12"), "edge_inner_point: edge 12 is not refused");
+            // 3. convexity: a box's twelve edges convex at pi/2, a pocket's eight concave
+            List<String> kinds = cube.edgesConvexity();
+            ins(kinds.size() == 12 && kinds.stream().allMatch("convex"::equals), "edges_convexity: " + kinds);
+            ins(cube.convexEdges().equals(java.util.stream.IntStream.range(0, 12).boxed().toList()) && cube.concaveEdges().isEmpty(), "convex_edges / concave_edges on the cube");
+            Blacksmith.EdgeConvexity c = cube.edgeConvexity(cube.edges().get(3), 0.0, 16);
+            ins(c.kind().equals("convex") && c.samples() == 16 && close(c.angleMin(), Math.PI / 2, 1e-12) && close(c.angleMax(), Math.PI / 2, 1e-12), "edge_convexity: " + c);
+            ins(pocketed.concaveEdges().size() == 8, "concave_edges: the pocket reads " + pocketed.concaveEdges());
+            String r3 = refused(() -> cube.edgesConvexity(-0.1));
+            ins(r3.startsWith("edges_convexity: the angular tolerance -0.1 is not in [0, pi/2)"), "edges_convexity: -0.1 gave '" + r3 + "'");
+            ins(refused(() -> cube.edgeConvexity(12)).startsWith("edge_convexity: edge 12 of 12"), "edge_convexity: edge 12 is not refused");
+            // 4. tangent chains: a box splits into six, a filleted box is one group
+            List<List<Integer>> groups = cube.tangentFaceGroups();
+            ins(groups.equals(List.of(List.of(0), List.of(1), List.of(2), List.of(3), List.of(4), List.of(5))), "tangent_face_groups: the cube reads " + groups);
+            ins(cube.tangentFaces(2).equals(List.of(2)), "tangent_faces: the cube's face 2");
+            ins(cube.tangentEdges(cube.edges().get(4)).equals(List.of(4)), "tangent_edges: the cube's edge 4");
+            List<Integer> all = java.util.stream.IntStream.range(0, rounded.faces()).boxed().toList();
+            List<List<Integer>> rg = rounded.tangentFaceGroups();
+            ins(rg.equals(List.of(all)), "tangent_face_groups: the rounded cube reads " + rg);
+            ins(rounded.tangentFaces(0).stream().sorted().toList().equals(all), "tangent_faces: the rounded cube");
+            ins(refused(() -> cube.tangentFaces(6)).startsWith("tangent_faces: face 6 of 6"), "tangent_faces: face 6 is not refused");
+            String r4 = refused(() -> cube.tangentFaceGroups(2.0));
+            ins(r4.startsWith("tangent_face_groups: the angular tolerance 2 is not in [0, pi/2)"), "tangent_face_groups: 2 gave '" + r4 + "'");
+            // 5. angles: faces of a box, an edge to a face, a rod's axis to its cap, three points
+            double[] angles = new double[6];
+            for (int f = 0; f < 6; f++) angles[f] = cube.angleTo("face", 0, cube, "face", f).angle();
+            Arrays.sort(angles);
+            double[] want = {0, Math.PI / 2, Math.PI / 2, Math.PI / 2, Math.PI / 2, Math.PI};
+            for (int i = 0; i < 6; i++) ins(close(angles[i], want[i], 1e-12), "angle_to: the cube's faces read " + Arrays.toString(angles));
+            Blacksmith.Angle ef = cube.angleTo("edge", cube.edges().get(0).index(), cube, "face", 0);
+            ins(ef.kind().equals("line_plane"), "angle_to: an edge to a face reads " + ef);
+            int side = -1, cap = -1;
+            for (int f = 0; f < rod.faces(); f++) if (side < 0 && rod.faceMinimumRadius(f).radius() < Double.POSITIVE_INFINITY) side = f;
+            for (int f = 0; f < rod.faces(); f++) if (cap < 0 && f != side) cap = f;
+            Blacksmith.Angle ra = rod.angleTo("face", side, rod, "face", cap);
+            ins(ra.kind().equals("line_plane") && close(ra.angle(), Math.PI / 2, 1e-12), "angle_to: the rod's axis to its cap reads " + ra);
+            ins(close(Blacksmith.angle(new double[] {1, 0, 0}, new double[] {0, 0, 0}, new double[] {0, 3, 0}), Math.PI / 2, 1e-15), "angle: a right angle");
+            ins(close(Blacksmith.angle(new double[] {1, 0, 0}, new double[] {0, 0, 0}, new double[] {-2, 0, 0}), Math.PI, 1e-15), "angle: a straight angle");
+            ins(refused(() -> Blacksmith.angle(new double[] {0, 0, 0}, new double[] {0, 0, 0}, new double[] {1, 0, 0})).startsWith("angle_points: "), "angle: an arm of no length is not refused");
+            String r5 = refused(() -> cube.angleTo("vertex", 0, cube, "face", 0));
+            ins(r5.startsWith("angle_between: a kind is 'face' or 'edge'"), "angle_to: 'vertex' gave '" + r5 + "'");
+            String r6 = refused(() -> ball.angleTo("face", 0, cube, "face", 0));
+            ins(r6.startsWith("angle_between: face 0 is neither planar nor has an axis"), "angle_to: a sphere gave '" + r6 + "'");
+            // 6. the minimum radius of a bore's wall and of a plane
+            int wall = -1;
+            for (int f = 0; f < bored.faces(); f++) if (wall < 0 && bored.faceMinimumRadius(f).radius() < Double.POSITIVE_INFINITY) wall = f;
+            Blacksmith.MinimumRadius mr = bored.faceMinimumRadius(wall);
+            ins(close(mr.radius(), 0.5, 1e-9) && close(mr.curvature(), -2, 1e-9), "face_minimum_radius: the bore reads " + mr);
+            Blacksmith.MinimumRadius flat = cube.faceMinimumRadius(0);
+            ins(flat.radius() == Double.POSITIVE_INFINITY && flat.curvature() == 0.0, "face_minimum_radius: a plane reads " + flat);
+            ins(refused(() -> cube.faceMinimumRadius(6)).startsWith("face_minimum_radius: face 6 of 6"), "face_minimum_radius: face 6 is not refused");
+            // 7. area properties: a 6 x 2 rectangle, and with a hole of radius 0.5
+            Blacksmith.AreaProperties ap = rect.areaProperties();
+            ins(ap.accuracyMet() && close(ap.area(), 12, 1e-12) && close(ap.perimeter(), 16, 1e-12), "area_properties: the rectangle reads " + ap);
+            ins(close(ap.secondMoments()[0], 4, 1e-12) && close(ap.secondMoments()[1], 36, 1e-12) && close(ap.secondMoments()[2], 0, 1e-12),
+                    "area_properties: second moments " + Arrays.toString(ap.secondMoments()));
+            ins(close(ap.principalMoments()[0], 4, 1e-12) && close(ap.principalMoments()[1], 36, 1e-12), "area_properties: principal moments " + Arrays.toString(ap.principalMoments()));
+            Blacksmith.AreaProperties hp = holed.areaProperties();
+            ins(close(hp.area(), 12 - Math.PI / 4, 1e-9) && close(hp.perimeter(), 16 + Math.PI, 1e-9), "area_properties: the plate reads " + hp);
+            ins(close(hp.secondMoments()[0], 4 - Math.PI * Math.pow(0.5, 4) / 4, 1e-9) && Math.abs(hp.centroid()[0]) < 1e-12 && Math.abs(hp.centroid()[1]) < 1e-12,
+                    "area_properties: the plate reads " + hp);
+            String r7 = refused(() -> rect.areaProperties(2.0));
+            ins(r7.startsWith("profile_area_properties: accuracy 2 is not in (0, 1)"), "area_properties: accuracy 2 gave '" + r7 + "'");
+            System.out.println("inspect: face/edge points, convexity, tangent groups, angles, minimum radius " + mr.radius() + ", area " + hp.area());
+        }
+    }
     private static void closestPoint() {
         final double s2 = 0.7071067811865476, s3 = 0.5773502691896258;
         try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(10, 10, 10)) {
@@ -5394,6 +6345,314 @@ public final class Smoke {
             if (beside.closestObject(List.of(mesh), 0.9) != null) fail("closest_object: 0.9 found a mesh 1 away");
         }
         System.out.println("closest points against a triangle mesh: face, edge, vertex, crossing, max distance, solid's mesh and nearest object read back");
+    }
+
+    /** Every field of two surface points, exactly. */
+    private static boolean sameSurfacePoint(Blacksmith.SurfacePoint a, Blacksmith.SurfacePoint b) {
+        return a != null && b != null && near(a.point(), b.point(), 0) && a.distance() == b.distance() && a.u() == b.u() && a.v() == b.v()
+            && near(a.normal(), b.normal(), 0) && a.boundary() == b.boundary();
+    }
+
+    /** Every field of two curve-surface answers, exactly. */
+    private static boolean sameSurfaceFoot(Blacksmith.CurveSurfaceFoot a, Blacksmith.CurveSurfaceFoot b) {
+        return a != null && b != null && a.distance() == b.distance() && a.t() == b.t() && near(a.pointOnCurve(), b.pointOnCurve(), 0)
+            && near(a.pointOnSurface(), b.pointOnSurface(), 0) && a.u() == b.u() && a.v() == b.v() && near(a.normal(), b.normal(), 0)
+            && a.boundary() == b.boundary() && a.crossing() == b.crossing();
+    }
+
+    /** The 2 x 2 sheet of degree 1, S(u, v) = (u, v, 0) over [0, 1]^2, its normal +z, moved by s. */
+    private static Blacksmith.NurbsSurface unitSheet(double[] s) {
+        return new Blacksmith.NurbsSurface(new double[][] {shift(0, 0, 0, s), shift(0, 1, 0, s), shift(1, 0, 0, s), shift(1, 1, 0, s)},
+                                           new int[] {2, 2}, 1, 1);
+    }
+
+    private static boolean sameDomain(Blacksmith.SurfaceValue.Domain d, double u0, double u1, double v0, double v1) {
+        return d.u().t0() == u0 && d.u().t1() == u1 && d.v().t0() == v0 && d.v().t1() == v1;
+    }
+
+    /** Closest points against an untrimmed NURBS surface: Python's
+     *  test_a_surface_point_names_its_boundary_and_normal_in_closed_form ..
+     *  test_the_nearest_object_to_a_curve_takes_a_nurbs_surface, every figure a closed form
+     *  written out here (surface closest points P3), at the origin and shifted far out. */
+    private static void nurbsSurfaceClosestPoints() {
+        double[][] shifts = {{0, 0, 0}, {1e4, -1e4, 5e3}, {1e6, -1e6, 5e5}};
+        for (double[] s : shifts) {
+            double big = Math.max(Math.abs(s[0]), Math.max(Math.abs(s[1]), Math.abs(s[2])));
+            double tol = 1e-9 * (1 + big);
+            try (Blacksmith.NurbsSurface sheet = unitSheet(s);
+                 Blacksmith.NurbsCurve through = segment(shift(0.25, 0.5, -1, s), shift(0.25, 0.5, 1, s));
+                 Blacksmith.NurbsCurve beside = segment(shift(2, 0.5, -1, s), shift(2, 0.5, 1, s))) {
+                // 1. the net reads back; the point and the normal in closed form
+                if (sheet.degreeU() != 1 || sheet.degreeV() != 1 || !Arrays.equals(sheet.counts(), new int[] {2, 2}) || !sameDomain(sheet.domain(), 0, 1, 0, 1))
+                    fail("nurbs surface: reads " + sheet + " over " + sheet.domain() + " at shift " + s[0]);
+                if (!near(sheet.pointAt(0.25, 0.75), shift(0.25, 0.75, 0, s), tol) || !near(sheet.normalAt(0.25, 0.75), new double[] {0, 0, 1}, 1e-12))
+                    fail("nurbs surface: point_at or normal_at off at shift " + s[0]);
+                // 2. above the interior, beyond the u = 1 edge, beyond the (1, 1) corner
+                Blacksmith.SurfacePoint inside = sheet.closestPoint(shift(0.3, 0.4, 1, s));
+                if (inside == null || !near(inside.point(), shift(0.3, 0.4, 0, s), tol) || !within(inside.distance(), 1, tol) || !within(inside.u(), 0.3, 1e-9)
+                    || !within(inside.v(), 0.4, 1e-9) || !near(inside.normal(), new double[] {0, 0, 1}, 1e-9) || inside.boundary())
+                    fail("nurbs surface closest_point: the interior reads " + inside + " at shift " + s[0]);
+                Blacksmith.SurfacePoint edge = sheet.closestPoint(shift(2, 0.5, -1, s));
+                if (edge == null || !edge.boundary() || edge.u() != 1 || !within(edge.v(), 0.5, 1e-9) || !within(edge.distance(), Math.sqrt(2), tol)
+                    || !near(edge.point(), shift(1, 0.5, 0, s), tol))
+                    fail("nurbs surface closest_point: beyond the edge reads " + edge + " at shift " + s[0]);
+                Blacksmith.SurfacePoint corner = sheet.closestPoint(shift(2, 2, 0, s));
+                if (corner == null || !corner.boundary() || corner.u() != 1 || corner.v() != 1 || !within(corner.distance(), Math.sqrt(2), tol)
+                    || !near(corner.point(), shift(1, 1, 0, s), tol))
+                    fail("nurbs surface closest_point: beyond the corner reads " + corner + " at shift " + s[0]);
+                // 3. the limit on both sides; null, NaN and +inf are none
+                double[] p = shift(0.3, 0.4, 1, s);
+                if (!sameSurfacePoint(sheet.closestPoint(p, 1.1), inside)) fail("nurbs surface closest_point: 1.1 missed a point 1 away");
+                if (sheet.closestPoint(p, 0.9) != null) fail("nurbs surface closest_point: 0.9 found a point 1 away");
+                if (!sameSurfacePoint(sheet.closestPoint(p, null), inside) || !sameSurfacePoint(sheet.closestPoint(p, Double.NaN), inside)
+                    || !sameSurfacePoint(sheet.closestPoint(p, Double.POSITIVE_INFINITY), inside))
+                    fail("nurbs surface closest_point: null, NaN or +inf is a limit");
+                // 4. a line up through (0.25, 0.5) crosses at t 0.5; a line beside the u = 1 edge
+                // answers the edge (boundary), 1 away at t 0.5; the limit on both sides
+                Blacksmith.CurveSurfaceFoot foot = sheet.curveClosestPoints(through);
+                if (foot == null || !foot.crossing() || foot.distance() != 0 || foot.boundary() || !within(foot.t(), 0.5, 1e-9) || !within(foot.u(), 0.25, 1e-9)
+                    || !within(foot.v(), 0.5, 1e-9) || !near(foot.pointOnCurve(), shift(0.25, 0.5, 0, s), tol)
+                    || !near(foot.pointOnSurface(), foot.pointOnCurve(), tol) || !near(foot.normal(), new double[] {0, 0, 1}, 1e-9))
+                    fail("nurbs surface curve_closest_points: through the sheet reads " + foot + " at shift " + s[0]);
+                Blacksmith.CurveSurfaceFoot side = sheet.curveClosestPoints(beside, 1.1);
+                if (side == null || side.crossing() || !side.boundary() || !within(side.distance(), 1, tol) || !within(side.t(), 0.5, 1e-9) || side.u() != 1
+                    || !within(side.v(), 0.5, 1e-9) || !near(side.pointOnSurface(), shift(1, 0.5, 0, s), tol) || !near(side.pointOnCurve(), shift(2, 0.5, 0, s), tol))
+                    fail("nurbs surface curve_closest_points: beside the edge reads " + side + " at shift " + s[0]);
+                if (sheet.curveClosestPoints(beside, 0.9) != null) fail("nurbs surface curve_closest_points: 0.9 found an edge 1 away");
+                if (!sameSurfaceFoot(sheet.curveClosestPoints(beside), side) || !sameSurfaceFoot(sheet.curveClosestPoints(beside, Double.NaN), side)
+                    || !sameSurfaceFoot(sheet.curveClosestPoints(beside, Double.POSITIVE_INFINITY), side))
+                    fail("nurbs surface curve_closest_points: null, NaN or +inf is a limit");
+            }
+        }
+        // 5. weights and knots reach the surface; a face's surface; the sheet of a surface is over
+        // [0, 1]^2; the refusals, exactly
+        try (Blacksmith.NurbsSurface w = new Blacksmith.NurbsSurface(
+                 new double[][] {{0, 0, 0}, {0, 1, 0}, {1, 0, 1}, {1, 1, 1}, {2, 0, 0}, {2, 1, 0}}, new int[] {3, 2}, 2, 1,
+                 new double[] {1, 1, 2, 2, 1, 1}, new double[] {2, 2, 2, 6, 6, 6}, new double[] {-1, -1, 1, 1})) {
+            if (!Arrays.equals(w.counts(), new int[] {3, 2}) || w.degreeU() != 2 || !sameDomain(w.domain(), 2, 6, -1, 1)) fail("nurbs surface: the weighted net reads " + w);
+            if (!near(w.pointAt(4, -1), new double[] {1, 0, 2.0 / 3}, 1e-12)) fail("nurbs surface: the weights do not reach the surface");
+            if (!refused(() -> w.pointAt(1, 0)).startsWith("nurbs_surface_point_at: ")) fail("nurbs surface: point_at outside the domain answered");
+        }
+        try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(2, 2, 2)) {
+            for (int f = 0; f < 6; f++) {
+                try (Blacksmith.NurbsSurface face = cube.faceSurface(f)) {
+                    Blacksmith.SurfacePoint foot = face.closestPoint(new double[] {0, 0, 0});
+                    if (foot == null || !within(foot.distance(), 1, 1e-12)) fail("solid face_surface: face " + f + " reads " + foot);
+                }
+            }
+            if (!refused(() -> cube.faceSurface(99)).startsWith("solid_face_surface: ")) fail("solid face_surface: face 99 answered");
+        }
+        try (Blacksmith.NurbsSurface wide = new Blacksmith.NurbsSurface(new double[][] {{0, 0, 0}, {0, 2, 0}, {3, 0, 0}, {3, 2, 0}}, new int[] {2, 2}, 1, 1,
+                 null, new double[] {5, 5, 9, 9}, new double[] {-1, -1, 1, 1});
+             Blacksmith.Solid sheet = wide.toSheet();
+             Blacksmith.NurbsSurface own = sheet.faceSurface(0)) {
+            if (!sameDomain(wide.domain(), 5, 9, -1, 1)) fail("nurbs surface: the knots read " + wide.domain());
+            if (sheet.faces() != 1 || !sameDomain(own.domain(), 0, 1, 0, 1)) fail("nurbs surface to_sheet: " + sheet.faces() + " faces over " + own.domain());
+        }
+        double[][] net = {{0, 0, 0}, {0, 1, 0}, {1, 0, 0}, {1, 1, 0}};
+        String badCount = refused(() -> new Blacksmith.NurbsSurface(net, new int[] {2, 3}, 1, 1));
+        if (!badCount.equals("nurbs_surface_new: 2 x 3 points take 18 numbers, got 12")) fail("nurbs surface: a bad grid count gave '" + badCount + "'");
+        String badDegree = refused(() -> new Blacksmith.NurbsSurface(net, new int[] {2, 2}, 0, 1));
+        if (!badDegree.equals("nurbs_surface_new: u degree 0 is not 1 to 7")) fail("nurbs surface: degree 0 gave '" + badDegree + "'");
+        try (Blacksmith.NurbsSurface sheet = unitSheet(new double[] {0, 0, 0});
+             Blacksmith.NurbsSurface flat = new Blacksmith.NurbsSurface(new double[] {0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0}, new int[] {2, 2}, 1, 1);
+             Blacksmith.NurbsCurve beside = segment(new double[] {2, 0.5, -1}, new double[] {2, 0.5, 1})) {
+            if (!sameSurfacePoint(flat.closestPoint(new double[] {0.3, 0.4, 1}), sheet.closestPoint(new double[] {0.3, 0.4, 1})))
+                fail("nurbs surface: the flat net builds another surface");
+            String negative = refused(() -> sheet.closestPoint(new double[] {0.5, 0.5, 1}, -1.0));
+            if (!negative.equals("nurbs_surface_closest_point: the max distance must not be negative")) fail("nurbs surface closest_point: -1 gave '" + negative + "'");
+            negative = refused(() -> sheet.curveClosestPoints(beside, -1.0));
+            if (!negative.equals("nurbs_surface_curve_closest_points: the max distance must not be negative"))
+                fail("nurbs surface curve_closest_points: -1 gave '" + negative + "'");
+            if (sheet.closestPoint(new double[] {0.5, 0.5, 0}, 0.0) == null) fail("nurbs surface closest_point: a point on the surface is not within 0");
+            // 6. the nearest object: a surface answers its own CurveSurfaceFoot (answer kind 4) and
+            // is named by its index; items after a surface are counted right
+            Blacksmith.NearestObject near = beside.closestObject(List.of(new double[] {9, 9, 9}, sheet));
+            Blacksmith.CurveSurfaceFoot own = sheet.curveClosestPoints(beside);
+            if (near == null || near.which() != 1 || near.body() != null || near.pair() != null || near.mesh() != null || !sameSurfaceFoot(near.surface(), own))
+                fail("closest_object: the surface's win reads " + near);
+            if (near.distance() != own.distance() || near.t() != own.t() || !near(near.pointOnCurve(), own.pointOnCurve(), 0)
+                || !near(near.pointOnItem(), own.pointOnSurface(), 0))
+                fail("closest_object: the surface's win is not its own answer");
+            Blacksmith.NearestObject after = beside.closestObject(List.of(sheet, new double[] {2.5, 0.5, 0}));
+            if (after == null || after.which() != 1 || after.surface() != null || !within(after.distance(), 0.5, 1e-9)) fail("closest_object: the point after a surface reads " + after);
+            if (beside.closestObject(List.of(sheet), 0.9) != null) fail("closest_object: 0.9 found a surface 1 away");
+            sheet.close();
+            String closed = refused(() -> sheet.closestPoint(new double[] {0.5, 0.5, 1}));
+            if (!closed.equals("nurbs_surface: closed")) fail("nurbs surface: a closed surface gave '" + closed + "'");
+        }
+        System.out.println("closest points against a nurbs surface: interior, edge, corner, crossing, boundary foot, max distance, face surface, sheet and nearest object read back");
+    }
+
+    /** A quarter of the circle of radius {@code r} in the xy plane, an exact rational quadratic on [0, 1]. */
+    private static Blacksmith.NurbsCurve quarter(double r) {
+        return new Blacksmith.NurbsCurve(new double[][] {{r, 0, 0}, {r, r, 0}, {0, r, 0}}, 2, new double[] {1, Math.sqrt(2) / 2, 1}, null);
+    }
+
+    /** The largest gap between {@code a} at t and {@code b} at {@code lo + (hi - lo) * s} for 201
+     *  even fractions s of {@code a}'s domain. */
+    private static double curveGap(Blacksmith.NurbsCurve a, Blacksmith.NurbsCurve b) {
+        double[] da = a.domain(), db = b.domain();
+        double worst = 0;
+        for (int i = 0; i <= 200; i++) {
+            double s = i / 200.0;
+            worst = Math.max(worst, dist(a.point(da[0] + (da[1] - da[0]) * s), b.point(db[0] + (db[1] - db[0]) * s)));
+        }
+        return worst;
+    }
+
+    /** f(u, v) = (u, v, u^2 v + u v^3) and its Su, Sv, Suv: cubic each way, so its Hermite surface is exact. */
+    private static double[][] hermitePoly(double u, double v) {
+        return new double[][] {{u, v, u * u * v + u * v * v * v}, {1, 0, 2 * u * v + v * v * v}, {0, 1, u * u + 3 * u * v * v}, {0, 0, 2 * u + 3 * v * v}};
+    }
+
+    private static boolean sameKnots(double[] a, double... b) {
+        if (a.length != b.length) return false;
+        for (int i = 0; i < a.length; i++) if (!within(a[i], b[i], 1e-15)) return false;
+        return true;
+    }
+
+    /** The NURBS toolbox: the C test nurbs_toolbox_abi.rs's closed forms -- knots in and out of an
+     *  arc, compatible / reparametrised / uniform / non-rational forms, Greville points and a
+     *  periodic curve, directions, the mean and conics; and on surfaces the Hermite surface read
+     *  back, knots, elevation, extension, second derivatives and a cylinder's curvature. */
+    private static void nurbsToolbox() {
+        final double r2 = Math.sqrt(2) / 2;
+        // 1. knots on an arc
+        try (Blacksmith.NurbsCurve q = quarter(2);
+             Blacksmith.NurbsCurve k = q.insertKnot(0.5);
+             Blacksmith.NurbsCurve.KnotRemoval back = k.removeKnot(0.5, 1, 1e-9);
+             Blacksmith.NurbsCurve corner = new Blacksmith.NurbsCurve(new double[][] {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}}, 1);
+             Blacksmith.NurbsCurve.KnotRemoval kept = corner.removeKnot(0.5, 1, 1e-6);
+             Blacksmith.NurbsCurve refined = q.refineKnots(new double[] {0.25, 0.5, 0.75})) {
+            if (!Arrays.equals(k.knots(), new double[] {0, 0, 0, 0.5, 1, 1, 1})) fail("nurbs insert_knot: knots " + Arrays.toString(k.knots()));
+            double[][] pts = k.controlPoints();
+            double[] w = k.weights();
+            if (!near(pts[1], new double[] {2, 2 * Math.sqrt(2) - 2, 0}, 1e-14) || !within(w[1], (2 + Math.sqrt(2)) / 4, 1e-14))
+                fail("nurbs insert_knot: point 1 " + Arrays.toString(pts[1]) + " weight " + w[1]);
+            if (curveGap(q, k) > 1e-14) fail("nurbs insert_knot: the curve moved " + curveGap(q, k));
+            if (back.removed() != 1) fail("nurbs remove_knot: removed " + back.removed());
+            if (!near(back.curve().controlPoints()[1], new double[] {2, 2, 0}, 1e-12) || !within(back.curve().weights()[1], r2, 1e-12))
+                fail("nurbs remove_knot: point 1 " + Arrays.toString(back.curve().controlPoints()[1]));
+            if (kept.removed() != 0 || kept.curve().controlPoints().length != 3) fail("nurbs remove_knot: a corner gave up " + kept.removed());
+            if (!Arrays.equals(refined.knots(), new double[] {0, 0, 0, 0.25, 0.5, 0.75, 1, 1, 1})) fail("nurbs refine_knots: " + Arrays.toString(refined.knots()));
+            if (!refused(() -> q.insertKnot(0.5, 3)).startsWith("nurbs_curve_knot_inserted: ")) fail("nurbs insert_knot: three at 0.5 on a quadratic answered");
+        }
+        // 2. forms
+        try (Blacksmith.NurbsCurve q = quarter(2);
+             Blacksmith.NurbsCurve re = q.reparametrize(10, 20);
+             Blacksmith.NurbsCurve flat = q.nonRational();
+             Blacksmith.NurbsCurve line = new Blacksmith.NurbsCurve(new double[][] {{0, 0, 1}, {4, 0, 1}}, 1, null, new double[] {3, 3, 5, 5});
+             Blacksmith.NurbsCurve bunched = new Blacksmith.NurbsCurve(new double[][] {{0, 0, 0}, {1, 1, 0}, {2, 0, 0}, {3, 1, 0}, {4, 0, 0}, {5, 1, 0}}, 3,
+                                                                       null, new double[] {0, 0, 0, 0, 0.1, 0.9, 1, 1, 1, 1});
+             Blacksmith.NurbsCurve uniform = bunched.makeUniform()) {
+            if (!Arrays.equals(re.domain(), new double[] {10, 20}) || !near(re.point(15), q.point(0.5), 1e-14)) fail("nurbs reparametrize: " + Arrays.toString(re.domain()));
+            if (!near(flat.point(0.5), new double[] {1.5, 1.5, 0}, 1e-15) || flat.isRational()) fail("nurbs non_rational: " + Arrays.toString(flat.point(0.5)));
+            List<Blacksmith.NurbsCurve> both = Blacksmith.NurbsCurve.makeCompatible(List.of(q, line));
+            try {
+                if (both.size() != 2) fail("nurbs make_compatible: " + both.size() + " curves");
+                for (Blacksmith.NurbsCurve c : both)
+                    if (c.degree() != 2 || !Arrays.equals(c.domain(), new double[] {0, 1})) fail("nurbs make_compatible: degree " + c.degree() + " over " + Arrays.toString(c.domain()));
+                if (!Arrays.equals(both.get(0).knots(), both.get(1).knots())) fail("nurbs make_compatible: the knots differ");
+                if (curveGap(q, both.get(0)) > 1e-14 || curveGap(line, both.get(1)) > 1e-14) fail("nurbs make_compatible: a curve moved");
+            } finally {
+                for (Blacksmith.NurbsCurve c : both) c.close();
+            }
+            if (!refused(() -> Blacksmith.NurbsCurve.makeCompatible(List.of())).startsWith("nurbs_curve_compatible: ")) fail("nurbs make_compatible: none answered");
+            if (!Arrays.equals(uniform.knots(), new double[] {0, 0, 0, 0, 1.0 / 3, 2.0 / 3, 1, 1, 1, 1})) fail("nurbs make_uniform: " + Arrays.toString(uniform.knots()));
+        }
+        // 3. Greville points and a periodic curve
+        try (Blacksmith.NurbsCurve c = new Blacksmith.NurbsCurve(new double[][] {{0, 0, 0}, {1, 1, 0}, {2, 4, 0}, {3, 9, 0}, {4, 16, 0}, {5, 25, 0}}, 3,
+                                                                 null, new double[] {0, 0, 0, 0, 1, 2, 3, 3, 3, 3});
+             Blacksmith.NurbsCurve square = new Blacksmith.NurbsCurve(new double[][] {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}, 3);
+             Blacksmith.NurbsCurve wrapped = square.periodic(false);
+             Blacksmith.NurbsCurve smooth = square.periodic()) {
+            double[] g = c.grevilleParameters();
+            if (!sameKnots(g, 0, 1.0 / 3, 1, 2, 8.0 / 3, 3)) fail("nurbs greville_parameters: " + Arrays.toString(g));
+            double[][] gp = c.grevillePoints();
+            for (int i = 0; i < 6; i++) if (!near(gp[i], c.point(g[i]), 1e-15)) fail("nurbs greville_points: point " + i + " " + Arrays.toString(gp[i]));
+            if (wrapped.controlPoints().length != 7 || !Arrays.equals(wrapped.domain(), new double[] {0, 4}) || !near(wrapped.point(0), new double[] {5.0 / 6, 1.0 / 6, 0}, 1e-15)
+                || !wrapped.isClosed())
+                fail("nurbs periodic: " + wrapped.controlPoints().length + " points over " + Arrays.toString(wrapped.domain()) + " from " + Arrays.toString(wrapped.point(0)));
+            if (!Arrays.equals(smooth.domain(), new double[] {0, 1}) || !near(smooth.point(0), square.point(0), 1e-12)) fail("nurbs periodic smooth: " + Arrays.toString(smooth.domain()));
+        }
+        // 4. directions, the mean, conics
+        try (Blacksmith.NurbsCurve a = segment(new double[] {0, 0, 0}, new double[] {10, 0, 0});
+             Blacksmith.NurbsCurve b = segment(new double[] {0, 1, 0}, new double[] {10, 1, 0});
+             Blacksmith.NurbsCurve backward = b.reverse();
+             Blacksmith.NurbsCurve lined = backward.linedUpWith(a);
+             Blacksmith.NurbsCurve q2 = quarter(2);
+             Blacksmith.NurbsCurve q4 = quarter(4);
+             Blacksmith.NurbsCurve q4r = q4.reverse();
+             Blacksmith.NurbsCurve m = q2.mean(q4r);
+             Blacksmith.NurbsCurve elevated = q2.elevate(3);
+             Blacksmith.NurbsCurve stretched = new Blacksmith.NurbsCurve(new double[][] {{4, 0, 0}, {4, 2, 0}, {0, 2, 0}}, 2, new double[] {1, r2, 1}, null);
+             Blacksmith.NurbsCurve hyper = new Blacksmith.NurbsCurve(new double[][] {{2, 0, 0}, {2, 2, 0}, {0, 2, 0}}, 2, new double[] {1, 2, 1}, null);
+             Blacksmith.NurbsCurve flat = q2.nonRational()) {
+            if (!a.directionsMatch(b) || a.directionsMatch(backward)) fail("nurbs directions_match: wrong");
+            if (!near(lined.point(0), new double[] {0, 1, 0}, 1e-15)) fail("nurbs lined_up_with: starts at " + Arrays.toString(lined.point(0)));
+            double[] d = m.domain();
+            for (int i = 0; i <= 40; i++) {
+                double[] p = m.point(d[0] + (d[1] - d[0]) * i / 40);
+                if (!within(dist(p, new double[] {0, 0, 0}), 3, 1e-12)) fail("nurbs mean: " + Arrays.toString(p) + " is not 3 from the centre");
+            }
+            Object[][] conics = {{q2, Blacksmith.ConicType.CIRCLE}, {elevated, Blacksmith.ConicType.CIRCLE}, {stretched, Blacksmith.ConicType.ELLIPSE},
+                                 {hyper, Blacksmith.ConicType.HYPERBOLA}, {flat, Blacksmith.ConicType.PARABOLA}, {a, null}};
+            for (Object[] row : conics) {
+                Blacksmith.ConicType kind = ((Blacksmith.NurbsCurve) row[0]).conicType(1e-6);
+                if (kind != row[1]) fail("nurbs conic_type: " + row[0] + " read " + kind + ", not " + row[1]);
+            }
+            if (!refused(() -> q2.conicType(-1)).startsWith("nurbs_curve_conic_type: ")) fail("nurbs conic_type: a negative tolerance answered");
+        }
+        // 5. the Hermite surface
+        double[] us = {0, 0.5, 2}, vs = {0, 1, 1.5};
+        double[][][] lists = new double[4][9][];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) {
+                double[][] f = hermitePoly(us[i], vs[j]);
+                for (int l = 0; l < 4; l++) lists[l][i * 3 + j] = f[l];
+            }
+        final double u = 1.3, v = 0.7;
+        try (Blacksmith.NurbsSurface s = Blacksmith.NurbsSurface.hermite(us, vs, lists[0], lists[1], lists[2], lists[3]);
+             Blacksmith.NurbsSurface e = s.elevate(Blacksmith.SurfaceDirection.U);
+             Blacksmith.NurbsSurface k = s.insertKnot(Blacksmith.SurfaceDirection.U, 1.0);
+             Blacksmith.NurbsSurface r = s.refineKnots(Blacksmith.SurfaceDirection.V, new double[] {0.25, 1.25});
+             Blacksmith.NurbsSurface.KnotRemoval back = k.removeKnot(Blacksmith.SurfaceDirection.U, 1.0, 1, 1e-9);
+             Blacksmith.NurbsSurface x = s.extend(Blacksmith.SurfaceSide.U_END, 0.5)) {
+            if (!Arrays.equals(s.counts(), new int[] {6, 6})) fail("nurbs surface hermite: counts " + Arrays.toString(s.counts()));
+            if (!Arrays.equals(s.knots(Blacksmith.SurfaceDirection.U), new double[] {0, 0, 0, 0, 0.5, 0.5, 2, 2, 2, 2})
+                || !Arrays.equals(s.knots(Blacksmith.SurfaceDirection.V), new double[] {0, 0, 0, 0, 1, 1, 1.5, 1.5, 1.5, 1.5}))
+                fail("nurbs surface knots: " + Arrays.toString(s.knots(Blacksmith.SurfaceDirection.U)) + " / " + Arrays.toString(s.knots(Blacksmith.SurfaceDirection.V)));
+            double[][] net = s.controlPoints();
+            if (net.length != 36 || !near(net[1], new double[] {0, 1.0 / 3, 0}, 0) || !near(net[6], new double[] {0.5 / 3, 0, 0}, 1e-15))
+                fail("nurbs surface control_points: " + net.length + " points, " + Arrays.toString(net[1]) + " " + Arrays.toString(net[6]));
+            for (double wt : s.weights()) if (wt != 1) fail("nurbs surface weights: " + wt);
+            if (!near(s.pointAt(u, v), hermitePoly(u, v)[0], 1e-13)) fail("nurbs surface hermite: point_at " + Arrays.toString(s.pointAt(u, v)));
+            Blacksmith.SurfaceDerivatives sd = s.secondDerivatives(u, v);
+            double[][] f = hermitePoly(u, v);
+            if (!near(sd.point(), f[0], 1e-12) || !near(sd.du(), f[1], 1e-12) || !near(sd.dv(), f[2], 1e-12) || !near(sd.duu(), new double[] {0, 0, 2 * v}, 1e-12)
+                || !near(sd.duv(), new double[] {0, 0, 2 * u + 3 * v * v}, 1e-12) || !near(sd.dvv(), new double[] {0, 0, 6 * u * v}, 1e-12))
+                fail("nurbs surface second_derivatives: Suu " + Arrays.toString(sd.duu()) + " Suv " + Arrays.toString(sd.duv()) + " Svv " + Arrays.toString(sd.dvv()));
+            if (e.degreeU() != 4 || e.degreeV() != 3 || !near(e.pointAt(u, v), s.pointAt(u, v), 1e-13)) fail("nurbs surface elevate: " + e);
+            if (!Arrays.equals(k.counts(), new int[] {7, 6}) || !near(k.pointAt(u, v), s.pointAt(u, v), 1e-13)) fail("nurbs surface insert_knot: " + k);
+            if (!Arrays.equals(r.counts(), new int[] {6, 8}) || !near(r.pointAt(u, v), s.pointAt(u, v), 1e-13)) fail("nurbs surface refine_knots: " + r);
+            if (back.removed() != 1 || !Arrays.equals(back.surface().counts(), new int[] {6, 6})) fail("nurbs surface remove_knot: removed " + back.removed() + ", " + back.surface());
+            if (!(x.domain().u().t1() > 2) || x.domain().u().t0() != 0 || !near(x.pointAt(u, v), s.pointAt(u, v), 1e-12)) fail("nurbs surface extend: " + x.domain());
+            if (!refused(() -> s.insertKnot(Blacksmith.SurfaceDirection.U, 0.5, 2)).startsWith("nurbs_surface_knot_inserted: ")) fail("nurbs surface insert_knot: past the degree answered");
+        }
+        // 6. a quarter cylinder's curvature
+        try (Blacksmith.NurbsSurface cyl = new Blacksmith.NurbsSurface(new double[][] {{2, 0, 0}, {2, 0, 5}, {2, 2, 0}, {2, 2, 5}, {0, 2, 0}, {0, 2, 5}}, new int[] {3, 2}, 2, 1,
+                                                                        new double[] {1, 1, r2, r2, 1, 1}, null, null)) {
+            Blacksmith.SurfaceCurvature c = cyl.curvature(0.5, 0.3);
+            if (!within(c.k1(), 0, 1e-12) || !within(c.k2(), -0.5, 1e-12) || !within(c.gaussian(), 0, 1e-12) || !within(c.mean(), -0.25, 1e-12)
+                || !near(c.normal(), new double[] {r2, r2, 0}, 1e-12))
+                fail("nurbs surface curvature: " + c);
+            if (Math.min(dist(c.dir1(), new double[] {0, 0, 1}), dist(c.dir1(), new double[] {0, 0, -1})) > 1e-12
+                || Math.min(dist(c.dir2(), new double[] {-r2, r2, 0}), dist(c.dir2(), new double[] {r2, -r2, 0})) > 1e-12)
+                fail("nurbs surface curvature: directions " + Arrays.toString(c.dir1()) + " " + Arrays.toString(c.dir2()));
+            if (!refused(() -> cyl.curvature(2.0, 0.3)).startsWith("nurbs_surface_curvature: ")) fail("nurbs surface curvature: outside the domain answered");
+        }
+        System.out.println("nurbs toolbox: knots in and out, compatible, reparametrised, uniform, non-rational, greville, periodic, directions, mean, conics, hermite surface, surface knots, elevation, extension, second derivatives and curvature read back");
     }
 
     private static double[] shift(double x, double y, double z, double[] s) {
@@ -6253,10 +7512,10 @@ public final class Smoke {
     private static void materials() {
         try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(1, 1, 1);
              Blacksmith.Solid made = cube.withMaterial("Steel");
-             Blacksmith.Solid steel = made.styled("materials/steel.mtlx", "BrushedSteel");
+             Blacksmith.Solid steel = made.style("materials/steel.mtlx", "BrushedSteel");
              Blacksmith.Solid tool = cube.translate(0.5, 0.5, 0.5);
              Blacksmith.Solid cut = steel.cut(tool);
-             Blacksmith.Solid only = cube.styled(null, "BrushedSteel")) {
+             Blacksmith.Solid only = cube.style(null, "BrushedSteel")) {
             if (cube.material() != null) fail("material: a fresh cuboid has a material");
             if (!"Steel".equals(steel.material()) || !"materials/steel.mtlx".equals(steel.styleLocation())
                     || !"BrushedSteel".equals(steel.styleIdentification()))
@@ -6270,7 +7529,7 @@ public final class Smoke {
             try { cube.withMaterial(" ").close(); } catch (Blacksmith.BuildException e) { refused = true; }
             if (!refused) fail("material: a blank material was accepted");
             refused = false;
-            try { cube.styled(null, null).close(); } catch (Blacksmith.BuildException e) { refused = true; }
+            try { cube.style(null, null).close(); } catch (Blacksmith.BuildException e) { refused = true; }
             if (!refused) fail("material: a style naming nothing was accepted");
         }
         System.out.println("kernel material: read back, kept by a cut, written to STEP");
@@ -6832,28 +8091,28 @@ public final class Smoke {
             String rest = noStamp(arm.stepText());
             List<Blacksmith.StateRow> shoulderHalf = List.of(new Blacksmith.StateRow("shoulder", new double[] {0.5}));
             String moved;
-            try (Blacksmith.Assembly p = arm.posed(shoulderHalf)) {
+            try (Blacksmith.Assembly p = arm.pose(shoulderHalf)) {
                 if (!p.name().equals("arm")) fail("posed: the posed arm is named " + p.name());
                 moved = noStamp(p.stepText());
             }
             if (moved.equals(rest)) fail("posed: the shoulder at 0.5 left the arm's STEP text as at rest");
-            try (Blacksmith.Assembly p = arm.posed(List.of(new Blacksmith.StateRow("upper/screw", new double[] {5.0})))) {
+            try (Blacksmith.Assembly p = arm.pose(List.of(new Blacksmith.StateRow("upper/screw", new double[] {5.0})))) {
                 if (noStamp(p.stepText()).equals(rest)) fail("posed: the screw at 5 left the arm's STEP text as at rest");
             }
-            try (Blacksmith.Assembly p = arm.posed(List.of())) {
+            try (Blacksmith.Assembly p = arm.pose(List.of())) {
                 if (!noStamp(p.stepText()).equals(rest)) fail("posed: no rows changed the arm");
             }
 
             // a state, and a ground
-            try (Blacksmith.Assembly byState = arm.posed(List.of(), "reach", null)) {
+            try (Blacksmith.Assembly byState = arm.pose(List.of(), "reach", null)) {
                 if (!noStamp(byState.stepText()).equals(moved)) fail("posed: state 'reach' differs from shoulder = [0.5]");
             }
-            try (Blacksmith.Assembly held = arm.posed(shoulderHalf, null, "upper arm")) {
+            try (Blacksmith.Assembly held = arm.pose(shoulderHalf, null, "upper arm")) {
                 if (noStamp(held.stepText()).equals(moved)) fail("posed: holding 'upper arm' fixed changed nothing");
             }
-            expectRefusal("shoulder = 2", () -> arm.posed(List.of(new Blacksmith.StateRow("shoulder", new double[] {2.0}))).close(),
+            expectRefusal("shoulder = 2", () -> arm.pose(List.of(new Blacksmith.StateRow("shoulder", new double[] {2.0}))).close(),
                     "posed: value 0 of joint 'shoulder' is 2, outside its range", null);
-            expectRefusal("state 'fold'", () -> arm.posed(List.of(), "fold", null).close(),
+            expectRefusal("state 'fold'", () -> arm.pose(List.of(), "fold", null).close(),
                     "posed: assembly 'arm' has no state named 'fold'", null);
             if (!noStamp(arm.stepText()).equals(rest)) fail("posed: posing changed the original arm");
         }
@@ -6872,13 +8131,13 @@ public final class Smoke {
             frame.place(bracket, Blacksmith.Frame.xy().toArray(), "left");
             frame.place(bracket, Blacksmith.Frame.xy(new double[] {100, 0, 0}).toArray(), "right/rear");
             String before = noStamp(frame.stepText());
-            expectRefusal("bare 'turn'", () -> frame.posed(List.of(new Blacksmith.StateRow("turn", new double[] {0.3}))).close(),
+            expectRefusal("bare 'turn'", () -> frame.pose(List.of(new Blacksmith.StateRow("turn", new double[] {0.3}))).close(),
                     "posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path", null);
-            try (Blacksmith.Assembly posed = frame.posed(List.of(new Blacksmith.StateRow("right\\/rear/turn", new double[] {0.3})))) {
+            try (Blacksmith.Assembly posed = frame.pose(List.of(new Blacksmith.StateRow("right\\/rear/turn", new double[] {0.3})))) {
                 if (!posed.name().equals("frame")) fail("posed: the posed frame is named " + posed.name());
                 if (noStamp(posed.stepText()).equals(before)) fail("posed: turning right/rear left the frame as it was");
             }
-            try (Blacksmith.Assembly posed = frame.posed(List.of(new Blacksmith.StateRow("right\\/rear/turn", new double[] {0.0})))) {
+            try (Blacksmith.Assembly posed = frame.pose(List.of(new Blacksmith.StateRow("right\\/rear/turn", new double[] {0.0})))) {
                 if (!noStamp(posed.stepText()).equals(before)) fail("posed: turning right/rear by 0 changed the frame");
             }
             if (!noStamp(frame.stepText()).equals(before)) fail("posed: posing changed the original frame");
@@ -6887,10 +8146,10 @@ public final class Smoke {
         // the drives: both sides of a coupling, disagreeing, are refused
         try (Blacksmith.Assembly gears = geared(true)) {
             String before = noStamp(gears.stepText());
-            try (Blacksmith.Assembly p = gears.posed(List.of(new Blacksmith.StateRow("drive", new double[] {0.4})))) {
+            try (Blacksmith.Assembly p = gears.pose(List.of(new Blacksmith.StateRow("drive", new double[] {0.4})))) {
                 if (!p.name().equals("gears")) fail("posed: the posed gears are named " + p.name());
             }
-            expectRefusal("disagreeing drives", () -> gears.posed(List.of(
+            expectRefusal("disagreeing drives", () -> gears.pose(List.of(
                             new Blacksmith.StateRow("drive", new double[] {0.4}),
                             new Blacksmith.StateRow("driven", new double[] {0.4}))).close(), null,
                     "posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by");
@@ -7075,7 +8334,7 @@ public final class Smoke {
         vCheck(up.min() == 2.0 && up.max() == 6.0 && down.min() == 2.0 && down.max() == 6.0, "interval min/max");
         vCheck(up.isIncreasing() && !down.isIncreasing() && !new Blacksmith.Interval(3, 3).isIncreasing(), "isIncreasing");
         vCheck(new Blacksmith.Interval(3, 3).isSingleton() && !up.isSingleton(), "isSingleton");
-        vCheck(up.swapped().equals(down) && down.swapped().equals(up), "swapped");
+        vCheck(up.swap().equals(down) && down.swap().equals(up), "swapped");
         vCheck(same(down.toArray(), 6, 2) && down.t0() == 6.0 && down.t1() == 2.0, "the decreasing interval's ends");
         // the set operations answer increasing, and touching is a singleton
         vCheck(up.grown(9).equals(iv(2, 9)) && down.grown(-1).equals(iv(-1, 6)) && down.grown(3).equals(up), "grown");
@@ -7134,8 +8393,8 @@ public final class Smoke {
 
     private static void frameVerbs(Map<String, String[]> r) {
         Blacksmith.Frame p = Blacksmith.Frame.of(nums(r, "plane", "frame"));
-        vClose("flip", p.flipped().toArray(), nums(r, "plane", "flip"), EXACT);
-        vClose("rotate", p.rotated(0.6, new double[] {1, -1, 0.5}).toArray(), nums(r, "plane", "rotate"), EXACT);
+        vClose("flip", p.flip().toArray(), nums(r, "plane", "flip"), EXACT);
+        vClose("rotate", p.rotate(0.6, new double[] {1, -1, 0.5}).toArray(), nums(r, "plane", "rotate"), EXACT);
         for (int i = 0; i < 12; i++) {
             String c = "plane_" + q2(i);
             double[] q = nums(r, c, "query");
@@ -7730,8 +8989,8 @@ public final class Smoke {
         double slerped = Blacksmith.Quaternion.slerp(new Blacksmith.Quaternion(), q, 0.25).angle();
         if (Math.abs(slerped - Math.PI / 8) > 1e-12) fail("transforms: slerp's angle " + slerped);
         tfNear("q q*", q.multiply(q.conjugate()).toArray(), 1e-12, 1, 0, 0, 0);
-        if (!new Blacksmith.Quaternion(0, 0, 0, 2).normalized().equals(new Blacksmith.Quaternion(0, 0, 0, 1)))
-            fail("transforms: (0,0,0,2).normalized()");
+        if (!new Blacksmith.Quaternion(0, 0, 0, 2).normalize().equals(new Blacksmith.Quaternion(0, 0, 0, 1)))
+            fail("transforms: (0,0,0,2).normalize()");
         tfRefused("a zero quaternion's transform", () -> new Blacksmith.Quaternion(0, 0, 0, 0).toTransform(),
                 "quaternion_to_transform: the quaternion is zero");
         tfRefused("a mirror's quaternion", () -> Blacksmith.Quaternion.fromTransform(Blacksmith.Transform.mirror(Blacksmith.Frame.xy())),
@@ -7749,17 +9008,17 @@ public final class Smoke {
     private static void quaternionsFarFromUnit() {
         double h = Math.sqrt(0.5);
         for (double k : new double[] {1e200, 1e-170}) {
-            if (!new Blacksmith.Quaternion(k, 0, 0, 0).normalized().equals(new Blacksmith.Quaternion(1, 0, 0, 0)))
-                fail("transforms: (" + k + ",0,0,0).normalized()");
-            if (!new Blacksmith.Quaternion(0, 0, 0, -k).normalized().equals(new Blacksmith.Quaternion(0, 0, 0, -1)))
-                fail("transforms: (0,0,0,-" + k + ").normalized()");
+            if (!new Blacksmith.Quaternion(k, 0, 0, 0).normalize().equals(new Blacksmith.Quaternion(1, 0, 0, 0)))
+                fail("transforms: (" + k + ",0,0,0).normalize()");
+            if (!new Blacksmith.Quaternion(0, 0, 0, -k).normalize().equals(new Blacksmith.Quaternion(0, 0, 0, -1)))
+                fail("transforms: (0,0,0,-" + k + ").normalize()");
             Blacksmith.Quaternion kk = new Blacksmith.Quaternion(k, k, 0, 0);
-            tfNear("(k,k,0,0).normalized()", kk.normalized().toArray(), 1e-12, h, h, 0, 0);
+            tfNear("(k,k,0,0).normalize()", kk.normalize().toArray(), 1e-12, h, h, 0, 0);
             if (!(Math.abs(kk.length() - k * Math.sqrt(2)) <= 1e-15 * k * Math.sqrt(2))) fail("transforms: (k,k,0,0).length " + kk.length());
             if (Math.abs(kk.angle() - Math.PI / 2) > 1e-12) fail("transforms: (k,k,0,0).angle " + kk.angle());
             tfNear("(0,k,k,0).axis", new Blacksmith.Quaternion(0, k, k, 0).axis().orElseThrow(), 1e-12, h, h, 0);
         }
-        tfRefused("a zero quaternion normalized", () -> new Blacksmith.Quaternion(0, 0, 0, 0).normalized(),
+        tfRefused("a zero quaternion normalized", () -> new Blacksmith.Quaternion(0, 0, 0, 0).normalize(),
                 "Quaternion.normalized: the quaternion is zero");
     }
 
@@ -8371,7 +9630,7 @@ public final class Smoke {
             if (box.health(-1.0, false).tolerance() != r.tolerance()) fail("health (kernel): tolerance -1 did not take the default");
 
             // 5. Healed: a new solid, nothing done, every edge exact.
-            Blacksmith.Healed healedPair = box.healed();
+            Blacksmith.Healed healedPair = box.heal();
             try (Blacksmith.Solid healed = healedPair.solid()) {
                 Blacksmith.HealReport h = healedPair.report();
                 if (healed == box || healed.handle().address() == box.handle().address()) fail("healed (kernel): not a new solid");
@@ -8388,7 +9647,7 @@ public final class Smoke {
                 }
                 if (healed.edgeTolerance(0xFFFFFFF0) != null) fail("edgeTolerance (kernel): an id no trim names is not null");
             }
-            Blacksmith.Healed wide = box.healed(0.5);
+            Blacksmith.Healed wide = box.heal(0.5);
             try (Blacksmith.Solid ignored = wide.solid()) {
                 if (wide.report().tolerance() != 0.5) fail("healed (kernel): tolerance 0.5 was not used");
             }
@@ -8430,7 +9689,7 @@ public final class Smoke {
             for (int i = 4; i < 8; i++) if (!relClose(small.get(i).size(), 0.0009999, 1e-3)) fail("health (kernel): plate " + small.get(i));
 
             // 6. Every kind off: nothing healed, each refused as toggled; all on: nothing toggled.
-            Blacksmith.Healed off = plate.healed(0.01, false, false, false);
+            Blacksmith.Healed off = plate.heal(0.01, false, false, false);
             try (Blacksmith.Solid ignored = off.solid()) {
                 Blacksmith.HealReport h = off.report();
                 if (!h.fixes().isEmpty() || h.smallBefore() != 8 || h.smallAfter() != 8) fail("healed (kernel): all off reads " + h);
@@ -8439,7 +9698,7 @@ public final class Smoke {
                         + "sliver_face 2 toggled 0.0, sliver_face 3 toggled 0.0, sliver_face 4 toggled 0.0, sliver_face 5 toggled 0.0]"))
                     fail("healed (kernel): all off refused " + refused);
             }
-            Blacksmith.Healed on = plate.healed(0.01);
+            Blacksmith.Healed on = plate.heal(0.01);
             try (Blacksmith.Solid ignored = on.solid()) {
                 Blacksmith.HealReport h = on.report();
                 if (h.smallBefore() != 8) fail("healed (kernel): all on reads " + h);
@@ -8471,7 +9730,7 @@ public final class Smoke {
         // 7. A closed solid: each call throws with the solid's "closed" message.
         Blacksmith.Solid gone = Blacksmith.Solid.cuboid(1, 1, 1);
         gone.close();
-        for (Runnable call : List.<Runnable>of(() -> gone.health(), () -> gone.healed(), () -> gone.edgeTolerance(0))) {
+        for (Runnable call : List.<Runnable>of(() -> gone.health(), () -> gone.heal(), () -> gone.edgeTolerance(0))) {
             String why = refused(call);
             if (!why.contains("closed")) fail("health (kernel): a closed solid's call gave " + why);
         }
@@ -8578,7 +9837,7 @@ public final class Smoke {
                 fail("health (reader): st203's extent/rounding/tolerance/cracks read " + r.extent() + "/" + r.rounding() + "/" + r.tolerance() + "/" + r.cracks());
             if (body.health(Double.NaN, false).tolerance() != r.tolerance()) fail("health (reader): NaN did not take the default");
             if (r.looseEdges() != 0 || r.worstLoose() != 0) fail("health (reader): st203 has loose edges: " + r.looseEdges());
-            Cad.Sewn sewn = body.sewed(null, null);
+            Cad.Sewn sewn = body.sew(null, null);
             sewn.brep().close();
             if (r.sewPairs() != sewn.report().pairs() || r.sewRefused() != 4 || sewn.report().refused() != 4
                     || !relClose(r.sewWorstGap(), sewn.report().worstGap(), 1e-12) || !(r.sewWorstGap() > 0))
@@ -8595,14 +9854,14 @@ public final class Smoke {
             if (edge.index() != 41550 || !relClose(edge.size(), 3.1622776616321775, 1e-9)) fail("health (reader): st203's first short edge reads " + edge);
 
             // 9. Healed: the default heals nothing; at 5, 28 fixes and eight uneven slivers left.
-            Cad.Healed same = body.healed();
+            Cad.Healed same = body.heal();
             try (Cad.Brep sameBrep = same.brep()) {
                 Cad.HealReport h = same.report();
                 if (sameBrep.pointer().address() == body.pointer().address() || h.smallBefore() != 0 || h.freeBefore() != 188
                         || h.freeAfter() > 188 || !relClose(h.tolerance(), 1e-4 * r.extent(), 1e-12))
                     fail("healed (reader): st203 at the default reads " + h);
             }
-            Cad.Healed healedPair = body.healed(5.0);
+            Cad.Healed healedPair = body.heal(5.0);
             try (Cad.Brep healed = healedPair.brep()) {
                 Cad.HealReport h = healedPair.report();
                 if (h.tolerance() != 5.0 || h.smallBefore() != 96 || h.fixes().size() != 28 || h.smallAfter() != 8
@@ -8626,7 +9885,7 @@ public final class Smoke {
                         || healed.edgeTolerance(0xFFFFFFF0) != null)
                     fail("edgeTolerance (reader): " + before + ", " + healed.edgeTolerance(fix.index()) + ", " + kept + ", " + healed.edgeTolerance(0xFFFFFFF0));
             }
-            Cad.Healed off = body.healed(5.0, false, false, false);
+            Cad.Healed off = body.heal(5.0, false, false, false);
             try (Cad.Brep ignored = off.brep()) {
                 Cad.HealReport h = off.report();
                 if (!h.fixes().isEmpty() || h.refused().size() != 96 || h.freeAfter() != h.freeBefore()
@@ -8638,7 +9897,7 @@ public final class Smoke {
                 if (per[0] != 64 || per[1] != 26 || per[2] != 6) fail("healed (reader): st203 toggled per kind " + Arrays.toString(per));
             }
             for (Cad.Brep b : breps) b.close();
-            for (Runnable call : List.<Runnable>of(() -> body.health(), () -> body.healed(), () -> body.edgeTolerance(0))) {
+            for (Runnable call : List.<Runnable>of(() -> body.health(), () -> body.heal(), () -> body.edgeTolerance(0))) {
                 String why;
                 try {
                     call.run();
@@ -8649,6 +9908,117 @@ public final class Smoke {
                 if (!why.contains("released")) fail("health (reader): a released brep's call gave " + why);
             }
             System.out.println("health (reader): st203-bapl.stp body 1: 188 free edges in 45 wires, healed at 5: 28 fixes, 188 -> 88 free");
+        }
+    }
+
+    // Canonical recognition on the kernel (recognition in the other wrappers, 2026-11-16):
+    // Python's test_recognize_* figures on a NURBS cylinder and the analytic one, and its
+    // distinct-rows decoder test on Blacksmith's own report types.
+    private static void kernelRecognize() {
+        // 1. A NURBS cylinder: three faces back to a cylinder and two planes, nothing refused.
+        try (Blacksmith.Solid made = Blacksmith.Solid.cylinder(2, 5); Blacksmith.Solid nurbs = made.convertToNurbs("all")) {
+            Blacksmith.Recognized pair = nurbs.recognize();
+            try (Blacksmith.Solid back = pair.solid()) {
+                Blacksmith.RecognizeReport r = pair.report();
+                if (back == nurbs || back.handle().address() == nurbs.handle().address()) fail("recognize (kernel): not a new solid");
+                List<String> kinds = r.faces().stream().map(Blacksmith.RecognizedFace::kind).sorted().toList();
+                List<Integer> faces = r.faces().stream().map(Blacksmith.RecognizedFace::face).sorted().toList();
+                if (!kinds.equals(List.of("cylinder", "plane", "plane")) || !faces.equals(List.of(0, 1, 2)))
+                    fail("recognize (kernel): the NURBS cylinder's faces read " + r.faces());
+                if (!r.refused().isEmpty() || r.edgesLeft() != 0) fail("recognize (kernel): refused " + r.refused() + ", edges left " + r.edgesLeft());
+                if (r.edges().stream().filter(e -> e.kind().equals("circle")).count() < 2
+                        || r.edges().stream().anyMatch(e -> !e.kind().equals("line") && !e.kind().equals("circle")))
+                    fail("recognize (kernel): the edges read " + r.edges());
+                if (!(r.tolerance() > 0) || !(r.worstFace() <= r.tolerance()) || !(r.worstEdge() <= r.tolerance()))
+                    fail("recognize (kernel): tolerance/worst face/worst edge " + r.tolerance() + "/" + r.worstFace() + "/" + r.worstEdge());
+                if (!relClose(back.mass(1e-6).volume(), made.mass(1e-6).volume(), 1e-6))
+                    fail("recognize (kernel): volume " + back.mass(1e-6).volume() + " against " + made.mass(1e-6).volume());
+            }
+            Blacksmith.Recognized wide = nurbs.recognize(0.5);
+            try (Blacksmith.Solid ignored = wide.solid()) {
+                if (wide.report().tolerance() != 0.5) fail("recognize (kernel): tolerance 0.5 was not used");
+            }
+            // 2. A body already analytic comes back as it was, nothing taken.
+            Blacksmith.Recognized plain = made.recognize();
+            try (Blacksmith.Solid ignored = plain.solid()) {
+                if (!plain.report().faces().isEmpty() || !plain.report().refused().isEmpty())
+                    fail("recognize (kernel): the analytic cylinder reads " + plain.report());
+            }
+        }
+        // 3. The decoder, on Python's literal rows: every figure different, so a swapped column
+        // cannot read back the same.
+        Blacksmith.RecognizeReport d = Blacksmith.RecognizeReport.of(new int[] {1, 2, 3, 4, 5, 6, 7, 8, 9, 11}, new double[] {0.5, 0.25, 0.125},
+                new int[] {10, 4, 12, 0}, new double[] {1.5, 2.5}, new int[] {20, 0, 21, 3}, new double[] {7.5, Double.NaN},
+                new int[] {30, 2, 31, 1, 32, 0}, new double[] {0.75, 0.0625, 0.03125});
+        if (d.tolerance() != 0.5 || d.worstFace() != 0.25 || d.worstEdge() != 0.125 || d.edgesLeft() != 11)
+            fail("recognize decoder (kernel): the summary reads " + d);
+        if (!d.faces().equals(List.of(new Blacksmith.RecognizedFace(10, "torus", 1.5), new Blacksmith.RecognizedFace(12, "plane", 2.5))))
+            fail("recognize decoder (kernel): the faces read " + d.faces());
+        if (!d.refused().equals(List.of(new Blacksmith.RecognizeRefusal(20, "no_kind", 7.5), new Blacksmith.RecognizeRefusal(21, "too_few_samples", null))))
+            fail("recognize decoder (kernel): the refusals read " + d.refused());
+        if (!d.edges().equals(List.of(new Blacksmith.RecognizedEdge(30, "ellipse", 0.75), new Blacksmith.RecognizedEdge(31, "circle", 0.0625),
+                new Blacksmith.RecognizedEdge(32, "line", 0.03125))))
+            fail("recognize decoder (kernel): the edges read " + d.edges());
+        System.out.println("recognize (kernel): NURBS cylinder back to cylinder + 2 planes, analytic untouched, decoder ok");
+    }
+
+    // Canonical recognition on the reader: Python's test_brep_recognize_* on box-union-sphere.3dm
+    // (a box unioned with a ball, every face NURBS; the repository's fixture, so it runs where
+    // found), and the distinct-rows decoder test on Cad's own report types, which always runs.
+    private static void readerRecognize(String path) {
+        Cad.RecognizeReport d = Cad.RecognizeReport.of(new int[] {1, 2, 3, 4, 5, 6, 7, 8, 9, 11}, new double[] {0.5, 0.25, 0.125},
+                new int[] {10, 4, 12, 0}, new double[] {1.5, 2.5}, new int[] {20, 0, 21, 3}, new double[] {7.5, Double.NaN},
+                new int[] {30, 2, 31, 1, 32, 0}, new double[] {0.75, 0.0625, 0.03125});
+        if (d.tolerance() != 0.5 || d.worstFace() != 0.25 || d.worstEdge() != 0.125 || d.edgesLeft() != 11)
+            fail("recognize decoder (reader): the summary reads " + d);
+        if (!d.faces().equals(List.of(new Cad.RecognizedFace(10, "torus", 1.5), new Cad.RecognizedFace(12, "plane", 2.5))))
+            fail("recognize decoder (reader): the faces read " + d.faces());
+        if (!d.refused().equals(List.of(new Cad.RecognizeRefusal(20, "no_kind", 7.5), new Cad.RecognizeRefusal(21, "too_few_samples", null))))
+            fail("recognize decoder (reader): the refusals read " + d.refused());
+        if (!d.edges().equals(List.of(new Cad.RecognizedEdge(30, "ellipse", 0.75), new Cad.RecognizedEdge(31, "circle", 0.0625),
+                new Cad.RecognizedEdge(32, "line", 0.03125))))
+            fail("recognize decoder (reader): the edges read " + d.edges());
+        System.out.println("recognize (reader): decoder ok");
+
+        Path root = Path.of(path).toAbsolutePath().getParent().getParent();
+        Path ball = root == null ? null : root.resolve("crates/cadaclysm-acis/tests/fixtures/rhino/box-union-sphere.3dm");
+        if (ball == null || !Files.exists(ball)) {
+            System.out.println("recognize (reader): box-union-sphere.3dm not to hand, SKIPPED");
+            return;
+        }
+        try (Cad.Scene scene = Cad.open(ball.toString())) {
+            Cad.Brep body = null;
+            for (Cad.Node n : scene.nodes()) {
+                body = n.brep();
+                if (body != null) break;
+            }
+            if (body == null) fail("recognize (reader): box-union-sphere.3dm has no brep");
+            Cad.Recognized pair = body.recognize();
+            Cad.RecognizeReport r = pair.report();
+            try (Cad.Brep back = pair.brep()) {
+                if (back.pointer().address() == body.pointer().address()) fail("recognize (reader): not a new brep");
+                Set<String> kinds = new HashSet<>();
+                Set<Integer> faces = new HashSet<>();
+                for (Cad.RecognizedFace f : r.faces()) {
+                    kinds.add(f.kind());
+                    faces.add(f.face());
+                }
+                if (!kinds.contains("sphere") || !kinds.contains("plane")) fail("recognize (reader): the kinds read " + kinds);
+                if (faces.size() != r.faces().size()) fail("recognize (reader): a face is named twice in " + r.faces());
+                if (r.faces().stream().anyMatch(f -> f.deviation() > r.tolerance()) || r.edges().stream().anyMatch(e -> e.deviation() > r.tolerance()))
+                    fail("recognize (reader): a deviation is past the tolerance " + r.tolerance() + ": " + r);
+                if (r.worstFace() != r.faces().stream().mapToDouble(Cad.RecognizedFace::deviation).max().orElse(Double.NaN))
+                    fail("recognize (reader): the worst face " + r.worstFace() + " is not the largest deviation of " + r.faces());
+                for (Cad.RecognizedEdge e : r.edges())
+                    if (back.edgeTolerance(e.edge()) == null) fail("recognize (reader): edge " + e.edge() + " has no edge tolerance on the result");
+            }
+            Cad.Recognized wide = body.recognize(0.25);
+            try (Cad.Brep ignored = wide.brep()) {
+                if (wide.report().tolerance() != 0.25) fail("recognize (reader): tolerance 0.25 was not used");
+            }
+            body.close();
+            System.out.println("recognize (reader): box-union-sphere.3dm: " + r.faces().size() + " faces taken, " + r.edges().size()
+                    + " edges, sphere and plane among them");
         }
     }
 
@@ -9000,6 +10370,7 @@ public final class Smoke {
         documentHeld();
         documentBim();
         documentLifetime();
+        documentGraph();
         System.out.println("document: results, save/load, undo, refusals, values, params, branches, batch/preview, types, held geometry, bim, lifetime");
     }
 
@@ -9556,6 +10927,183 @@ public final class Smoke {
         profile.close();
         curve.close();
         cage.close();
+    }
+
+    // 13. reading the graph (Python's test_document_revision_moves and the probe/meta tests)
+    /** Python's holed_document: a 10 mm box and a 2 mm pin cut through it -- six faces and the hole. */
+    private static Blacksmith.Document holedDocument() {
+        Blacksmith.Document doc = new Blacksmith.Document("mm");
+        doc.apply(addOp("{\"id\": \"box\", \"kind\": \"solid.cuboid\", \"x\": 10, \"y\": 10, \"z\": 10}"));
+        doc.apply(addOp("{\"id\": \"pin\", \"kind\": \"solid.cylinder\", \"r\": 2, \"h\": 30, \"at\": [0, 0, -15]}"));
+        doc.apply(addOp("{\"id\": \"cut\", \"kind\": \"solid.cut\", \"target\": \"box\", \"tool\": \"pin\"}"));
+        doc.evaluate();
+        return doc;
+    }
+
+    private static int faces(Blacksmith.Document doc, String id) {
+        try (Blacksmith.Solid solid = doc.resultSolid(id)) {
+            return solid.faces();
+        }
+    }
+
+    private static List<Object> nodeIds(String nodes) {
+        List<Object> out = new ArrayList<>();
+        for (Object row : Json.array(nodes)) out.add(((Map<?, ?>) row).get("id"));
+        return out;
+    }
+
+    private static double num(Object v) {
+        return ((Number) v).doubleValue();
+    }
+
+    private static boolean near(double a, double b, double tol) {
+        return Math.abs(a - b) <= tol;
+    }
+
+    private static List<Double> ends(Blacksmith.Profile p) {
+        List<Double> out = new ArrayList<>();
+        for (Object q : Json.array(p.piecesJson())) {
+            Map<?, ?> m = (Map<?, ?>) q;
+            for (String k : List.of("x0", "y0", "x1", "y1")) out.add(Math.round(num(m.get(k)) * 1e9) / 1e9);
+        }
+        return out;
+    }
+
+    private static void documentGraph() {
+        try (Blacksmith.Document doc = plateDocument()) {
+            long r0 = doc.revision();
+            dc(r0 >= 1, "revision: a new plate is at " + r0);
+            doc.evaluate();
+            doc.save();
+            doc.nodes();
+            dc(doc.revision() == r0, "revision: an evaluation, a save or a read moved it");
+            doc.undo();
+            dc(doc.revision() == r0 + 1, "revision: an undo did not move it once");
+            doc.apply(setOp("r1", "{\"w\": 12}"));
+            dc(doc.revision() == r0 + 2, "revision: a set did not move it once");
+            try (Blacksmith.Document loaded = Blacksmith.Document.load(doc.save())) {
+                dc(loaded.revision() == 1, "revision: a loaded document starts at " + loaded.revision());
+            }
+        }
+        try (Blacksmith.Document doc = plateDocument()) {
+            List<Object> nodes = Json.array(doc.nodes());
+            dc(nodeIds(doc.nodes()).equals(List.of("r1", "x1")), "nodes: " + doc.nodes());
+            Map<?, ?> r1 = (Map<?, ?>) nodes.get(0);
+            dc(r1.get("kind").equals("profile.rect") && num(r1.get("w")) == 10, "nodes: r1's record " + r1);
+            dc(nodeIds(doc.nodes(List.of("x1", "r1"))).equals(List.of("x1", "r1")), "nodes: not in the order asked");
+            dc(docRefused("nodes of a ghost", () -> doc.nodes(List.of("ghost"))).contains("ghost"), "nodes: an unknown id is not named");
+        }
+        try (Blacksmith.Document doc = holedDocument()) {
+            doc.apply(addOp("{\"id\": \"m\", \"kind\": \"measure.mass\", \"solid\": \"cut\"}"));
+            dc(Json.array(doc.inputs("cut")).equals(List.of("box", "pin")), "inputs: cut reads " + doc.inputs("cut"));
+            dc(Json.array(doc.inputs("m")).equals(List.of("cut")), "inputs: m reads " + doc.inputs("m"));
+            dc(Json.array(doc.inputs("m", true)).equals(List.of("box", "pin", "cut")), "inputs: m transitive reads " + doc.inputs("m", true));
+            dc(Json.array(doc.readers("box")).equals(List.of("cut")), "readers: box reads " + doc.readers("box"));
+            dc(Json.array(doc.readers("box", true)).equals(List.of("cut", "m")), "readers: box transitive reads " + doc.readers("box", true));
+            dc(Json.array(doc.inputs("box")).isEmpty() && Json.array(doc.readers("m")).isEmpty(), "inputs/readers: not empty");
+            dc(docRefused("inputs of a ghost", () -> doc.inputs("ghost")).contains("ghost"), "inputs: an unknown id is not named");
+        }
+        try (Blacksmith.Document doc = holedDocument()) {
+            dc(faces(doc, "cut") == 7, "probe: the holed cut has not 7 faces");
+            String saved = doc.save();
+            long revision = doc.revision();
+            String moved = "{\"op\": \"set\", \"id\": \"pin\", \"fields\": {\"at\": [50, 0, -15]}}";
+            try (Blacksmith.Document.Probe probe = doc.probe(moved, List.of("cut"))) {
+                Object cutState = null;
+                for (Object row : Json.array(probe.statuses())) {
+                    if ("cut".equals(((Map<?, ?>) row).get("id"))) cutState = ((Map<?, ?>) row).get("state");
+                }
+                dc("ok".equals(cutState), "probe: the statuses read " + probe.statuses());
+                dc(faces(doc, "cut") == 6, "probe: the probe's cut is not the pin moved clear (6 faces)");
+                dc(docRefused("an apply during a probe", () -> doc.apply("{\"op\": \"remove\", \"id\": \"cut\"}")).contains("a probe is open"),
+                        "probe: an apply during it is not refused as such");
+                probe.close();
+                probe.close();
+            }
+            dc(faces(doc, "cut") == 7, "probe: the document's cut is not back after the end");
+            dc(doc.save().equals(saved) && doc.revision() == revision, "probe: the probe changed the document");
+            String thinner = "{\"op\": \"set\", \"id\": \"pin\", \"fields\": {\"r\": 1}}";
+            dc(doc.probe(thinner, List.of("cut"), statuses -> faces(doc, "cut")) == 7, "probe: the body's return");
+            try {
+                doc.probe(thinner, List.of("cut"), statuses -> {
+                    throw new IllegalStateException("dropped");
+                });
+                dc(false, "probe: the body's exception was lost");
+            } catch (IllegalStateException expected) {
+                // passed on, and the probe ended: the apply below is not refused
+            }
+            doc.apply(thinner);
+            dc(docRefused("a probe of a ghost", () -> doc.probe(thinner, List.of("ghost"))).contains("no node `ghost`"), "probe: an unknown id");
+        }
+        try (Blacksmith.Document doc = new Blacksmith.Document("mm")) {
+            doc.apply(addOp("{\"id\": \"l\", \"kind\": \"curve.line\", \"x0\": 0, \"y0\": 0, \"x1\": 10, \"y1\": 5}"));
+            doc.apply(addOp("{\"id\": \"s\", \"kind\": \"solid.cuboid\", \"x\": 1, \"y\": 1, \"z\": 1}"));
+            doc.evaluate();
+            double[] flat = doc.resultBeziers("l");
+            dc(flat.length == 16 && Arrays.equals(Arrays.copyOfRange(flat, 0, 4), new double[] {0, 0, 0, 1})
+                    && Arrays.equals(Arrays.copyOfRange(flat, 12, 16), new double[] {10, 5, 0, 1}), "resultBeziers: the line reads " + Arrays.toString(flat));
+            double[] lifted = doc.resultBeziers("l", new double[] {0, 0, 10, 1, 0, 0, 0, 1, 0, 0, 0, 1});
+            dc(Arrays.equals(Arrays.copyOfRange(lifted, 0, 4), new double[] {0, 0, 10, 1}), "resultBeziers: the frame did not lift the line");
+            dc(docRefused("resultBeziers of a solid", () -> doc.resultBeziers("s")).contains("is a solid"), "resultBeziers: a solid is not refused");
+        }
+        try (Blacksmith.Document doc = plateDocument()) {
+            dc(doc.meta("forge") == null, "meta: a new plate keeps some");
+            Map<String, Object> changed = Json.object(doc.apply("{\"op\": \"meta\", \"app\": \"forge\", \"value\": {\"grid\": 5}}"));
+            dc(List.of("forge").equals(changed.get("meta")), "meta: the changed set does not name forge: " + changed);
+            dc(num(Json.object(doc.meta("forge")).get("grid")) == 5, "meta: forge reads " + doc.meta("forge"));
+            dc(doc.meta("other") == null, "meta: another app keeps some");
+            try (Blacksmith.Document back = Blacksmith.Document.load(doc.save())) {
+                dc(num(Json.object(back.meta("forge")).get("grid")) == 5, "meta: not saved");
+            }
+            doc.undo();
+            dc(doc.meta("forge") == null, "meta: not undone");
+        }
+        // Profiles from pieces (test_profile_from_pieces): round trip, bounds, reversed, filletCorner.
+        String pieces = "[{\"kind\": \"line\", \"x0\": 0, \"y0\": 0, \"x1\": 10, \"y1\": 0},"
+                + " {\"kind\": \"arc\", \"x0\": 10, \"y0\": 0, \"xm\": 15, \"ym\": 5, \"x1\": 10, \"y1\": 10},"
+                + " {\"kind\": \"line\", \"x0\": 10, \"y0\": 10, \"x1\": 0, \"y1\": 10}]";
+        try (Blacksmith.Profile closed = Blacksmith.Profile.fromPieces(pieces, true)) {
+            String back = closed.piecesJson();
+            List<Boolean> arcs = new ArrayList<>();
+            for (Object q : Json.array(back)) arcs.add(((Map<?, ?>) q).containsKey("xm"));
+            dc(arcs.equals(List.of(false, true, false, false)), "fromPieces: three pieces and the closing side, the arc second: " + back);
+            try (Blacksmith.Profile again = Blacksmith.Profile.fromPieces(back)) {
+                dc(docApprox(again.areaProperties().area(), closed.areaProperties().area()), "fromPieces: piecesJson does not read back to the same area");
+            }
+        }
+        dc(docRefused("a bad piece", () -> Blacksmith.Profile.fromPieces("[{\"kind\": \"nope\"}]")).contains("0"), "fromPieces: a bad piece is not named by index");
+        try (Blacksmith.Profile circle = Blacksmith.Profile.circle(5)) {
+            double[] box = circle.bounds();
+            double[] want = {-5, -5, 5, 5};
+            for (int i = 0; i < 4; i++) dc(near(box[i], want[i], 1e-12), "bounds: a circle of 5 reads " + Arrays.toString(box));
+        }
+        try (Blacksmith.Profile open = Blacksmith.Profile.fromPieces("[{\"kind\": \"line\", \"x0\": 0, \"y0\": 0, \"x1\": 10, \"y1\": 0},"
+                + " {\"kind\": \"line\", \"x0\": 10, \"y0\": 0, \"x1\": 10, \"y1\": 5}]");
+                Blacksmith.Profile turned = open.reversed();
+                Blacksmith.Profile twice = turned.reversed()) {
+            Map<?, ?> first = (Map<?, ?>) Json.array(turned.piecesJson()).get(0);
+            dc(near(num(first.get("x0")), 10, 1e-9) && near(num(first.get("y0")), 5, 1e-9), "reversed: does not start at (10, 5)");
+            dc(ends(twice).equals(ends(open)), "reversed: twice is not the profile");
+        }
+        try (Blacksmith.Profile a = Blacksmith.Profile.fromPieces("[{\"kind\": \"line\", \"x0\": 0, \"y0\": 0, \"x1\": 10, \"y1\": 0}]");
+                Blacksmith.Profile b = Blacksmith.Profile.fromPieces("[{\"kind\": \"line\", \"x0\": 10, \"y0\": 0, \"x1\": 10, \"y1\": 10}]")) {
+            Map<String, Object> got = Json.object(Blacksmith.Profile.filletCorner(a, b, 2));
+            dc(new java.util.TreeSet<>(got.keySet()).equals(new java.util.TreeSet<>(List.of("a", "arc", "b"))), "filletCorner: not {a, b, arc}: " + got.keySet());
+            List<?> ga = (List<?>) got.get("a");
+            List<?> gb = (List<?>) got.get("b");
+            dc(near(num(((Map<?, ?>) ga.get(ga.size() - 1)).get("x1")), 8, 1e-9), "filletCorner: a is not cut back to x = 8");
+            dc(near(num(((Map<?, ?>) gb.get(0)).get("y0")), 2, 1e-9), "filletCorner: b is not cut back to y = 2");
+            List<Object> all = new ArrayList<>(ga);
+            all.add(got.get("arc"));
+            all.addAll(gb);
+            try (Blacksmith.Profile joined = Blacksmith.Profile.fromPieces(Json.write(all))) {
+                double[] jb = joined.bounds();
+                double[] want = {0, 0, 10, 10};
+                for (int i = 0; i < 4; i++) dc(near(jb[i], want[i], 1e-9), "filletCorner: joined bounds " + Arrays.toString(jb));
+            }
+            dc(!docRefused("a radius of 50", () -> Blacksmith.Profile.filletCorner(a, b, 50)).isEmpty(), "filletCorner: a radius of 50 is not refused");
+        }
+        System.out.println("document: revision, nodes, inputs/readers, probe, resultBeziers, meta; profile fromPieces, piecesJson, bounds, reversed, filletCorner");
     }
 
     // What a page that draws a solid reads off it: test_a_face_tells_its_round_radius_and_chamfer_distance,

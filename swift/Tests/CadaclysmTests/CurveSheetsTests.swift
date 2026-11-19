@@ -229,6 +229,64 @@ final class CurveSheetsTests: XCTestCase {
         XCTAssertEqual(try rest.faces, 3)
     }
 
+    func testCurvesOnASpherePushUpPullBackAndTakeTheShortPath() throws {
+        func dist(_ a: P, _ b: P) -> Double { ((a - b) * (a - b)).sum().squareRoot() }
+        let sphere = try Solid.sphere(3)
+        let uv = try NurbsCurve([P(0.1, 0.2, 0), P(0.7, 0.5, 0), P(1.3, 0.1, 0), P(1.9, -0.3, 0)], degree: 3)
+        let up = try uv.pushUp(sphere, 0, tolerance: 1e-4)
+        let back = try up.pullBack(sphere, 0, tolerance: 1e-4)
+        let (lo, hi) = try up.domain
+        for k in 0...20 {
+            let t = lo + (hi - lo) * Double(k) / 20
+            XCTAssertEqual(dist(try up.point(t), P(0, 0, 0)), 3, accuracy: 1e-4, "pushed up off the sphere at \(t)")
+            let p = try back.point(t), q = try uv.point(t)
+            XCTAssertLessThanOrEqual(dist(p, q), 1e-3, "uv at \(t): \(p) vs \(q)")
+            XCTAssertEqual(p.z, 0)
+        }
+        // the sphere's point at (u, v) is 3 (cos v cos u, cos v sin u, sin v)
+        func on(_ u: Double, _ v: Double) -> P { P(3 * cos(v) * cos(u), 3 * cos(v) * sin(u), 3 * sin(v)) }
+        let path = try NurbsCurve.shortPath(sphere, 0, from: SIMD2(0, 0.3), to: SIMD2(1.2, -0.4), tolerance: 1e-4)
+        let (plo, phi) = try path.domain
+        let pts = try (0...2000).map { try path.point(plo + (phi - plo) * Double($0) / 2000) }
+        let length = (0..<2000).reduce(0.0) { $0 + dist(pts[$1 + 1], pts[$1]) }
+        let angle = acos(cos(0.3) * cos(-0.4) * cos(1.2) + sin(0.3) * sin(-0.4))
+        XCTAssertLessThanOrEqual(dist(pts[0], on(0, 0.3)), 1e-4)
+        XCTAssertLessThanOrEqual(dist(pts[2000], on(1.2, -0.4)), 1e-4)
+        XCTAssertEqual(length, 3 * angle, accuracy: 1e-4)
+        let same = try XCTUnwrap(refusal { _ = try NurbsCurve.shortPath(sphere, 0, from: SIMD2(0, 0.3), to: SIMD2(0, 0.3), tolerance: 1e-4) })
+        XCTAssertTrue(same.hasPrefix("nurbs_curve_short_path_on_face: "), same)
+    }
+
+    /// A curve fitted to a face's own parameter: a slanted line projected across a cylinder of
+    /// radius 3 along -x, parametrised by the side's height.
+    func testACurveFitsToAFacesOwnParameter() throws {
+        func dist(_ a: P, _ b: P) -> Double { ((a - b) * (a - b)).sum().squareRoot() }
+        let cyl = try Solid.cylinder(3, 5)
+        let line = try NurbsCurve([P(4, 1, 5), P(4, -1, 0)], degree: 1)
+        var side = -1
+        var found: NurbsCurve?
+        for f in 0..<3 where found == nil {
+            if let got = try? line.fitToFace(cyl, f, direction: P(-1, 0, 0), knots: [1.25, 2.5], tolerance: 1e-4) {
+                found = got
+                side = f
+            }
+        }
+        let fit = try XCTUnwrap(found, "no face of the cylinder took the line")
+        XCTAssertLessThanOrEqual(try XCTUnwrap(fit.fitError), 1e-4)
+        let (lo, hi) = try fit.domain
+        XCTAssertEqual(lo, 0)
+        XCTAssertEqual(hi, 5)
+        let knots = try fit.knots
+        XCTAssertTrue(knots.contains(1.25) && knots.contains(2.5), "\(knots)")
+        for t in [0.0, 1.3, 3.7, 5.0] {
+            let y = -1 + 2 * t / 5
+            XCTAssertLessThanOrEqual(dist(try fit.point(t), P((9 - y * y).squareRoot(), y, t)), 1e-4, "at \(t)")
+        }
+        let short = try NurbsCurve([P(3, 0, 1), P(3, 0, 4)], degree: 1)
+        let said = try XCTUnwrap(refusal { _ = try short.fitToFace(cyl, side) })
+        XCTAssertTrue(said.contains("has to cross the face"), said)
+    }
+
     func testTrimByCurveAndJoinRefuseByName() throws {
         let sheet = try rectSheet(P(0, 0, 0), P(1, 0, 0), P(0, 1, 0), 20, 20)
         let ring = try exactCircle(P(0, 0, 0), 5)
@@ -312,7 +370,7 @@ final class CurveSheetsTests: XCTestCase {
         XCTAssertLessThanOrEqual(r.gap, 1e-12)
         XCTAssertLessThanOrEqual(abs(r.angle - Double.pi / 2), 1e-9)
         XCTAssertGreaterThanOrEqual(r.samples, 33)
-        let m = try a.matched("u1", b, "u0", level: 1)
+        let m = try a.match("u1", b, "u0", level: 1)
         r = try m.continuity("u1", b, "u0")
         XCTAssertLessThanOrEqual(r.gap, 1e-10)
         XCTAssertLessThanOrEqual(r.angle, 1e-8)
@@ -322,7 +380,7 @@ final class CurveSheetsTests: XCTestCase {
         XCTAssertLessThanOrEqual(r.angle, 1e-8)
         XCTAssertLessThanOrEqual(r.curvature, 1e-6)
         XCTAssertEqual(refusal { _ = try a.continuity("w2", b, "u0") }, "a side is 'u0', 'u1', 'v0' or 'v1', not 'w2'")
-        XCTAssertEqual(refusal { _ = try a.matched("u1", b, "u0", level: 3) }?.hasPrefix("match_side: "), true)
+        XCTAssertEqual(refusal { _ = try a.match("u1", b, "u0", level: 3) }?.hasPrefix("match_side: "), true)
     }
 
     /// The positions a continuity reports, apart from each other and from the figures they go with.
@@ -536,7 +594,7 @@ final class CurveSheetsTests: XCTestCase {
         XCTAssertEqual(refusal { _ = try sheet.trimByCurve(circle, keep: "x") },
                        "trim_by_curve: keep must be 'outside', 'inside', 'left' or 'right', not 'x'")
         XCTAssertEqual(refusal { _ = try sheet.continuity("x", sheet, "u0") }, "a side is 'u0', 'u1', 'v0' or 'v1', not 'x'")
-        XCTAssertEqual(refusal { _ = try sheet.matched("u0", sheet, "y") }, "a side is 'u0', 'u1', 'v0' or 'v1', not 'y'")
+        XCTAssertEqual(refusal { _ = try sheet.match("u0", sheet, "y") }, "a side is 'u0', 'u1', 'v0' or 'v1', not 'y'")
         XCTAssertEqual(refusal { _ = try Solid.blendSides(sheet, "z", sheet, "u0") }, "a side is 'u0', 'u1', 'v0' or 'v1', not 'z'")
     }
 
@@ -598,6 +656,17 @@ final class CurveSheetsTests: XCTestCase {
         let slabVolume: Double = 1250
         XCTAssertEqual(try massOf(l.ribTool(diag, plane, 4, side: .front)).volume, slabVolume, accuracy: 1e-6 * slabVolume)
 
+        // A revolved rib on a hub: a 30-degree gusset between the flange and the boss (Pappus).
+        let hub = try Solid.cylinder(20, 10).join(Solid.cylinder(5, 30), tolerance: nil)
+        let flank = try line(P(15, 0, 10), P(5, 0, 25))
+        let gusset: Double = 75 * 25 / 3 * Double.pi / 6
+        let swungIn = try massOf(hub.ribRevolved(flank, P(0, 0, 0), P(0, 0, 1), Double.pi / 6)).volume - massOf(hub).volume
+        XCTAssertEqual(swungIn, gusset, accuracy: 1e-3 * gusset)
+        XCTAssertEqual(try massOf(hub.ribRevolvedTool(flank, P(0, 0, 0), P(0, 0, 1), Double.pi / 6)).volume, gusset,
+                       accuracy: 1e-3 * gusset)
+        XCTAssertEqual(refusal { _ = try hub.ribRevolved(flank, P(0, 0, 0), P(0, 0, 1), 0) }?
+            .hasPrefix("rib_revolved: angle 0 is not in (0, 2 pi)"), true)
+
         // A web across a tray, run down from the rim to the floor.
         let tray = try Solid.cuboid(60, 40, 20).translate(30, 20, 10).cut(Solid.cuboid(56, 36, 18).translate(30, 20, 11))
         let down = try Frame(P(0, 0, 10), P(1, 0, 0), P(0, -1, 0), P(0, 0, -1))
@@ -609,5 +678,74 @@ final class CurveSheetsTests: XCTestCase {
 
         XCTAssertEqual(refusal { _ = try blk.hole(P(10, 15, 20), 0) }?.hasPrefix("hole: diameter 0 is not positive and finite"), true)
         XCTAssertEqual(refusal { _ = try Pattern.rectangular(P(1, 0, 0), 0, 10) }?.hasPrefix("pattern_rectangular: count1 is 0"), true)
+    }
+
+    func testThreadsTheTableARodATappedHoleAndACosmeticRecord() throws {
+        // The literals Python's suite pins (P1's analytic grooves), measured to 1e-4.
+        let sizes = try threadSizes()
+        XCTAssertEqual(sizes.count, 108)
+        XCTAssertEqual(sizes.first?.designation, "M1")
+        XCTAssertEqual(sizes.last?.designation, "1-1/2-12 UNF")
+        XCTAssertEqual(sizes.last?.size, "1-1/2")
+        XCTAssertEqual(sizes.last?.family, .unf)
+        XCTAssertEqual(sizes.last?.clearance, [:])
+        let m10 = try threadSize("M10")
+        XCTAssertEqual(m10.family, .isoMetricCoarse)
+        XCTAssertEqual(m10.designation, "M10")
+        XCTAssertEqual(m10.size, "M10")
+        XCTAssertEqual(m10.major, 10)
+        XCTAssertEqual(m10.pitch, 1.5)
+        XCTAssertEqual(m10.tapDrill, 8.5)
+        XCTAssertEqual(m10.minor, 10 - 1.25 * 3.0.squareRoot() / 2 * 1.5, accuracy: 1e-12)
+        XCTAssertEqual(m10.clearance, ["fine": 10.5, "medium": 11, "coarse": 12])
+        XCTAssertEqual(try threadSize("1/4-20").designation, "1/4-20 UNC")
+        XCTAssertEqual(try threadSize("m10 x 1.25").designation, "M10x1.25")
+        XCTAssertEqual(refusal { _ = try threadSize("M7x9") }, "thread_size_find: \"M7x9\" is not a size in the table")
+
+        let rod = try Solid.cylinder(5, 12)
+        var cyl = 0
+        while try rod.faceKind(cyl) != "cylinder" { cyl += 1 }
+        let (threaded, tr) = try rod.thread(cyl, "M10")
+        let removed = Double.pi * 25 * 12 - (try massOf(threaded, 1e-4).volume)
+        XCTAssertEqual(removed, 160.77942917686894, accuracy: 1e-4 * 160.77942917686894)
+        XCTAssertFalse(tr.internal)
+        XCTAssertEqual(tr.major, 10)
+        XCTAssertEqual(tr.pitch, 1.5)
+        XCTAssertEqual(tr.length, 12, accuracy: 1e-9)
+        XCTAssertEqual(tr.turns, 10, accuracy: 1e-9)
+        XCTAssertEqual(tr.start.z, 0, accuracy: 1e-9)
+        XCTAssertEqual(tr.direction.z, 1, accuracy: 1e-9)
+        XCTAssertGreaterThan(tr.facesAdded, 0)
+        XCTAssertGreaterThan(try massOf(try rod.threadTool(cyl, m10.designation)).volume, 0)
+
+        let blk = try Solid.cuboid(40, 30, 20).translate(20, 15, 10)
+        let (tapped, hr) = try blk.hole(P(10, 15, 20), 0, thread: "M8")
+        XCTAssertEqual(24000 - (try massOf(tapped, 1e-4).volume), 833.1391195130168, accuracy: 1e-4 * 833.1391195130168)
+        XCTAssertEqual(hr.holes, 1)
+        XCTAssertEqual(hr.threadDepths.count, 1)
+        XCTAssertEqual(hr.threadDepths[0], 20, accuracy: 1e-9)
+        let (bare, _) = try blk.hole(P(10, 15, 20), 0, thread: try threadSize("M8").designation, threadModelled: false)
+        let recs = try bare.threadRecords()
+        XCTAssertEqual(recs.count, 1)
+        XCTAssertEqual(recs[0].record.designation, "M8")
+        XCTAssertEqual(recs[0].record.major, 8)
+        XCTAssertEqual(recs[0].record.pitch, 1.25)
+        XCTAssertTrue(recs[0].record.internal)
+        XCTAssertFalse(recs[0].record.leftHanded)
+        XCTAssertEqual(recs[0].record.length, 20, accuracy: 1e-9)
+        XCTAssertGreaterThan(try massOf(try blk.holeTool(P(10, 15, 20), 0, thread: "M8")).volume, 0)
+        XCTAssertEqual(refusal { _ = try blk.hole(P(10, 15, 20), 9, thread: "M8") },
+                       "hole_threaded: the diameter 9 is not in the thread's band [6.491, 7.188]")
+
+        let marked = try rod.cosmeticThread(cyl, "m10", length: 8, offset: 1, reverse: true, leftHanded: true)
+        XCTAssertEqual(try marked.faces, try rod.faces)
+        XCTAssertEqual(try marked.threadRecord(cyl),
+                       ThreadRecord(designation: "M10", major: 10, pitch: 1.5, length: 8, offset: 1, internal: false, leftHanded: true, reverse: true))
+        XCTAssertEqual(try marked.threadRecords().map { $0.face }, [cyl])
+        XCTAssertNil(try rod.threadRecord(cyl))
+        XCTAssertEqual(refusal { _ = try rod.threadRecord(3) }, "thread_record: face 3 is not one of the solid's 3")
+        XCTAssertEqual(refusal { _ = try rod.thread(cyl) }, "thread: neither a size nor a pitch is given")
+        XCTAssertEqual(refusal { _ = try rod.threadTool(cyl, "M10", length: 6, offset: 8) },
+                       "thread_tool: offset 8 and length 6 run past the face's length 12")
     }
 }

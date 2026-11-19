@@ -359,6 +359,63 @@ typedef enum CadaclysmPhase {
 } CadaclysmPhase;
 
 /**
+ * A [`cadaclysm::CalendarKind`] value, for [`cadaclysm_calendar_kind`]. Carried as a
+ * `uint32_t`. `CADACLYSM_CALENDAR_OTHER`'s text is [`cadaclysm_calendar_kind_name`].
+ */
+typedef enum CadaclysmCalendarKind {
+  CADACLYSM_CALENDAR_FIRSTSHIFT = 0,
+  CADACLYSM_CALENDAR_SECONDSHIFT = 1,
+  CADACLYSM_CALENDAR_THIRDSHIFT = 2,
+  CADACLYSM_CALENDAR_NOTDEFINED = 3,
+  CADACLYSM_CALENDAR_OTHER = 4,
+} CadaclysmCalendarKind;
+
+/**
+ * A [`cadaclysm::RecurrenceKind`] value, in `IfcRecurrenceTypeEnum`'s order: the `kind`
+ * of a [`CadaclysmWorkTime`]'s pattern. Carried as a `uint32_t`.
+ */
+typedef enum CadaclysmRecurrenceKind {
+  CADACLYSM_RECURRENCE_DAILY = 0,
+  CADACLYSM_RECURRENCE_WEEKLY = 1,
+  CADACLYSM_RECURRENCE_MONTHLY_BY_DAY_OF_MONTH = 2,
+  CADACLYSM_RECURRENCE_MONTHLY_BY_POSITION = 3,
+  CADACLYSM_RECURRENCE_BY_DAY_COUNT = 4,
+  CADACLYSM_RECURRENCE_BY_WEEKDAY_COUNT = 5,
+  CADACLYSM_RECURRENCE_YEARLY_BY_DAY_OF_MONTH = 6,
+  CADACLYSM_RECURRENCE_YEARLY_BY_POSITION = 7,
+} CadaclysmRecurrenceKind;
+
+/**
+ * A [`cadaclysm::DurationKind`] value, for [`cadaclysm_task_duration_kind`]: whether a
+ * task's duration is elapsed or working time. `CADACLYSM_DURATION_UNSET` where the file
+ * gives none. Carried as a `uint32_t`.
+ */
+typedef enum CadaclysmDurationKind {
+  CADACLYSM_DURATION_ELAPSED = 0,
+  CADACLYSM_DURATION_WORK = 1,
+  CADACLYSM_DURATION_NOTDEFINED = 2,
+  CADACLYSM_DURATION_UNSET = 3,
+} CadaclysmDurationKind;
+
+/**
+ * What a working-time query on a calendar returns: [`cadaclysm_calendar_working_periods`],
+ * [`cadaclysm_calendar_working_seconds`] and [`cadaclysm_calendar_add_work`]. Carried as a
+ * `uint32_t`; [`cadaclysm_calendar_error_message`] gives each one's text.
+ */
+typedef enum CadaclysmCalendarStatus {
+  CADACLYSM_CALENDAR_STATUS_OK = 0,
+  CADACLYSM_CALENDAR_STATUS_NOT_FINITE = 1,
+  CADACLYSM_CALENDAR_STATUS_REVERSED = 2,
+  CADACLYSM_CALENDAR_STATUS_NO_WORKING_TIME = 3,
+  CADACLYSM_CALENDAR_STATUS_NO_SUCH_CALENDAR = 4,
+  /**
+   * [`cadaclysm_calendar_working_periods`] and [`cadaclysm_calendar_working_seconds`]
+   * only: `from` and `to` lie more than 100 years apart.
+   */
+  CADACLYSM_CALENDAR_STATUS_TOO_LONG = 5,
+} CadaclysmCalendarStatus;
+
+/**
  * An imported body's exact B-rep -- the trimmed surfaces its mesh is cut from --
  * opaque, and shared with the scene rather than copied. Made by
  * [`cadaclysm_node_brep`], given back with [`cadaclysm_brep_release`]. It is
@@ -405,6 +462,13 @@ typedef struct CadaclysmMeshlets CadaclysmMeshlets;
  * neither more nor less than the caller wants: closing the scene does not invalidate it.
  */
 typedef struct CadaclysmPose CadaclysmPose;
+
+/**
+ * A recognition report and the recognised body: owned, opaque, independent of the brep it was
+ * made from (it stays good after [`cadaclysm_brep_release`](crate::cadaclysm_brep_release)).
+ * Made by [`cadaclysm_brep_recognized`], freed with [`cadaclysm_brep_recognize_free`].
+ */
+typedef struct CadaclysmRecognize CadaclysmRecognize;
 
 /**
  * A file, read. Opaque to C; `cadaclysm_close` frees it.
@@ -559,6 +623,17 @@ typedef struct CadaclysmOpenOptions {
    * Handed back to `pick` untouched.
    */
   void *pick_user;
+  /**
+   * Pack a lightmap atlas for a texture this many texels on a side: a second,
+   * non-overlapping set of texture coordinates in 0..1, one chart per B-rep face,
+   * read back through [`cadaclysm_node_mesh_lightmap_uvs`]. `0` (what
+   * [`cadaclysm_open_options_init`] sets) is off; under 16 is taken as 16.
+   * Independent of `uvs`. A B-rep body whose charts do not fit at this
+   * resolution hands back null, and [`cadaclysm_geometry_diagnostic`] says so
+   * once the body is meshed. Last, so a caller built before it passes a struct
+   * whose `size` stops short of it and is read as off.
+   */
+  uint32_t lightmap_resolution;
 } CadaclysmOpenOptions;
 
 /**
@@ -810,6 +885,29 @@ typedef struct CadaclysmElementState {
   bool has_variance;
   double variance;
 } CadaclysmElementState;
+
+/**
+ * One work time of a calendar, from [`cadaclysm_calendar_work_time`]. Dates are midnight
+ * of the day, in seconds since 1970-01-01T00:00; each `has_*` says whether its value is
+ * given. Without a pattern (`has_pattern` false) the work time covers every day of its
+ * validity, all day, and the fields after `has_pattern` are 0. `kind` is a
+ * [`CadaclysmRecurrenceKind`]. The pattern's lists come from
+ * [`cadaclysm_calendar_work_time_days`], `_weekdays`, `_months` and `_periods`.
+ */
+typedef struct CadaclysmWorkTime {
+  bool has_start;
+  double start;
+  bool has_finish;
+  double finish;
+  bool has_pattern;
+  uint32_t kind;
+  bool has_position;
+  int32_t position;
+  bool has_interval;
+  uint32_t interval;
+  bool has_occurrences;
+  uint32_t occurrences;
+} CadaclysmWorkTime;
 
 /**
  * A set of polylines. Both pointers borrow from the scene.
@@ -2064,6 +2162,30 @@ bool cadaclysm_node_visible(const struct CadaclysmScene *scene, uint32_t node);
 struct CadaclysmMesh cadaclysm_node_mesh(const struct CadaclysmScene *scene, uint32_t node);
 
 /**
+ * This part's lightmap coordinates: two floats a vertex, in 0..1, aligned with
+ * [`cadaclysm_node_mesh`]'s vertices -- the same count, the same order, the same
+ * instancing (two occurrences of one shape hand back the same pointer). A second
+ * texture coordinate set for baking light: one chart per B-rep face, packed without
+ * overlap, two texels apart at the resolution asked for.
+ *
+ * Null, with `*out_vertex_count` set to 0, unless the scene was opened with a
+ * non-zero `CadaclysmOpenOptions.lightmap_resolution` *and* this part's mesh came
+ * from a B-rep the reader charts (STEP today); a part that arrived as triangles has
+ * no faces to chart. Null for a B-rep part means its charts did not fit at that
+ * resolution. `out_vertex_count` may be null.
+ *
+ * Not a field of [`CadaclysmMesh`] because that struct is returned by value: a field
+ * added to it moves its layout under every caller already compiled.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out_vertex_count` null or
+ * writable. The pointer is good until [`cadaclysm_close`] and must not be freed.
+ */
+const float *cadaclysm_node_mesh_lightmap_uvs(const struct CadaclysmScene *scene,
+                                              uint32_t node,
+                                              uint32_t *out_vertex_count);
+
+/**
  * [`cadaclysm_node_mesh`], with its positions taken about a point near the part rather
  * than about the file's origin, and that point written to `out_anchor` as three doubles.
  *
@@ -2939,6 +3061,256 @@ int64_t cadaclysm_schedule_at(const struct CadaclysmScene *scene,
                               uint32_t capacity);
 
 /**
+ * How many work calendars (`IfcWorkCalendar`) the file records, in file order. 0 for a
+ * file with none.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_calendar_count(const struct CadaclysmScene *scene);
+
+/**
+ * A calendar's name (else its identification, else `calendar #k`), or null past the end.
+ * Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_calendar_name(const struct CadaclysmScene *scene, uint32_t c);
+
+/**
+ * A calendar's identification ("" where none), or null past the end. Borrowed, lives as
+ * long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_calendar_identification(const struct CadaclysmScene *scene, uint32_t c);
+
+/**
+ * A calendar's kind, a [`CadaclysmCalendarKind`]. `CADACLYSM_CALENDAR_NOTDEFINED` past the
+ * end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_calendar_kind(const struct CadaclysmScene *scene, uint32_t c);
+
+/**
+ * The text of a user-defined calendar kind (`CADACLYSM_CALENDAR_OTHER`, the calendar's
+ * ObjectType); "" for every other kind; null past the end. Borrowed, lives as long as the
+ * scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_calendar_kind_name(const struct CadaclysmScene *scene, uint32_t c);
+
+/**
+ * How many working times calendar `c` has, in file order. 0 past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_calendar_working_count(const struct CadaclysmScene *scene, uint32_t c);
+
+/**
+ * How many exception (non-working) times calendar `c` has, in file order. 0 past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_calendar_exception_count(const struct CadaclysmScene *scene, uint32_t c);
+
+/**
+ * Work time `w` of calendar `c`: one of its exceptions when `exception`, else one of its
+ * working times. False, with nothing written, past the end; nothing written when `out` is
+ * NULL.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable.
+ */
+bool cadaclysm_calendar_work_time(const struct CadaclysmScene *scene,
+                                  uint32_t c,
+                                  bool exception,
+                                  uint32_t w,
+                                  struct CadaclysmWorkTime *out);
+
+/**
+ * A work time's name ("" where none), or null past the end. `exception` picks the list as
+ * [`cadaclysm_calendar_work_time`] does. Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_calendar_work_time_name(const struct CadaclysmScene *scene,
+                                              uint32_t c,
+                                              bool exception,
+                                              uint32_t w);
+
+/**
+ * A work time's pattern's days of the month (1..=31, sorted), written to `out`. Returns
+ * the full count; writes `min(count, capacity)` of them, and nothing when `out` is NULL. 0
+ * past the end or without a pattern.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable for `capacity` values.
+ */
+uint32_t cadaclysm_calendar_work_time_days(const struct CadaclysmScene *scene,
+                                           uint32_t c,
+                                           bool exception,
+                                           uint32_t w,
+                                           uint8_t *out,
+                                           uint32_t capacity);
+
+/**
+ * A work time's pattern's weekdays (1 = Monday ..= 7 = Sunday, sorted), as
+ * [`cadaclysm_calendar_work_time_days`].
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable for `capacity` values.
+ */
+uint32_t cadaclysm_calendar_work_time_weekdays(const struct CadaclysmScene *scene,
+                                               uint32_t c,
+                                               bool exception,
+                                               uint32_t w,
+                                               uint8_t *out,
+                                               uint32_t capacity);
+
+/**
+ * A work time's pattern's months (1..=12, sorted), as [`cadaclysm_calendar_work_time_days`].
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable for `capacity` values.
+ */
+uint32_t cadaclysm_calendar_work_time_months(const struct CadaclysmScene *scene,
+                                             uint32_t c,
+                                             bool exception,
+                                             uint32_t w,
+                                             uint8_t *out,
+                                             uint32_t capacity);
+
+/**
+ * A work time's pattern's time periods, each a (start, end) pair in seconds after
+ * midnight, in file order, written to `out` as `[start0, end0, start1, ...]`. Returns the
+ * full count of pairs; writes `min(count, capacity)` pairs, and nothing when `out` is
+ * NULL. 0 past the end, without a pattern, or for an all-day pattern.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable for `2 * capacity` doubles.
+ */
+uint32_t cadaclysm_calendar_work_time_periods(const struct CadaclysmScene *scene,
+                                              uint32_t c,
+                                              bool exception,
+                                              uint32_t w,
+                                              double *out,
+                                              uint32_t capacity);
+
+/**
+ * The work calendar task `t` works on, an index for the `cadaclysm_calendar_*` calls,
+ * written to `out`. False, with nothing written, for a task with no calendar or past the
+ * end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable.
+ */
+bool cadaclysm_task_calendar(const struct CadaclysmScene *scene,
+                             uint32_t s,
+                             uint32_t t,
+                             uint32_t *out);
+
+/**
+ * Whether a task's duration is elapsed or working time, a [`CadaclysmDurationKind`].
+ * `CADACLYSM_DURATION_UNSET` where the file gives none, and past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_task_duration_kind(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+/**
+ * A task's duration in working time: `days` working days, then `seconds` of working time.
+ * Each out pointer may be null. False, with nothing written, where the task has none (an
+ * IFC2X3 task, or no duration) or past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; each out pointer, where not
+ * null, must be writable.
+ */
+bool cadaclysm_task_work_duration(const struct CadaclysmScene *scene,
+                                  uint32_t s,
+                                  uint32_t t,
+                                  double *days,
+                                  double *seconds);
+
+/**
+ * Calendar `c`'s working periods overlapping `from` ..= `to` (seconds since
+ * 1970-01-01T00:00), clipped to it, sorted and merged, written to `out` as
+ * `[start0, end0, start1, ...]`. Writes `min(count, capacity)` pairs (nothing when `out`
+ * is NULL) and the full count of pairs to `count`, where not null. Returns a
+ * [`CadaclysmCalendarStatus`]: `_OK`, `_NOT_FINITE`, `_REVERSED` (`from` after `to`),
+ * `_TOO_LONG` (more than 100 years apart) or `_NO_SUCH_CALENDAR` (a null scene, or past
+ * the end); nothing is written unless `_OK`.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable for `2 * capacity` doubles; `count`, where not null, must be writable.
+ */
+uint32_t cadaclysm_calendar_working_periods(const struct CadaclysmScene *scene,
+                                            uint32_t c,
+                                            double from,
+                                            double to,
+                                            double *out,
+                                            uint32_t capacity,
+                                            uint32_t *count);
+
+/**
+ * Calendar `c`'s working seconds in `from` ..= `to`, written to `out` where not null.
+ * Returns a [`CadaclysmCalendarStatus`] as [`cadaclysm_calendar_working_periods`] does.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable.
+ */
+uint32_t cadaclysm_calendar_working_seconds(const struct CadaclysmScene *scene,
+                                            uint32_t c,
+                                            double from,
+                                            double to,
+                                            double *out);
+
+/**
+ * The date `days` working days and then `seconds` of working time after `from` (before
+ * it, when negative) on calendar `c`, written to `out` where not null. A forward result
+ * at the start of a working day is reported as the end of the previous one; `days` = 0
+ * adds working seconds alone. Returns a [`CadaclysmCalendarStatus`]: `_OK`,
+ * `_NOT_FINITE`, `_NO_WORKING_TIME` (none within 100 years) or `_NO_SUCH_CALENDAR`.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable.
+ */
+uint32_t cadaclysm_calendar_add_work(const struct CadaclysmScene *scene,
+                                     uint32_t c,
+                                     double from,
+                                     double days,
+                                     double seconds,
+                                     double *out);
+
+/**
+ * The text of a [`CadaclysmCalendarStatus`]: "from and to must be finite", "from must
+ * not be after to", "no working time within 100 years", "no such calendar", "from and to
+ * must lie within 100 years of each other", and "" for
+ * `_OK` or a value no status names. Static: never null, never freed.
+ */
+const char *cadaclysm_calendar_error_message(uint32_t status);
+
+/**
  * The mechanism posed by `row_count` rows: row `i` sets joint `joints[i]` to `counts[i]`
  * values, taken consecutively from `values` (so `values` holds the sum of `counts`).
  * `ground`: a link index, or [`CADACLYSM_NONE`] for the default ground. NULL on error, with
@@ -3650,8 +4022,10 @@ void cadaclysm_cancel(const struct CadaclysmScene *scene);
  * [`cadaclysm_last_error`] lists what was written as a mesh or left out, one
  * line each, or is null where nothing was. Any other name is refused.
  *
- * A mechanism goes into a USD layer as UsdPhysics: a rigid body per link and a
- * joint prim per pair, for a simulator (Isaac Sim, Omniverse).
+ * A mechanism goes into a USD layer as UsdPhysics: a rigid body per link, with
+ * its mass and inertia from its parts' declared densities (water's where none
+ * is declared) and convex colliders, and a joint prim per pair, for a simulator
+ * (Isaac Sim, Omniverse).
  *
  * `"glb-skinned"`, `"gltf-skinned"` and `"usda-skinned"` write the same
  * containers with the scene's mechanism as a skin (in USD a UsdSkel skeleton): one bone per link, each moving link's bone on
@@ -4165,6 +4539,109 @@ uint32_t cadaclysm_brep_heal_refused(const struct CadaclysmHeal *h, uint32_t *it
  * `brep` null or a live brep handle (see [`cadaclysm_brep_healed`]).
  */
 double cadaclysm_brep_edge_tolerance(const struct CadaclysmBrep *brep, uint32_t edge);
+
+/**
+ * Give the brep's free-form surfaces and edge curves their analytic kind: a NURBS (or
+ * revolved, extruded or swept) surface that is a plane, cylinder, cone, sphere or torus within
+ * `tolerance` of every sample of its faces and every point of their edges becomes exactly
+ * that, and an edge curve that is a line, circle or ellipse within it likewise, over the same
+ * stretch run the same way -- so a file that stored its analytic faces as NURBS (a `.3dm`
+ * especially) comes back as they were made. Faces and edges keep their numbers. `brep` is left
+ * as it was. `NaN` or `tolerance <= 0` takes the default, `1e-6` times the body's extent --
+ * not the file's declared tolerance, at which a fillet's blend reads as a torus; the summary's
+ * `sizes[0]` says what was used.
+ *
+ * A report handle, read with the `cadaclysm_brep_recognize_*` accessors and freed with
+ * [`cadaclysm_brep_recognize_free`]; null (and
+ * [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `brep` or a panic inside
+ * recognition (the message starts `panicked:`).
+ *
+ * # Safety
+ * `brep` null or from [`cadaclysm_node_brep`](crate::cadaclysm_node_brep),
+ * [`cadaclysm_brep_sew`](crate::cadaclysm_brep_sew), [`cadaclysm_brep_heal_body`](crate::cadaclysm_brep_heal_body)
+ * or [`cadaclysm_brep_recognize_body`] and not yet released.
+ */
+struct CadaclysmRecognize *cadaclysm_brep_recognized(const struct CadaclysmBrep *brep,
+                                                     double tolerance);
+
+/**
+ * The recognised body: a new reference the caller releases with
+ * [`cadaclysm_brep_release`](crate::cadaclysm_brep_release). It outlives the report. Null
+ * (and [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `r`.
+ *
+ * # Safety
+ * `r` null or live from [`cadaclysm_brep_recognized`].
+ */
+const struct CadaclysmBrep *cadaclysm_brep_recognize_body(const struct CadaclysmRecognize *r);
+
+/**
+ * Free a report. Null is a no-op. A body taken with [`cadaclysm_brep_recognize_body`] stays
+ * good.
+ *
+ * # Safety
+ * `r` null or from [`cadaclysm_brep_recognized`], and freed once.
+ */
+void cadaclysm_brep_recognize_free(struct CadaclysmRecognize *r);
+
+/**
+ * The report's figures. `counts`, ten `uint32_t`, in order: faces taken as planes, cylinders,
+ * cones, spheres, tori; faces left free-form; edges taken as lines, circles, ellipses; edges
+ * left free-form. `sizes`, three `double`: the tolerance used, the worst face deviation, the
+ * worst edge deviation (0 where none was taken). Either output may be null; not both. `false`
+ * (and [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `r` or both outputs
+ * null.
+ *
+ * # Safety
+ * `r` null or live from [`cadaclysm_brep_recognized`]; `counts` null or ten `uint32_t`;
+ * `sizes` null or three `double`.
+ */
+bool cadaclysm_brep_recognize_summary(const struct CadaclysmRecognize *r,
+                                      uint32_t *counts,
+                                      double *sizes);
+
+/**
+ * The faces taken, one row each: `items`, two `uint32_t` -- the face's index (unchanged by
+ * recognition), its kind (0 plane, 1 cylinder, 2 cone, 3 sphere, 4 torus); `sizes`, one
+ * `double` -- the furthest any sample of it lies from the analytic surface. Returns the count;
+ * with both buffers null it writes nothing, so call it twice: once to size the buffers, once
+ * to fill them. A non-null buffer must hold the whole count. Zero (and
+ * [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `r`.
+ *
+ * # Safety
+ * `r` null or live from [`cadaclysm_brep_recognized`]; `items` null or `2 n` `uint32_t`,
+ * `sizes` null or `n` `double`, for `n` the count.
+ */
+uint32_t cadaclysm_brep_recognize_faces(const struct CadaclysmRecognize *r,
+                                        uint32_t *items,
+                                        double *sizes);
+
+/**
+ * The free-form faces left, one row each: `items`, two `uint32_t` -- the face's index, why
+ * (0 no kind fits within the tolerance, 1 its normals point both ways, 2 a parameter trim
+ * cannot be lifted, 3 too few samples); `sizes`, one `double` -- for "no kind", the closest
+ * kind's deviation, else `NaN`. Returns the count, with the two-call convention of
+ * [`cadaclysm_brep_recognize_faces`].
+ *
+ * # Safety
+ * `r` null or live; `items` null or `2 n` `uint32_t`, `sizes` null or `n` `double`.
+ */
+uint32_t cadaclysm_brep_recognize_refused(const struct CadaclysmRecognize *r,
+                                          uint32_t *items,
+                                          double *sizes);
+
+/**
+ * The edges whose curve was taken, one row each, in edge order: `items`, two `uint32_t` --
+ * the brep edge id (as [`cadaclysm_brep_edge_tolerance`](crate::cadaclysm_brep_edge_tolerance)
+ * takes one), its kind (0 line, 1 circle, 2 ellipse); `sizes`, one `double` -- the furthest
+ * any point of the curve or its edges lies from the analytic curve. Returns the count, with
+ * the two-call convention of [`cadaclysm_brep_recognize_faces`].
+ *
+ * # Safety
+ * `r` null or live; `items` null or `2 n` `uint32_t`, `sizes` null or `n` `double`.
+ */
+uint32_t cadaclysm_brep_recognize_edges(const struct CadaclysmRecognize *r,
+                                        uint32_t *items,
+                                        double *sizes);
 
 /**
  * The defaults: the viewer's `iso`, orthographic, a 1000-square page, black

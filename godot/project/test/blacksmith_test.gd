@@ -43,6 +43,9 @@ func test_the_library_loads():
 	ok(RegEx.create_from_string("cadaclysm[a-z_]*\\.(dll|so|dylib)$").search(path) != null, path)
 	ok(RegEx.create_from_string("^\\d+\\.\\d+\\.\\d+").search(CadaclysmBlacksmith.version()) != null, CadaclysmBlacksmith.version())
 	ok(RegEx.create_from_string("^\\d{4}-\\d{2}-\\d{2}$").search(CadaclysmBlacksmith.build_date()) != null, CadaclysmBlacksmith.build_date())
+	var build: Dictionary = JSON.parse_string(CadaclysmBlacksmith.build())
+	ok(build["version"] == CadaclysmBlacksmith.version() and build["date"] == CadaclysmBlacksmith.build_date(), CadaclysmBlacksmith.build())
+	ok(build.has("commit") and build.has("branch") and build.has("time"), CadaclysmBlacksmith.build())
 	ok(CadaclysmBlacksmith.license_info() != "")
 	ok(CadaclysmBlacksmith.license_notice_count() >= 0)
 	eq(CadaclysmBlacksmith.load(path), true)
@@ -152,11 +155,11 @@ func test_solids_build_transform_combine_mesh_bound_and_write_step():
 		s.close()
 	refuses(func(): return CadaclysmSolid.cuboid(-1, 1, 1), "cuboid")
 	eq(CadaclysmSolid.cuboid(-1, 1, 1), null)
-	var big := CadaclysmSolid.cuboid(1, 2, 3).scaled(2)
+	var big := CadaclysmSolid.cuboid(1, 2, 3).scale(2)
 	ok(big != null, "scaled")
 	var bb: AABB = big.bounds_at(0.05)
 	ok(absf(bb.size.x - 2.0) < 1e-5 and absf(bb.size.z - 6.0) < 1e-5, "scaled bounds")
-	eq(CadaclysmSolid.cuboid(1, 1, 1).scaled(0), null)
+	eq(CadaclysmSolid.cuboid(1, 1, 1).scale(0), null)
 	var pin := CadaclysmSolid.cylinder(4, 10).translate(0, 0, 6).rotate([0, 0, 0], [0, 0, 1], 0.1).place(XY).mirror(XY)
 	ok(pin.faces > 0)
 	var part := plate.join(CadaclysmSolid.cuboid(6, 6, 20).translate(30, 10, -5), 0.05)
@@ -316,7 +319,7 @@ func test_a_quaternion_turns_as_its_transform_does():
 	ok(all_near(CadaclysmQuaternion.from_transform(q.to_transform()).components, q.components, 1e-12), "from_transform")
 	near(CadaclysmQuaternion.slerp(CadaclysmQuaternion.identity(), q, 0.25).angle(), PI / 8, 1e-12)
 	ok(all_near(q.multiply(q.conjugate()).components, [1, 0, 0, 0], 1e-12), "q * conjugate")
-	eq(CadaclysmQuaternion.create(0, 0, 0, 2).normalized().components, PackedFloat64Array([0, 0, 0, 1]))
+	eq(CadaclysmQuaternion.create(0, 0, 0, 2).normalize().components, PackedFloat64Array([0, 0, 0, 1]))
 	eq(CadaclysmQuaternion.identity().axis(), null)
 	refused(func(): return CadaclysmQuaternion.create(0, 0, 0, 0).to_transform(), "quaternion_to_transform: the quaternion is zero")
 	refused(func(): return CadaclysmQuaternion.from_transform(CadaclysmTransform.mirror(fxy())), "quaternion_from_transform: ")
@@ -335,14 +338,14 @@ func test_a_quaternion_turns_as_its_transform_does():
 func test_a_quaternion_far_from_unit_length_normalises_like_the_abi():
 	var half := sqrt(0.5)
 	for k in [1e200, 1e-170]:
-		eq(CadaclysmQuaternion.create(k, 0, 0, 0).normalized().components, PackedFloat64Array([1, 0, 0, 0]), str(k))
-		eq(CadaclysmQuaternion.create(0, 0, 0, -k).normalized().components, PackedFloat64Array([0, 0, 0, -1]), str(k))
-		ok(all_near(CadaclysmQuaternion.create(k, k, 0, 0).normalized().components, [half, half, 0, 0], 1e-12), str(k))
+		eq(CadaclysmQuaternion.create(k, 0, 0, 0).normalize().components, PackedFloat64Array([1, 0, 0, 0]), str(k))
+		eq(CadaclysmQuaternion.create(0, 0, 0, -k).normalize().components, PackedFloat64Array([0, 0, 0, -1]), str(k))
+		ok(all_near(CadaclysmQuaternion.create(k, k, 0, 0).normalize().components, [half, half, 0, 0], 1e-12), str(k))
 		var length: float = CadaclysmQuaternion.create(k, k, 0, 0).length()
 		ok(absf((length - k * sqrt(2.0)) / (k * sqrt(2.0))) <= 1e-15, "%s: length %s" % [k, length])
 		near(CadaclysmQuaternion.create(k, k, 0, 0).angle(), PI / 2, 1e-12, str(k))
 		ok(all_near(CadaclysmQuaternion.create(0, k, k, 0).axis(), [half, half, 0], 1e-12), str(k))
-	refused(func(): return CadaclysmQuaternion.create(0, 0, 0, 0).normalized(), "Quaternion.normalized: the quaternion is zero")
+	refused(func(): return CadaclysmQuaternion.create(0, 0, 0, 0).normalize(), "Quaternion.normalized: the quaternion is zero")
 
 func test_a_solid_takes_any_affine_map():
 	var block := CadaclysmSolid.cuboid(1, 2, 3)
@@ -480,7 +483,7 @@ func test_an_interval_measures_keeping_its_orientation():
 	eq([up.min(), up.max(), down.min(), down.max()], [2.0, 6.0, 2.0, 6.0])
 	ok(up.is_increasing() and not down.is_increasing() and not iv(3, 3).is_increasing())
 	ok(iv(3, 3).is_singleton() and not up.is_singleton())
-	ok(up.swapped().equals(down) and down.swapped().equals(up))
+	ok(up.swap().equals(down) and down.swap().equals(up))
 	eq(down.values, PackedFloat64Array([6, 2]))
 	eq([down.t0, down.t1], [6.0, 2.0])
 
@@ -552,16 +555,16 @@ func test_the_frame_verbs_match_rhino():
 	if r == null:
 		return
 	var p := CadaclysmFrame.of(nums(r, "plane", "frame"))
-	ok(p.flipped() is CadaclysmFrame)
-	ok(all_near(p.flipped().raw, nums(r, "plane", "flip"), EXACT), "flip")
-	ok(all_near(p.rotated(0.6, [1, -1, 0.5]).raw, nums(r, "plane", "rotate"), EXACT), "rotate")
+	ok(p.flip() is CadaclysmFrame)
+	ok(all_near(p.flip().raw, nums(r, "plane", "flip"), EXACT), "flip")
+	ok(all_near(p.rotate(0.6, [1, -1, 0.5]).raw, nums(r, "plane", "rotate"), EXACT), "rotate")
 	for item in queries(r, "plane"):
 		var case: String = item[0]
 		var q: Array = item[1]
 		ok(all_near(xyz(p.to_local(q)), nums(r, case, "remap"), FLOATS), case)
 		ok(all_near(xyz(p.closest_point(q)), nums(r, case, "closest"), FLOATS), case)
 		near(p.distance_to(q), nums(r, case, "distance")[0], EXACT, case)
-	refused_as(func(): return p.rotated(0.6, [0, 0, 0]), "transform_rotation: the axis has no direction")
+	refused_as(func(): return p.rotate(0.6, [0, 0, 0]), "transform_rotation: the axis has no direction")
 	refused_as(func(): return p.to_local([1, 2]), "to_local: a point is 3 numbers, got 2")
 
 func test_frame_fit_matches_rhino_and_refuses_in_the_librarys_words():
@@ -1196,6 +1199,63 @@ func test_open_profiles_chain_into_one_in_any_order():
 	var message := refuses(func(): return CadaclysmProfile.chain([side.call([0, 0], [1, 0]), side.call([5, 5], [6, 5])]))
 	eq(message, "chain: piece 1 does not meet the others")
 
+# ---- the forge's 2D profile calls (the other wrappers' from_pieces & co., 2026-11-16) ----
+# Python's test_profile_* in test_cadaclysm_blacksmith.py. Pieces go in and come out as
+# JSON text, as CadaclysmBlacksmith.build gives its record.
+
+func line_piece(x0: float, y0: float, x1: float, y1: float) -> Dictionary:
+	return {"kind": "line", "x0": x0, "y0": y0, "x1": x1, "y1": y1}
+
+func pieces_of(p: CadaclysmProfile) -> Array:
+	return JSON.parse_string(p.pieces_json())
+
+func test_profile_from_pieces_round_trips_its_pieces():
+	var pieces := [line_piece(0, 0, 10, 0), {"kind": "arc", "x0": 10, "y0": 0, "xm": 15, "ym": 5, "x1": 10, "y1": 10},
+		line_piece(10, 10, 0, 10)]
+	var closed := CadaclysmProfile.from_pieces(JSON.stringify(pieces), true)
+	ok(closed != null, Cadaclysm.last_error())
+	var back := pieces_of(closed)
+	eq(back.map(func(q): return q.has("xm")), [false, true, false, false], "three pieces and the closing side")
+	var again := CadaclysmProfile.from_pieces(closed.pieces_json())
+	ok(all_near(again.bounds(), closed.bounds(), 1e-9), "%s %s" % [again.bounds(), closed.bounds()])
+	eq(CadaclysmSolid.extrude(again, XY, 2).faces, 6, "four sides and two caps")
+	refuses(func(): return CadaclysmProfile.from_pieces(JSON.stringify([{"kind": "nope"}])), "0")
+	refuses(func(): return CadaclysmProfile.from_pieces("not json"))
+
+func test_profile_bounds_are_the_curves_own_extremes():
+	var b := CadaclysmProfile.circle(5).bounds()
+	ok(b is PackedFloat64Array and all_near(b, [-5, -5, 5, 5], 1e-12), str(b))
+	ok(all_near(CadaclysmProfile.rect(4, 2).bounds(), [-2, -1, 2, 1], 1e-12), str(CadaclysmProfile.rect(4, 2).bounds()))
+
+func test_profile_reversed_twice_is_the_profile():
+	var open := CadaclysmProfile.from_pieces(JSON.stringify([line_piece(0, 0, 10, 0), line_piece(10, 0, 10, 5)]))
+	var turned := open.reversed()
+	var first: Dictionary = pieces_of(turned)[0]
+	ok(all_near([first["x0"], first["y0"]], [10, 5], 1e-9), str(first))
+	var ends := func(p: CadaclysmProfile) -> Array:
+		var out := []
+		for q in pieces_of(p):
+			out.append_array([q["x0"], q["y0"], q["x1"], q["y1"]])
+		return out
+	ok(all_near(ends.call(turned.reversed()), ends.call(open), 1e-9), "twice is the profile")
+	ok(not all_near(ends.call(turned), ends.call(open), 1e-9), "once is not")
+
+func test_profile_fillet_corner_cuts_back_to_the_tangent_points():
+	var a := CadaclysmProfile.from_pieces(JSON.stringify([line_piece(0, 0, 10, 0)]))
+	var b := CadaclysmProfile.from_pieces(JSON.stringify([line_piece(10, 0, 10, 10)]))
+	var got: Dictionary = JSON.parse_string(CadaclysmProfile.fillet_corner(a, b, 2))
+	var keys := got.keys()
+	keys.sort()
+	eq(keys, ["a", "arc", "b"])
+	ok(near(got["a"][-1]["x1"], 8, 1e-9) and near(got["b"][0]["y0"], 2, 1e-9), str(got))
+	var arc: Dictionary = got["arc"]
+	ok(all_near([arc["x0"], arc["y0"], arc["x1"], arc["y1"]], [8, 0, 10, 2], 1e-9), str(arc))
+	var joined := CadaclysmProfile.from_pieces(JSON.stringify(got["a"] + [arc] + got["b"]))
+	ok(all_near(joined.bounds(), [0, 0, 10, 10], 1e-9), str(joined.bounds()))
+	eq(CadaclysmProfile.fillet_corner(a, b, 2, NAN), CadaclysmProfile.fillet_corner(a, b, 2), "NaN is the effective tolerance")
+	refuses(func(): return CadaclysmProfile.fillet_corner(a, b, 50))
+	eq(CadaclysmProfile.fillet_corner(a, b, 50), "")
+
 func test_colours_are_set_read_back_and_inherited():
 	var block := CadaclysmSolid.cuboid(10, 10, 10)
 	eq(block.colour, null)
@@ -1437,7 +1497,7 @@ func test_health_of_a_tiny_body_lists_edges_faces_and_the_body():
 
 func test_healed_cuboid_is_a_new_solid_with_nothing_done():
 	var box := CadaclysmSolid.cuboid(10, 10, 10)
-	var pair := box.healed()
+	var pair := box.heal()
 	var healed: CadaclysmSolid = pair["body"]
 	var r: Dictionary = pair["report"]
 	ok(healed != box and healed.closed == false)
@@ -1448,7 +1508,7 @@ func test_healed_cuboid_is_a_new_solid_with_nothing_done():
 	eq(r["moved"], 0.0)
 	eq(healed.faces, 6)
 	near(healed.mass(0)["volume"], 1000, 1e-6, "volume")
-	eq(box.healed(0.5)["report"]["tolerance"], 0.5)
+	eq(box.heal(0.5)["report"]["tolerance"], 0.5)
 	for e in 12:
 		eq(healed.edge_tolerance(e), 0.0, "edge %d" % e)
 	ok(is_nan(healed.edge_tolerance(0xFFFFFFF0)), "no such edge is NAN")
@@ -1457,7 +1517,7 @@ func test_healed_cuboid_is_a_new_solid_with_nothing_done():
 
 func test_healed_with_every_kind_off_refuses_them_as_toggled():
 	var plate := CadaclysmSolid.cuboid(10, 10, 0.001)
-	var r: Dictionary = plate.healed(0.01, false, false, false)["report"]
+	var r: Dictionary = plate.heal(0.01, false, false, false)["report"]
 	eq(r["fixes"].size(), 0)
 	eq([r["small_before"], r["small_after"]], [8, 8])
 	var rows := []
@@ -1466,12 +1526,12 @@ func test_healed_with_every_kind_off_refuses_them_as_toggled():
 	eq(rows, [["short_edge", 8, "toggled", 0.0], ["short_edge", 9, "toggled", 0.0], ["short_edge", 10, "toggled", 0.0], ["short_edge", 11, "toggled", 0.0],
 		["sliver_face", 2, "toggled", 0.0], ["sliver_face", 3, "toggled", 0.0], ["sliver_face", 4, "toggled", 0.0], ["sliver_face", 5, "toggled", 0.0]])
 	# One kind off at a time: only that kind is toggled, so each switch reaches the library.
-	var edges_off: Dictionary = plate.healed(0.01, false, true, true)["report"]
+	var edges_off: Dictionary = plate.heal(0.01, false, true, true)["report"]
 	ok(edges_off["refused"].any(func(x): return x["kind"] == "short_edge" and x["why"] == "toggled"), "edges off")
 	ok(not edges_off["refused"].any(func(x): return x["kind"] == "sliver_face" and x["why"] == "toggled"), "edges off toggles faces")
-	var faces_off: Dictionary = plate.healed(0.01, true, false, true)["report"]
+	var faces_off: Dictionary = plate.heal(0.01, true, false, true)["report"]
 	ok(faces_off["refused"].any(func(x): return x["kind"] == "sliver_face" and x["why"] == "toggled"), "faces off")
-	var on: Dictionary = plate.healed(0.01)["report"]
+	var on: Dictionary = plate.heal(0.01)["report"]
 	eq(on["small_before"], 8)
 	ok(not on["refused"].any(func(x): return x["why"] == "toggled"), "nothing toggled with every kind on")
 	if on["guarded"]:
@@ -1481,9 +1541,9 @@ func test_healed_holes_switch_reaches_a_pinhole():
 	var sheet := CadaclysmSolid.face(CadaclysmProfile.rect(10, 10).with_hole(CadaclysmProfile.circle(0.002)), XY)
 	var small: Array = sheet.health(0.01)["small"]
 	ok(small.any(func(s): return s["kind"] == "small_hole"), "a pinhole is a small hole: %s" % [small])
-	var off: Dictionary = sheet.healed(0.01, true, true, false)["report"]
+	var off: Dictionary = sheet.heal(0.01, true, true, false)["report"]
 	ok(off["refused"].any(func(x): return x["kind"] == "small_hole" and x["why"] == "toggled"), "holes off: %s" % [off])
-	var on: Dictionary = sheet.healed(0.01)["report"]
+	var on: Dictionary = sheet.heal(0.01)["report"]
 	ok(on["fixes"].any(func(x): return x["kind"] == "small_hole"), "holes on: %s" % [on])
 
 func test_health_and_healing_refuse_a_closed_solid():
@@ -1491,9 +1551,74 @@ func test_health_and_healing_refuse_a_closed_solid():
 	box.close()
 	eq(box.health(), {})
 	refuses(func(): return box.health(), "closed")
-	refuses(func(): return box.healed(), "closed")
+	refuses(func(): return box.heal(), "closed")
 	refuses(func(): return box.edge_tolerance(0), "closed")
 	ok(is_nan(box.edge_tolerance(0)))
+
+# ---- canonical recognition (recognition in the other wrappers, 2026-11-16) ----------
+# Python's test_recognize_* in test_cadaclysm_blacksmith.py. The decoder is the Rust SDK's,
+# out of GDScript's reach: its distinct-rows test is in the SDK's lib.rs.
+
+func test_recognize_takes_a_nurbs_cylinder_back_to_planes_and_a_cylinder():
+	var made := CadaclysmSolid.cylinder(2, 5)
+	var nurbs := made.convert_to_nurbs("all")
+	var pair := nurbs.recognize()
+	var back: CadaclysmSolid = pair["body"]
+	var r: Dictionary = pair["report"]
+	ok(back != null and back != nurbs, "a new solid")
+	eq(back.faces, 3)
+	var face_kinds := []
+	var faces := []
+	for f in r["faces"]:
+		face_kinds.append(f["kind"])
+		faces.append(f["face"])
+	face_kinds.sort()
+	faces.sort()
+	eq(face_kinds, ["cylinder", "plane", "plane"])
+	eq(faces, [0, 1, 2])
+	eq(r["refused"].size(), 0, "nothing refused: %s" % [r])
+	eq(r["edges_left"], 0, "no edge left: %s" % [r])
+	ok(r["edges"].filter(func(e): return e["kind"] == "circle").size() >= 2, "two circles: %s" % [r["edges"]])
+	ok(r["edges"].all(func(e): return e["kind"] == "line" or e["kind"] == "circle"), "lines and circles: %s" % [r["edges"]])
+	ok(r["tolerance"] > 0.0 and r["worst_face"] <= r["tolerance"] and r["worst_edge"] <= r["tolerance"], str(r))
+	rel(back.mass(0)["volume"], made.mass(0)["volume"], 1e-6, "volume")
+	eq(nurbs.recognize(0.5)["report"]["tolerance"], 0.5)
+	eq(nurbs.recognize(-1)["report"]["tolerance"], r["tolerance"])
+	eq(nurbs.recognize(NAN)["report"]["tolerance"], r["tolerance"])
+
+func test_recognize_of_an_analytic_body_takes_nothing():
+	var r: Dictionary = CadaclysmSolid.cylinder(2, 5).recognize()["report"]
+	eq([r["faces"].size(), r["refused"].size()], [0, 0], str(r))
+
+func test_recognize_leaves_a_bulging_loft_s_free_form_sides():
+	# Rectangles of one depth and varying width, lofted through four heights: the two sides
+	# of constant depth are planes, the two that bulge are left (no_kind, the closest kind's
+	# deviation given), and the four bulging corner curves are left too -- two faces left,
+	# four edges, so a report reading one count for the other cannot pass. Python's figures.
+	var sections := []
+	for wz in [[4, 0], [2, 3], [5, 6], [3, 9]]:
+		sections.append([CadaclysmProfile.rect(wz[0], 4), CadaclysmFrame.xy(Vector3(0, 0, wz[1]))])
+	var r: Dictionary = CadaclysmSolid.loft_through(sections).recognize()["report"]
+	var taken := []
+	for f in r["faces"]:
+		taken.append([f["face"], f["kind"]])
+	eq(taken, [[0, "plane"], [2, "plane"]])
+	var left := []
+	for x in r["refused"]:
+		left.append([x["face"], x["why"]])
+		rel(x["closest"], 0.8219141521824609, 1e-6, "closest")
+	eq(left, [[1, "no_kind"], [3, "no_kind"]])
+	eq(r["edges_left"], 4)
+	var edges := []
+	for e in r["edges"]:
+		edges.append([e["edge"], e["kind"]])
+	eq(edges, [[0, "line"], [2, "line"], [4, "line"], [6, "line"], [7, "line"], [9, "line"], [10, "line"], [11, "line"]])
+
+func test_recognize_refuses_a_closed_solid():
+	var box := CadaclysmSolid.cuboid(1, 1, 1)
+	box.close()
+	eq(box.recognize(), {})
+	refuses(func(): return box.recognize(), "closed")
 
 func test_the_collider_finds_overlapping_parts_and_rebuilds_the_overlap():
 	# Two cuboids overlapping by 2 along x, plus one far away -> one hit (0, 1), depth 2.
@@ -2971,7 +3096,7 @@ func test_a_solids_name_rides_through_a_one_source_step_and_drops_at_two():
 func test_a_material_and_an_outside_style_ride_operations_and_reach_step():
 	var cube := CadaclysmSolid.cuboid(1, 1, 1)
 	eq(cube.material, "", "a fresh cuboid has no material")
-	var steel := cube.with_material("Steel").styled("materials/steel.mtlx", "BrushedSteel")
+	var steel := cube.with_material("Steel").style("materials/steel.mtlx", "BrushedSteel")
 	eq(steel.material, "Steel")
 	eq(steel.style_location, "materials/steel.mtlx")
 	eq(steel.style_identification, "BrushedSteel")
@@ -2979,12 +3104,12 @@ func test_a_material_and_an_outside_style_ride_operations_and_reach_step():
 	var cut := steel.cut(tool)
 	eq(cut.material, "Steel", "a cut is made of its target's material")
 	eq(cut.style_identification, "BrushedSteel")
-	eq(cube.styled("", "BrushedSteel").style_location, "", "an empty location is left out")
+	eq(cube.style("", "BrushedSteel").style_location, "", "an empty location is left out")
 	var text := steel.step_text()
 	ok(text.contains("MATERIAL_DESIGNATION('Steel'"), "the material reaches STEP")
 	ok(text.contains("EXTERNALLY_DEFINED_STYLE(IDENTIFIER('BrushedSteel')"), "the style reaches STEP")
 	refuses(func(): return cube.with_material(" "), "blank")
-	refuses(func(): return cube.styled("", ""), "location or an identification")
+	refuses(func(): return cube.style("", ""), "location or an identification")
 
 func test_assembly_create_close_and_get_name():
 	refuses(func(): return CadaclysmAssembly.create(""), "name")
@@ -3366,7 +3491,7 @@ func test_pair_with_refuses_a_wrong_parameter_count():
 	ok(gears.pair_with("mesh", "gear", CadaclysmFrame.xy(Vector3(0, 0, 0)), null, [],
 		PackedFloat64Array([10, 20, -0.5])), Cadaclysm.last_error())
 
-# `CadaclysmAssembly.posed`, at parity with the Python reference's posed tests and the
+# `CadaclysmAssembly.pose`, at parity with the Python reference's posed tests and the
 # Rust SDK's `posed_*` tests, compared by STEP text (stamp stripped). NOT RUN locally:
 # there is no Godot binary on the authoring machine.
 func _posed_no_stamp(a: CadaclysmAssembly) -> String:
@@ -3394,48 +3519,48 @@ func _posed_frame() -> CadaclysmAssembly:
 func test_posed_moves_the_shoulder():
 	var arm: CadaclysmAssembly = _paired_arm()[1]
 	var before := _posed_no_stamp(arm)
-	var posed: CadaclysmAssembly = arm.posed({"shoulder": 0.5})
+	var posed: CadaclysmAssembly = arm.pose({"shoulder": 0.5})
 	if not ok(posed != null, "posed: " + Cadaclysm.last_error()):
 		return
 	eq(posed.name, "arm")
 	ok(_posed_no_stamp(posed) != before, "the posed copy differs from the rest")
 	eq(_posed_no_stamp(arm), before, "the original is unchanged")
 	# rows as an array of pairs, a list value, and no rows at all
-	eq(_posed_no_stamp(arm.posed([["shoulder", [0.5]]])), _posed_no_stamp(posed))
-	eq(_posed_no_stamp(arm.posed({})), before)
+	eq(_posed_no_stamp(arm.pose([["shoulder", [0.5]]])), _posed_no_stamp(posed))
+	eq(_posed_no_stamp(arm.pose({})), before)
 
 func test_posed_refuses_an_ambiguous_name_and_takes_a_path_with_a_slash():
 	var frame := _posed_frame()
 	var before := _posed_no_stamp(frame)
-	refuses(func(): return frame.posed({"turn": 0.3}),
+	refuses(func(): return frame.pose({"turn": 0.3}),
 		"posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path")
-	var posed: CadaclysmAssembly = frame.posed({"right\\/rear/turn": 0.3})
+	var posed: CadaclysmAssembly = frame.pose({"right\\/rear/turn": 0.3})
 	if not ok(posed != null, "posed: " + Cadaclysm.last_error()):
 		return
 	eq(posed.name, "frame")
 	ok(_posed_no_stamp(posed) != before, "posed by path differs from the rest")
 	# an array of names is escaped and joined
-	eq(_posed_no_stamp(frame.posed({["right/rear", "turn"]: 0.3})), _posed_no_stamp(posed))
-	eq(_posed_no_stamp(frame.posed({"right\\/rear/turn": 0.0})), before)
+	eq(_posed_no_stamp(frame.pose({["right/rear", "turn"]: 0.3})), _posed_no_stamp(posed))
+	eq(_posed_no_stamp(frame.pose({"right\\/rear/turn": 0.0})), before)
 	eq(_posed_no_stamp(frame), before)
 
 func test_posed_takes_a_state_and_a_ground_and_refuses_with_the_kernels_words():
 	var arm: CadaclysmAssembly = _paired_arm()[1]
 	var before := _posed_no_stamp(arm)
-	eq(_posed_no_stamp(arm.posed({}, "reach")), _posed_no_stamp(arm.posed({"shoulder": [0.5]})))
-	var held: CadaclysmAssembly = arm.posed({"shoulder": 0.5}, "", "upper arm")
-	ok(_posed_no_stamp(held) != _posed_no_stamp(arm.posed({"shoulder": 0.5})), "the ground link changes the pose")
-	eq(refuses(func(): return arm.posed({"shoulder": 2.0})), "posed: value 0 of joint 'shoulder' is 2, outside its range")
-	eq(refuses(func(): return arm.posed({}, "fold")), "posed: assembly 'arm' has no state named 'fold'")
+	eq(_posed_no_stamp(arm.pose({}, "reach")), _posed_no_stamp(arm.pose({"shoulder": [0.5]})))
+	var held: CadaclysmAssembly = arm.pose({"shoulder": 0.5}, "", "upper arm")
+	ok(_posed_no_stamp(held) != _posed_no_stamp(arm.pose({"shoulder": 0.5})), "the ground link changes the pose")
+	eq(refuses(func(): return arm.pose({"shoulder": 2.0})), "posed: value 0 of joint 'shoulder' is 2, outside its range")
+	eq(refuses(func(): return arm.pose({}, "fold")), "posed: assembly 'arm' has no state named 'fold'")
 	eq(_posed_no_stamp(arm), before)
 
 func test_posed_refuses_a_disagreeing_coupling():
 	var gears := _geared()
 	var before := _posed_no_stamp(gears)
-	var posed: CadaclysmAssembly = gears.posed({"drive": 0.4})
+	var posed: CadaclysmAssembly = gears.pose({"drive": 0.4})
 	if ok(posed != null, "posed drive alone: " + Cadaclysm.last_error()):
 		eq(posed.name, "gears")
-	refuses(func(): return gears.posed({"drive": 0.4, "driven": 0.4}),
+	refuses(func(): return gears.pose({"drive": 0.4, "driven": 0.4}),
 		"posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by")
 	eq(_posed_no_stamp(gears), before)
 
@@ -3573,7 +3698,7 @@ func test_assembly_swept_clash_a_sub_assembly_rides_its_placements_link():
 	eq(_swept_names(names, rig.swept_clash(_swing(), 0.0, SWEPT_TOL)), [["hand/tip", "circle"]])
 
 # The SDK's own refusals (keyframes naming other joints, a joint given twice, a value count
-# that changes), Godot's (a keyframe not in `posed`'s shape, a malformed `allowed`, a
+# that changes), Godot's (a keyframe not in `pose`'s shape, a malformed `allowed`, a
 # negative `max_steps`, a closed assembly), then the kernel's, passed on.
 func test_assembly_swept_clash_refuses_in_the_kernels_words():
 	var rig := _rig(_hand())
@@ -3654,6 +3779,91 @@ func test_profile_to_arcs_fits_a_spline_within_tolerance():
 	var fitted := spline.to_arcs(0.01)
 	assert_cam_footprint(fitted, cam_footprint(spline), 0.011, "fitted")
 	refuses(func(): return spline.to_arcs(-1.0), "profile_to_arcs: tolerance must be positive and finite")
+
+# the profile toolkit: every figure is worked out by hand in the spec
+func toolkit_area(p: CadaclysmProfile) -> float:
+	return p.area_properties().area
+
+# A straight-sided profile's side count (one Bezier, 16 numbers, a side).
+func toolkit_sides(p: CadaclysmProfile) -> int:
+	return p.beziers().size() / 16
+
+func test_profile_toolkit_union_difference_and_regions_are_exact():
+	var a := CadaclysmProfile.rect(10, 10)
+	var b := a.translate(5, 5)
+	var u := a.union(b)
+	eq(u.size(), 1)
+	near(toolkit_area(u[0]), 175, 1e-6, "union")
+	var d := a.difference(b)
+	eq(d.size(), 1)
+	near(toolkit_area(d[0]), 75, 1e-6, "difference")
+	var ring := CadaclysmProfile.circle(5).difference(CadaclysmProfile.circle(2))
+	eq(ring.size(), 1)
+	near(toolkit_area(ring[0]), 21 * PI, 21 * PI * 1e-9, "ring")
+	var areas := []
+	for r in CadaclysmProfile.regions([a, b]):
+		areas.append(toolkit_area(r))
+	areas.sort()
+	ok(all_near(areas, [25, 75, 75], 1e-6), "regions %s" % [areas])
+
+func test_profile_toolkit_contains_relationship_and_deviation():
+	var sq := CadaclysmProfile.rect(10, 10)
+	eq([sq.contains([0, 0]), sq.contains(Vector2(5, 0)), sq.contains([6, 0])], ["inside", "on", "outside"])
+	eq(sq.relationship(sq.translate(20, 0)), "disjoint")
+	eq(sq.relationship(sq.translate(10, 0)), "touching")
+	eq(sq.relationship(sq.translate(5, 0)), "overlapping")
+	eq(CadaclysmProfile.circle(2).relationship(sq), "a_inside_b")
+	eq(sq.relationship(CadaclysmProfile.circle(2)), "b_inside_a")
+	eq(sq.relationship(CadaclysmProfile.rect(10, 10)), "equal")
+	var d := CadaclysmProfile.circle(5).deviation(CadaclysmProfile.circle(6), 1e-6)
+	near(d.max_distance, 1, 1e-6, "max")
+	near(d.min_distance, 1, 1e-6, "min")
+	d = sq.deviation(CadaclysmProfile.circle(5), 1e-6)
+	near(d.max_distance, 5 * sqrt(2) - 5, 1e-6, "max")
+	near(d.min_distance, 0, 1e-6, "min")
+	near(hypot(d.max_a), 5 * sqrt(2), 1e-5, "the farthest point is a corner")
+	eq(sq.contains([NAN, 0]), "")
+	refuses_as(func(): return sq.contains([NAN, 0]), "profile_contains: ")
+
+func test_profile_toolkit_offset_corner_and_end_styles():
+	var sq := CadaclysmProfile.rect(10, 10)
+	var areas := {}
+	for c in ["sharp", "chamfer", "round", "smooth"]:
+		var out := sq.offset(1, 1e-3, c)
+		eq(out.size(), 1, c)
+		areas[c] = toolkit_area(out[0])
+	near(areas["sharp"], 144, 144 * 1e-6, "sharp")
+	near(areas["chamfer"], 142, 142 * 1e-6, "chamfer")
+	near(areas["round"], 140 + PI, (140 + PI) * 1e-4, "round")
+	near(areas["smooth"], 144 - 4.0 / 6.0, 144 * 1e-6, "smooth")
+	var line := CadaclysmProfile.polyline([[0, 0], [10, 0]])
+	var flat := line.offset_open(1, 1e-3, "round", "flat")
+	eq(flat.size(), 1)
+	near(toolkit_area(flat[0]), 20, 20 * 1e-6, "flat ends")
+	eq(line.offset_open(1, 1e-3).size(), 1, "the one-sided offset")
+	refuses_as(func(): return sq.offset(1, 0.01, "mitre"), "offset: corner must be one of 'round', 'sharp', 'smooth', 'chamfer', not 'mitre'")
+	eq(sq.offset(1, 0.01, "mitre").size(), 0)
+	refuses_as(func(): return line.offset_open(1, 0.01, "round", "square"), "offset_open: end must be one of")
+
+func test_profile_toolkit_polyline_tools():
+	var zig := CadaclysmProfile.polyline([[0, 0], [1, 0.001], [2, 0], [3, 0.001], [4, 0], [4, 4], [0, 4]], true)
+	eq(toolkit_sides(zig.reduce_segments(0.01)), 4)
+	eq(toolkit_sides(zig.reduce_segments(0.0001)), 7, "a tolerance under the wiggle keeps every vertex")
+	var colinear := CadaclysmProfile.polyline([[0, 0], [2, 0], [4, 0], [4, 4], [0, 4]], true)
+	eq(toolkit_sides(colinear.merge_colinear(1e-9)), 4)
+	ok(colinear.is_convex(), "convex")
+	ok(not colinear.is_convex(true), "not strictly convex")
+	ok(not CadaclysmProfile.polygon([[0, 0], [4, 0], [4, 4], [2, 1], [0, 4]]).is_convex(), "a dent")
+	eq(CadaclysmProfile.rect(10, 10).break_at_kinks(0.1).size(), 4)
+	eq(CadaclysmProfile.circle(3).break_at_kinks(0.1).size(), 1)
+	var gap := CadaclysmProfile.polyline([[0, 0], [4, 0], [4, 4], [0, 4], [0, 0.0005]])
+	near(toolkit_area(gap.make_closed(0.001)), 16, 0.01, "closed")
+	refuses_as(func(): return gap.make_closed(1e-5), "profile_make_closed: the ends are 0.0005 apart")
+	var seamed := CadaclysmProfile.rect(10, 10).with_seam([0, -5])
+	var start := seamed.beziers()
+	ok(all_near([start[0], start[1]], [0, -5], 1e-9), "the seam %s" % [start.slice(0, 2)])
+	near(toolkit_area(seamed), 100, 1e-6, "seamed")
+	eq(toolkit_sides(seamed), 5)
 
 func test_solid_section_cuts_a_cuboid():
 	var cuboid := CadaclysmSolid.cuboid(20, 10, 5)
@@ -5461,7 +5671,7 @@ func test_thickness_refusals_carry_the_calls_prefix():
 # A 10-cube centred on the origin and a pin through it (radius 2, along z, z -10..10),
 # both tracked.
 func block_and_pin() -> Array:
-	return [CadaclysmSolid.cuboid(10, 10, 10).tracked(), CadaclysmSolid.cylinder(2, 20).translate(0, 0, -10).tracked()]
+	return [CadaclysmSolid.cuboid(10, 10, 10).track(), CadaclysmSolid.cylinder(2, 20).translate(0, 0, -10).track()]
 
 # Face `f`'s outward normal's z, off its reference.
 func nz(solid: CadaclysmSolid, f: int) -> float:
@@ -5473,9 +5683,9 @@ func test_tracking_numbers_faces_and_edges_and_an_untracked_solid_has_no_ids():
 	eq(plain.face_id(0), -1, "untracked: none")
 	eq(plain.edge_id(0), -1)
 	eq(plain.face_origins(0), [])
-	var t := plain.tracked()
+	var t := plain.track()
 	eq(t.is_tracked, true)
-	eq(t.tracked().face_id(5), 6, "a tracked solid comes back as it is")
+	eq(t.track().face_id(5), 6, "a tracked solid comes back as it is")
 	eq(range(6).map(func(f): return t.face_id(f)), [1, 2, 3, 4, 5, 6])
 	eq(range(12).map(func(e): return t.edge_id(e)), range(1, 13))
 	eq([t.face_with_id(4), t.face_with_id(7), t.face_with_id(0)], [3, -1, -1])
@@ -5512,7 +5722,8 @@ func test_a_cuts_origins_and_history():
 	eq(h.deleted, caps, "the pin's two caps deleted")
 	eq(str(h), "History(kept=6, modified=1, generated=0, deleted=2)")
 	var e := cut.edge_history([block, pin])
-	eq([e.kept.size(), e.deleted, e.generated.size(), e.modified], [12, [[1, 1], [1, 2], [1, 3]], 3, []])
+	# The pin's two rims gone, the bore's two new, the pin's seam cut down to the bore's (re-pinned 2026-11-16: the exact route keeps the pin's seam).
+	eq([e.kept.size(), e.deleted, e.generated.size(), e.modified], [12, [[1, 1], [1, 3]], 2, [[[1, 2], [15]]]])
 	eq(refuses(func(): return cut.history([block, CadaclysmSolid.cuboid(1, 1, 1)])), "history: input 1 is not tracked")
 	eq(cut.history([block, CadaclysmSolid.cuboid(1, 1, 1)]), null)
 	ok(refuses(func(): return cut.history([block])).begins_with("history: face "), Cadaclysm.last_error())
@@ -5520,8 +5731,8 @@ func test_a_cuts_origins_and_history():
 	eq(refuses(func(): return CadaclysmSolid.cuboid(1, 1, 1).edge_history([block])), "edge_history: the result is not tracked")
 
 func test_a_union_renumbers_the_second_operands_clashing_ids():
-	var a := CadaclysmSolid.cuboid(10, 10, 10).tracked()
-	var b := CadaclysmSolid.cuboid(10, 10, 10).translate(5, 5, 5).tracked()
+	var a := CadaclysmSolid.cuboid(10, 10, 10).track()
+	var b := CadaclysmSolid.cuboid(10, 10, 10).translate(5, 5, 5).track()
 	var joined := a.join(b)
 	eq(joined.faces, 12)
 	var firsts := []
@@ -5542,7 +5753,7 @@ func test_a_union_renumbers_the_second_operands_clashing_ids():
 	eq(theirs, [1, 2, 3, 4, 5, 6], "their origins name operand 1's own ids")
 
 func test_a_split_halves_the_sides_and_its_bodies_keep_the_splits_origins():
-	var block := CadaclysmSolid.cuboid(2, 4, 6).tracked()
+	var block := CadaclysmSolid.cuboid(2, 4, 6).track()
 	var pieces := block.split_by_plane(XY)
 	eq(pieces.size(), 2)
 	var halves := {}
@@ -5574,7 +5785,7 @@ func test_a_split_halves_the_sides_and_its_bodies_keep_the_splits_origins():
 		eq([h.generated.size(), h.deleted.size()], [1, 1], "its cut face generated, the other body's cap deleted")
 
 func test_a_fillets_round_is_generated():
-	var block := CadaclysmSolid.cuboid(10, 10, 10).tracked()
+	var block := CadaclysmSolid.cuboid(10, 10, 10).track()
 	var rounded := block.fillet([0], 1.0)
 	eq(rounded.faces, 7)
 	var round_: int = range(rounded.faces).filter(func(f): return rounded.face_kind(f) != "plane")[0]
@@ -5586,8 +5797,8 @@ func test_a_fillets_round_is_generated():
 	eq(rounded.edge_with_id(1), -1, "the rounded edge is gone")
 
 func test_a_flush_join_merged_names_one_origin_per_input():
-	var a := CadaclysmSolid.cuboid(10, 10, 10).tracked()
-	var b := CadaclysmSolid.cuboid(4, 10, 10).translate(7, 0, 0).tracked()
+	var a := CadaclysmSolid.cuboid(10, 10, 10).track()
+	var b := CadaclysmSolid.cuboid(4, 10, 10).translate(7, 0, 0).track()
 	var merged := a.join(b, 0.05, true)
 	eq(merged.faces, 6)
 	var two := 0
@@ -5797,22 +6008,22 @@ func test_a_curve_through_points_and_its_edits():
 		samples.append([t / 50.0, sin(t / 50.0), 0])
 	var fit := CadaclysmNurbsCurve.fit(samples, 3, 1e-4)
 	ok(fit.fit_error != null and fit.fit_error >= 0 and fit.fit_error <= 1e-4, str(fit.fit_error))
-	ok(pdist(c.reversed().point(lo), c.point(hi)) < 1e-12)
+	ok(pdist(c.reverse().point(lo), c.point(hi)) < 1e-12)
 	var mid := 0.5 * (lo + hi)
-	eq(c.trimmed(lo, mid).domain, PackedFloat64Array([lo, mid]))
-	var longer := c.extended(0.5)
+	eq(c.trim(lo, mid).domain, PackedFloat64Array([lo, mid]))
+	var longer := c.extend(0.5)
 	ok(longer.domain[1] > hi and pdist(longer.point(hi), c.point(hi)) < 1e-9, str(longer.domain))
-	var earlier := c.extended(0.5, true)
+	var earlier := c.extend(0.5, true)
 	ok(earlier.domain[0] < lo and earlier.domain[1] == hi, str(earlier.domain))
-	eq(c.elevated(2).degree, 5)
-	eq(c.elevated().degree, 4)
+	eq(c.elevate(2).degree, 5)
+	eq(c.elevate().degree, 4)
 
 func test_curves_join_end_to_end():
 	# A line to (2, 0, 0), the quarter circle from there given backwards, and a quintic on.
 	var lead := segment([2, -3, 0], [2, 0, 0])
 	var arc := quarter_circle()
 	var tail := CadaclysmNurbsCurve.create([[0, 2, 0], [-1, 2.5, 0], [-2, 2, 1], [-3, 3, 0], [-4, 2, 0], [-5, 2, 2]], 5)
-	var j := CadaclysmNurbsCurve.joined([lead, arc.reversed(), tail])
+	var j := CadaclysmNurbsCurve.join([lead, arc.reverse(), tail])
 	eq(j.degree, 5)
 	eq(j.domain, PackedFloat64Array([0, 3]))
 	for row in [[0, [2, -3, 0]], [1, [2, 0, 0]], [2, [0, 2, 0]], [3, [-5, 2, 2]]]:
@@ -5820,11 +6031,11 @@ func test_curves_join_end_to_end():
 	for i in 21:
 		near(pdist(j.point(1 + i / 20.0), [0, 0, 0]), 2, 1e-12)
 		ok(pdist(j.point(2 + i / 20.0), tail.point(i / 20.0)) < 1e-12)
-	eq(CadaclysmNurbsCurve.joined([arc]).control_points, arc.control_points)
-	var message := refuses_as(func(): return CadaclysmNurbsCurve.joined([lead, tail]), "nurbs_curve_joined: curve 1")
+	eq(CadaclysmNurbsCurve.join([arc]).control_points, arc.control_points)
+	var message := refuses_as(func(): return CadaclysmNurbsCurve.join([lead, tail]), "nurbs_curve_joined: curve 1")
 	ok(message.contains("curve 0"), message)
-	refuses_as(func(): return CadaclysmNurbsCurve.joined([]), "nurbs_curve_joined: ")
-	refuses_as(func(): return CadaclysmNurbsCurve.joined([lead, 7]), "nurbs_curve_joined: curves")
+	refuses_as(func(): return CadaclysmNurbsCurve.join([]), "nurbs_curve_joined: ")
+	refuses_as(func(): return CadaclysmNurbsCurve.join([lead, 7]), "nurbs_curve_joined: curves")
 
 func test_tweens_blend_from_one_curve_to_another():
 	var a := CadaclysmNurbsCurve.create([[0, 0, 0], [3, 2, 0], [6, -1, 0], [10, 0, 0]], 3)
@@ -5892,10 +6103,10 @@ func test_a_curve_from_an_edge_a_plane_and_a_sphere():
 			near(hypot(rim.point(t)), 2.5, 1e-12)
 	var sphere := CadaclysmSolid.sphere(3)
 	var line := segment([-2, 0.5, 10], [2, -0.5, 10])
-	var on := line.projected_to_face(sphere, 0, [0, 0, -1], 1e-4)
+	var on := line.project_to_face(sphere, 0, [0, 0, -1], 1e-4)
 	ok(on.fit_error != null and on.fit_error <= 1e-4, str(on.fit_error))
 	near(pdist(on.point(0.5 * (on.domain[0] + on.domain[1])), [0, 0, 0]), 3, 1e-4)
-	var pulled := line.pulled_to_face(sphere, 0, 1e-4)
+	var pulled := line.pull_to_face(sphere, 0, 1e-4)
 	near(pdist(pulled.point(pulled.domain[0]), [0, 0, 0]), 3, 1e-4)
 	ok(pulled.fit_error != null)
 	var through := segment([-5, 1, 1], [5, 1, 1])
@@ -5905,10 +6116,10 @@ func test_a_curve_from_an_edge_a_plane_and_a_sphere():
 	var crossing := through.plane_hits([0, 0, 0], [1, 0, 0])
 	eq(crossing.size(), 1)
 	ok(v3near(crossing[0].point, Vector3(0, 1, 1), 1e-6), str(crossing[0].point))
-	var flat := line.projected_to_plane([0, 0, 1], [0, 0, 1])
+	var flat := line.project_to_plane([0, 0, 1], [0, 0, 1])
 	eq(flat.point(0), PackedFloat64Array([-2, 0.5, 1]))
 	eq(flat.fit_error, null)
-	var slanted := line.projected_to_plane([0, 0, 1], [0, 0, 1], PackedFloat64Array([1, 0, -1]))
+	var slanted := line.project_to_plane([0, 0, 1], [0, 0, 1], PackedFloat64Array([1, 0, -1]))
 	ok(pdist(slanted.point(0), [7, 0.5, 1]) < 1e-12, str(slanted.point(0)))
 	var blend := CadaclysmNurbsCurve.blend(quarter_circle(), true, through, false, 2)
 	eq(blend.degree, 5)
@@ -5917,6 +6128,63 @@ func test_a_curve_from_an_edge_a_plane_and_a_sphere():
 	eq(teeth.size(), 18)
 	for i in 9:
 		near(teeth[2 * i].distance_to(teeth[2 * i + 1]), 0.5, 1e-5)
+
+# Curves on a surface: a uv curve pushed up onto a sphere of radius 3 and pulled back, the
+# shortest path between two uv points a great-circle arc, and a refusal naming the call.
+func test_curves_on_a_sphere_push_up_pull_back_and_take_the_short_path():
+	var sphere := CadaclysmSolid.sphere(3)
+	var uv := CadaclysmNurbsCurve.create([[0.1, 0.2, 0], [0.7, 0.5, 0], [1.3, 0.1, 0], [1.9, -0.3, 0]], 3)
+	var up := uv.push_up(sphere, 0, 1e-4)
+	var back := up.pull_back(sphere, 0, 1e-4)
+	var lo: float = up.domain[0]
+	var hi: float = up.domain[1]
+	for k in 21:
+		var t := lo + (hi - lo) * k / 20.0
+		near(pdist(up.point(t), ORIGIN), 3, 1e-4, "off the sphere at %f" % t)
+		var p = back.point(t)
+		var q = uv.point(t)
+		ok(pdist(p, q) <= 1e-3 and p[2] == 0, "uv at %f: %s vs %s" % [t, p, q])
+	# the sphere's point at (u, v) is 3 (cos v cos u, cos v sin u, sin v)
+	var pa := [3 * cos(0.3), 0, 3 * sin(0.3)]
+	var pb := [3 * cos(-0.4) * cos(1.2), 3 * cos(-0.4) * sin(1.2), 3 * sin(-0.4)]
+	var path := CadaclysmNurbsCurve.short_path(sphere, 0, [0, 0.3], [1.2, -0.4], 1e-4)
+	var plo: float = path.domain[0]
+	var phi: float = path.domain[1]
+	var length := 0.0
+	var prev = path.point(plo)
+	for k in range(1, 2001):
+		var next = path.point(plo + (phi - plo) * k / 2000.0)
+		length += pdist(prev, next)
+		prev = next
+	var angle := acos(cos(0.3) * cos(-0.4) * cos(1.2) + sin(0.3) * sin(-0.4))
+	ok(pdist(path.point(plo), pa) <= 1e-4 and pdist(path.point(phi), pb) <= 1e-4, "the short path's ends")
+	near(length, 3 * angle, 1e-4, "the short path is a great-circle arc")
+	refused(func(): return CadaclysmNurbsCurve.short_path(sphere, 0, [0, 0.3], [0, 0.3], 1e-4), "nurbs_curve_short_path_on_face: ")
+
+# A curve fitted to a face's own parameter: a slanted line projected across a cylinder of radius 3
+# along -x, parametrised by the side's height, and a refusal for a trace that does not cross.
+func test_a_curve_fits_to_a_faces_own_parameter():
+	var cyl := CadaclysmSolid.cylinder(3, 5)
+	var line := CadaclysmNurbsCurve.create([[4, 1, 5], [4, -1, 0]], 1)
+	var side := -1
+	var fit: CadaclysmNurbsCurve = null
+	for f in 3:
+		if fit == null:
+			fit = line.fit_to_face(cyl, f, PackedFloat64Array([-1, 0, 0]), PackedFloat64Array([1.25, 2.5]), 1e-4)
+			side = f
+	ok(fit != null, "no face of the cylinder took the line")
+	if fit == null:
+		return
+	ok(fit.fit_error != null and fit.fit_error <= 1e-4, str(fit.fit_error))
+	eq(fit.domain[0], 0.0)
+	eq(fit.domain[1], 5.0)
+	ok(fit.knots.has(1.25) and fit.knots.has(2.5), str(fit.knots))
+	for t in [0.0, 1.3, 3.7, 5.0]:
+		var y: float = -1 + 2 * t / 5
+		ok(pdist(fit.point(t), [sqrt(9 - y * y), y, t]) <= 1e-4, "off the trace at %f: %s" % [t, fit.point(t)])
+	var short := CadaclysmNurbsCurve.create([[3, 0, 1], [3, 0, 4]], 1)
+	var said := refuses(func(): return short.fit_to_face(cyl, side), "has to cross the face")
+	ok(said.begins_with("nurbs_curve_fitted_to_face: "), said)
 
 func test_nurbs_curve_refusals_name_the_call():
 	var q := quarter_circle()
@@ -5932,26 +6200,102 @@ func test_nurbs_curve_refusals_name_the_call():
 		[func(): return CadaclysmNurbsCurve.fit(two, 1, -1), "nurbs_curve_fit: "],
 		[func(): return CadaclysmNurbsCurve.from_edge(cube, 999), "nurbs_curve_from_edge: "],
 		[func(): return CadaclysmNurbsCurve.from_edge(cube, -1), "nurbs_curve_from_edge: "],
-		[func(): return CadaclysmNurbsCurve.isocurve(cube, 0, true, 0.5), "nurbs_curve_from_face_isocurve: "],
+		[func(): return CadaclysmNurbsCurve.isocurve(cube, 99, true, 0.5), "nurbs_curve_from_face_isocurve: "],
 		[func(): return CadaclysmNurbsCurve.blend(q, true, q, true, 3), "nurbs_curve_blend: "],
-		[func(): return q.projected_to_plane([0, 0, 0], [0, 0, 1], PackedFloat64Array([1, 0, 0])), "nurbs_curve_projected_to_plane: "],
-		[func(): return q.trimmed(0.5, 0.2), "nurbs_curve_trimmed: "],
-		[func(): return q.extended(0), "nurbs_curve_extended: "],
+		[func(): return q.project_to_plane([0, 0, 0], [0, 0, 1], PackedFloat64Array([1, 0, 0])), "nurbs_curve_projected_to_plane: "],
+		[func(): return q.trim(0.5, 0.2), "nurbs_curve_trimmed: "],
+		[func(): return q.extend(0), "nurbs_curve_extended: "],
 		[func(): return q.point(2), "nurbs_curve_point: "],
 		[func(): return q.derivatives(0.5, 9), "nurbs_curve_derivatives: "],
 		[func(): return q.divide_by_count(0), "nurbs_curve_divide_by_count: "],
 		[func(): return q.plane_hits([0, 0, 0], [0, 0, 1]), "nurbs_curve_plane_hits: "],
-		[func(): return q.transformed([1, 2, 3]), "Transform: a matrix is 16 numbers"],
+		[func(): return q.transform([1, 2, 3]), "Transform: a matrix is 16 numbers"],
 	]:
 		refuses_as(row[0], row[1])
 	eq(q.point(2), PackedFloat64Array())
-	eq(q.trimmed(0.5, 0.2), null)
+	eq(q.trim(0.5, 0.2), null)
+	# any face kind has an isocurve now: the cuboid's planar face 0 too
+	ok(CadaclysmNurbsCurve.isocurve(cube, 0, true, 0.5) != null, "a planar face's isocurve")
+
+func test_curves_as_objects():
+	# the helix about z from (2, 0, 0), pitch 1, two turns, ends at (2, 0, 2)
+	var h := CadaclysmNurbsCurve.spiral([0, 0, 0], [0, 0, 1], [2, 0, 0], 1, 2)
+	ok(h.fit_error > 0 and h.fit_error <= 1e-6, "helix fit error %s" % h.fit_error)
+	ok(all_near(h.point(h.domain[1]), [2, 0, 2], 1e-12), "helix end %s" % h.point(h.domain[1]))
+	# the line (0,0,0)-(10,0,0) over [0, 1]
+	var line := CadaclysmNurbsCurve.create([[0, 0, 0], [10, 0, 0]], 1, PackedFloat64Array(), PackedFloat64Array([0, 0, 1, 1]))
+	near(line.length_between(0.2, 0.5).length, 3, 1e-12, "length between")
+	near(line.point_at_normalized_length(0.25).parameter, 0.25, 1e-12, "a quarter of the length")
+	near(line.point_at_normalized_length(0.25).point.x, 2.5, 1e-6, "a quarter of the length")
+	var fs := line.points_at_normalized_lengths(PackedFloat64Array([1, 0, 0.5]))
+	eq(fs.size(), 3)
+	ok(is_equal_approx(fs[0].point.x, 10) and is_equal_approx(fs[1].point.x, 0) and is_equal_approx(fs[2].point.x, 5), "fractions in the order given")
+	eq(line.points_at_normalized_lengths(PackedFloat64Array()).size(), 0)
+	var steps := line.divide_equidistant(3)
+	eq(steps.size(), 4)
+	for k in steps.size():
+		near(steps[k].point.x, 3 * k, 1e-5, "equidistant %d" % k)
+	var cuts := line.divide_as_contour([0, 0, 0], [10, 0, 0], 2.5)
+	eq(cuts.size(), 5)
+	near(cuts[4].point.x, 10, 1e-6, "the last plane at x = 10")
+	# its length mass: L^3 / 12 about the middle, the line's own axis first
+	var m := line.mass()
+	near(m["length"], 10, 1e-12, "mass length")
+	ok(m["accuracy_met"] and not m["from_polyline"], "mass flags")
+	ok(all_near(m["centroid"], [5, 0, 0], 1e-12), "centroid %s" % m["centroid"])
+	ok(all_near(m["principal_moments"], [0, 1000.0 / 12, 1000.0 / 12], 1e-9), "principal moments %s" % m["principal_moments"])
+	near(m["inertia"][4], 1000.0 / 12, 1e-9, "inertia yy")
+	near(absf(m["principal_axes"][0]), 1, 1e-12, "the line's own axis first")
+	# a unit cube's face 0 along u at 0: one exact piece of length 1, isoparametric along u
+	var cube := CadaclysmSolid.cuboid(1, 1, 1)
+	var iv := cube.face_iso_intervals(0, true, 0)
+	ok(iv.size() >= 1 and iv[iv.size() - 1][1] > iv[0][0], "iso intervals %s" % [iv])
+	var isos := CadaclysmNurbsCurve.face_isocurves(cube, 0, true, 0, 0)
+	eq(isos.size(), 1)
+	eq(isos[0].fit_error, 0.0)
+	var d: PackedFloat64Array = isos[0].domain
+	near(isos[0].length_between(d[0], d[1], 1e-12).length, 1, 1e-12, "the isocurve is the face's side")
+	var kind = isos[0].is_isoparametric(cube, 0, 0)
+	ok(kind != null and kind[0] == "u" and absf(kind[1]) <= 1e-9, "isoparametric along u: %s" % [kind])
+	eq(line.is_isoparametric(cube, 0), null)
+	eq(CadaclysmNurbsCurve.face_isocurves(cube, 0, true, 1e6, 0).size(), 0)
+	# a 40 x 30 x 20 box cut at z = 3: one closed exact rectangle of length 140
+	var box := CadaclysmSolid.cuboid(40, 30, 20)
+	var cut := box.section_curves([0, 0, 3], [0, 0, 1])
+	eq(cut.size(), 1)
+	ok(cut[0].closed and cut[0].exact and cut[0].error == 0 and cut[0].plane == 0, "closed exact section")
+	var cd: PackedFloat64Array = cut[0].curve.domain
+	near(cut[0].curve.length_between(cd[0], cd[1], 1e-12).length, 140, 1e-9, "perimeter 140")
+	eq(box.section_curves([0, 0, 50], [0, 0, 1]).size(), 0)
+	# contours from z = -10 to 10 every 5: one loop on each of the five planes, in plane order
+	var rings := box.contour_curves([0, 0, -10], [0, 0, 10], 5)
+	eq(rings.size(), 5)
+	for k in rings.size():
+		var r: CadaclysmSectionCurve = rings[k]
+		eq(r.plane, k)
+		ok(r.closed and r.exact, "ring %d closed and exact" % k)
+		near(r.curve.point(r.curve.domain[0])[2], -10 + 5 * k, 1e-12, "ring %d height" % k)
+	# every refusal by its call's own name
+	for row in [
+		[func(): return CadaclysmNurbsCurve.spiral([0, 0, 0], [0, 0, 1], [2, 0, 0], 1, 0), "nurbs_curve_spiral: "],
+		[func(): return line.length_between(0.5, 0.2), "nurbs_curve_length_between: "],
+		[func(): return line.point_at_normalized_length(1.5), "nurbs_curve_point_at_normalized_length: "],
+		[func(): return line.divide_equidistant(0), "nurbs_curve_divide_equidistant: "],
+		[func(): return line.divide_as_contour([0, 0, 0], [0, 0, 0], 1), "nurbs_curve_divide_as_contour: "],
+		[func(): return line.mass(NAN), "nurbs_curve_mass: "],
+		[func(): return CadaclysmNurbsCurve.face_isocurves(cube, 99, true, 0), "nurbs_curve_face_isocurves: "],
+		[func(): return cube.face_iso_intervals(99, true, 0), "face_iso_intervals: "],
+		[func(): return line.is_isoparametric(cube, 99), "nurbs_curve_is_isoparametric: "],
+		[func(): return box.section_curves([0, 0, 0], [0, 0, 0]), "solid_section_curves: "],
+		[func(): return box.contour_curves([0, 0, 0], [0, 0, 1], 0), "solid_contour_curves: "],
+	]:
+		refuses_as(row[0], row[1])
 
 func test_a_curve_maps_by_its_control_points_and_values_turn_into_curves():
 	var c := CadaclysmNurbsCurve.create([[0, 0, 0], [1, 1, 1], [2, 0, 0]], 2, PackedFloat64Array([1, 0.5, 1]))
 	var p := c.point(0.5)
 	for t in [CadaclysmTransform.translation([1, 2, 3]), [1, 0, 0, 1, 0, 1, 0, 2, 0, 0, 1, 3, 0, 0, 0, 1]]:
-		var moved := c.transformed(t)
+		var moved := c.transform(t)
 		ok(pdist(moved.point(0.5), [p[0] + 1, p[1] + 2, p[2] + 3]) < 1e-12, str(moved.point(0.5)))
 		ok(all_near(moved.weights, c.weights, 1e-15))
 	var line := CadaclysmLine.create([0, 0, 0], [2, 0, 0]).to_nurbs()
@@ -6180,6 +6524,16 @@ func test_a_rib_braces_an_l_and_a_web_divides_a_tray():
 	ok(tray.web_tool(line, down, 3, "both", 6).mass()["volume"] > 0)
 	eq(l.rib(diag, plane, 4, "sideways"), null)
 	ok(Cadaclysm.last_error().begins_with("rib: side must be 'both', 'front' or 'back', not 'sideways'"), Cadaclysm.last_error())
+
+func test_a_revolved_rib_gussets_a_hub():
+	var hub := CadaclysmSolid.cylinder(20, 10).join(CadaclysmSolid.cylinder(5, 30))
+	var flank := CadaclysmNurbsCurve.through([[15, 0, 10], [5, 0, 25]], 1)
+	var gusset: float = 75 * 25.0 / 3 * PI / 6
+	var added: float = hub.rib_revolved(flank, [0, 0, 0], [0, 0, 1], PI / 6).mass()["volume"] - hub.mass()["volume"]
+	near(added, gusset, 1e-3 * gusset)
+	near(hub.rib_revolved_tool(flank, [0, 0, 0], [0, 0, 1], PI / 6).mass()["volume"], gusset, 1e-3 * gusset)
+	eq(hub.rib_revolved(flank, [0, 0, 0], [0, 0, 1], 0), null)
+	ok(Cadaclysm.last_error().begins_with("rib_revolved: angle 0 is not in (0, 2 pi)"), Cadaclysm.last_error())
 
 func flat_rect(x0: float, y0: float, x1: float, y1: float) -> CadaclysmSolid:
 	var c := [[x0, y0, 0], [x1, y0, 0], [x1, y1, 0], [x0, y1, 0]]
@@ -6440,6 +6794,69 @@ func test_highlight_kink_runs_straight_across_planes_and_kinks_at_a_fillet_seam(
 	near(sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), 1.0, 1e-9)
 	refuses_as(func(): return block.highlight_kink(999), "highlight_kink: ")
 	refuses_as(func(): return block.highlight_kink(-1), "highlight_kink: edge: -1 is not an index")
+
+# The Python reference's draft tests: a 2 x 3 x 4 box's +x side drafted 5 degrees about its bottom
+# loses a wedge of h^2 w tan(5)/2; the box's analysis reads its six kinds.
+func draft_plane(z: float) -> Array:
+	return [0, 0, z, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+
+func draft_facing(solid: CadaclysmSolid, n: Array) -> int:
+	for f in solid.faces:
+		var z: PackedFloat64Array = solid.face_frame(f).raw.slice(9)
+		if absf(z[0] - n[0]) < 1e-9 and absf(z[1] - n[1]) < 1e-9 and absf(z[2] - n[2]) < 1e-9:
+			return f
+	return -1
+
+func test_draft_a_box_side_to_the_closed_form():
+	var a := deg_to_rad(5.0)
+	var block := CadaclysmSolid.cuboid(2, 3, 4)
+	var side := draft_facing(block, [1, 0, 0])
+	var out := block.draft([side], draft_plane(-2), a)
+	ok(out != null, Cadaclysm.last_error())
+	eq(out.faces, 6)
+	var want := 24 - 16 * 3 * tan(a) / 2
+	near(out.mass(0.0)["volume"], want, 1e-9 * want)
+	var at := out.draft_angle_at(side, [5, 0, 0], [0, 0, 2])
+	ok(at != null, Cadaclysm.last_error())
+	near(at.angle, a, 1e-12, str(at))
+	eq(at.uv.size(), 2)
+	near(at.raw_normal[0], cos(a), 1e-12, str(at))
+	near(at.raw_normal[2], sin(a), 1e-12, str(at))
+	# One face as an int reads as the list of it.
+	near(block.draft(side, draft_plane(-2), a).mass(0.0)["volume"], want, 1e-9 * want)
+	var both := block.draft_two_sided([side], draft_plane(0), a, a)
+	var want_both := 24 - 2 * (4 * 3 * tan(a) / 2)
+	near(both.mass(0.0)["volume"], want_both, 1e-9 * want_both)
+
+func test_draft_analysis_reads_a_boxs_six_kinds():
+	var block := CadaclysmSolid.cuboid(2, 3, 4)
+	var top := draft_facing(block, [0, 0, 1])
+	var bottom := draft_facing(block, [0, 0, -1])
+	var side := draft_facing(block, [1, 0, 0])
+	var rows := block.draft_analysis([0, 0, 1])
+	eq(rows.size(), 6)
+	for i in rows.size():
+		var r: CadaclysmFaceDraft = rows[i]
+		eq(r.face, i)
+		eq(r.kind, "positive" if r.face == top else ("negative" if r.face == bottom else "vertical"), str(r))
+		ok(r.undercut == 0.0 and r.area > 0.0, str(r))
+	var t: CadaclysmFaceDraft = rows[top]
+	near(t.min, PI / 2, 1e-9)
+	near(t.area, 6.0, 1e-9)
+	eq(t.positive, t.area)
+	var drafted := block.draft([side], draft_plane(-2), deg_to_rad(5.0)).draft_analysis([0, 0, 1], deg_to_rad(1.0), 0.0)
+	eq(drafted[side].kind, "positive")
+	near(drafted[side].min, deg_to_rad(5.0), 1e-9)
+
+func test_draft_refusals_are_named():
+	var block := CadaclysmSolid.cuboid(2, 3, 4)
+	var top := draft_facing(block, [0, 0, 1])
+	refuses_as(func(): return block.draft([top], draft_plane(0), 0.1), "draft: ")
+	refuses_as(func(): return block.draft([], draft_plane(0), 0.1), "draft: ")
+	refuses_as(func(): return block.draft_two_sided([0, 0], draft_plane(0), 0.1, 0.1), "draft: ")
+	refuses_as(func(): return block.draft_angle_at(9, [0, 0, 0], [0, 0, 1]), "draft_angle_at: face 9 of 6")
+	refuses_as(func(): return block.draft_angle_at(0, [0, 0, 0], [0, 0, 0]), "draft_angle_at: ")
+	refuses_as(func(): return block.draft_analysis([0, 0, 1], 2.0), "draft_analysis: ")
 
 func pentagon_strips() -> Array:
 	var corners := []
@@ -7033,6 +7450,341 @@ func test_mesh_closest_points_the_nearest_object_takes_a_triangle_mesh():
 	eq(beside.closest_object([mesh], 0.9), null)
 	eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
 
+# -- point, edge and face queries (2026-11-12): the Python reference's tests, their closed forms as
+# literals -- a 2 x 2 x 2 cube about the origin, the same with a bore of radius 0.5 along z, its
+# fillet, a cylinder, a sphere, a 6 x 2 plate with and without a hole.
+
+func inspect_top_face(solid: CadaclysmSolid) -> int:
+	var best := 0
+	var z := -INF
+	for f in solid.faces:
+		var h: float = solid.face_inner_point(f).point[2]
+		if h > z:
+			best = f
+			z = h
+	return best
+
+func inspect_bored_cube() -> CadaclysmSolid:
+	return CadaclysmSolid.cuboid(2, 2, 2).cut(CadaclysmSolid.cylinder(0.5, 4).translate(0, 0, -2), 0.0)
+
+func inspect_curved_face(solid: CadaclysmSolid) -> int:
+	for f in solid.faces:
+		if solid.face_minimum_radius(f).radius < INF:
+			return f
+	return -1
+
+func test_inspect_a_point_on_a_face_reads_inside_boundary_or_off():
+	var cube := CadaclysmSolid.cuboid(2, 2, 2)
+	var top := inspect_top_face(cube)
+	var inner := cube.face_inner_point(top)
+	ok(inner != null and inner.where == "inside" and inner.distance < 1e-12, str(inner))
+	eq(cube.face_point(top, [0.2, 0.1, 1.0]).where, "inside")
+	eq(cube.face_point(top, [1.0, 0.1, 1.0], 1e-6).where, "boundary")
+	var off := cube.face_point(top, [0.2, 0.1, 1.5])
+	ok(off.where == "off" and absf(off.distance - 0.5) < 1e-12 and absf(off.point[2] - 1.0) < 1e-12, str(off))
+	near(off.point[0], 0.2, 1e-12)
+	eq(off.uv.size(), 2)
+	# 1e-3 above the face: off at 1e-4, on at 1e-2.
+	eq(cube.face_point(top, [0.2, 0.1, 1.001], 1e-4).where, "off")
+	eq(cube.face_point(top, [0.2, 0.1, 1.001], 1e-2).where, "inside")
+	var size := cube.face_size(top)
+	ok(size.size() == 2 and absf(size[0] - 2) < 1e-9 and absf(size[1] - 2) < 1e-9, str(size))
+	# The bored cube's top face: a point in the hole is on the plane but off the face.
+	var bored := inspect_bored_cube()
+	var btop := inspect_top_face(bored)
+	eq(bored.face_point(btop, [0.0, 0.0, 1.0]).where, "off")
+	eq(bored.face_point(btop, [0.5, 0.0, 1.0], 1e-6).where, "boundary")
+	refuses_as(func(): return cube.face_point(99, [0, 0, 0]), "face_point: face 99 of ")
+	refuses_as(func(): return cube.face_point(0, [0, 0, 0], -1), "face_point: tolerance must be positive and finite")
+	refuses_as(func(): return cube.face_inner_point(6), "face_inner_point: face 6 of 6")
+	refuses_as(func(): return cube.face_size(6), "face_size: face 6 of 6")
+
+func test_inspect_a_point_on_an_edge_and_its_parameter():
+	var cube := CadaclysmSolid.cuboid(2, 2, 2)
+	var edge: CadaclysmEdge = cube.edges[0]
+	var mid := cube.edge_inner_point(edge)
+	ok(mid != null and mid.on and mid.distance == 0.0, str(mid))
+	ok(cube.edge_point(0, mid.point).on, "the middle is on the edge")
+	var m := mid.point
+	var far := [3 * m[0] + 1, 3 * m[1] + 1, 3 * m[2] + 1]
+	var e := cube.edge_point(edge, far)
+	ok(not e.on and e.distance > 0.5, str(e))
+	var closest: Dictionary = cube.edge_closest_point(0, far)
+	ok(e.t == closest.t and e.point == closest.raw_point and e.distance == closest.distance, str(closest))
+	refuses_as(func(): return cube.edge_point(12, far), "edge_point: edge 12 of 12")
+	refuses_as(func(): return cube.edge_inner_point(12), "edge_inner_point: edge 12 of 12")
+
+func test_inspect_edge_convexity_on_a_box_and_a_pocket():
+	var cube := CadaclysmSolid.cuboid(2, 2, 2)
+	var kinds := cube.edges_convexity()
+	eq(kinds.size(), 12)
+	for k in kinds:
+		eq(k, "convex")
+	eq(cube.convex_edges(), PackedInt64Array(range(12)))
+	eq(cube.concave_edges().size(), 0)
+	var c := cube.edge_convexity(cube.edges[3], 0.0)
+	ok(c != null and c.kind == "convex" and c.samples == 16, str(c))
+	near(c.angle_min, PI / 2, 1e-12)
+	near(c.angle_max, PI / 2, 1e-12)
+	eq(c.at_min.size(), 3)
+	# A pocket's floor edges and its inside corners are concave: four and four.
+	var block := CadaclysmSolid.cuboid(40, 30, 10).translate(0, 0, 5)
+	var pocketed := block.cut(CadaclysmSolid.cuboid(20, 10, 8).translate(0, 0, 6))
+	eq(pocketed.concave_edges().size(), 8)
+	refuses_as(func(): return cube.edges_convexity(-0.1), "edges_convexity: the angular tolerance -0.1 is not in [0, pi/2)")
+	refuses_as(func(): return cube.edge_convexity(12), "edge_convexity: edge 12 of 12")
+
+func test_inspect_tangent_chains_split_a_box_and_join_a_filleted_one():
+	var cube := CadaclysmSolid.cuboid(2, 2, 2)
+	var groups := cube.tangent_face_groups()
+	eq(groups.size(), 6)
+	for f in 6:
+		eq(groups[f], PackedInt64Array([f]))
+	eq(cube.tangent_faces(2), PackedInt64Array([2]))
+	eq(cube.tangent_edges(cube.edges[4]), PackedInt64Array([4]))
+	var rounded := cube.fillet(range(12), 0.3)
+	var all := rounded.tangent_face_groups()
+	ok(all.size() == 1 and all[0] == PackedInt64Array(range(rounded.faces)), str(all))
+	var reached := rounded.tangent_faces(0)
+	reached.sort()
+	eq(reached, PackedInt64Array(range(rounded.faces)))
+	refuses_as(func(): return cube.tangent_faces(6), "tangent_faces: face 6 of 6")
+	refuses_as(func(): return cube.tangent_face_groups(2), "tangent_face_groups: the angular tolerance 2 is not in [0, pi/2)")
+
+func test_inspect_angles_between_faces_edges_and_points():
+	var cube := CadaclysmSolid.cuboid(2, 2, 2)
+	var angles := []
+	for f in 6:
+		angles.append(cube.angle_to("face", 0, cube, "face", f).angle)
+	angles.sort()
+	var want := [0.0, PI / 2, PI / 2, PI / 2, PI / 2, PI]
+	for i in 6:
+		near(angles[i], want[i], 1e-12)
+	var a := cube.angle_to("edge", cube.edges[0], cube, "face", 0)
+	ok(a != null and a.kind == "line_plane", str(a))
+	# A cylinder's axis to its cap: square.
+	var rod := CadaclysmSolid.cylinder(1, 3)
+	var side := inspect_curved_face(rod)
+	var cap := 1 if side == 0 else 0
+	var square := rod.angle_to("face", side, rod, "face", cap)
+	ok(square.kind == "line_plane" and absf(square.angle - PI / 2) < 1e-12, str(square))
+	near(CadaclysmBlacksmith.angle([1, 0, 0], [0, 0, 0], [0, 3, 0]), PI / 2, 1e-15)
+	near(CadaclysmBlacksmith.angle([1, 0, 0], [0, 0, 0], [-2, 0, 0]), PI, 1e-15)
+	refuses_as(func(): return CadaclysmBlacksmith.angle([0, 0, 0], [0, 0, 0], [1, 0, 0]), "angle_points: ")
+	refuses_as(func(): return cube.angle_to("vertex", 0, cube, "face", 0), "angle_between: a kind is 'face' or 'edge'")
+	var ball := CadaclysmSolid.sphere(1)
+	refuses_as(func(): return ball.angle_to("face", 0, cube, "face", 0), "angle_between: face 0 is neither planar nor has an axis")
+
+func test_inspect_minimum_radius_of_a_bore_and_a_plane():
+	var bored := inspect_bored_cube()
+	var r := bored.face_minimum_radius(inspect_curved_face(bored))
+	ok(r != null and absf(r.radius - 0.5) < 1e-9 and absf(r.curvature + 2) < 1e-9, str(r))
+	ok(r.at.size() == 3 and r.uv.size() == 2 and r.direction.size() == 3, str(r))
+	var flat := CadaclysmSolid.cuboid(2, 2, 2).face_minimum_radius(0)
+	ok(flat.radius == INF and flat.curvature == 0.0, str(flat))
+	refuses_as(func(): return CadaclysmSolid.cuboid(2, 2, 2).face_minimum_radius(6), "face_minimum_radius: face 6 of 6")
+
+func test_inspect_area_properties_of_a_plate_with_a_hole():
+	var rect := CadaclysmProfile.rect(6, 2).area_properties()
+	ok(rect != null and rect.accuracy_met, str(rect))
+	near(rect.area, 12, 1e-12)
+	near(rect.perimeter, 16, 1e-12)
+	var m := rect.second_moments
+	ok(absf(m[0] - 4) < 1e-12 and absf(m[1] - 36) < 1e-12 and absf(m[2]) < 1e-12, str(m))
+	var p := rect.principal_moments
+	ok(absf(p[0] - 4) < 1e-12 and absf(p[1] - 36) < 1e-12, str(p))
+	# The first principal axis is x (Ixx the smaller), the second it turned +90 degrees.
+	var axes := rect.principal_axes
+	ok(axes.size() == 2 and absf(absf(axes[0][0]) - 1) < 1e-12 and absf(axes[1][0] + axes[0][1]) < 1e-12 and absf(axes[1][1] - axes[0][0]) < 1e-12, str(axes))
+	var holed := CadaclysmProfile.rect(6, 2).with_hole(CadaclysmProfile.circle(0.5)).area_properties()
+	near(holed.area, 12 - PI / 4, 1e-9)
+	near(holed.perimeter, 16 + PI, 1e-9)
+	near(holed.second_moments[0], 4 - PI * pow(0.5, 4) / 4, 1e-9)
+	near(holed.centroid[0], 0, 1e-12)
+	near(holed.centroid[1], 0, 1e-12)
+	refuses_as(func(): return CadaclysmProfile.rect(6, 2).area_properties(2), "profile_area_properties: accuracy 2 is not in (0, 1)")
+
+# ---- closest points against an untrimmed NURBS surface: a flat 2 x 2 sheet's interior,
+# beyond-an-edge and beyond-a-corner feet, a line through it and a line beside its edge, pinned
+# to their closed forms (literals, not read back through the wrapper; the doubles through the raw_
+# properties, the net given as arrays so it keeps a double's precision) at the origin and shifted
+# far out; max_distance on both sides, a weighted net's read-backs, a solid's face surfaces, a
+# surface's sheet, the nearest object naming a surface item, and the refusals (null, the reason in
+# last_error).
+
+const SC_SHEET := [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]   # S(u, v) = (u, v, 0)
+
+func sc_sheet(s: Array) -> CadaclysmNurbsSurface:
+	var moved := []
+	for p in SC_SHEET:
+		moved.append(cc_plus(s, p))
+	return CadaclysmNurbsSurface.create(moved, Vector2i(2, 2), 1, 1)
+
+func test_surface_closest_points_a_nurbs_surface_holds_its_net_and_reads_back():
+	for s in CC_SHIFTS:
+		var sheet := sc_sheet(s)
+		if not ok(sheet is CadaclysmNurbsSurface, Cadaclysm.last_error()):
+			return
+		ok(sheet.degree_u() == 1 and sheet.degree_v() == 1 and sheet.counts() == Vector2i(2, 2), str(sheet))
+		eq(sheet.domain(), PackedFloat64Array([0, 1, 0, 1]))
+		ok(all_near(sheet.raw_point_at(0.25, 0.75), cc_plus(s, [0.25, 0.75, 0]), cc_scaled(s)), str(sheet.raw_point_at(0.25, 0.75)))
+		ok(v3near(sheet.normal_at(0.25, 0.75), Vector3(0, 0, 1)), str(sheet.normal_at(0.25, 0.75)))
+	ok(v3near(sc_sheet([0.0, 0.0, 0.0]).point_at(0.25, 0.75), Vector3(0.25, 0.75, 0)), "point_at is the Vector3")
+	# weights and knots reach the surface: a 3 x 2 net over u in [2, 6], v in [-1, 1]
+	var net := [[0, 0, 0], [0, 1, 0], [1, 0, 1], [1, 1, 1], [2, 0, 0], [2, 1, 0]]
+	var w := CadaclysmNurbsSurface.create(net, Vector2i(3, 2), 2, 1, PackedFloat64Array([1, 1, 2, 2, 1, 1]),
+		PackedFloat64Array([2, 2, 2, 6, 6, 6]), PackedFloat64Array([-1, -1, 1, 1]))
+	if not ok(w is CadaclysmNurbsSurface, Cadaclysm.last_error()):
+		return
+	ok(w.counts() == Vector2i(3, 2) and w.degree_u() == 2, str(w))
+	eq(w.domain(), PackedFloat64Array([2, 6, -1, 1]))
+	ok(all_near(w.raw_point_at(4, -1), [1, 0, 2.0 / 3.0], 1e-12), str(w.raw_point_at(4, -1)))
+	refused(func(): return w.raw_point_at(1, 0), "nurbs_surface_point_at: ")
+	eq(w.raw_point_at(1, 0), PackedFloat64Array())
+	# point_at and normal_at answer a Vector3: off the domain a NaN one, the reason in last_error
+	ok(is_nan(w.point_at(1, 0).x), str(w.point_at(1, 0)))
+	refused(func(): return w.point_at(1, 0), "nurbs_surface_point_at: ")
+	ok(is_nan(w.normal_at(1, 0).x), str(w.normal_at(1, 0)))
+	refused(func(): return w.normal_at(1, 0), "nurbs_surface_normal_at: ")
+	ok(is_nan(w.point_at(NAN, 0).x), "a NaN parameter")
+	refused(func(): return w.point_at(NAN, 0), "nurbs_surface_point_at: ")
+	# a packed grid builds the same sheet
+	var packed := CadaclysmNurbsSurface.create(PackedVector3Array([Vector3(0, 0, 0), Vector3(0, 1, 0), Vector3(1, 0, 0), Vector3(1, 1, 0)]), Vector2i(2, 2), 1, 1)
+	ok(packed.closest_point([0.3, 0.4, 1]).equals(sc_sheet([0.0, 0.0, 0.0]).closest_point([0.3, 0.4, 1])), "a packed grid builds the same sheet")
+	# the refusals, exactly: a bad grid count (the wrapper's), a degree out of range (the library's)
+	eq(refuses(func(): return CadaclysmNurbsSurface.create(SC_SHEET, Vector2i(2, 3), 1, 1), "nurbs_surface_new: "),
+		"nurbs_surface_new: 2 x 3 points take 18 numbers, got 12")
+	eq(CadaclysmNurbsSurface.create(SC_SHEET, Vector2i(2, 3), 1, 1), null)
+	eq(refuses(func(): return CadaclysmNurbsSurface.create(SC_SHEET, Vector2i(2, 2), 0, 1), "nurbs_surface_new: "),
+		"nurbs_surface_new: u degree 0 is not 1 to 7")
+	eq(str(sc_sheet([0.0, 0.0, 0.0])), "NurbsSurface(degrees 1 x 1, 2 x 2 points)")
+
+func test_surface_closest_points_a_surface_point_names_its_boundary_and_normal():
+	for s in CC_SHIFTS:
+		var tol := cc_scaled(s, 1e-9)
+		var sheet := sc_sheet(s)
+		var inside := sheet.closest_point(cc_plus(s, [0.3, 0.4, 1]))
+		if not ok(inside is CadaclysmSurfacePoint, Cadaclysm.last_error()):
+			return
+		ok(not inside.boundary, str(inside))
+		ok(all_near(inside.raw_point, cc_plus(s, [0.3, 0.4, 0]), tol), str(inside))
+		near(inside.distance, 1.0, tol)
+		near(inside.u, 0.3, 1e-9)
+		near(inside.v, 0.4, 1e-9)
+		ok(v3near(inside.normal, Vector3(0, 0, 1)), str(inside))
+		var edge := sheet.closest_point(cc_plus(s, [2, 0.5, -1]))
+		ok(edge.boundary and edge.u == 1.0, str(edge))
+		near(edge.v, 0.5, 1e-9)
+		near(edge.distance, sqrt(2.0), tol)
+		ok(all_near(edge.raw_point, cc_plus(s, [1, 0.5, 0]), tol), str(edge))
+		var corner := sheet.closest_point(cc_plus(s, [2, 2, 0]))
+		ok(corner.boundary and corner.u == 1.0 and corner.v == 1.0, str(corner))
+		near(corner.distance, sqrt(2.0), tol)
+		ok(all_near(corner.raw_point, cc_plus(s, [1, 1, 0]), tol), str(corner))
+		# the limit on both sides; the default, NaN and INF are none
+		var p := cc_plus(s, [0.3, 0.4, 1])
+		ok(sheet.closest_point(p, 1.1).equals(inside), "within 1.1")
+		eq(sheet.closest_point(p, 0.9), null)
+		eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
+		ok(sheet.closest_point(p, NAN).equals(inside) and sheet.closest_point(p, INF).equals(inside), "NaN and INF")
+	var sheet := sc_sheet([0.0, 0.0, 0.0])
+	ok(sheet.closest_point([0.5, 0.5, 0], 0.0) != null, "a point on the surface is within 0")
+	eq(refuses(func(): return sheet.closest_point([0.5, 0.5, 1], -1.0), "nurbs_surface_closest_point: "),
+		"nurbs_surface_closest_point: the max distance must not be negative")
+	eq(sheet.closest_point([0.5, 0.5, 1], -1.0), null)
+	# a point not finite is refused by the library, by name
+	for bad in [[NAN, 0, 0], [0, INF, 0], [0, 0, -INF]]:
+		eq(refuses(func(): return sheet.closest_point(bad), "nurbs_surface_closest_point: "),
+			"nurbs_surface_closest_point: not finite", str(bad))
+		eq(sheet.closest_point(bad), null)
+
+func test_surface_closest_points_a_line_through_crosses_and_a_line_beside_answers_the_edge():
+	for s in CC_SHIFTS:
+		var tol := cc_scaled(s, 1e-9)
+		var sheet := sc_sheet(s)
+		var through := cc_segment(cc_plus(s, [0.25, 0.5, -1]), cc_plus(s, [0.25, 0.5, 1]))
+		var foot := sheet.curve_closest_points(through)
+		if not ok(foot is CadaclysmCurveSurfaceFoot, Cadaclysm.last_error()):
+			return
+		ok(foot.crossing and foot.distance == 0.0 and not foot.boundary, str(foot))
+		near(foot.t, 0.5, 1e-9)
+		near(foot.u, 0.25, 1e-9)
+		near(foot.v, 0.5, 1e-9)
+		ok(all_near(foot.raw_point_on_curve, cc_plus(s, [0.25, 0.5, 0]), tol), str(foot))
+		ok(all_near(foot.raw_point_on_surface, cc_plus(s, [0.25, 0.5, 0]), tol), str(foot))
+		ok(v3near(foot.normal, Vector3(0, 0, 1)), str(foot))
+		# a line beside the u = 1 edge: the edge answers, boundary true, 1 away at t 0.5
+		var beside := cc_segment(cc_plus(s, [2, 0.5, -1]), cc_plus(s, [2, 0.5, 1]))
+		var side := sheet.curve_closest_points(beside, 1.1)
+		if not ok(side != null, Cadaclysm.last_error()):
+			return
+		ok(not side.crossing and side.boundary and side.u == 1.0, str(side))
+		near(side.distance, 1.0, tol)
+		near(side.t, 0.5, 1e-9)
+		near(side.v, 0.5, 1e-9)
+		ok(all_near(side.raw_point_on_surface, cc_plus(s, [1, 0.5, 0]), tol), str(side))
+		ok(all_near(side.raw_point_on_curve, cc_plus(s, [2, 0.5, 0]), tol), str(side))
+		eq(sheet.curve_closest_points(beside, 0.9), null)
+		eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
+		ok(sheet.curve_closest_points(beside).equals(side), "the default is no limit")
+		ok(sheet.curve_closest_points(beside, NAN).equals(side) and sheet.curve_closest_points(beside, INF).equals(side), "NaN and INF")
+		eq(refuses(func(): return sheet.curve_closest_points(beside, -1.0), "nurbs_surface_curve_closest_points: "),
+			"nurbs_surface_curve_closest_points: the max distance must not be negative")
+
+func test_surface_closest_points_a_solids_face_surface_and_a_surfaces_sheet():
+	var cube := CadaclysmSolid.cuboid(2, 2, 2)
+	var faces := []
+	for f in 6:
+		faces.append(cube.face_surface(f))
+	refused(func(): return cube.face_surface(99), "solid_face_surface: ")
+	eq(cube.face_surface(99), null)
+	cube.close()
+	for f in 6:
+		if not ok(faces[f] is CadaclysmNurbsSurface, "face %d" % f):
+			return
+		near(faces[f].closest_point([0, 0, 0]).distance, 1.0, 1e-12, "face %d after the solid is closed" % f)
+	var wide := CadaclysmNurbsSurface.create([[0, 0, 0], [0, 2, 0], [3, 0, 0], [3, 2, 0]], Vector2i(2, 2), 1, 1,
+		PackedFloat64Array(), PackedFloat64Array([5, 5, 9, 9]), PackedFloat64Array([-1, -1, 1, 1]))
+	eq(wide.domain(), PackedFloat64Array([5, 9, -1, 1]))
+	var sheet := wide.to_sheet()
+	if not ok(sheet is CadaclysmSolid, Cadaclysm.last_error()):
+		return
+	eq(sheet.faces, 1)
+	eq(sheet.face_surface(0).domain(), PackedFloat64Array([0, 1, 0, 1]), "the sheet is over [0, 1]^2")
+
+func test_surface_closest_points_a_closed_surface_is_refused():
+	var sheet := sc_sheet([0.0, 0.0, 0.0])
+	ok(not sheet.closed, "open")
+	sheet.close()
+	sheet.close()
+	ok(sheet.closed, "closed")
+	eq(refuses(func(): return sheet.closest_point([0, 0, 1]), "nurbs_surface: closed"), "nurbs_surface: closed")
+	var line := cc_segment([0, 0, 1], [1, 0, 1])
+	eq(refuses(func(): return line.closest_object([sheet]), "nurbs_curve_closest_object: "),
+		"nurbs_curve_closest_object: item 0: nurbs_surface: closed")
+
+func test_surface_closest_points_the_nearest_object_takes_a_nurbs_surface():
+	var sheet := sc_sheet([0.0, 0.0, 0.0])
+	var beside := cc_segment([2, 0.5, -1], [2, 0.5, 1])
+	var nearest := beside.closest_object([[9, 9, 9], sheet])
+	if not ok(nearest is CadaclysmNearestObject, Cadaclysm.last_error()):
+		return
+	var own := sheet.curve_closest_points(beside)
+	eq(nearest.which, 1)
+	ok(nearest.answer is CadaclysmCurveSurfaceFoot and nearest.answer.equals(own), str(nearest))
+	ok(nearest.distance == own.distance and nearest.t == own.t, str(nearest))
+	ok(nearest.raw_point_on_curve == own.raw_point_on_curve and nearest.raw_point_on_item == own.raw_point_on_surface, str(nearest))
+	var after := beside.closest_object([sheet, [2.5, 0.5, 0]])
+	eq(after.which, 1)
+	eq(after.answer, null)
+	near(after.distance, 0.5, 1e-9)
+	eq(beside.closest_object([sheet], 0.9), null)
+	eq(Cadaclysm.last_error(), "", "beyond the limit is not a refusal")
+	# an item of no known kind is refused by index, the message naming the surface among the kinds
+	var unknown := refuses(func(): return beside.closest_object([sheet, "x"]), "nurbs_curve_closest_object: item 1: ")
+	ok(unknown.contains("a CadaclysmNurbsSurface"), unknown)
+	eq(beside.closest_object([sheet, "x"]), null)
+
 func _hlr_sum(lines: Array) -> float:
 	var total := 0.0
 	for l in lines:
@@ -7130,3 +7882,689 @@ func test_a_page_writes_r2000_dxf_that_reads_back_as_its_profiles():
 	eq(CadaclysmPage.create("furlongs"), null)
 	page.close()
 	ok(page.closed and not page.add_profile(rect, [0, 0]))
+
+# The Python reference's sheet-metal and unroll tests: a 60 x 40 tray, T 1, R 1, K 0.44, its four
+# sides flanged up 15; its flat pattern's numbers, DXF, page entities and refold; a cylinder
+# unrolled; a cuboid refused.
+func sheet_face_facing_up(solid: CadaclysmSolid) -> int:
+	for f in solid.faces:
+		var fr = solid.face_frame(f)
+		if fr == null:
+			continue
+		var r: PackedFloat64Array = fr.raw
+		if absf(r[9]) < 1e-9 and absf(r[10]) < 1e-9 and absf(r[11] - 1) < 1e-9 and absf(r[2]) < 1e-9:
+			return f
+	return -1
+
+func sheet_edges_of(solid: CadaclysmSolid, face: int) -> Array:
+	var out := []
+	for e in solid.edges:
+		if face in e.faces:
+			out.append(e)
+	return out
+
+func sheet_tray(rule: CadaclysmSheetRule) -> CadaclysmSolid:
+	var plate := CadaclysmSolid.sheet_base(CadaclysmProfile.rect(60, 40), rule)
+	ok(plate != null, Cadaclysm.last_error())
+	var top := sheet_face_facing_up(plate)
+	ok(top >= 0, "the plate's top")
+	var edges := sheet_edges_of(plate, top)
+	eq(edges.size(), 4)
+	var tray := plate.sheet_flange(edges, PI / 2, 15, rule)
+	ok(tray != null, Cadaclysm.last_error())
+	return tray
+
+func test_sheet_metal_rule_defaults_and_refusals():
+	var rule := CadaclysmSheetRule.create(1.0)
+	eq(rule.thickness, 1.0)
+	eq(rule.bend_radius, null)
+	eq(rule.k_factor, 0.44)
+	eq(rule.relief, "rectangular")
+	eq(rule.corner, "round")
+	eq(CadaclysmSheetRule.create(2.0, 3.0).bend_radius, 3.0)
+	refuses(func(): return CadaclysmSheetRule.create(1.0, NAN, 0.44, "oval"), "sheet_rule: relief")
+	refuses(func(): return CadaclysmSheetRule.create(1.0, NAN, 0.44, "round", 0, 0, "oval"), "sheet_rule: corner")
+
+func test_sheet_metal_tray_reads_its_bends_and_flat_pattern():
+	var rule := CadaclysmSheetRule.create(1.0)
+	var tray := sheet_tray(rule)
+	ok(tray.is_sheet_metal(), "the tray is sheet metal")
+	ok(not CadaclysmSolid.cuboid(10, 10, 10).is_sheet_metal(), "a cuboid is not")
+	var info := tray.sheet_info()
+	ok(info != null, Cadaclysm.last_error())
+	near(info.thickness, 1.0, 1e-9)
+	eq(info.bends.size(), 4)
+	for b in info.bends:
+		near(b.radius, 1.0, 1e-9, str(b))
+		near(absf(b.angle), PI / 2, 1e-9, str(b))
+		eq(b.axis.size(), 6)
+		eq(b.line.size(), 6)
+	eq(tray.sheet_bend_faces().size(), 8)
+	var flat := tray.flat_pattern(sheet_face_facing_up(tray), rule)
+	ok(flat != null, Cadaclysm.last_error())
+	eq(flat.bends.size(), 4)
+	for b in flat.bends:
+		ok(b.up, str(b))
+		near(b.allowance, PI / 2 * 1.44, 1e-9, str(b))
+		eq(b.centre.size(), 4)
+	var want := 2400 - PI + 2 * (58 + 38) * (15 - 2 + PI / 2 * 1.44)
+	near(flat.body.mass(0.0)["volume"], want, 1e-6 * want)
+	var dxf := flat.dxf("mm", true, true, true)
+	for word in ["OUTLINE", "BEND_UP", "BEND_EXTENT", "BEND_TABLE", "B4 UP 90"]:
+		ok(dxf.contains(word), "the DXF has " + word)
+	ok(not flat.dxf("mm", true, false, true).contains("BEND_TABLE"), "no table, no BEND_TABLE")
+	refuses_as(func(): return flat.dxf("furlong"), "flat_pattern_dxf: units")
+	var page := CadaclysmPage.create("mm")
+	ok(page.add_flat_pattern(flat, [0, 0], false, false, false), Cadaclysm.last_error())
+	var n: int = page.entity_count
+	ok(n > 0, "the flat pattern draws")
+	ok(page.add_flat_pattern(flat, [200, 0], true, false, false), Cadaclysm.last_error())
+	eq(page.entity_count, 2 * n + 8, "the second adds the four zones' eight edges")
+	# The drawing view: a note a bend, a ruled table (6 + 8 rules, 35 cells), two dimensions of six.
+	for v in [[true, false, false, 4], [false, true, false, 6 + 8 + 35], [false, false, true, 12]]:
+		var before: int = page.entity_count
+		ok(page.add_flat_pattern(flat, [400, 0], false, v[1], false, v[0], v[2], false), Cadaclysm.last_error())
+		eq(page.entity_count - before, n + v[3], "the drawing view's entities")
+	var drawn := flat.dxf("mm", true, true, true, true, true, true)
+	for word in ["BEND_NOTE", "DIMENSION", "FOLDED", "K-FACTOR", "DEDUCTION"]:
+		ok(drawn.contains(word), "the drawing has " + word)
+	eq(flat.fold_bends.size(), 4)
+	var refolded := CadaclysmSolid.fold_flat(flat.profile, flat.fold_bends, rule, flat.frame.raw)
+	ok(refolded != null, Cadaclysm.last_error())
+	var tray_volume: float = tray.mass(0.0)["volume"]
+	near(refolded.mass(0.0)["volume"], tray_volume, 1e-6 * tray_volume)
+	flat.close()
+	ok(flat.closed)
+	eq(flat.bends.size(), 4, "the bends read at birth stay")
+	refuses_as(func(): return flat.body, "flat_pattern: closed")
+
+func test_sheet_metal_unroll_a_cylinder():
+	var u := CadaclysmSolid.cylinder(5, 10).unroll(PackedInt64Array(), PackedFloat64Array([5, 0, 1, 50, 50, 50]))
+	ok(u != null, Cadaclysm.last_error())
+	var faces := Array(u.faces)
+	faces.sort()
+	eq(faces, [0, 1, 2])
+	eq(u.not_developable.size(), 0)
+	ok(u.cuts.size() >= 1, str(u))
+	var want := 2 * PI * 5 * 10 + 2 * PI * 25
+	near(u.sheet.mass(0.0)["area"], want, 1e-6 * want)
+	eq(u.points.size(), 2)
+	ok(u.points[0] != null, "the point on the side is found")
+	near(u.points[0][2], 0.0, 1e-9)
+	eq(u.points[1], null)
+	eq(u.curves.size(), 0)
+	var with_curves := CadaclysmSolid.cylinder(5, 10).unroll_with_curves([])
+	ok(with_curves != null, Cadaclysm.last_error())
+	eq(with_curves.curves.size(), 0)
+	refuses(func(): return CadaclysmSolid.cylinder(5, 10).unroll_with_curves([1]), "unroll: curves")
+	refuses(func(): return CadaclysmSolid.cylinder(5, 10).unroll(PackedInt64Array(), PackedFloat64Array([1, 2])), "unroll: points")
+
+func test_sheet_metal_refusals_are_named():
+	refuses_as(func(): return CadaclysmSolid.cuboid(10, 10, 10).sheet_info(), "sheet_info: ")
+	# The library words this one `bend_faces: ...`, not `sheet_bend_faces: ...`.
+	refuses(func(): return CadaclysmSolid.cuboid(10, 10, 10).sheet_bend_faces(), "bend_faces: the body is not thin")
+	var rule := CadaclysmSheetRule.create(1.0)
+	refuses_as(func(): return CadaclysmSolid.cuboid(10, 10, 10).flat_pattern(0, rule), "flat_pattern: ")
+	refuses_as(func(): return CadaclysmSolid.cylinder(5, 10).unroll([9]), "unroll: ")
+	refuses_as(func(): return CadaclysmSolid.cuboid(10, 10, 10).sheet_hem([0], "pleat", 5, rule), "sheet_hem: kind")
+
+# ---- animation tracks (kernel animation plan 1, 2026-11-15), at parity with the Python reference's
+# test_animation_*, trimmed to what proves the marshalling: the turntable, every track field read
+# back, the order and shapes of values_at, the nearest hold, each refusal's prefix, clone
+# independence and the handle's lifetime.
+
+const ANIM_IDENTITY := [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+# A column-major 4x4 (16 numbers) applied to a point.
+func anim_moved(m: PackedFloat64Array, p: Array) -> Array:
+	var out := []
+	for row in 3:
+		out.append(m[row] * p[0] + m[4 + row] * p[1] + m[8 + row] * p[2] + m[12 + row])
+	return out
+
+func test_animation_turntable_through_rotate():
+	eq([CadaclysmAnimation.CHANNEL_TRANSLATE, CadaclysmAnimation.CHANNEL_ROTATE, CadaclysmAnimation.CHANNEL_SCALE,
+		CadaclysmAnimation.CHANNEL_VISIBLE, CadaclysmAnimation.CHANNEL_COLOUR, CadaclysmAnimation.CHANNEL_GHOST,
+		CadaclysmAnimation.CHANNEL_VALUE], [0, 1, 2, 3, 4, 5, 6], "the C constants")
+	var a := CadaclysmAnimation.create()
+	ok(a != null, Cadaclysm.last_error())
+	eq(a.count(), 0)
+	eq(a.duration, 0.0)
+	eq(a.targets, PackedStringArray())
+	eq(a.values_at(1.0).size(), 0, "no tracks")
+	var k := a.rotate("nut", [[0.0, 0.0], [4.0, 360.0]], [1, 2, 0])
+	eq(k, 0)
+	eq(a.count(), 1)
+	eq(a.targets, PackedStringArray(["nut"]))
+	eq(a.duration, 4.0)
+	var m := a.placement_at("nut", 1.0)
+	eq(m.size(), 16)
+	ok(all_near(anim_moved(m, [2, 2, 0]), [1, 3, 0], 1e-12), "a quarter turn about the pivot: %s" % [anim_moved(m, [2, 2, 0])])
+	eq(a.placement_at(0, 1.0), m, "by name or by index")
+	ok(all_near(a.placement_at("nut", 4.0), ANIM_IDENTITY, 1e-12), "a full turn is the identity")
+	var v := a.value_at(0, 1.0)
+	eq(v.size(), 1)
+	near(v[0], 90.0, 1e-12, "dimension 1 is an array of one")
+	var tr := a.track(0)
+	eq([tr.channel, tr.mode, tr.pivot, tr.axis], [CadaclysmAnimation.CHANNEL_ROTATE, CadaclysmInterpolator.MODE_LINEAR,
+		PackedFloat64Array([1, 2, 0]), PackedFloat64Array([0, 0, 1])])
+	# a target with no placement track answers the identity
+	eq(a.colour("lamp", [[0.0, Color(1, 0, 0)]]), 1)
+	eq(a.track(1).values, [PackedFloat64Array([1, 0, 0])] as Array[PackedFloat64Array], "a Color is its r, g, b")
+	var tinted := a.colour("tint", [[0.0, Color(0.25, 0.5, 1.0)]])
+	eq(a.track(tinted).values, [PackedFloat64Array([0.25, 0.5, 1.0])] as Array[PackedFloat64Array], "r, g, b in order")
+	eq(a.placement_at("lamp", 2.0), PackedFloat64Array(ANIM_IDENTITY))
+	eq(refuses(func(): return a.placement_at("nobody", 0.0)), "animation: no target nobody")
+	eq(a.placement_at("nobody", 0.0).size(), 0)
+	# translate and scale, composed T * R * S
+	eq(a.translate("box", [[0.0, Vector3(0, 0, 0)], [2.0, Vector3(10, 0, 0)]]),3)
+	eq(a.scale("box", [[0.0, Vector3(2, 2, 2)]], [1, 0, 0]),4)
+	ok(all_near(anim_moved(a.placement_at("box", 1.0), [2, 0, 0]), [8, 0, 0], 1e-12), "T * S")
+	a.close()
+
+func test_animation_track_reads_back_every_field():
+	var a := CadaclysmAnimation.create()
+	eq(a.value("dial", [[0.0, [1, 2]], [1.0, [3, 5]], [3.0, [8, 13]]], CadaclysmInterpolator.MODE_CUBIC), 0)
+	eq(a.colour("lamp", [[0.5, [1, 0, 0]], [2.0, [0, 0.5, 1]]]), 1)
+	var tr := a.track(0)
+	ok(tr != null, Cadaclysm.last_error())
+	eq(tr.target, "dial")
+	eq(tr.channel, CadaclysmAnimation.CHANNEL_VALUE)
+	eq(tr.mode, CadaclysmInterpolator.MODE_CUBIC)
+	eq(tr.dimension, 2)
+	eq(tr.times, PackedFloat64Array([0.0, 1.0, 3.0]))
+	var rows: Array[PackedFloat64Array] = [PackedFloat64Array([1, 2]), PackedFloat64Array([3, 5]), PackedFloat64Array([8, 13])]
+	eq(tr.values, rows)
+	eq(tr.pivot, PackedFloat64Array([0, 0, 0]))
+	eq(tr.axis, PackedFloat64Array([0, 0, 1]))
+	var lamp := a.track(1)
+	eq([lamp.target, lamp.channel, lamp.dimension], ["lamp", CadaclysmAnimation.CHANNEL_COLOUR, 3])
+	eq(lamp.values, [PackedFloat64Array([1, 0, 0]), PackedFloat64Array([0, 0.5, 1])] as Array[PackedFloat64Array])
+	eq(a.visible("lamp", [[0.0, 1], [2.0, 0]]), 2)
+	var vis := a.track(2)
+	eq([vis.dimension, vis.mode, vis.times], [1, CadaclysmInterpolator.MODE_NEAREST, PackedFloat64Array([0.0, 2.0])])
+	eq(vis.values, [PackedFloat64Array([1]), PackedFloat64Array([0])] as Array[PackedFloat64Array])
+	eq(a.targets, PackedStringArray(["dial", "lamp"]))
+	eq(a.duration, 3.0)
+	# equal by value, not by identity
+	ok(tr.equals(a.clone().track(0)), "equal by value")
+	ok(not tr.equals(lamp) and not tr.equals(null) and not tr.equals(3), "and not otherwise")
+	eq(refuses(func(): return a.track(9), "animation_track_target: "), "animation_track_target: track 9 is not below 3")
+	eq(a.track(9), null)
+	eq(refuses(func(): return a.track(-1), "animation_track_target: "), "animation_track_target: track -1 is not below 3")
+	# the pivot read back, set and refused
+	var r := a.rotate("wheel", [[0.0, 0.0], [1.0, 90.0]], [0.5, 1, 0], [0, 1, 0])
+	eq(a.track(r).pivot, PackedFloat64Array([0.5, 1, 0]))
+	eq(a.track(r).axis, PackedFloat64Array([0, 1, 0]))
+	eq(a.set_pivot(r, [2, 0, 0]), true)
+	eq(a.track(r).pivot, PackedFloat64Array([2, 0, 0]))
+	eq(a.track(r).axis, PackedFloat64Array([0, 0, 1]), "the axis defaults to +Z")
+	a.close()
+
+func test_animation_values_at_shapes():
+	var a := CadaclysmAnimation.create()
+	a.value("speed", [[0.0, 0.0], [2.0, 4.0]])
+	a.translate("box", [[0.0, Vector3(0, 0, 0)], [2.0, Vector3(2, 4, 6)]])
+	a.ghost("box", [[0.0, 0], [1.0, 1]])
+	var v := a.values_at(1.0)
+	eq(v.size(), 3)
+	eq([v[0].size(), v[1].size(), v[2].size()], [1, 3, 1], "one array a track, dimension 1 included")
+	near(v[0][0], 2.0, 1e-12)
+	ok(all_near(v[1], [1.0, 2.0, 3.0], 1e-12), "%s" % v[1])
+	eq(v[2][0], 1.0)
+	var looped: Array[PackedFloat64Array] = []
+	for k in 3:
+		looped.append(a.value_at(k, 1.0))
+	eq(v, looped, "in track order")
+	a.close()
+
+func test_animation_nearest_holds_and_modes_differ_on_uneven_keys():
+	var a := CadaclysmAnimation.create()
+	a.value("step", [[0.0, 0.0], [2.0, 10.0], [3.0, 20.0]], CadaclysmInterpolator.MODE_NEAREST)
+	var got := []
+	for t in [-1.0, 0.0, 1.99, 2.0, 2.5, 3.0, 9.0]:
+		got.append(a.value_at(0, t)[0])
+	eq(got, [0.0, 0.0, 0.0, 10.0, 10.0, 20.0, 20.0], "a key at 2 takes effect at 2")
+	# visible holds whatever mode was asked, and reads the mode back as given
+	eq(a.add_track("flag", CadaclysmAnimation.CHANNEL_VISIBLE, [[0.0, 0.0], [1.0, 1.0]], CadaclysmInterpolator.MODE_LINEAR), 1)
+	eq(a.value_at(1, 0.9)[0], 0.0)
+	eq(a.track(1).mode, CadaclysmInterpolator.MODE_LINEAR)
+	var keys := [[0.0, 0.0], [1.0, 1.0], [3.0, 0.0]]
+	var cubic := a.value("c", keys, CadaclysmInterpolator.MODE_CUBIC)
+	var catmull := a.value("r", keys, CadaclysmInterpolator.MODE_CATMULL_ROM)
+	var cosine := a.value("o", [[0.0, 0.0], [2.0, 10.0]], CadaclysmInterpolator.MODE_COSINE)
+	near(a.value_at(cubic, 2.0)[0], 0.625, 1e-12, "cubic")
+	near(a.value_at(catmull, 2.0)[0], 0.5625, 1e-12, "catmull-rom")
+	near(a.value_at(cosine, 0.5)[0], 10.0 * (1.0 - cos(PI / 4.0)) / 2.0, 1e-12, "cosine")
+	eq([a.track(cubic).mode, a.track(catmull).mode, a.track(cosine).mode],
+		[CadaclysmInterpolator.MODE_CUBIC, CadaclysmInterpolator.MODE_CATMULL_ROM, CadaclysmInterpolator.MODE_COSINE])
+	a.close()
+
+func test_animation_refusals_name_their_call():
+	var a := CadaclysmAnimation.create()
+	for channel in [7, -1]:
+		eq(refuses(func(): return a.add_track("x", channel, [[0.0, 1.0]])), "animation: channel %d is not a channel" % channel)
+	eq(a.add_track("x", 6, [[0.0, 1.0]], 5), -1)
+	eq(Cadaclysm.last_error(), "animation: mode 5 is not a mode")
+	eq(refuses(func(): return a.add_track("x", 6, [[0.0, 1.0]], -1)), "animation: mode -1 is not a mode")
+	eq(refuses(func(): return a.value("x", [[0.0, [1, 2]], [1.0, [1, 2, 3]]])), "animation: key values differ in length")
+	eq(refuses(func(): return a.value("x", [[0.0, 0.0], [1.5, 1.0], [1.0, 2.0]]), "animation_add_track: "),
+		"animation_add_track: times must increase: key 2 at 1 after 1.5")
+	refuses(func(): return a.translate("x", [[0.0, 1.0]]), "animation_add_track: ")   # a translate key is three numbers
+	refuses(func(): return a.value("x", "not keys"), "animation_add_track: keys must be an array")
+	refuses(func(): return a.value("x", [[0.0, 1.0, 2.0]]), "animation_add_track: key 0 is not a [time, value] pair")
+	eq(refuses(func(): return a.rotate("x", [[0.0, 0.0]], [0, 0, 0], [0, 0, 0])), "animation_set_pivot: the axis is too short")
+	eq(a.count(), 0, "every refusal leaves the animation as it was")
+	eq(a.targets.size(), 0)
+	var k := a.value("x", [[0.0, 0.0]])
+	refuses(func(): return a.set_pivot(k, [0, 0, 0]), "animation_set_pivot: track 0 is value: only rotate and scale have a pivot")
+	eq(a.set_pivot(k, [0, 0, 0]), false)
+	refuses(func(): return a.set_pivot(5, [0, 0, 0]), "animation_set_pivot: track 5 is not below 1")
+	refuses(func(): return a.value_at(k, NAN), "animation_track_value_at: t NaN is not finite")
+	eq(a.value_at(k, NAN).size(), 0, "a refused value is empty")
+	refuses(func(): return a.values_at(INF), "animation_values_at: ")
+	refuses(func(): return a.placement_at("x", NAN), "animation_placement_at: ")
+	a.value("y", [[0.0, 1.0]])
+	eq(refuses(func(): return a.value_at(9, 0.0), "animation_track_value_at: "), "animation_track_value_at: track 9 is not below 2")
+	eq(refuses(func(): return a.value_at(-1, 0.0), "animation_track_value_at: "), "animation_track_value_at: track -1 is not below 2")
+	eq(refuses(func(): return a.placement_at(5, 0.0), "animation_placement_at: "), "animation_placement_at: target 5 is not below 2")
+	eq(refuses(func(): return a.placement_at(-1, 0.0), "animation_placement_at: "), "animation_placement_at: target -1 is not below 2")
+	refuses(func(): return a.placement_at(1.5, 0.0), "animation: a target is a name or an index")
+	eq(a.count(), 2)
+	eq(a.targets, PackedStringArray(["x", "y"]), "a refused pivot leaves no stray track")
+	a.close()
+
+func test_animation_pivot_and_axis_are_points_in_doubles():
+	var a := CadaclysmAnimation.create()
+	var pivot := [1234567.89, 0.1, 0.0]
+	var axis := [0.1, 0.2, 0.7]
+	var r := a.rotate("wheel", [[0.0, 0.0], [1.0, 90.0]], pivot, axis)
+	eq(a.track(r).pivot, PackedFloat64Array(pivot), "a double pivot reads back exactly")
+	eq(a.track(r).axis, PackedFloat64Array(axis), "and its axis")
+	var s := a.scale("body", [[0.0, Vector3(2, 2, 2)]], pivot)
+	eq(a.track(s).pivot, PackedFloat64Array(pivot))
+	eq(a.set_pivot(r, [0.3, 0.1, 1234567.89], [0.7, 0.2, 0.1]), true)
+	eq(a.track(r).pivot, PackedFloat64Array([0.3, 0.1, 1234567.89]))
+	eq(a.track(r).axis, PackedFloat64Array([0.7, 0.2, 0.1]))
+	eq(refuses(func(): return a.rotate("x", [[0.0, 0.0]], [1, 2])), "animation: pivot is 2 numbers, not 3")
+	eq(refuses(func(): return a.rotate("x", [[0.0, 0.0]], [], [0, 0, 1, 0])), "animation: axis is 4 numbers, not 3")
+	eq(refuses(func(): return a.scale("x", [[0.0, Vector3(1, 1, 1)]], [1, 2])), "animation: pivot is 2 numbers, not 3")
+	eq(refuses(func(): return a.set_pivot(r, [1, 2, 3, 4])), "animation: pivot is 4 numbers, not 3")
+	eq(refuses(func(): return a.set_pivot(r, [1, 2, 3], [1, 2])), "animation: axis is 2 numbers, not 3")
+	eq(a.count(), 2, "a refused pivot leaves no stray track")
+	eq(a.targets, PackedStringArray(["wheel", "body"]))
+	a.close()
+
+func test_animation_clone_is_independent_and_close_twice_then_refuses():
+	var a := CadaclysmAnimation.create()
+	a.translate("box", [[0.0, Vector3(0, 0, 0)], [1.0, Vector3(1, 0, 0)]])
+	var b := a.clone()
+	b.value("dial", [[0.0, 5.0], [7.0, 6.0]])
+	eq([a.count(), b.count()], [1, 2])
+	eq([a.duration, b.duration], [1.0, 7.0])
+	eq([a.targets, b.targets], [PackedStringArray(["box"]), PackedStringArray(["box", "dial"])])
+	a.close()
+	a.close()
+	eq(b.track(0).target, "box", "the clone outlives its source")
+	eq(refuses(func(): return a.count()), "animation: closed")
+	eq(refuses(func(): return a.duration), "animation: closed")
+	eq(refuses(func(): return a.targets), "animation: closed")
+	eq(refuses(func(): return a.values_at(0.0)), "animation: closed")
+	eq(refuses(func(): return a.value_at(0, 0.0)), "animation: closed")
+	eq(refuses(func(): return a.placement_at(0, 0.0)), "animation: closed")
+	eq(refuses(func(): return a.track(0)), "animation: closed")
+	eq(refuses(func(): return a.clone()), "animation: closed")
+	eq(refuses(func(): return a.value("x", [[0.0, 1.0]])), "animation: closed")
+	eq(refuses(func(): return a.rotate("x", [[0.0, 1.0]])), "animation: closed")
+	eq(refuses(func(): return a.set_pivot(0, [0, 0, 0])), "animation: closed")
+	b.close()
+
+func test_threads_the_table_a_rod_a_tapped_hole_and_a_cosmetic_record():
+	# The literals Python's suite pins (P1's analytic grooves), measured to 1e-4.
+	var sizes := CadaclysmBlacksmith.thread_sizes()
+	eq(sizes.size(), 108)
+	var last: CadaclysmThreadSize = sizes[sizes.size() - 1]
+	eq([sizes[0].designation, last.designation, last.size, last.family], ["M1", "1-1/2-12 UNF", "1-1/2", "unf"])
+	eq(last.clearance, {})
+	var m10: CadaclysmThreadSize = CadaclysmBlacksmith.thread_size("M10")
+	eq([m10.family, m10.designation, m10.size, m10.major, m10.pitch, m10.tap_drill], ["iso_metric_coarse", "M10", "M10", 10.0, 1.5, 8.5], str(m10))
+	near(m10.minor, 10 - 1.25 * sqrt(3) / 2 * 1.5, 1e-12)
+	eq(m10.clearance, {"fine": 10.5, "medium": 11.0, "coarse": 12.0})
+	eq(CadaclysmBlacksmith.thread_size("1/4-20").designation, "1/4-20 UNC")
+	eq(CadaclysmBlacksmith.thread_size("m10 x 1.25").designation, "M10x1.25")
+	eq(CadaclysmBlacksmith.thread_size("M7x9"), null)
+	eq(Cadaclysm.last_error(), "thread_size_find: \"M7x9\" is not a size in the table")
+
+	var rod := CadaclysmSolid.cylinder(5, 12)
+	var cyl := 0
+	while rod.face_kind(cyl) != "cylinder":
+		cyl += 1
+	var threaded = rod.thread(cyl, "M10")
+	var tr: CadaclysmThreadReport = threaded[1]
+	near(PI * 25 * 12 - threaded[0].mass(1e-4)["volume"], 160.77942917686894, 1e-4 * 160.77942917686894)
+	eq([tr.internal, tr.major, tr.pitch], [false, 10.0, 1.5], str(tr))
+	near(tr.length, 12, 1e-9)
+	near(tr.turns, 10, 1e-9)
+	near(tr.start.z, 0, 1e-9)
+	near(tr.direction.z, 1, 1e-9)
+	ok(tr.faces_added > 0, str(tr))
+	ok(rod.thread_tool(cyl, m10.designation).mass()["volume"] > 0)
+
+	var blk := CadaclysmSolid.cuboid(40, 30, 20).translate(20, 15, 10)
+	var tapped = blk.hole_threaded([10, 15, 20], 0, {"size": "M8"})
+	var hr: CadaclysmHoleReport = tapped[1]
+	near(24000 - tapped[0].mass(1e-4)["volume"], 833.1391195130168, 1e-4 * 833.1391195130168)
+	eq([hr.holes, hr.thread_depths.size()], [1, 1], str(hr))
+	near(hr.thread_depths[0], 20, 1e-9)
+	var bare = blk.hole_threaded([10, 15, 20], 0, {"size": CadaclysmBlacksmith.thread_size("M8").designation, "modelled": false})
+	var recs: Array = bare[0].thread_records()
+	eq(recs.size(), 1)
+	var r8: CadaclysmThreadRecord = recs[0][1]
+	eq([r8.designation, r8.major, r8.pitch, r8.internal, r8.left_handed], ["M8", 8.0, 1.25, true, false])
+	near(r8.length, 20, 1e-9)
+	ok(blk.hole_threaded_tool([10, 15, 20], 0, {"size": "M8"}).mass()["volume"] > 0)
+	eq(blk.hole_threaded([10, 15, 20], 9, {"size": "M8"}), null)
+	eq(Cadaclysm.last_error(), "hole_threaded: the diameter 9 is not in the thread's band [6.491, 7.188]")
+
+	var marked := rod.cosmetic_thread(cyl, "m10", NAN, NAN, 8, 1, true, true)
+	eq(marked.faces, rod.faces)
+	var rec: CadaclysmThreadRecord = marked.thread_record(cyl)
+	eq([rec.designation, rec.major, rec.pitch, rec.length, rec.offset, rec.internal, rec.left_handed, rec.reverse],
+		["M10", 10.0, 1.5, 8.0, 1.0, false, true, true])
+	eq(marked.thread_records().size(), 1)
+	eq(marked.thread_records()[0][0], cyl)
+	eq(rod.thread_record(cyl), null)
+	eq(rod.thread_record(3), null)
+	eq(Cadaclysm.last_error(), "thread_record: face 3 is not one of the solid's 3")
+	eq(rod.thread(cyl), null)
+	eq(Cadaclysm.last_error(), "thread: neither a size nor a pitch is given")
+	eq(rod.thread_tool(cyl, "M10", NAN, NAN, 6, 8), null)
+	eq(Cadaclysm.last_error(), "thread_tool: offset 8 and length 6 run past the face's length 12")
+
+# Sheet rips, join and corner breaks: the 60 x 40 plate, T 1, ripped from edge to edge across its
+# top, its four thickness edges rounded and two chamfered; a cuboid and a doubled edge refused.
+func test_sheet_metal_rips_joins_and_corner_breaks():
+	var rule := CadaclysmSheetRule.create(1.0)
+	var plate := CadaclysmSolid.sheet_base(CadaclysmProfile.rect(60, 40), rule)
+	ok(plate != null, Cadaclysm.last_error())
+	var top := sheet_face_facing_up(plate)
+	ok(top >= 0, "the plate's top")
+	var bottom := -1
+	for f in plate.faces:
+		var r: PackedFloat64Array = plate.face_frame(f).raw
+		if absf(r[9]) < 1e-9 and absf(r[10]) < 1e-9 and absf(r[11] + 1) < 1e-9 and absf(r[2] + 1) < 1e-9:
+			bottom = f
+	ok(bottom >= 0, "the plate's bottom")
+	var ripped := plate.sheet_rip_points(top, Vector3(0, -20, 0), Vector3(0, 20, 0), 0.5)
+	ok(ripped != null, Cadaclysm.last_error())
+	near(ripped.mass(0.0)["volume"], 2380.0, 1e-6 * 2380)
+	refuses_as(func(): return CadaclysmSolid.cuboid(10, 10, 10).sheet_rip_face(0), "sheet_rip_face: ")
+	var corners := []
+	for e in plate.edges:
+		if not (top in e.faces) and not (bottom in e.faces):
+			corners.append(e)
+	eq(corners.size(), 4)
+	var rounded := plate.sheet_fillet(corners, 3, rule)
+	ok(rounded != null, Cadaclysm.last_error())
+	var want := 2400 - (4 - PI) * 9
+	near(rounded.mass(0.0)["volume"], want, 1e-6 * want)
+	ok(rounded.is_sheet_metal(), "the rounded plate stays sheet metal")
+	var chamfered := plate.sheet_chamfer(corners.slice(0, 2), 2, rule)
+	ok(chamfered != null, Cadaclysm.last_error())
+	near(chamfered.mass(0.0)["volume"], 2396.0, 1e-6 * 2396)
+	refuses_as(func(): return plate.sheet_join(corners[0], corners[0], rule), "sheet_join: ")
+
+# ---- the NURBS toolbox: knots in and out, compatible / reparametrised / uniform / non-rational
+# forms, Greville points, periodic and mean curves, directions, conics; a surface's net readers,
+# elevation, knots, extension, second derivatives, curvature and the Hermite surface. Every pin a
+# closed form worked by hand (the C test's own numbers), read through the doubles.
+
+func nt_curve(points: Array, degree: int, weights := [], knots := []) -> CadaclysmNurbsCurve:
+	return CadaclysmNurbsCurve.create(points, degree, PackedFloat64Array(weights), PackedFloat64Array(knots))
+
+# A quarter of the circle of radius `r` in the xy plane, an exact rational quadratic on [0, 1].
+func nt_quarter(r := 2.0) -> CadaclysmNurbsCurve:
+	return nt_curve([[r, 0.0, 0.0], [r, r, 0.0], [0.0, r, 0.0]], 2, [1.0, sqrt(2.0) / 2.0, 1.0])
+
+func nt_point(flat: PackedFloat64Array, i: int) -> Array:
+	return [flat[3 * i], flat[3 * i + 1], flat[3 * i + 2]]
+
+func nt_dist(a, b) -> float:
+	return sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+# The largest gap between `a` and `b` at 21 parameters of `a`'s domain.
+func nt_gap(a: CadaclysmNurbsCurve, b: CadaclysmNurbsCurve) -> float:
+	var d := a.domain
+	var worst := 0.0
+	for i in 21:
+		var t: float = d[0] + (d[1] - d[0]) * i / 20.0
+		worst = maxf(worst, nt_dist(a.point(t), b.point(t)))
+	return worst
+
+func test_nurbs_toolbox_knots_go_in_and_come_out_of_an_arc():
+	var q := nt_quarter()
+	var k := q.insert_knot(0.5)
+	if not ok(k is CadaclysmNurbsCurve, Cadaclysm.last_error()):
+		return
+	# Boehm at 1/2 on the arc of radius 2: (2, 2√2 - 2, 0) with weight (2 + √2) / 4.
+	ok(all_near(k.knots, [0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0], 0.0), str(k.knots))
+	ok(nt_dist(nt_point(k.control_points, 1), [2.0, 2.0 * sqrt(2.0) - 2.0, 0.0]) < 1e-14, str(k.control_points))
+	near(k.weights[1], (2.0 + sqrt(2.0)) / 4.0, 1e-14)
+	ok(nt_gap(q, k) < 1e-14, "the inserted knot keeps the curve")
+	var back = k.remove_knot(0.5, 1, 1e-9)
+	if not ok(back is Array, Cadaclysm.last_error()):
+		return
+	eq(back[1], 1)
+	ok(nt_dist(nt_point(back[0].control_points, 1), [2.0, 2.0, 0.0]) < 1e-12, str(back[0].control_points))
+	near(back[0].weights[1], sqrt(2.0) / 2.0, 1e-12)
+	# A corner holds its knot.
+	var kept = nt_curve([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]], 1).remove_knot(0.5, 1, 1e-6)
+	eq(kept[1], 0)
+	eq(kept[0].control_points.size(), 9)
+	var r := q.refine_knots(PackedFloat64Array([0.25, 0.5, 0.75]))
+	ok(all_near(r.knots, [0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0], 0.0), str(r.knots))
+	ok(nt_gap(q, r) < 1e-14)
+	eq(q.insert_knot(0.5, 3), null)
+	ok(Cadaclysm.last_error().begins_with("nurbs_curve_knot_inserted: "), Cadaclysm.last_error())
+	eq(q.remove_knot(0.3), null)
+	ok(Cadaclysm.last_error().begins_with("nurbs_curve_knot_removed: "), Cadaclysm.last_error())
+
+func test_nurbs_toolbox_curves_are_made_compatible_reparametrised_and_respaced():
+	var q := nt_quarter()
+	var re := q.reparametrize(10, 20)
+	ok(all_near(re.domain, [10.0, 20.0], 0.0), str(re.domain))
+	ok(nt_dist(re.point(15), q.point(0.5)) < 1e-14)
+	eq(q.reparametrize(1, 1), null)
+	ok(Cadaclysm.last_error().begins_with("nurbs_curve_reparametrized: "), Cadaclysm.last_error())
+	# Weights dropped: the arc's middle point moves from (√2, √2) to the parabola's (3/2, 3/2).
+	var flat := q.non_rational()
+	ok(not flat.is_rational)
+	ok(all_near(flat.point(0.5), [1.5, 1.5, 0.0], 1e-15), str(flat.point(0.5)))
+	var line := nt_curve([[0.0, 0.0, 1.0], [4.0, 0.0, 1.0]], 1, [], [3.0, 3.0, 5.0, 5.0])
+	var both := CadaclysmNurbsCurve.make_compatible([q, line])
+	if not eq(both.size(), 2, Cadaclysm.last_error()):
+		return
+	for c in both:
+		eq(c.degree, 2)
+		ok(all_near(c.domain, [0.0, 1.0], 0.0), str(c.domain))
+	ok(all_near(both[0].knots, both[1].knots, 0.0), "%s vs %s" % [both[0].knots, both[1].knots])
+	ok(nt_gap(q, both[0]) < 1e-14)
+	ok(nt_dist(both[1].point(0.25), line.point(3.5)) < 1e-14)
+	eq(CadaclysmNurbsCurve.make_compatible([]).size(), 0)
+	ok(Cadaclysm.last_error().begins_with("nurbs_curve_compatible: "), Cadaclysm.last_error())
+	# A cubic with knots bunched at the ends: uniform puts them at the thirds, the net kept.
+	var zigzag := []
+	for i in 6:
+		zigzag.append([float(i), float(i % 2), 0.0])
+	var bunched := nt_curve(zigzag, 3, [], [0.0, 0.0, 0.0, 0.0, 0.1, 0.9, 1.0, 1.0, 1.0, 1.0])
+	var u := bunched.make_uniform()
+	ok(all_near(u.knots, [0.0, 0.0, 0.0, 0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0, 1.0, 1.0, 1.0], 0.0), str(u.knots))
+	ok(all_near(u.control_points, bunched.control_points, 0.0))
+
+func test_nurbs_toolbox_greville_points_and_a_periodic_curve():
+	var net := []
+	for i in 6:
+		net.append([float(i), float(i * i), 0.0])
+	var c := nt_curve(net, 3, [], [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0])
+	# The means of three knots after each first: 0, 1/3, 1, 2, 8/3, 3.
+	var g := c.greville_parameters()
+	ok(all_near(g, [0.0, 1.0 / 3.0, 1.0, 2.0, 8.0 / 3.0, 3.0], 1e-15), str(g))
+	var gp := c.greville_points()
+	eq(gp.size(), 18)
+	for i in 6:
+		ok(nt_dist(nt_point(gp, i), c.point(g[i])) < 1e-15, "greville point %d" % i)
+	# The unit square's corners as a cubic, wrapped: 7 points on [0, 4], and at a knot a uniform
+	# cubic is (P0 + 4 P1 + P2) / 6 = (5/6, 1/6).
+	var square := nt_curve([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], 3)
+	var wrapped := square.periodic(false)
+	if not ok(wrapped is CadaclysmNurbsCurve, Cadaclysm.last_error()):
+		return
+	eq(wrapped.control_points.size(), 21)
+	ok(all_near(wrapped.domain, [0.0, 4.0], 0.0), str(wrapped.domain))
+	ok(all_near(wrapped.point(0), [5.0 / 6.0, 1.0 / 6.0, 0.0], 1e-15), str(wrapped.point(0)))
+	ok(wrapped.is_closed)
+	var smooth := square.periodic()
+	ok(all_near(smooth.domain, [0.0, 1.0], 0.0), str(smooth.domain))
+	var short := nt_curve([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 0.0, 0.0]], 3)
+	eq(short.periodic(false), null)
+	ok(Cadaclysm.last_error().begins_with("nurbs_curve_periodic: "), Cadaclysm.last_error())
+
+func test_nurbs_toolbox_directions_a_mean_and_conics():
+	var a := nt_curve([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], 1)
+	var b := nt_curve([[0.0, 1.0, 0.0], [10.0, 1.0, 0.0]], 1)
+	var back := b.reverse()
+	eq(a.directions_match(b), true)
+	eq(a.directions_match(back), false)
+	eq(Cadaclysm.last_error(), "", "a mismatch is no refusal")
+	ok(all_near(back.lined_up_with(a).point(0), [0.0, 1.0, 0.0], 1e-15), str(back.lined_up_with(a).point(0)))
+	# Arcs of radius 2 and 4 about one centre, the second run backwards: the mean is radius 3.
+	var q := nt_quarter()
+	var m := q.mean(nt_quarter(4.0).reverse())
+	if not ok(m is CadaclysmNurbsCurve, Cadaclysm.last_error()):
+		return
+	var d := m.domain
+	for i in 41:
+		var p := m.point(d[0] + (d[1] - d[0]) * i / 40.0)
+		near(nt_dist(p, [0.0, 0.0, 0.0]), 3.0, 1e-12, str(p))
+	# Conics from their points: the arc, raised, stretched, a middle weight 2 (w1² / (w0 w2) > 1),
+	# its parabola, and a line.
+	eq(q.conic_type(1e-6), "circle")
+	eq(q.elevate(3).conic_type(1e-6), "circle")
+	eq(nt_curve([[4.0, 0.0, 0.0], [4.0, 2.0, 0.0], [0.0, 2.0, 0.0]], 2, [1.0, sqrt(2.0) / 2.0, 1.0]).conic_type(1e-6), "ellipse")
+	eq(nt_curve([[2.0, 0.0, 0.0], [2.0, 2.0, 0.0], [0.0, 2.0, 0.0]], 2, [1.0, 2.0, 1.0]).conic_type(1e-6), "hyperbola")
+	eq(q.non_rational().conic_type(1e-6), "parabola")
+	eq(a.conic_type(1e-6), null)
+	eq(Cadaclysm.last_error(), "", "no conic is no refusal")
+	eq(q.conic_type(-1.0), null)
+	ok(Cadaclysm.last_error().begins_with("nurbs_curve_conic_type: "), Cadaclysm.last_error())
+
+# (u, v, u²v + u v³) and its Su, Sv, Suv: cubic each way, so its Hermite surface is exact.
+func nt_poly(u: float, v: float) -> Array:
+	return [[u, v, u * u * v + u * v * v * v], [1.0, 0.0, 2.0 * u * v + v * v * v], [0.0, 1.0, u * u + 3.0 * u * v * v], [0.0, 0.0, 2.0 * u + 3.0 * v * v]]
+
+func nt_hermite() -> CadaclysmNurbsSurface:
+	var lists := [[], [], [], []]
+	for u in [0.0, 0.5, 2.0]:
+		for v in [0.0, 1.0, 1.5]:
+			var f := nt_poly(u, v)
+			for k in 4:
+				lists[k].append(f[k])
+	return CadaclysmNurbsSurface.hermite(PackedFloat64Array([0.0, 0.5, 2.0]), PackedFloat64Array([0.0, 1.0, 1.5]), lists[0], lists[1], lists[2], lists[3])
+
+func test_nurbs_toolbox_a_hermite_surface_is_its_bicubic_and_reads_back():
+	var s := nt_hermite()
+	if not ok(s is CadaclysmNurbsSurface, Cadaclysm.last_error()):
+		return
+	eq(s.counts(), Vector2i(6, 6))
+	ok(all_near(s.knots("u"), [0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 2.0, 2.0, 2.0, 2.0], 0.0), str(s.knots("u")))
+	ok(all_near(s.knots("v"), [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.5, 1.5, 1.5, 1.5], 0.0), str(s.knots("v")))
+	var xyz := s.control_points()
+	eq(xyz.size(), 108)
+	# Corner (0, 0), its v neighbour (0, 1/3, 0), and its u neighbour a third of the first u span along Su.
+	ok(all_near(xyz.slice(0, 6), [0.0, 0.0, 0.0, 0.0, 1.0 / 3.0, 0.0], 0.0), str(xyz.slice(0, 6)))
+	ok(nt_dist(nt_point(xyz, 6), [0.5 / 3.0, 0.0, 0.0]) < 1e-15, str(nt_point(xyz, 6)))
+	var w := s.weights()
+	eq(w.size(), 36)
+	ok(w.count(1.0) == 36, str(w))
+	var u := 1.3
+	var v := 0.7
+	ok(nt_dist(s.raw_point_at(u, v), nt_poly(u, v)[0]) < 1e-13, str(s.raw_point_at(u, v)))
+	var d := s.second_derivatives(u, v)
+	if not eq(d.size(), 6, Cadaclysm.last_error()):
+		return
+	var want := [nt_poly(u, v)[0], nt_poly(u, v)[1], nt_poly(u, v)[2], [0.0, 0.0, 2.0 * v], [0.0, 0.0, 2.0 * u + 3.0 * v * v], [0.0, 0.0, 6.0 * u * v]]
+	for k in 6:
+		ok(nt_dist(d[k], want[k]) < 1e-12, "derivative %d: %s" % [k, d[k]])
+	eq(s.second_derivatives(3.0, 0.5).size(), 0)
+	ok(Cadaclysm.last_error().begins_with("nurbs_surface_second_derivatives: "), Cadaclysm.last_error())
+	eq(s.knots("w").size(), 0)
+	ok(Cadaclysm.last_error() != "", "a direction neither u nor v is refused")
+	eq(CadaclysmNurbsSurface.hermite(PackedFloat64Array([1.0, 0.0]), PackedFloat64Array([0.0, 1.0]), [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]], [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]], [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]], [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]), null)
+	ok(Cadaclysm.last_error().begins_with("nurbs_surface_hermite: "), Cadaclysm.last_error())
+
+# The largest gap between two surfaces over an 11 x 11 grid of `a`'s domain.
+func nt_surface_gap(a: CadaclysmNurbsSurface, b: CadaclysmNurbsSurface) -> float:
+	var d := a.domain()
+	var worst := 0.0
+	for i in 11:
+		for j in 11:
+			var u: float = d[0] + (d[1] - d[0]) * i / 10.0
+			var v: float = d[2] + (d[3] - d[2]) * j / 10.0
+			worst = maxf(worst, nt_dist(a.raw_point_at(u, v), b.raw_point_at(u, v)))
+	return worst
+
+func test_nurbs_toolbox_surface_knots_degrees_and_extension_keep_the_surface():
+	var s := nt_hermite()
+	var e := s.elevate("u")
+	if not ok(e is CadaclysmNurbsSurface, Cadaclysm.last_error()):
+		return
+	eq([e.degree_u(), e.degree_v()], [4, 3])
+	ok(nt_surface_gap(s, e) < 1e-13)
+	var k := s.insert_knot("u", 1.0)
+	eq(k.counts(), Vector2i(7, 6))
+	ok(all_near(k.knots("u"), [0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 1.0, 2.0, 2.0, 2.0, 2.0], 0.0), str(k.knots("u")))
+	ok(nt_surface_gap(s, k) < 1e-13)
+	var r := s.refine_knots("v", PackedFloat64Array([0.25, 1.25]))
+	eq(r.counts(), Vector2i(6, 8))
+	ok(nt_surface_gap(s, r) < 1e-13)
+	var back = k.remove_knot("u", 1.0, 1, 1e-9)
+	if not ok(back is Array, Cadaclysm.last_error()):
+		return
+	eq([back[1], back[0].counts()], [1, Vector2i(6, 6)])
+	ok(nt_surface_gap(s, back[0]) < 1e-12)
+	eq(k.remove_knot("u", 1.0)[1], 1, "the effective tolerance")
+	# Extended 0.5 past the u end: every old (u, v) keeps its point, the u domain grows.
+	var x := s.extend("u_end", 0.5)
+	var d := x.domain()
+	ok(d[1] > 2.0 and d[0] == 0.0 and d[2] == 0.0 and d[3] == 1.5, str(d))
+	ok(nt_dist(x.raw_point_at(1.3, 0.7), s.raw_point_at(1.3, 0.7)) < 1e-12)
+	ok(nt_surface_gap(s, x) < 1e-12)
+	eq(s.insert_knot("u", 0.5, 2), null)
+	ok(Cadaclysm.last_error().begins_with("nurbs_surface_knot_inserted: "), Cadaclysm.last_error())
+	eq(s.extend("w_end", 0.5), null)
+	ok(Cadaclysm.last_error() != "", "a side not among the four is refused")
+	eq(s.extend("u_start", -1.0), null)
+	ok(Cadaclysm.last_error().begins_with("nurbs_surface_extended: "), Cadaclysm.last_error())
+	eq(s.remove_knot("u", 1.0, 1, 1e-9), null, "1.0 is no knot of s")
+	ok(Cadaclysm.last_error().begins_with("nurbs_surface_knot_removed: "), Cadaclysm.last_error())
+
+func test_nurbs_toolbox_a_cylinder_bends_one_way():
+	# A quarter cylinder of radius 2 along z: the arc in u, a line of length 5 in v.
+	var h := sqrt(2.0) / 2.0
+	var s := CadaclysmNurbsSurface.create([[2.0, 0.0, 0.0], [2.0, 0.0, 5.0], [2.0, 2.0, 0.0], [2.0, 2.0, 5.0], [0.0, 2.0, 0.0], [0.0, 2.0, 5.0]],
+		Vector2i(3, 2), 2, 1, PackedFloat64Array([1.0, 1.0, h, h, 1.0, 1.0]))
+	if not ok(s is CadaclysmNurbsSurface, Cadaclysm.last_error()):
+		return
+	var c := s.curvature(0.5, 0.3)
+	if not ok(c is CadaclysmSurfaceCurvature, Cadaclysm.last_error()):
+		return
+	# Su x Sv points out of the cylinder, which bends away from it: k2 = -1/2 round, k1 = 0 along.
+	near(c.k1, 0.0, 1e-12, str(c))
+	near(c.k2, -0.5, 1e-12, str(c))
+	near(c.gaussian, 0.0, 1e-12, str(c))
+	near(c.mean, -0.25, 1e-12, str(c))
+	ok(all_near(c.normal, [h, h, 0.0], 1e-12), str(c.normal))
+	ok(minf(nt_dist(c.dir1, [0.0, 0.0, 1.0]), nt_dist(c.dir1, [0.0, 0.0, -1.0])) < 1e-12, str(c.dir1))
+	ok(minf(nt_dist(c.dir2, [-h, h, 0.0]), nt_dist(c.dir2, [h, -h, 0.0])) < 1e-12, str(c.dir2))
+	eq(s.curvature(2.0, 0.3), null)
+	ok(Cadaclysm.last_error().begins_with("nurbs_surface_curvature: "), Cadaclysm.last_error())

@@ -58,6 +58,7 @@ import datetime
 import decimal
 import enum
 import math
+import operator
 import os
 import platform
 import re
@@ -145,6 +146,10 @@ __all__ = [
     "HealFix",
     "HealRefusal",
     "HealReport",
+    "RecognizedFace",
+    "RecognizeRefusal",
+    "RecognizedEdge",
+    "RecognizeReport",
     "Mesh",
     "Meshlet",
     "Meshlets",
@@ -154,6 +159,7 @@ __all__ = [
     "Placement",
     "Polylines",
     "Pose",
+    "Recurrence",
     "Scene",
     "Segment",
     "Sequence",
@@ -164,7 +170,9 @@ __all__ = [
     "Tolerances",
     "UV_WORLD",
     "ValueKind",
+    "WorkCalendar",
     "WorkSchedule",
+    "WorkTime",
     "build_date",
     "datetime_of",
     "declared_schema",
@@ -264,7 +272,7 @@ FILE_UNITS = 0x100
 UV_WORLD = 0x200
 
 
-def _options(convention, schema=None, colors=False, source_meters_per_unit=0.0):
+def _options(convention, schema=None, colors=False, source_meters_per_unit=0.0, lightmap_resolution=0):
     """A `CadaclysmOpenOptions` built from this module's arguments.
 
     Returns the struct *and the objects it points into*: ctypes will happily let
@@ -279,6 +287,20 @@ def _options(convention, schema=None, colors=False, source_meters_per_unit=0.0):
     options.uvs = 1 if packed & UV_WORLD else 0
     options.colors = 1 if colors else 0
     options.source_meters_per_unit = float(source_meters_per_unit)
+    texels = lightmap_resolution
+    if isinstance(texels, float) and texels.is_integer():
+        texels = int(texels)
+    try:
+        if isinstance(texels, bool):
+            raise TypeError
+        texels = operator.index(texels)   # int, numpy integers -- not str, bool or 2.5
+    except TypeError:
+        raise TypeError(f"lightmap_resolution must be a whole number of texels, not {lightmap_resolution!r}") from None
+    if texels < 0:
+        raise ValueError(f"lightmap_resolution must be 0 (off) or a texel count, not {lightmap_resolution}")
+    if texels > 0xFFFFFFFF:
+        raise ValueError(f"lightmap_resolution must fit in 32 bits, not {lightmap_resolution}")
+    options.lightmap_resolution = texels
     held = []
     if schema is not None:
         encoded = str(schema).encode()
@@ -396,6 +418,7 @@ class _OpenOptions(ctypes.Structure):
         # order and length.
         ("pick", c_void_p),
         ("pick_user", c_void_p),
+        ("lightmap_resolution", c_uint32),
     ]
 
 
@@ -697,6 +720,23 @@ class _ElementState(ctypes.Structure):
     ]
 
 
+class _WorkTime(ctypes.Structure):
+    _fields_ = [
+        ("has_start", c_bool),
+        ("start", c_double),
+        ("has_finish", c_bool),
+        ("finish", c_double),
+        ("has_pattern", c_bool),
+        ("kind", c_uint32),
+        ("has_position", c_bool),
+        ("position", ctypes.c_int32),
+        ("has_interval", c_bool),
+        ("interval", c_uint32),
+        ("has_occurrences", c_bool),
+        ("occurrences", c_uint32),
+    ]
+
+
 # ---- loading the library --------------------------------------------------
 
 #: Every entry point in `include/cadaclysm.h`, as `(name, restype, argtypes)`.
@@ -769,6 +809,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_placement_transform", None, [c_void_p, c_uint32, POINTER(c_double)]),
     ("cadaclysm_node_can_mesh", c_bool, [c_void_p, c_uint32]),
     ("cadaclysm_node_mesh", _Mesh, [c_void_p, c_uint32]),
+    ("cadaclysm_node_mesh_lightmap_uvs", POINTER(c_float), [c_void_p, c_uint32, POINTER(c_uint32)]),
     ("cadaclysm_node_mesh64", _Mesh64, [c_void_p, c_uint32]),
     ("cadaclysm_lod_levels", c_uint32, []),
     ("cadaclysm_node_mesh_lod", _Mesh, [c_void_p, c_uint32, c_uint32]),
@@ -807,6 +848,13 @@ _ENTRY_POINTS = [
     ("cadaclysm_brep_heal_fixes", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
     ("cadaclysm_brep_heal_refused", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
     ("cadaclysm_brep_edge_tolerance", c_double, [c_void_p, c_uint32]),
+    ("cadaclysm_brep_recognized", c_void_p, [c_void_p, c_double]),
+    ("cadaclysm_brep_recognize_body", c_void_p, [c_void_p]),
+    ("cadaclysm_brep_recognize_free", None, [c_void_p]),
+    ("cadaclysm_brep_recognize_summary", c_bool, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_recognize_faces", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_recognize_refused", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_recognize_edges", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
     ("cadaclysm_brep_layout_id", c_char_p, []),
     ("cadaclysm_surface_matrix", None, [c_void_p, POINTER(c_float)]),
     ("cadaclysm_node_bounds", _Bounds, [c_void_p, c_uint32]),
@@ -872,6 +920,34 @@ _ENTRY_POINTS = [
     ("cadaclysm_task_link_kind_name", c_char_p, [c_void_p, c_uint32, c_uint32]),
     ("cadaclysm_schedule_at", ctypes.c_int64,
      [c_void_p, c_uint32, c_double, c_uint32, POINTER(_ElementState), c_uint32]),
+    ("cadaclysm_calendar_count", c_uint32, [c_void_p]),
+    ("cadaclysm_calendar_name", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_calendar_identification", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_calendar_kind", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_calendar_kind_name", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_calendar_working_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_calendar_exception_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_calendar_work_time", c_bool, [c_void_p, c_uint32, c_bool, c_uint32, POINTER(_WorkTime)]),
+    ("cadaclysm_calendar_work_time_name", c_char_p, [c_void_p, c_uint32, c_bool, c_uint32]),
+    ("cadaclysm_calendar_work_time_days", c_uint32,
+     [c_void_p, c_uint32, c_bool, c_uint32, POINTER(ctypes.c_uint8), c_uint32]),
+    ("cadaclysm_calendar_work_time_weekdays", c_uint32,
+     [c_void_p, c_uint32, c_bool, c_uint32, POINTER(ctypes.c_uint8), c_uint32]),
+    ("cadaclysm_calendar_work_time_months", c_uint32,
+     [c_void_p, c_uint32, c_bool, c_uint32, POINTER(ctypes.c_uint8), c_uint32]),
+    ("cadaclysm_calendar_work_time_periods", c_uint32,
+     [c_void_p, c_uint32, c_bool, c_uint32, POINTER(c_double), c_uint32]),
+    ("cadaclysm_task_calendar", c_bool, [c_void_p, c_uint32, c_uint32, POINTER(c_uint32)]),
+    ("cadaclysm_task_duration_kind", c_uint32, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_task_work_duration", c_bool,
+     [c_void_p, c_uint32, c_uint32, POINTER(c_double), POINTER(c_double)]),
+    ("cadaclysm_calendar_working_periods", c_uint32,
+     [c_void_p, c_uint32, c_double, c_double, POINTER(c_double), c_uint32, POINTER(c_uint32)]),
+    ("cadaclysm_calendar_working_seconds", c_uint32,
+     [c_void_p, c_uint32, c_double, c_double, POINTER(c_double)]),
+    ("cadaclysm_calendar_add_work", c_uint32,
+     [c_void_p, c_uint32, c_double, c_double, c_double, POINTER(c_double)]),
+    ("cadaclysm_calendar_error_message", c_char_p, [c_uint32]),
     ("cadaclysm_pose", c_void_p,
      [c_void_p, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_double), c_uint32, c_uint32]),
     ("cadaclysm_pose_state", c_void_p, [c_void_p, c_uint32, c_uint32]),
@@ -2349,6 +2425,13 @@ _TASK_KINDS = (
 _LINK_KINDS = ("finish_start", "start_start", "finish_finish", "start_finish", "notdefined", "other")
 _DATES = {"scheduled": 0, "actual": 1}
 _PHASES = ("unbuilt", "building", "built", "demolishing", "demolished")
+# Calendars use the IFC words, as the core's `word()` spells them.
+_CALENDAR_KINDS = ("FIRSTSHIFT", "SECONDSHIFT", "THIRDSHIFT", "NOTDEFINED", "USERDEFINED")
+_RECURRENCE_KINDS = (
+    "DAILY", "WEEKLY", "MONTHLY_BY_DAY_OF_MONTH", "MONTHLY_BY_POSITION", "BY_DAY_COUNT",
+    "BY_WEEKDAY_COUNT", "YEARLY_BY_DAY_OF_MONTH", "YEARLY_BY_POSITION",
+)
+_DURATION_KINDS = ("ELAPSEDTIME", "WORKTIME", "NOTDEFINED", None)
 
 
 class ElementState:
@@ -2375,16 +2458,28 @@ class TaskTime:
     """Every date pair a task gives, each a float (seconds since 1970-01-01T00:00; see
     `datetime_of`) or None where the file gives none: `schedule_start`, `schedule_finish`,
     `early_start`, `early_finish`, `late_start`, `late_finish`, `actual_start`,
-    `actual_finish`, and `duration` (seconds)."""
+    `actual_finish`, and `duration` (seconds).
 
-    __slots__ = (
+    `duration_kind` is `"ELAPSEDTIME"`, `"WORKTIME"` or `"NOTDEFINED"`, None where the file
+    gives none; `work_duration` is the duration in working time, `(days, seconds)`: that
+    many working days, then that many seconds of working time; None where there is none
+    (an IFC2X3 task, or no duration)."""
+
+    _FIELDS = (
         "schedule_start", "schedule_finish", "early_start", "early_finish", "late_start",
         "late_finish", "actual_start", "actual_finish", "duration",
     )
+    __slots__ = (
+        "schedule_start", "schedule_finish", "early_start", "early_finish", "late_start",
+        "late_finish", "actual_start", "actual_finish", "duration", "duration_kind", "work_duration",
+    )
 
-    def __init__(self, raw: "_TaskTime"):
-        for name in self.__slots__:
+    def __init__(self, raw: "_TaskTime", duration_kind: "str | None" = None,
+                 work_duration: "tuple[float, float] | None" = None):
+        for name in self._FIELDS:
             setattr(self, name, getattr(raw, name) if getattr(raw, "has_" + name) else None)
+        self.duration_kind = duration_kind
+        self.work_duration = work_duration
 
     def __repr__(self) -> str:
         given = ", ".join(f"{n}={getattr(self, n)}" for n in self.__slots__ if getattr(self, n) is not None)
@@ -2564,7 +2659,24 @@ class Task:
         library, handle, s, t = self._args()
         raw = _TaskTime()
         library.cadaclysm_task_time(handle, s, t, ctypes.byref(raw))
-        return TaskTime(raw)
+        days, seconds = c_double(), c_double()
+        work = library.cadaclysm_task_work_duration(handle, s, t, ctypes.byref(days), ctypes.byref(seconds))
+        return TaskTime(raw, _DURATION_KINDS[library.cadaclysm_task_duration_kind(handle, s, t)],
+                        (days.value, seconds.value) if work else None)
+
+    @property
+    def calendar_index(self) -> "int | None":
+        """The index of the work calendar this task works on (`scene.calendars[i]`), None
+        where it has none."""
+        library, handle, s, t = self._args()
+        out = c_uint32()
+        return out.value if library.cadaclysm_task_calendar(handle, s, t, ctypes.byref(out)) else None
+
+    @property
+    def calendar(self) -> "WorkCalendar | None":
+        """The work calendar this task works on, None where it has none."""
+        index = self.calendar_index
+        return None if index is None else WorkCalendar(self.schedule._scene, index)
 
     @property
     def nodes(self) -> "list[Node]":
@@ -2601,6 +2713,173 @@ class TaskLink:
 
     def __repr__(self) -> str:
         return f"<TaskLink {self.from_task.name} -> {self.to_task.name} {self.kind}>"
+
+
+class Recurrence:
+    """A work time's repeating pattern (`IfcRecurrencePattern`). `kind` is the IFC word:
+    `"DAILY"`, `"WEEKLY"`, `"MONTHLY_BY_DAY_OF_MONTH"`, `"MONTHLY_BY_POSITION"`,
+    `"BY_DAY_COUNT"`, `"BY_WEEKDAY_COUNT"`, `"YEARLY_BY_DAY_OF_MONTH"` or
+    `"YEARLY_BY_POSITION"`. `days` (1..31), `weekdays` (1 = Monday .. 7 = Sunday) and
+    `months` (1..12) are sorted lists; `position`, `interval` and `occurrences` are ints or
+    None; `periods` are `(start, end)` pairs in seconds after midnight, empty for all day."""
+
+    __slots__ = ("kind", "days", "weekdays", "months", "position", "interval", "occurrences", "periods")
+
+    def __init__(self, kind, days, weekdays, months, position, interval, occurrences, periods):
+        self.kind = kind
+        self.days = days
+        self.weekdays = weekdays
+        self.months = months
+        self.position = position
+        self.interval = interval
+        self.occurrences = occurrences
+        self.periods = periods
+
+    def __repr__(self) -> str:
+        return f"<Recurrence {self.kind}>"
+
+
+class WorkTime:
+    """A repeating set of working (or, among a calendar's `exceptions`, non-working)
+    periods, valid between two dates (`IfcWorkTime`). `start` and `finish` are midnight of
+    their day, in seconds since 1970-01-01T00:00, or None for an open end; the finish day
+    is included. `pattern` is a `Recurrence`, or None for every day of the range, all day."""
+
+    __slots__ = ("name", "start", "finish", "pattern")
+
+    def __init__(self, name: str, start: "float | None", finish: "float | None", pattern: "Recurrence | None"):
+        self.name = name
+        self.start = start
+        self.finish = finish
+        self.pattern = pattern
+
+    def __repr__(self) -> str:
+        return f"<WorkTime {self.name!r}>"
+
+
+def _calendar_check(status: int) -> None:
+    if status != 0:
+        raise CadaclysmError(_text(_lib().cadaclysm_calendar_error_message(status)))
+
+
+class WorkCalendar:
+    """When work happens (`IfcWorkCalendar`). From `Scene.calendars` or `Task.calendar`.
+
+    `kind` is `"FIRSTSHIFT"`, `"SECONDSHIFT"`, `"THIRDSHIFT"`, `"NOTDEFINED"` or
+    `"USERDEFINED"` (`kind_name` is a user-defined one's text, `""` otherwise). `working`
+    and `exceptions` are `WorkTime`s in file order. Dates are floats, seconds since
+    1970-01-01T00:00. The queries raise `CadaclysmError` with the library's message for a
+    date that is not finite or a `frm` after `to`."""
+
+    __slots__ = ("_scene", "index")
+
+    def __init__(self, scene: "Scene", index: int):
+        self._scene = scene
+        self.index = index
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, WorkCalendar) and other.index == self.index and other._scene is self._scene
+
+    def __hash__(self) -> int:
+        return hash((id(self._scene), self.index))
+
+    def __repr__(self) -> str:
+        return f"<WorkCalendar {self.index} {self.name}>"
+
+    @property
+    def name(self) -> str:
+        """Its name, else its identification, else `calendar #k` (k from 1, in file order)."""
+        return _text(_lib().cadaclysm_calendar_name(self._scene._handle, self.index))
+
+    @property
+    def identification(self) -> str:
+        """Its identification, `""` where none."""
+        return _text(_lib().cadaclysm_calendar_identification(self._scene._handle, self.index))
+
+    @property
+    def kind(self) -> str:
+        return _CALENDAR_KINDS[_lib().cadaclysm_calendar_kind(self._scene._handle, self.index)]
+
+    @property
+    def kind_name(self) -> str:
+        """The text of a user-defined kind (`kind == "USERDEFINED"`); `""` otherwise."""
+        return _text(_lib().cadaclysm_calendar_kind_name(self._scene._handle, self.index))
+
+    def _work_times(self, exception: bool, count: int) -> "list[WorkTime]":
+        library, handle, c = _lib(), self._scene._handle, self.index
+
+        def numbers(call, w):
+            n = call(handle, c, exception, w, None, 0)
+            buf = (ctypes.c_uint8 * n)()
+            call(handle, c, exception, w, buf, n)
+            return list(buf)
+
+        out = []
+        for w in range(count):
+            raw = _WorkTime()
+            library.cadaclysm_calendar_work_time(handle, c, exception, w, ctypes.byref(raw))
+            pattern = None
+            if raw.has_pattern:
+                n = library.cadaclysm_calendar_work_time_periods(handle, c, exception, w, None, 0)
+                flat = (c_double * (2 * n))()
+                library.cadaclysm_calendar_work_time_periods(handle, c, exception, w, flat, n)
+                pattern = Recurrence(
+                    _RECURRENCE_KINDS[raw.kind],
+                    numbers(library.cadaclysm_calendar_work_time_days, w),
+                    numbers(library.cadaclysm_calendar_work_time_weekdays, w),
+                    numbers(library.cadaclysm_calendar_work_time_months, w),
+                    raw.position if raw.has_position else None,
+                    raw.interval if raw.has_interval else None,
+                    raw.occurrences if raw.has_occurrences else None,
+                    [(flat[2 * i], flat[2 * i + 1]) for i in range(n)],
+                )
+            out.append(WorkTime(
+                _text(library.cadaclysm_calendar_work_time_name(handle, c, exception, w)),
+                raw.start if raw.has_start else None,
+                raw.finish if raw.has_finish else None,
+                pattern,
+            ))
+        return out
+
+    @property
+    def working(self) -> "list[WorkTime]":
+        """Its working times, in file order."""
+        return self._work_times(False, _lib().cadaclysm_calendar_working_count(self._scene._handle, self.index))
+
+    @property
+    def exceptions(self) -> "list[WorkTime]":
+        """Its exception (non-working) times, in file order."""
+        return self._work_times(True, _lib().cadaclysm_calendar_exception_count(self._scene._handle, self.index))
+
+    def working_periods(self, frm: float, to: float) -> "list[tuple[float, float]]":
+        """The working periods overlapping `frm`..`to`, clipped to it, sorted and merged:
+        `(start, end)` pairs, no two touching or overlapping."""
+        library, handle = _lib(), self._scene._handle
+        count = c_uint32()
+        _calendar_check(library.cadaclysm_calendar_working_periods(
+            handle, self.index, float(frm), float(to), None, 0, ctypes.byref(count)))
+        n = count.value
+        flat = (c_double * (2 * n))()
+        _calendar_check(library.cadaclysm_calendar_working_periods(
+            handle, self.index, float(frm), float(to), flat, n, ctypes.byref(count)))
+        return [(flat[2 * i], flat[2 * i + 1]) for i in range(n)]
+
+    def working_seconds(self, frm: float, to: float) -> float:
+        """The working seconds in `frm`..`to`."""
+        out = c_double()
+        _calendar_check(_lib().cadaclysm_calendar_working_seconds(
+            self._scene._handle, self.index, float(frm), float(to), ctypes.byref(out)))
+        return out.value
+
+    def add_work(self, frm: float, days: float, seconds: float = 0.0) -> float:
+        """The date `days` working days and then `seconds` of working time after `frm`
+        (before it, when negative). A forward result landing at the start of a working day
+        is the end of the previous one. Raises `CadaclysmError` when no working time lies
+        within 100 years."""
+        out = c_double()
+        _calendar_check(_lib().cadaclysm_calendar_add_work(
+            self._scene._handle, self.index, float(frm), float(days), float(seconds), ctypes.byref(out)))
+        return out.value
 
 
 class Pose:
@@ -2791,7 +3070,7 @@ class Brep:
             raise CadaclysmError(_text(_lib().cadaclysm_last_error()) or "manifold")
         return Manifold(tuple(out))
 
-    def sewed(self, tolerance: "float | None" = None, vertex: "float | None" = None) -> "tuple[Brep, SewReport]":
+    def sew(self, tolerance: "float | None" = None, vertex: "float | None" = None) -> "tuple[Brep, SewReport]":
         """This brep with its free edges sewn, and what was sewn, as a new `Brep` and a
         `SewReport`; this one is left as it was. Two free edges become one shared edge
         where both their ends coincide within `vertex` -- by default the rounding
@@ -2814,7 +3093,7 @@ class Brep:
     def health(self, tolerance: "float | None" = None, mesh: bool = False) -> "HealthReport":
         """What is wrong with this brep, as a `HealthReport`: the free edges (the sides one
         face bounds) and the wires they chain into, with each edge's nearest partner and the
-        gap to it; the features below `tolerance`; the loose edges; and what `sewed` would
+        gap to it; the features below `tolerance`; the loose edges; and what `sew` would
         join and leave. `tolerance` is the length below which a feature is "small" and a
         gap closes -- `None`, or a value that is not finite and positive, takes the default
         (the report shows what was used). `mesh=True` also meshes the brep and reports
@@ -2850,7 +3129,7 @@ class Brep:
         finally:
             lib.cadaclysm_brep_health_free(handle)
 
-    def healed(self, tolerance: "float | None" = None, edges: bool = True, faces: bool = True,
+    def heal(self, tolerance: "float | None" = None, edges: bool = True, faces: bool = True,
                holes: bool = True) -> "tuple[Brep, HealReport]":
         """This brep with its small features removed, and what was done, as a new `Brep`
         and a `HealReport`; this one is left as it was. The features are the ones `health`
@@ -2895,6 +3174,43 @@ class Brep:
         t = _lib().cadaclysm_brep_edge_tolerance(self.pointer, int(edge))
         return None if math.isnan(t) else float(t)
 
+    def recognize(self, tolerance: "float | None" = None) -> "tuple[Brep, RecognizeReport]":
+        """This brep with its free-form surfaces and edge curves given their analytic kind,
+        and what was taken, as a new `Brep` and a `RecognizeReport`; this one is left as it
+        was. A NURBS (or revolved, extruded or swept) surface that is a plane, cylinder, cone,
+        sphere or torus within `tolerance` of every sample of its faces and every point of
+        their edges becomes exactly that, and an edge curve that is a line, circle or ellipse
+        within it likewise -- so a file that stored analytic faces as NURBS (a `.3dm`
+        especially) comes back as they were made. Faces and edges keep their numbers.
+        `tolerance` `None`, or a value that is not finite and positive, takes the default,
+        1e-6 of the body's extent -- not the file's declared tolerance, at which a fillet's
+        blend reads as a torus (the report shows what was used)."""
+        lib = _lib()
+        tol = float("nan") if tolerance is None else float(tolerance)
+        handle = lib.cadaclysm_brep_recognized(self.pointer, tol)
+        if not handle:
+            raise CadaclysmError(_text(lib.cadaclysm_last_error()) or "recognized")
+        try:
+            counts = (c_uint32 * 10)()
+            sizes = (c_double * 3)()
+            if not lib.cadaclysm_brep_recognize_summary(handle, counts, sizes):
+                raise CadaclysmError(_text(lib.cadaclysm_last_error()) or "recognized")
+            rows = []
+            for read in (lib.cadaclysm_brep_recognize_faces, lib.cadaclysm_brep_recognize_refused,
+                         lib.cadaclysm_brep_recognize_edges):
+                n = read(handle, None, None)
+                items, figures = (c_uint32 * (2 * n))(), (c_double * n)()
+                if n:
+                    read(handle, items, figures)
+                rows += [list(items), list(figures)]
+            report = _recognize_report(list(counts), list(sizes), *rows)
+            body = lib.cadaclysm_brep_recognize_body(handle)
+            if not body:
+                raise CadaclysmError(_text(lib.cadaclysm_last_error()) or "recognized")
+            return Brep(body), report
+        finally:
+            lib.cadaclysm_brep_recognize_free(handle)
+
     def release(self) -> None:
         pointer, self._pointer = getattr(self, "_pointer", None), None
         if pointer and _library is not None:
@@ -2937,7 +3253,7 @@ class Manifold:
 
 
 class SewReport:
-    """What `Brep.sewed` did, as plain data: the edges it joined (`pairs`), the free
+    """What `Brep.sew` did, as plain data: the edges it joined (`pairs`), the free
     edges before and after, how many groups of free edges between the same two
     vertices it left free (`refused`: too far apart for the tolerance, or more than
     two), the widest gap it sewed, and the two tolerances it used."""
@@ -3081,7 +3397,7 @@ def _health_report(counts, sizes, free_ids, free_sizes, wire_runs, wire_sizes, s
 
 @dataclass(frozen=True)
 class HealFix:
-    """One small feature `healed` removed: its `kind` (as `SmallFeature.kind`), its `index`
+    """One small feature `heal` removed: its `kind` (as `SmallFeature.kind`), its `index`
     in the input (the edge, face or loop number `health` gave it), its `size`, and how far
     the vertex it merged `moved`."""
 
@@ -3093,7 +3409,7 @@ class HealFix:
 
 @dataclass(frozen=True)
 class HealRefusal:
-    """One small feature `healed` left, and why: `kind` and `index` as in `HealFix`; `why`
+    """One small feature `heal` left, and why: `kind` and `index` as in `HealFix`; `why`
     is "would_empty_loop", "closed", "seam", "chain" (a chain wider than the tolerance),
     "neighbours_part" (a sliver's neighbours part), "uneven" (uneven sliver sides),
     "non_manifold", "has_holes", "body_guard" (the fix made the body's health worse),
@@ -3108,7 +3424,7 @@ class HealRefusal:
 
 @dataclass(frozen=True)
 class HealReport:
-    """What `healed` did, as plain data: the `tolerance` it healed at, the furthest any trim
+    """What `heal` did, as plain data: the `tolerance` it healed at, the furthest any trim
     `moved`, whether the body guard refused fixes (`guarded`), the `fixes` made and the
     features `refused`; and the body's health before and after at that tolerance -- its small
     features, free edges, whether it is closed, and its non-manifold edges."""
@@ -3146,8 +3462,76 @@ def _heal_report(counts, sizes, fix_items, fix_sizes, refused_items, refused_siz
 
 
 def _heal_flags(edges: bool, faces: bool, holes: bool) -> int:
-    """`healed`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes."""
+    """`heal`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes."""
     return (1 if edges else 0) | (2 if faces else 0) | (4 if holes else 0)
+
+
+@dataclass(frozen=True)
+class RecognizedFace:
+    """One face `recognize` gave an analytic kind: its `face` number (unchanged), its `kind`
+    ("plane", "cylinder", "cone", "sphere" or "torus"), and how far any sample of it lies from
+    the analytic surface (`deviation`)."""
+
+    face: int
+    kind: str
+    deviation: float
+
+
+@dataclass(frozen=True)
+class RecognizeRefusal:
+    """One face `recognize` left free-form, and why: "no_kind" (no kind fits within the
+    tolerance; `closest` the nearest kind's deviation), "mixed_normals", "parameter_trims"
+    (a parameter trim cannot be lifted) or "too_few_samples" (`closest` `None`)."""
+
+    face: int
+    why: str
+    closest: "float | None"
+
+
+@dataclass(frozen=True)
+class RecognizedEdge:
+    """One edge whose curve `recognize` gave an analytic kind: its brep `edge` id (as
+    `edge_tolerance` takes one), its `kind` ("line", "circle" or "ellipse"), and how far any
+    point of the curve or the edge lies from the analytic curve (`deviation`)."""
+
+    edge: int
+    kind: str
+    deviation: float
+
+
+@dataclass(frozen=True)
+class RecognizeReport:
+    """What `recognize` did, as plain data: the `tolerance` it fitted to, the faces given an
+    analytic kind and those `refused`, the edges given one, how many edges were left
+    free-form (`edges_left`), and the worst deviation of a face and of an edge taken."""
+
+    tolerance: float
+    faces: "tuple[RecognizedFace, ...]"
+    refused: "tuple[RecognizeRefusal, ...]"
+    edges: "tuple[RecognizedEdge, ...]"
+    edges_left: int
+    worst_face: float
+    worst_edge: float
+
+
+_RECOGNIZE_FACE_KINDS = ("plane", "cylinder", "cone", "sphere", "torus")
+_RECOGNIZE_EDGE_KINDS = ("line", "circle", "ellipse")
+_RECOGNIZE_WHYS = ("no_kind", "mixed_normals", "parameter_trims", "too_few_samples")
+
+
+def _recognize_report(counts, sizes, face_items, face_sizes, refused_items, refused_sizes, edge_items,
+                      edge_sizes) -> RecognizeReport:
+    """The flat rows of the recognition C ABI (or the wasm object) as a `RecognizeReport`:
+    counts 10 u32 (faces per kind, faces left, edges per kind, edges left), sizes 3 f64
+    (tolerance, worst face, worst edge), each row two u32 and one f64."""
+    faces = tuple(RecognizedFace(int(face_items[2 * i]), _RECOGNIZE_FACE_KINDS[int(face_items[2 * i + 1])],
+                                 float(face_sizes[i])) for i in range(len(face_sizes)))
+    refused = tuple(RecognizeRefusal(int(refused_items[2 * i]), _RECOGNIZE_WHYS[int(refused_items[2 * i + 1])],
+                                     None if math.isnan(float(refused_sizes[i])) else float(refused_sizes[i]))
+                    for i in range(len(refused_sizes)))
+    edges = tuple(RecognizedEdge(int(edge_items[2 * i]), _RECOGNIZE_EDGE_KINDS[int(edge_items[2 * i + 1])],
+                                 float(edge_sizes[i])) for i in range(len(edge_sizes)))
+    return RecognizeReport(float(sizes[0]), faces, refused, edges, int(counts[9]), float(sizes[1]), float(sizes[2]))
 
 
 class Meshlet:
@@ -3987,6 +4371,20 @@ class Node:
         return self._mesh_of(_lib().cadaclysm_node_mesh(self.scene._handle, self.index))
 
     @property
+    def lightmap_uvs(self) -> NDArray[numpy.float32] | None:
+        """`(vertex_count, 2)` float32 in 0..1, aligned with `mesh`'s vertices, or None.
+
+        Present only when the scene was opened with `lightmap_resolution` and this
+        node's mesh came from a B-rep. A view into the scene, like `mesh`'s arrays.
+        None for a B-rep body means its charts did not fit at that resolution.
+        """
+        count = c_uint32(0)
+        ptr = _lib().cadaclysm_node_mesh_lightmap_uvs(self.scene._handle, self.index, ctypes.byref(count))
+        if not ptr or count.value == 0:
+            return None
+        return _view(self.scene, ptr, (count.value, 2), "float32")
+
+    @property
     def mesh64(self) -> Mesh:
         """`mesh` in float64: the document's own mesh, lent (the float32 one is this
         narrowed) -- the same indices, for a caller using the mesh as geometry. **A
@@ -4651,6 +5049,12 @@ class Scene:
         return [WorkSchedule(self, i) for i in range(_lib().cadaclysm_schedule_count(self._handle))]
 
     @property
+    def calendars(self) -> "list[WorkCalendar]":
+        """The file's work calendars (IFC 4D), in file order; empty for a file that
+        records none."""
+        return [WorkCalendar(self, i) for i in range(_lib().cadaclysm_calendar_count(self._handle))]
+
+    @property
     def sequences(self) -> "list[Sequence]":
         """The file's motion sequences, in file order; empty for a file that records
         none."""
@@ -5010,7 +5414,8 @@ def resolve_schema(model: str | os.PathLike[str],
 
 
 def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = None,  # noqa: A001 - the verb
-         convention: int = Convention.NATIVE, colors: bool = False) -> Scene:
+         convention: int = Convention.NATIVE, colors: bool = False,
+         lightmap_resolution: int = 0) -> Scene:
     """Open a CAD file.
 
     `schema` names an EXPRESS schema (`.exp`) beyond the ones built into the
@@ -5024,6 +5429,11 @@ def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = N
     every array a caller reads out is already in it; there is nothing left for
     the caller to rotate or scale. The default keeps the file's own axes and
     units, so a script written before this parameter existed is unaffected.
+
+    `lightmap_resolution` asks for a lightmap atlas for a texture that many
+    texels on a side -- a second set of texture coordinates in 0..1, one chart
+    per B-rep face, no two sharing a texel -- read back as `Node.lightmap_uvs`.
+    0, the default, is off. Only B-rep bodies are charted (STEP today).
 
     There is no `surfaces` argument, and there used to be. Every body now carries
     both descriptions -- its triangles and its trimmed surfaces -- and builds
@@ -5056,7 +5466,7 @@ def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = N
     # when the directory is passed through, its real schema being the one in
     # `ap203e2_mim_lf.exp`.
     if schema is not None and Path(schema).is_dir():
-        options, _held = _options(convention, schema, colors)
+        options, _held = _options(convention, schema, colors, lightmap_resolution=lightmap_resolution)
         pointer = library.cadaclysm_open(str(path).encode(), ctypes.byref(options))
         if pointer:
             return Scene(pointer, path, Path(schema), int(convention))
@@ -5064,7 +5474,7 @@ def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = N
 
     chosen, fallbacks = resolve_schema(path, schema)
     for candidate in [chosen] if chosen is not None or not fallbacks else fallbacks:
-        options, _held = _options(convention, candidate, colors)
+        options, _held = _options(convention, candidate, colors, lightmap_resolution=lightmap_resolution)
         pointer = library.cadaclysm_open(str(path).encode(), ctypes.byref(options))
         if pointer:
             return Scene(pointer, path, candidate, int(convention))
@@ -5073,7 +5483,8 @@ def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = N
 
 def open_memory(data: bytes | bytearray | memoryview, format: str,  # noqa: A002
                 schema: str | os.PathLike[str] | None = None, name: str = "<memory>",
-                convention: int = Convention.NATIVE, colors: bool = False) -> Scene:
+                convention: int = Convention.NATIVE, colors: bool = False,
+                lightmap_resolution: int = 0) -> Scene:
     """Open a CAD file already in bytes.
 
     `format` names the kind as an extension would — `"step"`, `"ifc"`, `"igs"`,
@@ -5081,9 +5492,14 @@ def open_memory(data: bytes | bytearray | memoryview, format: str,  # noqa: A002
     A leading dot is allowed and ignored. `schema` must be a path here: there
     is no file on disk to read a `FILE_SCHEMA` line out of. `convention` is as
     `open` takes it.
+
+    `lightmap_resolution` asks for a lightmap atlas for a texture that many
+    texels on a side -- a second set of texture coordinates in 0..1, one chart
+    per B-rep face, no two sharing a texel -- read back as `Node.lightmap_uvs`.
+    0, the default, is off. Only B-rep bodies are charted (STEP today).
     """
     buffer = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-    options, _held = _options(convention, schema, colors)
+    options, _held = _options(convention, schema, colors, lightmap_resolution=lightmap_resolution)
     pointer = _lib().cadaclysm_open_memory(
         buffer,
         len(data),

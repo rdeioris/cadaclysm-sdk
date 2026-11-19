@@ -95,8 +95,8 @@ CADACLYSM_TRY_VOID(scene.svg("model.svg", options));
 `view` is one of `SvgView`'s seven (`front`, `back`, `left`, `right`, `top`, `bottom`,
 `iso`, the default), which fills `azimuth`/`elevation` in degrees unless they are set
 directly (`std::optional<double>`, not `nullopt`); `up` (`"y"` or `"z"`, `nullopt` by
-default) falls back to the scene's own convention. `stroke`/`background` are packed
-`0xRRGGBB`; `background` left `nullopt` is no `<rect>` at all, the page left
+default) falls back to the scene's own convention. `stroke`/`set_background` are packed
+`0xRRGGBB`; `set_background` left `nullopt` is no `<rect>` at all, the page left
 transparent. A refused option (`fov` outside `0..179`, say) is an `Error` naming the
 field, worded by the library itself -- test with `if (!result)`, as any other call.
 
@@ -113,7 +113,7 @@ other with `cadaclysm::view::use(path)` or `CADACLYSM_VIEW`. Link `cadaclysm::vi
 **and** `cadaclysm::blacksmith` (the view library is not linked: `view_loader` compiles in
 where to look). `cadaclysm::view` is the linked C library itself, for a host that calls
 `cadaclysm_view.h` directly. A missing library is refused with "no view library: ...", naming
-where it looked, and the view library must speak ABI 1.25.
+where it looked, and the view library must speak ABI 1.27.
 
 ```cpp
 #include <cadaclysm/view.hpp>
@@ -127,7 +127,7 @@ cadaclysm::Result<void> draw() {
 
     CADACLYSM_TRY(view, cadaclysm::View::offscreen(800, 600));   // no display needed
     CADACLYSM_TRY(item, view.show(solid));                       // keeps the solid alive while shown
-    CADACLYSM_TRY_VOID(item.colour("tomato"));                   // or "#e64d1a", or {0.9f, 0.3f, 0.1f}
+    CADACLYSM_TRY_VOID(item.set_colour("tomato"));                   // or "#e64d1a", or {0.9f, 0.3f, 0.1f}
     CADACLYSM_TRY_VOID(view.frame());
     return view.save("sphere.png");
 }
@@ -148,13 +148,13 @@ units). The options are a `cadaclysm::TextOptions` (white, 12 pixels, `"bottom-l
 by default). `item.set_text("...")` replaces the string; a pick on text answers its item, the
 `face` being the line hit. `cadaclysm::view::load_font(bytes)` (or a path) loads a TTF/OTF font
 and returns its id for `options.font` (0 is the bundled Liberation Sans);
-`view.layer(CADACLYSM_VIEW_LAYER_TEXT, false)` hides every text item. An unknown `mode` or
+`view.set_layer(CADACLYSM_VIEW_LAYER_TEXT, false)` hides every text item. An unknown `mode` or
 `align` and a NUL in the text are refused in Python's words, the rest with the library's
 reason.
 
 `pose.show()` draws a posed mechanism (the scene by handle, every node at its posed
-transform). `view.lod("smooth")` turns levels of detail on (`wake_ms()` says when a resting
-frame is owed), and `item.node_transforms(...)` poses a shown scene by hand.
+transform). `view.set_lod("smooth")` turns levels of detail on (`wake_ms()` says when a resting
+frame is owed), and `item.set_node_transforms(...)` poses a shown scene by hand.
 
 `View::create` opens a window of its own (`run()` blocks, `cadaclysm::view::pump()` keeps it
 live from your loop); `View::in_window` draws in a host's native window, the host forwarding

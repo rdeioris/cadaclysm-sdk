@@ -51,7 +51,7 @@ The `CadaclysmView` product draws through a view library opened at run time -- t
 by default, the GPU window after `ViewLibrary.useWgpu()`, any other with
 `ViewLibrary.use(path)` or `CADACLYSM_VIEW`. `Cadaclysm` and `Blacksmith` depend on it, so a
 package that imports either already links it; add the product when you use `View` yourself.
-A missing library throws "no view library: ...", and the view library must speak ABI 1.25.
+A missing library throws "no view library: ...", and the view library must speak ABI 1.28.
 
 ```swift
 import Blacksmith
@@ -64,7 +64,7 @@ let camera = try solid.view()       // a Camera: where it was left, and the last
 
 let view = try CadaclysmView.View.offscreen(width: 800, height: 600)   // no display needed
 let item = try view.showSolid(solid)                                  // the view keeps the solid alive
-try item.colour("tomato")                                             // or "#e64d1a", or SIMD3<Float>(0.9, 0.3, 0.1)
+try item.setColour("tomato")                                             // or "#e64d1a", or SIMD3<Float>(0.9, 0.3, 0.1)
 try view.frame()
 try view.save("sphere.png")
 ```
@@ -82,12 +82,12 @@ default; `size:` in pixels, facing the viewer, its `align:` corner on the point,
 `onTop:`) or `mode: "world"` text lying in the model along `right:` and `up:` (`size:` in model
 units). `item.setText("...")` replaces the string; a pick on text answers its item, the face
 being the line hit. `loadFont(bytes)` (or `loadFont(path:)`) loads a TTF/OTF font and returns
-its id for `font:` (0 is the bundled Liberation Sans); `view.layer(CADACLYSM_VIEW_LAYER_TEXT,
+its id for `font:` (0 is the bundled Liberation Sans); `view.setLayer(CADACLYSM_VIEW_LAYER_TEXT,
 false)` hides every text item. An unknown `mode` or `align` and a NUL in the text are refused
 in Python's words, the rest with the library's reason.
 
-`pose.show()` draws a posed mechanism. `view.lod("smooth")` turns levels of detail on
-(`wakeMs()` says when a resting frame is owed), and `item.nodeTransforms(...)` poses a shown
+`pose.show()` draws a posed mechanism. `view.setLod("smooth")` turns levels of detail on
+(`wakeMs()` says when a resting frame is owed), and `item.setNodeTransforms(...)` poses a shown
 scene by hand.
 
 `View(title:width:height:)` opens a window of its own (`run()` blocks, `View.pump(timeout:)`

@@ -1290,10 +1290,10 @@ static Result<void> sheet_verbs(const bs::Solid& plate) {
 
     {
         CADACLYSM_TRY(box, bs::Solid::cuboid(1, 2, 3));
-        CADACLYSM_TRY(big, box.scaled(2));
+        CADACLYSM_TRY(big, box.scale(2));
         CADACLYSM_TRY(bb, big.bounds());
         EXPECT(std::abs(bb.second[0] - bb.first[0] - 2.0) < 1e-9 && std::abs(bb.second[2] - bb.first[2] - 6.0) < 1e-9, "scaled bounds");
-        auto zero = box.scaled(0);
+        auto zero = box.scale(0);
         EXPECT(!zero && zero.error().message.rfind("scaled:", 0) == 0, "scaled(0) not refused");
     }
 
@@ -2364,7 +2364,7 @@ static Result<void> round_trip(bs::Solid rounded, std::uint32_t faces) {
     EXPECT(read.is_closed && read.faces == 15, "the read body is not the closed manifold written");
     {
         std::optional<cadaclysm::Brep> read_brep = body->brep();
-        CADACLYSM_TRY(sewn, read_brep->sewed());
+        CADACLYSM_TRY(sewn, read_brep->sew());
         CADACLYSM_TRY(after_sew, read_brep->manifold());
         EXPECT(sewn.second.free_before == read.boundary_edges && after_sew.boundary_edges == read.boundary_edges,
                "sewed disagrees with manifold about the free edges");
@@ -2462,6 +2462,7 @@ static Result<void> run(int argc, char** argv) {
         if (!loaded) return Error{"blacksmith license: " + loaded.error().message};
     }
     std::printf("blacksmith %s built %s\n", bs::version().c_str(), bs::build_date().c_str());
+    std::printf("blacksmith build %s\n", bs::build().c_str());
     std::printf("blacksmith license: %s\n", bs::license_info().c_str());
     EXPECT(bs::brep_layout_id() == cadaclysm::Brep::layout_id(), "the reader and the kernel are not from one build");
     CADACLYSM_TRY_VOID(kernel_values());

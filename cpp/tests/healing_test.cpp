@@ -185,7 +185,7 @@ static void a_tiny_body_and_its_tiny_faces() {
 
 static void a_healed_cuboid_heals_to_itself_as_a_new_solid() {
     bs::Solid box = must(bs::Solid::cuboid(10, 10, 10), "cuboid");
-    std::pair<bs::Solid, bs::HealReport> out = must(box.healed(), "healed");
+    std::pair<bs::Solid, bs::HealReport> out = must(box.heal(), "healed");
     const bs::Solid& healed = out.first;
     const bs::HealReport& report = out.second;
     check(healed.handle() != box.handle(), "the healed solid is a new one");
@@ -198,7 +198,7 @@ static void a_healed_cuboid_heals_to_itself_as_a_new_solid() {
           "healed at health's tolerance, nothing moved");
     check(healed.faces() == 6 && box.faces() == 6, "six faces");
     check(approx(must(healed.mass(), "mass").volume, 1000.0), "volume 1000");
-    check(must(box.healed(0.5), "healed(0.5)").second.tolerance == 0.5, "healed(0.5) heals at 0.5");
+    check(must(box.heal(0.5), "healed(0.5)").second.tolerance == 0.5, "healed(0.5) heals at 0.5");
     for (std::uint32_t e = 0; e < 12; ++e) {
         std::optional<double> t = must(healed.edge_tolerance(e), "edge_tolerance");
         check(t == std::optional<double>(0.0), "edge " + std::to_string(e) + " is exact");
@@ -208,7 +208,7 @@ static void a_healed_cuboid_heals_to_itself_as_a_new_solid() {
 
 static void healed_with_every_kind_off_refuses_each_small_feature_as_toggled() {
     bs::Solid plate = must(bs::Solid::cuboid(10, 10, 0.001), "cuboid");
-    bs::HealReport report = must(plate.healed(0.01, false, false, false), "healed(off)").second;
+    bs::HealReport report = must(plate.heal(0.01, false, false, false), "healed(off)").second;
     check(report.fixes.empty() && report.small_before == 8 && report.small_after == 8,
           "nothing fixed, 8 small before and after; got " + std::to_string(report.small_before) + " and " +
               std::to_string(report.small_after));
@@ -219,7 +219,7 @@ static void healed_with_every_kind_off_refuses_each_small_feature_as_toggled() {
               "refusal " + std::to_string(i) + " reads (" + r.kind + ", " + std::to_string(r.index) + ", " + r.why + ", " +
                   std::to_string(r.figure) + ")");
     }
-    bs::HealReport on = must(plate.healed(0.01), "healed(on)").second;
+    bs::HealReport on = must(plate.heal(0.01), "healed(on)").second;
     check(on.small_before == 8, "8 small before with every kind on");
     for (const bs::HealRefusal& r : on.refused) {
         check(r.why != "toggled", "nothing toggled with every kind on");
@@ -232,7 +232,7 @@ static void a_closed_solid_is_refused() {
     box.close();
     check(trips([&] { (void)box.health(); }) && trap::message.find("closed") != std::string::npos,
           "health on a closed solid: " + trap::message);
-    check(trips([&] { (void)box.healed(); }) && trap::message.find("closed") != std::string::npos,
+    check(trips([&] { (void)box.heal(); }) && trap::message.find("closed") != std::string::npos,
           "healed on a closed solid: " + trap::message);
     check(trips([&] { (void)box.edge_tolerance(0); }) && trap::message.find("closed") != std::string::npos,
           "edge_tolerance on a closed solid: " + trap::message);
@@ -384,8 +384,8 @@ static void st203_health_reports_the_free_edges() {
     check(rel(report.rounding, 1e-7 * report.extent, 1e-12), "rounding");
     check(rel(report.tolerance, 1e-4 * report.extent, 1e-12), "tolerance");
     check(report.loose_edges == 0 && report.worst_loose == 0.0, "nothing loose");
-    std::pair<cadaclysm::Brep, cadaclysm::SewReport> sewn = must(body.sewed(), "sewed");
-    check(report.sew_pairs == sewn.second.pairs, "sew_pairs " + std::to_string(report.sew_pairs) + " is sewed()'s pairs");
+    std::pair<cadaclysm::Brep, cadaclysm::SewReport> sewn = must(body.sew(), "sewed");
+    check(report.sew_pairs == sewn.second.pairs, "sew_pairs " + std::to_string(report.sew_pairs) + " is sew()'s pairs");
     check(report.sew_refused == 4 && sewn.second.refused == 4, "sew_refused 4");
     check(rel(report.sew_worst_gap, sewn.second.worst_gap, 1e-12) && report.sew_worst_gap > 0, "sew_worst_gap");
     std::optional<cadaclysm::Cracks> c = must(body.health(std::nullopt, true), "health(mesh)").cracks;
@@ -418,13 +418,13 @@ static void st203_healed_heals_and_leaves_the_original() {
         return;
     }
     cadaclysm::Brep& body = breps[1];
-    std::pair<cadaclysm::Brep, cadaclysm::HealReport> same = must(body.healed(), "healed");
+    std::pair<cadaclysm::Brep, cadaclysm::HealReport> same = must(body.heal(), "healed");
     check(same.first.pointer() != body.pointer(), "a new brep all the same");
     check(same.second.small_before == 0 && same.second.free_before == 188 && same.second.free_after <= 188,
           "nothing small at the default tolerance");
     check(rel(same.second.tolerance, 1e-4 * must(body.health(), "health").extent, 1e-12), "the default tolerance");
 
-    std::pair<cadaclysm::Brep, cadaclysm::HealReport> out = must(body.healed(5.0), "healed(5)");
+    std::pair<cadaclysm::Brep, cadaclysm::HealReport> out = must(body.heal(5.0), "healed(5)");
     const cadaclysm::Brep& healed = out.first;
     const cadaclysm::HealReport& report = out.second;
     check(report.tolerance == 5.0 && report.small_before == 96, "healed at 5 from 96 small");
@@ -459,7 +459,7 @@ static void st203_healed_heals_and_leaves_the_original() {
     check(must(healed.edge_tolerance(41363), "edge_tolerance") == std::optional<double>(0.0), "edge 41363 is exact");
     check(!must(healed.edge_tolerance(0xFFFFFFF0u), "edge_tolerance").has_value(), "an id no trim names");
 
-    cadaclysm::HealReport off = must(body.healed(5.0, false, false, false), "healed(off)").second;
+    cadaclysm::HealReport off = must(body.heal(5.0, false, false, false), "healed(off)").second;
     check(off.fixes.empty() && off.refused.size() == 96 && off.free_after == off.free_before, "every kind off: nothing healed, 96 refused");
     std::uint32_t per[3] = {0, 0, 0};
     for (const cadaclysm::HealRefusal& r : off.refused) {
@@ -470,7 +470,7 @@ static void st203_healed_heals_and_leaves_the_original() {
     }
     check(per[0] == 64 && per[1] == 26 && per[2] == 6,
           "short/sliver/tiny " + std::to_string(per[0]) + ", " + std::to_string(per[1]) + ", " + std::to_string(per[2]));
-    cadaclysm::HealReport edges_only = must(body.healed(5.0, true, false, false), "healed(edges only)").second;
+    cadaclysm::HealReport edges_only = must(body.heal(5.0, true, false, false), "healed(edges only)").second;
     for (const cadaclysm::HealRefusal& r : edges_only.refused) {
         if (r.kind != "short_edge") check(r.why == "toggled", "with faces and holes off, a face is toggled");
     }
@@ -479,7 +479,7 @@ static void st203_healed_heals_and_leaves_the_original() {
     }
 
     body.release();
-    Result<std::pair<cadaclysm::Brep, cadaclysm::HealReport>> gone = body.healed();
+    Result<std::pair<cadaclysm::Brep, cadaclysm::HealReport>> gone = body.heal();
     check(!gone.ok() && gone.error().message.find("released") != std::string::npos, "healed on a released brep");
     check(!body.health().ok(), "health on a released brep");
     check(!body.edge_tolerance(0).ok(), "edge_tolerance on a released brep");

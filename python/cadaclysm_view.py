@@ -21,13 +21,14 @@ import contextlib
 import ctypes
 import dataclasses
 import math
+import numbers
 import os
 import sys
 import threading
 import time
 import weakref
 from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_uint32, c_void_p
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple, TypedDict, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, TypedDict, Union
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,12 +57,17 @@ ABI_MAJOR = 1
 # 1.24: overlays -- `cadaclysm_view_show_overlay`, `_show_overlay_image`, `_move_overlay`, screen text
 #       (`CADACLYSM_VIEW_TEXT_SCREEN`, `CadaclysmViewText.order`) and the pick's `overlay` flag.
 # 1.25: `cadaclysm_view_stats` (frames drawn, the last frame's CPU and GPU time, triangles, draw calls).
-ABI_MINOR = 25
+# 1.26: `cadaclysm_view_next_event` and `cadaclysm_view_close` (the own window's input events, read one
+#       at a time or handed to `run(on_event)`).
+# 1.27: kernel animations on the timeline -- `cadaclysm_view_play_animation`, `_timeline_remove`,
+#       `_set_item_visible`, `_set_node_ghosts` and the "timeline" event.
+# 1.28: the drafting styles (set_line_style, set_point_style, set_point_states, set_point_state_colours, set_viewport_label, set_viewport_border, set_on_top) and the pick's viewport_label.
+ABI_MINOR = 28
 
 #: A colour: text -- "#rgb", "#rrggbb" (the "#" optional) or one of the 148 CSS colour names,
 #: any case, read by the view library's own `cadaclysm_view_parse_colour`, so the forms are
 #: the same in every wrapper -- or three numbers in 0..1. Where a call takes an alpha as well
-#: (`node_colour`, `node_highlight`, `face_colours`), numbers may be three or four, and text
+#: (`set_node_colour`, `set_node_highlight`, `set_face_colours`), numbers may be three or four, and text
 #: (or three numbers) means an alpha of 1.
 Colour = Union[str, Sequence[float]]
 VIEWS = {"front": (-90.0, 0.0), "back": (90.0, 0.0), "left": (180.0, 0.0), "right": (0.0, 0.0),
@@ -79,6 +85,8 @@ _SURFACES = {"exact": 0, "triangles": 1}
 _LIGHTING = {"headlight": 0, "studio": 1, "showroom": 2}
 _ANALYSIS = {"zebra": 1, "isophotes": 2, "gaussian": 3, "mean": 4, "min": 5, "max": 6}
 _OCCLUDED = {"off": 0, "solid": 1, "dashed": 2}
+_POINT_SHAPES = {"disc": 0, "ring": 1, "square": 2, "diamond": 3}
+_POINT_STATES = {"normal": 0, "hover": 1, "selected": 2, "first": 3}
 _FINISH = {"gloss": 0, "satin": 1, "matte": 2}
 #: A shown solid's material (`show_solid(..., material=)`, 1.21): CADACLYSM_VIEW_MATERIAL_*.
 _MATERIAL = {"default": 0, "plastic": 1, "metal": 2, "matte": 3, "paint": 4, "brushed": 5, "glass": 6}
@@ -96,6 +104,11 @@ _TEXT_SCREEN = 2  # CADACLYSM_VIEW_TEXT_SCREEN (1.24): an overlay's text
 _GRIDS = {"none": 0, "top": 1, "front": 2, "right": 3}
 _EVENTS = {"pointer_down": 1, "pointer_move": 2, "pointer_up": 3, "pointer_cancel": 4, "wheel": 5, "key": 6}
 _POINTERS = {"mouse": 0, "touch": 1, "pen": 2}
+#: CADACLYSM_VIEW_INPUT_EVENT_* (1.26) by the "type" `next_event` reports.
+_INPUT_EVENTS = {1: "pointer_down", 2: "pointer_move", 3: "pointer_up", 4: "wheel", 5: "key_down", 6: "key_up",
+                 7: "resize", 8: "pick", 9: "snap", 10: "close", 11: "timeline"}
+#: CADACLYSM_VIEW_MOD_* (1.26).
+_MODS = {"shift": 1, "ctrl": 2, "alt": 4, "meta": 8}
 
 
 class ViewError(RuntimeError):
@@ -146,19 +159,33 @@ class Pick(TypedDict):
     """What a pick answers: the item hit, its node and face, `clicks` (2 for a double click,
     else 1) and `point` -- where the ray met the model, or None where no depth was read --
     and `overlay` (1.24): True where the item is an overlay, over the pixel, so nothing of the
-    scene beneath it was picked (`face` a text overlay's line, else 0)."""
+    scene beneath it was picked (`face` a text overlay's line, else 0). `viewport_label`
+    (1.28) is the viewport whose label was hit (`item` 0), else None."""
     item: int
     node: int
     face: int
     clicks: int
     point: Optional[Tuple[float, float, float]]
     overlay: bool
+    viewport_label: Optional[int]
+
+
+class _EventPick(ctypes.Structure):
+    #: CadaclysmViewEventPick: the pick inside an input event, CadaclysmViewPick as 1.24-1.27 laid
+    #: it out (40 bytes), frozen there so the event keeps its 1.26 layout.
+    _fields_ = [("size", c_uint32), ("item", c_uint32), ("node", c_uint32), ("face", c_uint32),
+                ("clicks", c_uint32), ("has_point", c_uint32), ("point", c_float * 3), ("overlay", c_uint32)]
 
 
 class _Pick(ctypes.Structure):
-    #: CadaclysmViewPick, cadaclysm_view.h 1.24 (1.0 had the first four fields, 1.8 clicks and the point).
-    _fields_ = [("size", c_uint32), ("item", c_uint32), ("node", c_uint32), ("face", c_uint32),
-                ("clicks", c_uint32), ("has_point", c_uint32), ("point", c_float * 3), ("overlay", c_uint32)]
+    #: CadaclysmViewPick, cadaclysm_view.h 1.28 (1.0 had the first four fields, 1.8 clicks and the
+    #: point, 1.24 overlay, 1.28 viewport_label).
+    _fields_ = _EventPick._fields_ + [("viewport_label", ctypes.c_int32)]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not args and "viewport_label" not in kwargs:
+            self.viewport_label = -1   # "no label hit", until the library writes it
 
 
 class Snap(TypedDict):
@@ -282,6 +309,35 @@ class _Stats(ctypes.Structure):
                 ("draw_calls", c_uint32), ("pad1", c_uint32)]
 
 
+class _InputEvent(ctypes.Structure):
+    #: CadaclysmViewInputEvent, cadaclysm_view.h 1.26: 272 bytes, padded explicitly.
+    _fields_ = [("size", c_uint32), ("kind", c_uint32), ("time_ms", c_double), ("x", c_float), ("y", c_float),
+                ("wheel_y", c_float), ("button", c_uint32), ("modifiers", c_uint32), ("pointer", c_uint32),
+                ("pointer_id", c_uint32), ("width", c_uint32), ("height", c_uint32), ("repeat", c_uint32),
+                ("dropped", c_uint32), ("pad0", c_uint32), ("key", ctypes.c_char * 32), ("pick", _EventPick),
+                ("snap", _Snap), ("camera", _Camera), ("pick_viewport_label", ctypes.c_int32)]
+
+
+class _AnimationBinding(ctypes.Structure):
+    #: CadaclysmViewAnimationBinding, cadaclysm_view.h 1.27: 16 bytes on a 64-bit target.
+    _fields_ = [("target", c_char_p), ("item", c_uint32), ("node", c_uint32)]
+
+
+#: CADACLYSM_VIEW_ALL_NODES (1.27): a binding's node where it binds the item itself.
+_ALL_NODES = 0xFFFFFFFF
+
+
+@dataclasses.dataclass(frozen=True)
+class AnimationBinding:
+    """Where `View.play_animation` plays one target of a kernel `Animation`: `target` (the
+    animation's target name) drives shown `item` (an `Item` or its id) -- the item whole, or with
+    `node` (a `Node` or its index in the item's scene) that node and its subtree, rigidly.
+    `(target, item)` and `(target, item, node)` tuples are taken in its place."""
+    target: str
+    item: Any
+    node: Optional[Any] = None
+
+
 class _KmsInfo(ctypes.Structure):
     #: CadaclysmViewKmsInfo, cadaclysm_view.h 1.19.
     _fields_ = [("size", c_uint32), ("path", c_uint32), ("modifier", ctypes.c_uint64), ("connector", c_uint32),
@@ -377,6 +433,8 @@ _SIGNATURES = {
     "cadaclysm_view_show_overlay_image": (c_uint32, [V, POINTER(_OverlayImage)]),
     "cadaclysm_view_move_overlay": (c_bool, [V, c_uint32, c_uint32, c_float, c_float]),
     "cadaclysm_view_stats": (c_bool, [V, POINTER(_Stats)]),
+    "cadaclysm_view_next_event": (c_bool, [V, POINTER(_InputEvent)]),
+    "cadaclysm_view_close": (c_bool, [V]),
     "cadaclysm_view_show_machining": (c_uint32, [V, POINTER(_Machining)]),
     "cadaclysm_view_machining_seek": (c_bool, [V, c_uint32, c_uint32]),
     "cadaclysm_view_machining_colour_by": (c_bool, [V, c_uint32, c_uint32]),
@@ -409,6 +467,17 @@ _SIGNATURES = {
     "cadaclysm_view_standard_in": (c_bool, [V, c_uint32, c_uint32]),
     "cadaclysm_view_kms_info": (c_bool, [V, POINTER(_KmsInfo)]),
     "cadaclysm_view_kms_probe": (c_bool, [POINTER(_Window), POINTER(_KmsInfo)]),
+    "cadaclysm_view_set_item_visible": (c_bool, [V, c_uint32, c_bool]),
+    "cadaclysm_view_set_node_ghosts": (c_bool, [V, c_uint32, POINTER(c_uint32), c_uint32]),
+    "cadaclysm_view_set_line_style": (c_bool, [V, c_uint32, c_float, c_float]),
+    "cadaclysm_view_set_point_style": (c_bool, [V, c_uint32, c_uint32, c_bool]),
+    "cadaclysm_view_set_point_states": (c_bool, [V, c_uint32, POINTER(ctypes.c_uint8), ctypes.c_size_t]),
+    "cadaclysm_view_set_point_state_colours": (None, [V, POINTER(c_float), POINTER(c_float), POINTER(c_float)]),
+    "cadaclysm_view_set_viewport_label": (c_bool, [V, c_uint32, c_char_p, POINTER(c_float)]),
+    "cadaclysm_view_set_viewport_border": (c_bool, [V, c_uint32, POINTER(c_float)]),
+    "cadaclysm_view_set_on_top": (c_bool, [V, c_uint32, c_bool]),
+    "cadaclysm_view_play_animation": (c_uint32, [V, V, POINTER(_AnimationBinding), c_uint32]),
+    "cadaclysm_view_timeline_remove": (c_bool, [V, c_uint32]),
 }
 
 _TOOL_SHAPES = {"flat": 0, "ball": 1, "drill": 2, "vbit": 3, "bullnose": 4}
@@ -735,13 +804,39 @@ def _zoom(lib, v, opts) -> None:
         lib.cadaclysm_view_zoom(v, math.log(zoom) / -math.log(_ZOOM_PER_STEP))
 
 
-def _pick_dict(pick: _Pick) -> "Pick":
+def _pick_dict(pick: Any, label: Optional[int] = None) -> "Pick":
     """A hit as the dict every pick answer carries: the item, node and face, `clicks` (2 for a
     double click, else 1) and `point` -- where the ray met the model, in the coordinates the
     items were shown in, or None where the library read no depth (no hit to place, a
-    machining stock, the terminal library)."""
+    machining stock, the terminal library) -- and `viewport_label`: the viewport whose label
+    was hit (`item` 0), else None. `label` is an event pick's, which has no field of its own."""
+    raw = pick.viewport_label if label is None else label
     return {"item": pick.item, "node": pick.node, "face": pick.face, "clicks": pick.clicks,
-            "point": tuple(pick.point) if pick.has_point else None, "overlay": bool(pick.overlay)}
+            "point": tuple(pick.point) if pick.has_point else None, "overlay": bool(pick.overlay),
+            "viewport_label": None if raw < 0 else raw}
+
+
+def _event_dict(e: _InputEvent, y_up: bool) -> Dict[str, Any]:
+    """A `CadaclysmViewInputEvent` as the dict `View.next_event` returns (see there)."""
+    kind = _INPUT_EVENTS.get(e.kind, str(e.kind))
+    out: Dict[str, Any] = {"type": kind, "time_ms": e.time_ms, "dropped": e.dropped}
+    mods = {name: bool(e.modifiers & bit) for name, bit in _MODS.items()}
+    if kind.startswith("pointer_"):
+        pointer = next((name for name, code in _POINTERS.items() if code == e.pointer), str(e.pointer))
+        out.update(x=e.x, y=e.y, button=e.button, pointer=pointer, pointer_id=e.pointer_id, **mods)
+    elif kind == "wheel":
+        out.update(x=e.x, y=e.y, wheel_y=e.wheel_y, **mods)
+    elif kind in ("key_down", "key_up"):
+        out.update(key=e.key.decode("utf-8", "replace"), repeat=bool(e.repeat), **mods)
+    elif kind == "resize":
+        out.update(width=e.width, height=e.height)
+    elif kind == "pick":
+        out["pick"] = _pick_dict(e.pick, e.pick_viewport_label) if e.pick.item or e.pick_viewport_label >= 0 else None
+    elif kind == "snap":
+        out["snap"] = _snap_dict(e.snap) if e.snap.kind else None
+    elif kind == "close":
+        out["camera"] = _camera(e.camera, _Pick(), y_up)
+    return out
 
 
 def _anchor(anchor: str) -> int:
@@ -794,7 +889,7 @@ def _camera(cam: _Camera, pick: _Pick, y_up: bool) -> dict:
     elevation = math.degrees(math.asin(max(-1.0, min(1.0, d[2]))))
     return {"eye": eye, "target": target, "up": up, "orthographic": bool(cam.orthographic),
             "azimuth": azimuth, "elevation": elevation,
-            "pick": _pick_dict(pick) if pick.item else None}
+            "pick": _pick_dict(pick) if pick.item or pick.viewport_label >= 0 else None}
 
 
 _shared = None   # the one window `obj.show()` draws into, on the wgpu library
@@ -902,7 +997,7 @@ def present(mode: str, obj: Any, *, name: str, default_view: Union[str, Tuple[fl
         if machining is not None:
             item = view.show_machining(**machining)
             if machining.get("part") is not None:
-                item.colour_by("deviation")
+                item.set_colour_by("deviation")
         elif kind == "Profile":
             item = view._show_profile(obj, tolerance=tolerance)
         elif kind == "Solid":
@@ -910,8 +1005,8 @@ def present(mode: str, obj: Any, *, name: str, default_view: Union[str, Tuple[fl
         else:
             item = view.show(obj)
         if transforms is not None:
-            item.node_transforms(transforms)
-        view.layer("edges", not (opts["flags"] & NO_EDGES))
+            item.set_node_transforms(transforms)
+        view.set_layer("edges", not (opts["flags"] & NO_EDGES))
         _aim(view._lib, view._v, opts)
         if kind == "Node":
             item.frame_node(obj)
@@ -919,7 +1014,7 @@ def present(mode: str, obj: Any, *, name: str, default_view: Union[str, Tuple[fl
         if machining is not None:
             # The shared window's timeline keeps its loop flag: an L pressed for an earlier
             # job must not carry over to this one.
-            view.loop(False)
+            view.set_loop(False)
             view.play(1.0)
         if mode == "show":
             view.draw()
@@ -1208,6 +1303,37 @@ def _node_index(node: Any) -> int:
     return int(getattr(node, "index", node))
 
 
+def _item_id(item: Any) -> int:
+    """An `Item` or an item id, as the id the library takes."""
+    return int(item.id if isinstance(item, Item) else item)
+
+
+def _u32(value: int, what: str) -> int:
+    if not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError(f"{what} {value}: not in 0..4294967295")
+    return value
+
+
+def _bindings(bindings) -> Tuple[Any, list]:
+    """`play_animation`'s bindings as the C array, and what must stay alive while it is read."""
+    rows = []
+    for k, b in enumerate(bindings):
+        if not isinstance(b, AnimationBinding):
+            if not isinstance(b, (tuple, list)) or len(b) not in (2, 3):
+                raise ValueError(f"binding {k}: an AnimationBinding or a (target, item[, node]) tuple, not {b!r}")
+            b = AnimationBinding(*b)
+        if not isinstance(b.target, str):
+            raise ValueError(f"binding {k}: the target is a name, not {b.target!r}")
+        node = _ALL_NODES if b.node is None else _u32(_node_index(b.node), f"binding {k}: node")
+        rows.append((_text_bytes(b.target), _u32(_item_id(b.item), f"binding {k}: item"), node))
+    if not rows:
+        return None, []
+    array = (_AnimationBinding * len(rows))()
+    for slot, (target, item, node) in zip(array, rows):
+        slot.target, slot.item, slot.node = target, item, node
+    return array, rows
+
+
 def _program(tool, gcode) -> _Program:
     """One `(tool, gcode)` as the struct; the text is kept alive by the caller's list."""
     if any(tool.get(k) is None for k in ("number", "shape", "diameter")):
@@ -1302,15 +1428,15 @@ class Item:
         self.view._items.pop(self.id, None)
         self._keeps = None
 
-    def colour(self, rgb: Colour) -> None:
+    def set_colour(self, rgb: Colour) -> None:
         """Recolours the item in place: text ("#rgb", "#rrggbb", a CSS name) or 3 numbers in 0..1."""
         self.view._ok("cadaclysm_view_set_colour", self.id, _f32(_colour(rgb, self.view._lib), 3))
 
-    def placement(self, matrix: Optional[Sequence[float]]) -> None:
+    def set_placement(self, matrix: Optional[Sequence[float]]) -> None:
         """A column-major 4x4 as 16 numbers; None takes it back."""
         self.view._ok("cadaclysm_view_set_placement", self.id, _matrix(matrix))
 
-    def node_transforms(self, transforms: Optional[Iterable[Sequence[float]]]) -> None:
+    def set_node_transforms(self, transforms: Optional[Iterable[Sequence[float]]]) -> None:
         """Poses a shown scene: one world transform per node (column-major 4x4s as 16 numbers
         each, `Pose.raw_transform`'s layout -- every node of the scene, in index order),
         drawn in place of each node's rest transform. None restores the rest pose."""
@@ -1326,7 +1452,7 @@ class Item:
         count = len(values) // 16
         self.view._ok("cadaclysm_view_set_node_transforms", self.id, (c_double * len(values))(*values), count)
 
-    def face_colours(self, faces: Iterable[int], rgba: Iterable[Colour]) -> None:
+    def set_face_colours(self, faces: Iterable[int], rgba: Iterable[Colour]) -> None:
         """Colours faces (the item's pick numbers): one colour a face, `rgba[i]` for `faces[i]` --
         text, or 3 or 4 numbers in 0..1 (the alpha is not drawn)."""
         faces = [int(f) for f in faces]
@@ -1337,10 +1463,40 @@ class Item:
         colours = (c_float * len(values))(*values)
         self.view._ok("cadaclysm_view_set_face_colours", self.id, (c_uint32 * len(faces))(*faces), colours, len(faces))
 
-    def xray(self, on: bool = True) -> None:
+    def set_xray(self, on: bool = True) -> None:
         self.view._ok("cadaclysm_view_set_xray", self.id, bool(on))
 
-    def occluded(self, mode: str) -> None:
+    def set_line_style(self, dash: float = 0, gap: float = 0) -> None:
+        """Draw the item's lines in its own dash: `dash` points on, `gap` off; a dash of 0 (the
+        default) is solid. A hidden line it draws "solid" (`set_occluded`) takes the same dash;
+        a "dashed" item's hidden stretch keeps the view-wide occluded style."""
+        self.view._ok("cadaclysm_view_set_line_style", self.id, float(dash), float(gap))
+
+    def set_point_style(self, shape: str = "disc", hollow: bool = False) -> None:
+        """A points item's marker: "disc" (the default), "ring", "square" or "diamond", filled
+        or `hollow`."""
+        if shape not in _POINT_SHAPES:
+            raise ValueError(f"point style: {shape!r} is not 'disc', 'ring', 'square' or 'diamond'")
+        self.view._ok("cadaclysm_view_set_point_style", self.id, _POINT_SHAPES[shape], bool(hollow))
+
+    def set_point_states(self, states: Sequence[Union[str, int]]) -> None:
+        """One state a point, in the order shown: "normal", "hover", "selected" or "first" (or
+        0..3). Hover and selected draw the point in their colour (`View.set_point_state_colours`);
+        first rings it."""
+        states = list(states)   # a generator is read once, for the codes and for the bad one
+        codes = [int(s) if isinstance(s, numbers.Integral) and not isinstance(s, bool) else _POINT_STATES.get(s, -1)
+                 for s in states]
+        bad = next((s for s, c in zip(states, codes) if not 0 <= c <= 3), None)
+        if bad is not None:
+            raise ValueError(f"point states: {bad!r} is not 'normal', 'hover', 'selected' or 'first'")
+        array = (ctypes.c_uint8 * max(1, len(codes)))(*codes)
+        self.view._ok("cadaclysm_view_set_point_states", self.id, ctypes.cast(array, POINTER(ctypes.c_uint8)), len(codes))
+
+    def set_on_top(self, on: bool = True) -> None:
+        """Draw the item after every other, depth testing off; picked ahead of what is under it."""
+        self.view._ok("cadaclysm_view_set_on_top", self.id, bool(on))
+
+    def set_occluded(self, mode: str) -> None:
         """How the item's lines and points draw where a surface hides them: "off" (not
         drawn; an item shows with this until it is set), "solid" (drawn through) or "dashed"
         (dashed and dimmed; a point as a dimmed ring)."""
@@ -1348,7 +1504,7 @@ class Item:
             raise ValueError(f"occluded: {mode!r} is not 'off', 'solid' or 'dashed'")
         self.view._ok("cadaclysm_view_set_occluded", self.id, _OCCLUDED[mode])
 
-    def finish(self, finish: str) -> None:
+    def set_finish(self, finish: str) -> None:
         """The item's finish: "gloss" (an item shows with this until it is set) -- under the
         showroom lighting a clear coat mirroring the room, silver at a grazing angle -- "satin"
         (a weaker, blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads
@@ -1361,16 +1517,16 @@ class Item:
     def frame(self) -> None:
         self.view._ok("cadaclysm_view_frame", self.id)
 
-    def node_visible(self, node: Any, on: bool = True) -> None:
+    def set_node_visible(self, node: Any, on: bool = True) -> None:
         self.view._ok("cadaclysm_view_set_node_visible", self.id, _node_index(node), bool(on))
 
-    def node_colour(self, node: Any, rgba: Optional[Colour]) -> None:
+    def set_node_colour(self, node: Any, rgba: Optional[Colour]) -> None:
         """Colours `node` (a `Node` or its index) and its subtree: text, or 3 or 4 numbers in
         0..1 (the alpha is not drawn); None clears."""
         self.view._ok("cadaclysm_view_set_node_color", self.id, _node_index(node),
                       None if rgba is None else _rgba(rgba, self.view._lib))
 
-    def node_highlight(self, node: Any, rgba: Optional[Colour]) -> None:
+    def set_node_highlight(self, node: Any, rgba: Optional[Colour]) -> None:
         """Tints `node` and its subtree toward the colour by its alpha (0 leaves it, 1 is the
         colour): text (alpha 1), or 3 or 4 numbers; None clears."""
         self.view._ok("cadaclysm_view_set_node_highlight", self.id, _node_index(node),
@@ -1382,8 +1538,10 @@ class Item:
 
 class Overlay(Item):
     """An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the
-    window, drawn over everything, untouched by the camera. `remove` and (text) `set_text` work
-    as on any item."""
+    window, drawn over everything, untouched by the camera. `remove`, `View.set_item_layer`
+    and, for text, `set_text` and `set_colour` work as on any item; the item calls that mean
+    nothing for an overlay -- `set_colour` on a shape or an image, `set_placement`, `set_xray`, the line
+    and node colours, `frame` -- raise ViewError saying it is an overlay."""
 
     __slots__ = ("_anchor",)
 
@@ -1421,13 +1579,13 @@ class Machining(Item):
         """Jump the timeline to the end of move `move` (0: the untouched stock)."""
         self.view._ok("cadaclysm_view_machining_seek", self.id, int(move))
 
-    def colour_by(self, mode: str) -> None:
+    def set_colour_by(self, mode: str) -> None:
         """"height", "tool" or "deviation" (needs a part)."""
         if mode not in _COLOUR_BY:
             raise ValueError(f"mode {mode!r}: one of {', '.join(_COLOUR_BY)}")
         self.view._ok("cadaclysm_view_machining_colour_by", self.id, _COLOUR_BY[mode])
 
-    def overlays(self, path: bool = True, tool: bool = True) -> None:
+    def set_overlays(self, path: bool = True, tool: bool = True) -> None:
         """The toolpath and the tool, on or off."""
         self.view._ok("cadaclysm_view_machining_overlays", self.id, bool(path), bool(tool))
 
@@ -1632,10 +1790,11 @@ class View:
         column and from the right edge for the right one, y down from the top for the top row and
         up from the bottom for the bottom one). `shape` is a blacksmith `Profile`, a list of them
         (one overlay, filled together by the even-odd rule), or rational cubic Beziers ((n, 4, 4)
-        or sixteen numbers each, a profile's `beziers()`). The fill: `fill` where given ("none"
-        for no fill), else the profile's own colour, else white -- unless a `stroke` is given,
-        when an uncoloured profile is not filled; the stroke only where `stroke` is given,
-        `stroke_width` pixels wide. Lower `order` draws first (shapes, text and images share it).
+        or sixteen numbers each, a profile's `beziers()`). A profile is a sketch, so it draws as
+        its outline by default: the stroke is `stroke` where given ("none" for no stroke), else the
+        profile's own colour, else white, `stroke_width` pixels wide; the fill only where `fill` is
+        given ("none" for no fill) -- a panel needs one. Fill only: a `fill` and `stroke="none"`;
+        neither a fill nor a stroke is refused. Lower `order` draws first (shapes, text and images share it).
         Drawn after everything else, never moved by the camera; a click on it picks it
         (`Pick["overlay"]`) and nothing beneath."""
         import numpy as np
@@ -1653,15 +1812,19 @@ class View:
             b = np.ascontiguousarray(shape, dtype=np.float32).reshape(-1)
         if b.size == 0 or b.size % 16:
             raise ValueError(f"show_overlay: 16 numbers a curve, at least one, not {b.size}")
-        stroke_rgba = None if stroke is None else _rgba(stroke, self._lib)
-        if isinstance(fill, str) and fill.strip().lower() == "none":
-            fill_rgba = None
-        elif fill is not None:
-            fill_rgba = _rgba(fill, self._lib)
+        def _none(c):
+            return isinstance(c, str) and c.strip().lower() == "none"
+        if _none(stroke):
+            stroke_rgba = None
+        elif stroke is not None:
+            stroke_rgba = _rgba(stroke, self._lib)
         elif own is not None:
-            fill_rgba = _f32(list(own)[:3] + [1.0], 4)
+            stroke_rgba = _f32(list(own)[:3] + [1.0], 4)
         else:
-            fill_rgba = None if stroke_rgba is not None else _f32((1.0, 1.0, 1.0, 1.0), 4)
+            stroke_rgba = _f32((1.0, 1.0, 1.0, 1.0), 4)
+        fill_rgba = None if fill is None or _none(fill) else _rgba(fill, self._lib)
+        if fill_rgba is None and stroke_rgba is None:
+            raise ValueError("show_overlay: neither a fill nor a stroke")
         code = _anchor(anchor)
         o = _Overlay()
         o.size, o.anchor = ctypes.sizeof(_Overlay), code
@@ -1744,7 +1907,7 @@ class View:
     def show_solid(self, solid: Any, tolerance: float = 0.05, rgb: Optional[Colour] = None,
                    finish: Optional[str] = None, material: Optional[str] = None,
                    opacity: Optional[float] = None, faces: Optional[Iterable[int]] = None) -> Item:
-        """A kernel solid, read in place; `finish` "gloss", "satin" or "matte" (`Item.finish`),
+        """A kernel solid, read in place; `finish` "gloss", "satin" or "matte" (`Item.set_finish`),
         None the gloss every item shows with. `material` (1.21) "default", "plastic", "metal",
         "matte", "paint", "brushed" or "glass"; `opacity` 0..1 (1 opaque); `faces` the solid's
         face numbers to show alone, with no edges -- a trim's ghost (None: every face). The
@@ -1768,7 +1931,7 @@ class View:
         item = self._item(shown, solid)
         if finish not in (None, "gloss"):
             try:
-                item.finish(finish)
+                item.set_finish(finish)
             except BaseException:
                 item.remove()
                 raise
@@ -1790,11 +1953,11 @@ class View:
         path.reverse()
         for root in node.scene.roots:
             if root.index != path[0].index:
-                item.node_visible(root, False)
+                item.set_node_visible(root, False)
         for parent, child in zip(path, path[1:]):
             for sibling in parent.children:
                 if sibling.index != child.index:
-                    item.node_visible(sibling, False)
+                    item.set_node_visible(sibling, False)
         return item
 
     def _show_profile(self, profile: Any, tolerance: float = 0.05, rgb: Optional[Colour] = None) -> Item:
@@ -1912,7 +2075,7 @@ class View:
 
     # -- the timeline --
     def play(self, speed: float = 1.0) -> None:
-        """Play the timeline at `speed` times real time. It stops at its end unless `loop()` is
+        """Play the timeline at `speed` times real time. It stops at its end unless `set_loop()` is
         on; `play` at the end starts it again from 0."""
         self._ok("cadaclysm_view_timeline_play", float(speed))
 
@@ -1923,7 +2086,7 @@ class View:
         """Set the clock, clamped to [0, duration]."""
         self._ok("cadaclysm_view_timeline_seek", float(seconds))
 
-    def loop(self, on: bool = True) -> None:
+    def set_loop(self, on: bool = True) -> None:
         self._ok("cadaclysm_view_timeline_set_loop", bool(on))
 
     @property
@@ -1952,6 +2115,63 @@ class View:
             return []
         return buf.value.decode("utf-8", "replace").split("\n")
 
+    def play_animation(self, animation: Any, bindings: Iterable[Any]) -> int:
+        """Plays a kernel `Animation` (cadaclysm_blacksmith's) on the timeline: each binding an
+        `AnimationBinding` (or a `(target, item)` / `(target, item, node)` tuple) driving shown
+        items or their nodes by one of the animation's targets -- placement, visibility, colour
+        and ghosting, as the animation's tracks say. The view plays its own copy: the animation
+        may be changed or closed after. Answers the track's id, for `remove_track`; the clock is
+        `play`, `seek` and `pause`'s. Raises ViewError with the library's reason (an unknown
+        item or node, a target bound twice, a node scaled, no kernel loaded, a library with no
+        timeline)."""
+        array, keep = _bindings(bindings)
+        handle = None if animation is None else animation._h()  # None: the library's own refusal
+        track = self._ok("cadaclysm_view_play_animation", handle, array, len(keep))
+        return int(track)
+
+    def remove_track(self, track: int) -> None:
+        """Takes animation track `track` (`play_animation`'s id) off the timeline, putting back
+        what it drove as it was when it began to play. ViewError for no such track."""
+        self._ok("cadaclysm_view_timeline_remove", _u32(int(track), "track"))
+
+    def set_item_visible(self, item: Any, visible: bool) -> None:
+        """Hides an item (an `Item` or its id) whole, or shows it again: hidden, it draws
+        nothing, is never picked or snapped and is left out of every framing; shown, it draws
+        only while its layer is shown too."""
+        self._ok("cadaclysm_view_set_item_visible", _u32(_item_id(item), "item"), bool(visible))
+
+    def set_node_ghosts(self, item: Any, nodes: Optional[Iterable[Any]]) -> None:
+        """Draws exactly `nodes` (`Node`s or indices) of `item` (an `Item` or its id) x-ray,
+        each node alone (the render view library: its subtree), replacing the item's previous ghosts; None (or no nodes) clears them."""
+        item_id = _u32(_item_id(item), "item")
+        if nodes is None:
+            self._ok("cadaclysm_view_set_node_ghosts", item_id, None, 0)
+            return
+        indices = [_u32(_node_index(n), "node") for n in nodes]
+        array = (c_uint32 * max(len(indices), 1))(*indices)
+        self._ok("cadaclysm_view_set_node_ghosts", item_id, ctypes.cast(array, POINTER(c_uint32)), len(indices))
+
+    def set_point_state_colours(self, hover: Optional[Colour] = None, selected: Optional[Colour] = None,
+                                first: Optional[Colour] = None) -> None:
+        """The colours hover, selected and first points draw in; None restores that state's
+        default (hover #9CD3FF, selected and first #378ADD)."""
+        args = [None if c is None else _f32(_colour(c, self._lib), 3) for c in (hover, selected, first)]
+        self._void("cadaclysm_view_set_point_state_colours", *args)
+
+    def set_viewport_label(self, index: int, text: Optional[str], colour: Optional[Colour] = None) -> None:
+        """Name viewport `index`: `text` top left inside it at 12 points in `colour` (white by
+        default); None clears it. Kept across `set_viewport_rects`, and across `set_viewports`
+        while viewport `index` still exists (`set_viewports(None)` keeps index 0's).
+        A pick on it answers `viewport_label`."""
+        raw = None if text is None else _text_bytes(text)
+        self._ok("cadaclysm_view_set_viewport_label", _u32(index, "viewport"), raw,
+                 None if colour is None else _f32(_colour(colour, self._lib), 3))
+
+    def set_viewport_border(self, index: int, colour: Optional[Colour]) -> None:
+        """Frame viewport `index` in `colour`, one point wide inside its edge; None clears it."""
+        self._ok("cadaclysm_view_set_viewport_border", _u32(index, "viewport"),
+                 None if colour is None else _f32(_colour(colour, self._lib), 3))
+
     def _clear(self):
         for item in list(self._items.values()):
             item.remove()
@@ -1962,7 +2182,7 @@ class View:
     def zoom(self, steps: float) -> None: self._void("cadaclysm_view_zoom", float(steps))
     def look(self, dx: float, dy: float) -> None: self._void("cadaclysm_view_look", float(dx), float(dy))
     def dolly(self, ratio: float) -> None: self._void("cadaclysm_view_dolly", float(ratio))
-    def orthographic(self, on: bool = True) -> None: self._void("cadaclysm_view_set_orthographic", bool(on))
+    def set_orthographic(self, on: bool = True) -> None: self._void("cadaclysm_view_set_orthographic", bool(on))
     def frame(self) -> None: self._ok("cadaclysm_view_frame", 0)
 
     def set_double_click_frames(self, on: bool) -> None:
@@ -1999,7 +2219,7 @@ class View:
             raise ValueError(f"standard view {name!r}: one of {', '.join(_STANDARD)}")
         self._ok("cadaclysm_view_standard", _STANDARD[name])
 
-    def viewports(self, panes: Optional[Sequence[Dict[str, Any]]]) -> None:
+    def set_viewports(self, panes: Optional[Sequence[Dict[str, Any]]]) -> None:
         if not panes:
             self._ok("cadaclysm_view_set_viewports", None, 0)
             return
@@ -2030,7 +2250,7 @@ class View:
         for _ in range(200):
             self.draw()
             if self._call("cadaclysm_view_pick_result", ctypes.byref(out)):
-                return _pick_dict(out) if out.item else None
+                return _pick_dict(out) if out.item or out.viewport_label >= 0 else None
             waiting = _text(self._lib.cadaclysm_view_last_error())
             if waiting and not waiting.endswith("no pick result"):
                 raise ViewError(waiting)
@@ -2048,7 +2268,7 @@ class View:
         out = _Pick()
         out.size = ctypes.sizeof(_Pick)
         if self._call("cadaclysm_view_pick_result", ctypes.byref(out)):
-            return _pick_dict(out) if out.item else {}
+            return _pick_dict(out) if out.item or out.viewport_label >= 0 else {}
         waiting = _text(self._lib.cadaclysm_view_last_error())
         if waiting and not waiting.endswith("no pick result"):
             raise ViewError(waiting)
@@ -2137,8 +2357,96 @@ class View:
         self._ok("cadaclysm_view_draw")
         self._drawn = True
 
-    def run(self) -> Dict[str, Any]:
-        """Blocks until the window is closed; the camera and the last pick, as `view()` returns them."""
+    def next_event(self) -> Optional[Dict[str, Any]]:
+        """The oldest input event the view's own window handled and has not handed out yet, without
+        waiting; None while there is none. The window still orbits, zooms and closes on its own --
+        the events report what it handled, they do not stop it. Each is a dict with "type",
+        "time_ms" (the library's clock) and "dropped" (events a full queue dropped before it), and:
+
+        - "pointer_down", "pointer_move", "pointer_up": "x", "y" (physical pixels), "button"
+          (0 left, 1 middle, 2 right), "pointer" ("mouse", "touch", "pen"), "pointer_id";
+        - "wheel": "x", "y", "wheel_y" (a DOM deltaY: negative forward);
+        - "key_down", "key_up": "key" (the DOM code: "KeyR", "Digit1", "Space", "Escape",
+          "ArrowUp"...), "repeat";
+        - the pointer, wheel and key events also "shift", "ctrl", "alt", "meta";
+        - "resize": "width", "height";
+        - "pick": "pick" -- a click's answer, as `last_pick` also returns it (None for nothing);
+        - "snap": "snap" -- a hover's or click's snap with snapping on (None for nothing);
+        - "close": "camera" -- the window closed; the camera it closed on, as `run` returns it;
+        - "timeline": nothing more -- the timeline's clock moved this frame (it played, or was
+          sought, played or paused); `time` reads where it is.
+
+        A view in a host's window, or offscreen, queues nothing. Still read after the window closed."""
+        if threading.get_ident() != self._thread:
+            raise ViewError("cadaclysm_view_next_event: a view belongs to the thread that made it")
+        if self._v is None:
+            raise ViewError("cadaclysm_view_next_event: the view is closed")
+        e = _InputEvent()
+        e.size = ctypes.sizeof(_InputEvent)
+        if self._lib.cadaclysm_view_next_event(self._v, ctypes.byref(e)):
+            return _event_dict(e, self._up == 1)
+        waiting = _text(self._lib.cadaclysm_view_last_error())
+        if waiting and not waiting.endswith("no event"):
+            raise ViewError(waiting)
+        return None
+
+    def events(self) -> Iterator[Dict[str, Any]]:
+        """Every event waiting now, oldest first (`next_event` until None): `for e in view.events():`
+        between `pump()` calls."""
+        while True:
+            e = self.next_event()
+            if e is None:
+                return
+            yield e
+
+    def close_window(self) -> None:
+        """Closes the view's own window as its close button does: `closed` turns true, a "close"
+        event is queued, a loop around `pump()` ends; the view lives on until `close()`. Nothing
+        for a window already closed. A view in a host's window or offscreen has none: refused."""
+        if self._v is not None and self._closed:
+            return
+        self._ok("cadaclysm_view_close")
+        self._window_closed()
+
+    def run(self, on_event: Optional[Callable[[Dict[str, Any]], Any]] = None) -> Dict[str, Any]:
+        """Blocks until the window is closed; the camera and the last pick, as `view()` returns them.
+
+        With `on_event`, each input event (`next_event`'s dicts) is handed to it on this thread as
+        the window handles it, between pumps -- it may change the scene or the camera. Returning
+        False closes the window and ends the run; anything else (None too) goes on. The "close"
+        event is handed over last, whatever closed the window."""
+        if on_event is None:
+            return self._run_blocking()
+        picked: Optional[Pick] = None
+        camera: Optional[Dict[str, Any]] = None
+        stopping = False
+        while camera is None:
+            state = self._call("cadaclysm_view_pump", 16) if not self._closed else _CLOSED
+            if state not in (_OPEN, _CLOSED):
+                raise self._error()
+            for e in self.events():
+                if e["type"] == "pick":
+                    picked = e["pick"]
+                if e["type"] == "close":
+                    camera = e["camera"]
+                    if not stopping:
+                        on_event(e)
+                    break
+                if not stopping and on_event(e) is False:
+                    stopping = True
+                    self.close_window()
+            if state == _CLOSED and camera is None:
+                raise ViewError("run: the window closed with no close event")
+        # The answer the last click left for `last_pick`, taken as `run` takes it; else the last pick event's.
+        out = _Pick()
+        out.size = ctypes.sizeof(_Pick)
+        if self._lib.cadaclysm_view_pick_result(self._v, ctypes.byref(out)):
+            picked = _pick_dict(out) if out.item or out.viewport_label >= 0 else None
+        self._window_closed()
+        camera["pick"] = picked
+        return camera
+
+    def _run_blocking(self) -> Dict[str, Any]:
         cam, pick = _Camera(), _Pick()
         cam.size, pick.size = ctypes.sizeof(_Camera), ctypes.sizeof(_Pick)
         self._ok("cadaclysm_view_run", ctypes.byref(cam), ctypes.byref(pick))
@@ -2363,16 +2671,16 @@ class View:
         colour; None takes the view's colour again."""
         self._set_item_line_colour(item, "isocurves", rgb)
 
-    def layer(self, name: str, on: bool = True) -> None:
+    def set_layer(self, name: str, on: bool = True) -> None:
         if name not in _LAYERS:
             raise ValueError(f"layer {name!r}: one of {', '.join(_LAYERS)}")
         self._ok("cadaclysm_view_set_layer", _LAYERS[name], bool(on))
 
-    def background(self, rgb: Colour) -> None:
+    def set_background(self, rgb: Colour) -> None:
         """The colour the view is cleared to: text ("#rgb", "#rrggbb", a CSS name) or 3 numbers in 0..1."""
         self._void("cadaclysm_view_set_background", _f32(_colour(rgb, self._lib), 3))
 
-    def lod(self, motion: Optional[str] = "detailed", min_triangles: int = 0) -> None:
+    def set_lod(self, motion: Optional[str] = "detailed", min_triangles: int = 0) -> None:
         """Levels of detail for this view: parts of `min_triangles` or more (0: the library's
         default, 2,048) get coarser levels, built in the background after each show, and a
         moving frame draws as `motion` says -- "detailed" keeps every frame whole but for

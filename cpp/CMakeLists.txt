@@ -81,6 +81,18 @@ if(CADACLYSM_LIBRARY_DIR)
     add_test(NAME kinematics COMMAND cadaclysm_kinematics_test "${CADACLYSM_SAMPLE}")
   endif()
 
+  # Node::lightmap_uvs over a STEP with faces (mechanism.stp has none); skipped when absent.
+  set(_cadaclysm_faced "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-acis/tests/fixtures/fusion/rhino-fillet-mixed-radii.stp")
+  if(NOT EXISTS "${_cadaclysm_faced}")
+    set(_cadaclysm_faced "-")
+  endif()
+  add_executable(cadaclysm_lightmap_test tests/lightmap_test.cpp)
+  target_link_libraries(cadaclysm_lightmap_test PRIVATE cadaclysm::reader)
+  add_custom_command(TARGET cadaclysm_lightmap_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE_DIR:cadaclysm_lightmap_test>")
+  add_test(NAME lightmap COMMAND cadaclysm_lightmap_test "${_cadaclysm_faced}")
+
   # view_loader.h alone: the search, its messages, the camera maths and the PNG writer,
   # and cvl_draw_object/cvl_pick over a table of fakes; cvl_open over a stand-in library
   # that answers zero. No view library and no GPU; the build directory is the empty place
@@ -277,6 +289,41 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_mesh_closest_test>")
   add_test(NAME mesh_closest COMMAND cadaclysm_mesh_closest_test ${CADACLYSM_LICENSE})
 
+  # Point, edge and face queries: a point on a face or an edge, edge convexity, tangent chains,
+  # angles, the smallest radius and a profile's area properties in closed form, at parity with
+  # the Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_inspect_test tests/inspect_test.cpp)
+  target_link_libraries(cadaclysm_inspect_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_inspect_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_inspect_test>")
+  add_test(NAME inspect COMMAND cadaclysm_inspect_test ${CADACLYSM_LICENSE})
+
+  # Closest points against an untrimmed NURBS surface: the flat sheet's interior, edge and corner
+  # feet in closed form, a line through it and a line beside its edge, the max distance, a solid's
+  # face surface, a surface's sheet and the nearest object, at parity with the Python reference's
+  # tests. Needs a license, no sample file.
+  add_executable(cadaclysm_surface_closest_test tests/surface_closest_test.cpp)
+  target_link_libraries(cadaclysm_surface_closest_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_surface_closest_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_surface_closest_test>")
+  add_test(NAME surface_closest COMMAND cadaclysm_surface_closest_test ${CADACLYSM_LICENSE})
+
+  # The NURBS toolbox: knots inserted, refined and removed, reparametrised, non-rational,
+  # compatible, uniform and periodic curves, Greville abscissae, matching directions, the mean
+  # curve and conic kinds; a Hermite surface with its net edits, second derivatives and a
+  # cylinder's curvature, at parity with the other wrappers' smokes. Needs a license, no sample.
+  add_executable(cadaclysm_nurbs_toolbox_test tests/nurbs_toolbox_test.cpp)
+  target_link_libraries(cadaclysm_nurbs_toolbox_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_nurbs_toolbox_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_nurbs_toolbox_test>")
+  add_test(NAME nurbs_toolbox COMMAND cadaclysm_nurbs_toolbox_test ${CADACLYSM_LICENSE})
+
   # Point at length, divide by count and divide by length on edges and a profile's outer loop,
   # at parity with the Python reference's arc-length tests. Needs a license, no sample file.
   add_executable(cadaclysm_arc_length_test tests/arc_length_test.cpp)
@@ -297,6 +344,17 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_nurbs_curve_test>")
   add_test(NAME nurbs_curve COMMAND cadaclysm_nurbs_curve_test ${CADACLYSM_LICENSE})
 
+  # Curves as objects: a helix, lengths by fraction, equidistant and as-contour division, a
+  # line's length mass, a box face's trimmed isocurve and a box's section and contour curves,
+  # at parity with the Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_curve_objects_test tests/curve_objects_test.cpp)
+  target_link_libraries(cadaclysm_curve_objects_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_curve_objects_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_curve_objects_test>")
+  add_test(NAME curve_objects COMMAND cadaclysm_curve_objects_test ${CADACLYSM_LICENSE})
+
   # Sheets from curves (loft_curves ... join_sheets) and their records, at parity with the Python
   # reference's tests. No sample file.
   add_executable(cadaclysm_curve_sheets_test tests/curve_sheets_test.cpp)
@@ -306,6 +364,49 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_curve_sheets_test>")
   add_test(NAME curve_sheets COMMAND cadaclysm_curve_sheets_test ${CADACLYSM_LICENSE})
+
+  # Threads: the size table, modelled and cosmetic threads and the tapped hole, at parity with the
+  # Python reference's tests. Its own test because each modelled thread takes a minute or two.
+  add_executable(cadaclysm_threads_test tests/threads_test.cpp)
+  target_link_libraries(cadaclysm_threads_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_threads_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_threads_test>")
+  add_test(NAME threads COMMAND cadaclysm_threads_test ${CADACLYSM_LICENSE})
+  # About seven minutes alone on a desktop: past the ten-minute --timeout a loaded runner gives.
+  set_tests_properties(threads PROPERTIES TIMEOUT 1800)
+
+  # Draft: faces drafted about a neutral plane, one way and both, the angle at a point and a
+  # body's analysis, at parity with the Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_draft_test tests/draft_test.cpp)
+  target_link_libraries(cadaclysm_draft_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_draft_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_draft_test>")
+  add_test(NAME draft COMMAND cadaclysm_draft_test ${CADACLYSM_LICENSE})
+
+  # Sheet metal and unroll: a tray flanged, read, laid flat, drawn and folded back, a cylinder
+  # unrolled, at parity with the Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_sheet_metal_test tests/sheet_metal_test.cpp)
+  target_link_libraries(cadaclysm_sheet_metal_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_sheet_metal_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_sheet_metal_test>")
+  add_test(NAME sheet_metal COMMAND cadaclysm_sheet_metal_test ${CADACLYSM_LICENSE})
+
+  # The 2D profile toolkit: booleans, regions, containment, relationship, deviation, offset
+  # corner and end styles, polyline tools, at parity with the Python reference's tests. Needs a
+  # license, no sample file.
+  add_executable(cadaclysm_profile_toolkit_test tests/profile_toolkit_test.cpp)
+  target_link_libraries(cadaclysm_profile_toolkit_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_profile_toolkit_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_profile_toolkit_test>")
+  add_test(NAME profile_toolkit COMMAND cadaclysm_profile_toolkit_test ${CADACLYSM_LICENSE})
 
   # RTree, closest_points and k_neighbors, at parity with the Python reference's R-tree tests.
   # No sample file.
@@ -401,6 +502,21 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_healing_test>")
   add_test(NAME healing COMMAND cadaclysm_healing_test "${_cadaclysm_st203}" ${CADACLYSM_LICENSE})
 
+  # Solid::recognize and Brep::recognize, at parity with the Python reference's recognition
+  # tests and their decoder test. The reader half opens box-union-sphere.3dm from the ACIS
+  # crate's fixtures, which an SDK checkout does not carry: "-" skips it there.
+  set(_cadaclysm_ball "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-acis/tests/fixtures/rhino/box-union-sphere.3dm")
+  if(NOT EXISTS "${_cadaclysm_ball}")
+    set(_cadaclysm_ball "-")
+  endif()
+  add_executable(cadaclysm_recognize_test tests/recognize_test.cpp)
+  target_link_libraries(cadaclysm_recognize_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_recognize_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_recognize_test>")
+  add_test(NAME recognize COMMAND cadaclysm_recognize_test "${_cadaclysm_ball}" ${CADACLYSM_LICENSE})
+
   # Interpolator, Profile::circumscribed_polygon and Solid::merge / regions / region_solid, at
   # parity with the Python reference's interpolator, circumscribed-polygon and merge tests. No
   # sample file.
@@ -411,6 +527,16 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_interpolator_merge_test>")
   add_test(NAME interpolator_merge COMMAND cadaclysm_interpolator_merge_test ${CADACLYSM_LICENSE})
+
+  # Animation, AnimationTrack and AnimationChannel, at parity with the Python reference's
+  # test_animation_* tests. No sample file.
+  add_executable(cadaclysm_animation_test tests/animation_test.cpp)
+  target_link_libraries(cadaclysm_animation_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_animation_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_animation_test>")
+  add_test(NAME animation COMMAND cadaclysm_animation_test ${CADACLYSM_LICENSE})
 
   # Assembly::posed over the paired arm, two copies of a bracket and plan 4's gears.
   add_executable(cadaclysm_posed_test tests/posed_test.cpp)
@@ -431,6 +557,17 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_document_test>")
   add_test(NAME document COMMAND cadaclysm_document_test ${CADACLYSM_LICENSE})
+
+  # The forge's general kernel calls: Document::revision/nodes/inputs/readers/probe/
+  # result_beziers/meta and Profile::from_pieces/pieces_json/fillet_corner/bounds/reversed, at
+  # parity with the Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_forge_kernel_test tests/forge_kernel_test.cpp)
+  target_link_libraries(cadaclysm_forge_kernel_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_forge_kernel_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_forge_kernel_test>")
+  add_test(NAME forge_kernel COMMAND cadaclysm_forge_kernel_test ${CADACLYSM_LICENSE})
   # to_arcs, offset, section, Tool, Stock and Job over the pocketed block and the plate
   # fixtures, plus face/contour/pocket/drill driven by hand and a closed job's refusal.
   # Needs a license, as assembly does; no sample file.

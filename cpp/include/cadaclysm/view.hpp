@@ -57,12 +57,14 @@
 static_assert(sizeof(CadaclysmViewLod) == 12, "CadaclysmViewLod is size, min_triangles, motion: 12 bytes");
 static_assert(offsetof(CadaclysmViewLod, min_triangles) == 4 && offsetof(CadaclysmViewLod, motion) == 8,
               "CadaclysmViewLod's fields are at 0, 4 and 8");
-// The pick answer as 1.24 writes it: size, item, node, face, clicks, has_point, point[3] (1.8),
-// overlay (1.24).
-static_assert(sizeof(CadaclysmViewPick) == 40, "CadaclysmViewPick (1.24) is 40 bytes");
+// The pick answer as 1.28 writes it: size, item, node, face, clicks, has_point, point[3] (1.8),
+// overlay (1.24), viewport_label (1.28).
+static_assert(sizeof(CadaclysmViewPick) == 44, "CadaclysmViewPick (1.28) is 44 bytes");
 static_assert(offsetof(CadaclysmViewPick, clicks) == 16 && offsetof(CadaclysmViewPick, has_point) == 20 &&
-                  offsetof(CadaclysmViewPick, point) == 24 && offsetof(CadaclysmViewPick, overlay) == 36,
-              "CadaclysmViewPick's fields are at 16, 20, 24 and (1.24's overlay) 36");
+                  offsetof(CadaclysmViewPick, point) == 24 && offsetof(CadaclysmViewPick, overlay) == 36 &&
+                  offsetof(CadaclysmViewPick, viewport_label) == 40,
+              "CadaclysmViewPick's fields are at 16, 20, 24, (1.24's overlay) 36 and (1.28's viewport_label) 40");
+static_assert(sizeof(CadaclysmViewEventPick) == 40, "the event's pick, frozen at 1.26");
 // The overlay structs as 1.24 reads them: 80 and 48 bytes; CadaclysmViewText's order at 112.
 static_assert(sizeof(CadaclysmViewOverlay) == 80 && offsetof(CadaclysmViewOverlay, offset) == 24 &&
                   offsetof(CadaclysmViewOverlay, stroke_width) == 72,
@@ -70,6 +72,11 @@ static_assert(sizeof(CadaclysmViewOverlay) == 80 && offsetof(CadaclysmViewOverla
 static_assert(sizeof(CadaclysmViewOverlayImage) == 48 && offsetof(CadaclysmViewOverlayImage, order) == 44,
               "CadaclysmViewOverlayImage (1.24) is 48 bytes, order at 44");
 static_assert(offsetof(CadaclysmViewText, order) == 112, "CadaclysmViewText's order (1.24) is at 112");
+// The animation binding as 1.27 reads it: target (a pointer), item, node -- 16 bytes on 64-bit.
+static_assert(sizeof(void*) != 8 || (sizeof(CadaclysmViewAnimationBinding) == 16 &&
+                                     offsetof(CadaclysmViewAnimationBinding, item) == 8 &&
+                                     offsetof(CadaclysmViewAnimationBinding, node) == 12),
+              "CadaclysmViewAnimationBinding (1.27) is 16 bytes, item at 8, node at 12");
 // The snap structs as 1.22 reads and writes them: settings size, kinds, aperture_px, marker
 // (16 bytes); the answer size, kind, point[3] (doubles), item, node, face, edge, tangent[3],
 // axis[3], radius, distance_px, clicks (88 bytes).
@@ -121,6 +128,9 @@ struct ViewPick {
     std::uint32_t clicks = 0;
     std::optional<std::array<float, 3>> point;
     bool overlay = false;
+    // 1.28: the viewport whose label (View::set_viewport_label) was over the pixel -- `item` is
+    // 0 then -- else -1.
+    std::int32_t viewport_label = -1;
 };
 
 // What a snap found, as Python's Snap: its kind ("vertex", "midpoint", "centre", "quadrant",
@@ -156,6 +166,27 @@ inline ViewPick pick_of(const CadaclysmViewPick& raw) {
     p.clicks = raw.clicks;
     if (raw.has_point) p.point = std::array<float, 3>{raw.point[0], raw.point[1], raw.point[2]};
     p.overlay = raw.overlay != 0;
+    p.viewport_label = raw.viewport_label;
+    return p;
+}
+// A raw pick buffer that says nothing: item 0, and -1 (no label hit) as the library writes it.
+inline CadaclysmViewPick no_raw_pick() {
+    CadaclysmViewPick raw{};
+    raw.size = sizeof raw;
+    raw.viewport_label = -1;
+    return raw;
+}
+// An input event's pick (CadaclysmViewEventPick, the 1.26 layout, 40 bytes) as a ViewPick;
+// the label hit is the event's own pick_viewport_label (1.28), passed as `label`.
+inline ViewPick pick_of(const CadaclysmViewEventPick& raw, std::int32_t label) {
+    ViewPick p;
+    p.item = raw.item;
+    p.node = raw.node;
+    p.face = raw.face;
+    p.clicks = raw.clicks;
+    if (raw.has_point) p.point = std::array<float, 3>{raw.point[0], raw.point[1], raw.point[2]};
+    p.overlay = raw.overlay != 0;
+    p.viewport_label = label;
     return p;
 }
 // The CADACLYSM_VIEW_SNAP_* kinds by the names set_snap takes and ViewSnap::kind reports.
@@ -199,6 +230,136 @@ struct Camera {
     double azimuth = 0.0, elevation = 0.0;
     std::optional<ViewPick> pick;
 };
+
+// What kind of input a view's own window handled (view ABI 1.26; timeline 1.27):
+// CADACLYSM_VIEW_INPUT_EVENT_*.
+enum class InputKind : std::uint32_t {
+    pointer_down = CADACLYSM_VIEW_INPUT_EVENT_POINTER_DOWN,
+    pointer_move = CADACLYSM_VIEW_INPUT_EVENT_POINTER_MOVE,
+    pointer_up = CADACLYSM_VIEW_INPUT_EVENT_POINTER_UP,
+    wheel = CADACLYSM_VIEW_INPUT_EVENT_WHEEL,
+    key_down = CADACLYSM_VIEW_INPUT_EVENT_KEY_DOWN,
+    key_up = CADACLYSM_VIEW_INPUT_EVENT_KEY_UP,
+    resize = CADACLYSM_VIEW_INPUT_EVENT_RESIZE,
+    pick = CADACLYSM_VIEW_INPUT_EVENT_PICK,
+    snap = CADACLYSM_VIEW_INPUT_EVENT_SNAP,
+    close = CADACLYSM_VIEW_INPUT_EVENT_CLOSE,
+    timeline = CADACLYSM_VIEW_INPUT_EVENT_TIMELINE,
+};
+
+// One input event a view's own window handled (view ABI 1.26, View::next_event and
+// View::run(callback)): the window still orbits, zooms and closes by itself -- the events
+// report, they do not intercept. `kind` says which fields mean anything:
+// - pointer_down, pointer_move, pointer_up: x, y in physical pixels; button (0 left, 1 middle,
+//   2 right; 0 for a move); the modifiers held; pointer "mouse", "touch" or "pen", and the
+//   touch's pointer_id.
+// - wheel: x, y and wheel_y, a DOM deltaY (negative forward, about 100 a notch); the modifiers.
+// - key_down, key_up: key, its DOM code ("KeyR", "Digit1", "Space", "Escape", "ArrowUp",
+//   "ShiftLeft", "F5") -- every key, the ones the view binds too; the modifiers; repeat for the
+//   system's auto-repeat.
+// - resize: width x height, the drawing area's new physical size.
+// - pick: a click's pick has landed -- `pick`, std::nullopt for nothing; last_pick() gets the
+//   same answer.
+// - snap: with snapping on, a hover's or a click's snap has landed -- `snap`, std::nullopt for
+//   none; last_snap() gets the same answer.
+// - close: the window closed (Escape, its close button, close_window()) -- the last event;
+//   `camera` the camera it closed on, as run() returns it (its pick std::nullopt).
+// - timeline (1.27): a drawn frame moved the timeline's clock (playing, or a play, pause or
+//   seek since the last frame) -- no fields of its own; time() reads the clock.
+// Every event: time_ms on the library's own clock (only differences mean anything), and
+// dropped, how many events a full queue (1024) dropped just before this one.
+struct InputEvent {
+    InputKind kind = InputKind::pointer_move;
+    double time_ms = 0.0;
+    std::uint32_t dropped = 0;
+    float x = 0.0f, y = 0.0f, wheel_y = 0.0f;
+    std::uint32_t button = 0;
+    bool shift = false, ctrl = false, alt = false, meta = false;
+    std::string pointer;  // a pointer event's: "mouse", "touch" or "pen"
+    std::uint32_t pointer_id = 0;
+    std::string key;
+    bool repeat = false;
+    std::uint32_t width = 0, height = 0;
+    std::optional<ViewPick> pick;
+    std::optional<ViewSnap> snap;
+    std::optional<Camera> camera;
+};
+
+namespace detail {
+// A library's camera as a Camera, azimuth and elevation in the view's up axis.
+inline Camera camera_of(const CadaclysmViewCamera& cam, const CadaclysmViewPick& picked, bool y_up) {
+    Camera c;
+    for (std::size_t i = 0; i < 3; ++i) {
+        c.eye[i] = cam.eye[i];
+        c.target[i] = cam.target[i];
+        c.up[i] = cam.up[i];
+    }
+    c.orthographic = cam.orthographic != 0;
+    cvl_angles(&cam, y_up ? 1 : 0, &c.azimuth, &c.elevation);
+    if (picked.item || picked.viewport_label >= 0) c.pick = detail::pick_of(picked);
+    return c;
+}
+// A library's input event as an InputEvent; a kind this SDK does not know is refused.
+inline Result<InputEvent> input_event_of(const CadaclysmViewInputEvent& raw, bool y_up) {
+    InputEvent e;
+    e.time_ms = raw.time_ms;
+    e.dropped = raw.dropped;
+    switch (raw.kind) {
+        case CADACLYSM_VIEW_INPUT_EVENT_POINTER_DOWN:
+        case CADACLYSM_VIEW_INPUT_EVENT_POINTER_MOVE:
+        case CADACLYSM_VIEW_INPUT_EVENT_POINTER_UP:
+            e.x = raw.x;
+            e.y = raw.y;
+            e.button = raw.button;
+            e.pointer = raw.pointer == CADACLYSM_VIEW_POINTER_MOUSE   ? "mouse"
+                        : raw.pointer == CADACLYSM_VIEW_POINTER_TOUCH ? "touch"
+                        : raw.pointer == CADACLYSM_VIEW_POINTER_PEN   ? "pen"
+                                                                      : std::to_string(raw.pointer);
+            e.pointer_id = raw.pointer_id;
+            break;
+        case CADACLYSM_VIEW_INPUT_EVENT_WHEEL:
+            e.x = raw.x;
+            e.y = raw.y;
+            e.wheel_y = raw.wheel_y;
+            break;
+        case CADACLYSM_VIEW_INPUT_EVENT_KEY_DOWN:
+        case CADACLYSM_VIEW_INPUT_EVENT_KEY_UP: {
+            std::size_t n = 0;
+            while (n < sizeof raw.key && raw.key[n]) ++n;
+            e.key.assign(raw.key, n);
+            e.repeat = raw.repeat != 0;
+            break;
+        }
+        case CADACLYSM_VIEW_INPUT_EVENT_RESIZE:
+            e.width = raw.width;
+            e.height = raw.height;
+            break;
+        case CADACLYSM_VIEW_INPUT_EVENT_PICK:
+            if (raw.pick.item || raw.pick_viewport_label >= 0) e.pick = pick_of(raw.pick, raw.pick_viewport_label);
+            break;
+        case CADACLYSM_VIEW_INPUT_EVENT_SNAP:
+            if (raw.snap.kind) e.snap = snap_of(raw.snap);
+            break;
+        case CADACLYSM_VIEW_INPUT_EVENT_CLOSE:
+            e.camera = camera_of(raw.camera, no_raw_pick(), y_up);
+            break;
+        case CADACLYSM_VIEW_INPUT_EVENT_TIMELINE:
+            break;
+        default:
+            return Error{"next_event: kind " + std::to_string(raw.kind) +
+                             " is not a CADACLYSM_VIEW_INPUT_EVENT_* this SDK knows",
+                         Origin::view};
+    }
+    e.kind = static_cast<InputKind>(raw.kind);
+    if (raw.kind <= CADACLYSM_VIEW_INPUT_EVENT_KEY_UP) {
+        e.shift = (raw.modifiers & CADACLYSM_VIEW_MOD_SHIFT) != 0;
+        e.ctrl = (raw.modifiers & CADACLYSM_VIEW_MOD_CTRL) != 0;
+        e.alt = (raw.modifiers & CADACLYSM_VIEW_MOD_ALT) != 0;
+        e.meta = (raw.modifiers & CADACLYSM_VIEW_MOD_META) != 0;
+    }
+    return e;
+}
+}  // namespace detail
 
 // RGBA8, rows from the top.
 struct ViewImage {
@@ -270,7 +431,7 @@ private:
 // show_text's keywords, as Python's: mode "label" (a screen label: `size` its height in
 // pixels, facing the viewer, placed by `align` -- which corner or edge of the text sits on
 // the point -- and nudged by `offset` pixels, right and up) or "world" (a quad in the scene:
-// `size` the height in model units, laid along `right` and `up`, unset: x and y). `colour`
+// `size` the height in model units, laid along `right` and `up`, unset: x and y). `set_colour`
 // is the glyphs' (an alpha is not drawn); `box`, `padding` and `on_top` are a label's alone:
 // `box` an optional backing rectangle (alpha 1 unless four numbers say otherwise) `padding`
 // pixels larger than the text, `on_top` drawing the label even where its point is hidden.
@@ -307,12 +468,13 @@ enum class Anchor : std::uint32_t {
     bottom_right = CADACLYSM_VIEW_ALIGN_BOTTOM_RIGHT,
 };
 
-// How View::show_overlay draws a shape (view ABI 1.24). `fill`: where set, its colour (see
-// Colour; four numbers for an alpha), or the text "none" for no fill; unset, the profile's own
-// colour (Profile::coloured), else white -- unless a stroke is set, when an uncoloured profile is
-// not filled. `stroke`: only where set, `stroke_width` pixels wide; an open profile, never
-// filled, draws only with one. `order`: lower draws first, equal orders in show order (shapes,
-// text and images share it).
+// How View::show_overlay draws a shape (view ABI 1.24). A profile is a sketch, so it draws as
+// its outline by default. `stroke`: where set, its colour (see Colour; four numbers for an
+// alpha), or the text "none" for no stroke; unset, the profile's own colour (Profile::coloured),
+// else white; `stroke_width` pixels wide. `fill`: only where set, its colour, or "none" for no
+// fill -- a panel needs one. Fill only is a fill and a stroke of "none"; neither a fill nor a
+// stroke is refused. `order`: lower draws first, equal orders in show order (shapes, text and
+// images share it).
 struct OverlayStyle {
     std::optional<Colour> fill;
     std::optional<Colour> stroke;
@@ -462,12 +624,19 @@ struct ViewState {
     }
 };
 
-// Python's _call: another thread's view, a closed view, a closed window, each refused with
-// the C call's name.
-inline std::optional<Error> refusal(const ViewState* s, const char* call) {
+// Another thread's view or a closed view, refused with the C call's name: the refusals of a
+// call that a closed window still answers (next_event, close).
+inline std::optional<Error> live_refusal(const ViewState* s, const char* call) {
     if (s && s->thread != std::this_thread::get_id())
         return view_error(std::string(call) + ": a view belongs to the thread that made it");
     if (!s || !s->handle) return view_error(std::string(call) + ": the view is closed");
+    return std::nullopt;
+}
+
+// Python's _call: another thread's view, a closed view, a closed window, each refused with
+// the C call's name.
+inline std::optional<Error> refusal(const ViewState* s, const char* call) {
+    if (auto no = live_refusal(s, call)) return no;
     if (s->closed) return view_error(std::string(call) + ": the window is closed");
     return std::nullopt;
 }
@@ -772,18 +941,18 @@ public:
         return {};
     }
     // Recolours the item in place: three numbers or text (see Colour).
-    Result<void> colour(const Colour& rgb) {
+    Result<void> set_colour(const Colour& rgb) {
         return ok_paint("cadaclysm_view_set_colour", rgb,
                         [&](detail::ViewState& s, const float* c) { return s.t->set_colour(s.handle, id_, c); });
     }
     // A column-major 4x4; std::nullopt takes it back.
-    Result<void> placement(const std::optional<std::array<double, 16>>& m) {
+    Result<void> set_placement(const std::optional<std::array<double, 16>>& m) {
         return ok("cadaclysm_view_set_placement",
                   [&](detail::ViewState& s) { return s.t->set_placement(s.handle, id_, m ? m->data() : nullptr); });
     }
     // `faces` (pick numbers) in `rgba`, one colour a face (see Colour; the alpha is not
     // drawn); both empty: every face's own colour.
-    Result<void> face_colours(const std::vector<std::uint32_t>& faces, const std::vector<Colour>& rgba) {
+    Result<void> set_face_colours(const std::vector<std::uint32_t>& faces, const std::vector<Colour>& rgba) {
         if (faces.size() != rgba.size())
             return detail::view_error(std::to_string(4 * static_cast<std::uint64_t>(faces.size())) +
                                       " numbers (rgba, 4 a face), not " +
@@ -805,8 +974,8 @@ public:
     }
     // Numbers only, as before Colour: a std::array<float, 4> (or 3, alpha 1) a face.
     template <std::size_t N>
-    Result<void> face_colours(const std::vector<std::uint32_t>& faces, const std::vector<std::array<float, N>>& rgba) {
-        return face_colours(faces, std::vector<Colour>(rgba.begin(), rgba.end()));
+    Result<void> set_face_colours(const std::vector<std::uint32_t>& faces, const std::vector<std::array<float, N>>& rgba) {
+        return set_face_colours(faces, std::vector<Colour>(rgba.begin(), rgba.end()));
     }
     Result<void> frame() {
         return ok("cadaclysm_view_frame", [&](detail::ViewState& s) { return s.t->frame(s.handle, id_); });
@@ -817,12 +986,12 @@ public:
         if (!shown) return shown.error();
         return ok("cadaclysm_view_set_text", [&](detail::ViewState& s) { return s.t->set_text(s.handle, id_, shown->c_str()); });
     }
-    Result<void> xray(bool on) {
+    Result<void> set_xray(bool on) {
         return ok("cadaclysm_view_set_xray", [&](detail::ViewState& s) { return s.t->set_xray(s.handle, id_, on); });
     }
     // How the item's lines and points draw where a surface hides them: "off" (not drawn, the
     // default), "solid" (drawn through) or "dashed" (dashed and dimmed).
-    Result<void> occluded(std::string_view mode) {
+    Result<void> set_occluded(std::string_view mode) {
         std::uint32_t m = 0;
         if (mode == "off") {
             m = CADACLYSM_VIEW_OCCLUDED_OFF;
@@ -835,12 +1004,55 @@ public:
         }
         return ok("cadaclysm_view_set_occluded", [&](detail::ViewState& s) { return s.t->set_occluded(s.handle, id_, m); });
     }
+    // Draws the item's lines in its own dash: `dash` points on, `gap` off; 0 is solid.
+    Result<void> set_line_style(float dash = 0.0f, float gap = 0.0f) {
+        return ok("cadaclysm_view_set_line_style",
+                  [&](detail::ViewState& s) { return s.t->set_line_style(s.handle, id_, dash, gap); });
+    }
+    // A points item's marker: "disc", "ring", "square" or "diamond", filled or hollow.
+    Result<void> set_point_style(std::string_view shape = "disc", bool hollow = false) {
+        // The numbers are the header's own constants, so the table cannot drift from it.
+        static const char* const names[] = {"disc", "ring", "square", "diamond"};
+        static const std::uint32_t shape_codes[] = {CADACLYSM_VIEW_POINT_DISC, CADACLYSM_VIEW_POINT_RING,
+                                                    CADACLYSM_VIEW_POINT_SQUARE, CADACLYSM_VIEW_POINT_DIAMOND};
+        std::uint32_t s = 0;
+        while (s < 4 && shape != names[s]) ++s;
+        if (s == 4) {
+            return detail::view_error("point style: '" + std::string(shape) +
+                                      "' is not 'disc', 'ring', 'square' or 'diamond'");
+        }
+        return ok("cadaclysm_view_set_point_style",
+                  [&](detail::ViewState& st) { return st.t->set_point_style(st.handle, id_, shape_codes[s], hollow); });
+    }
+    // One state a point: "normal", "hover", "selected" or "first".
+    Result<void> set_point_states(const std::vector<std::string>& states) {
+        static const char* const names[] = {"normal", "hover", "selected", "first"};
+        static const std::uint8_t state_codes[] = {CADACLYSM_VIEW_POINT_STATE_NORMAL, CADACLYSM_VIEW_POINT_STATE_HOVER,
+                                                   CADACLYSM_VIEW_POINT_STATE_SELECTED, CADACLYSM_VIEW_POINT_STATE_FIRST};
+        std::vector<std::uint8_t> codes;
+        codes.reserve(states.size());
+        for (const std::string& name : states) {
+            std::uint8_t c = 0;
+            while (c < 4 && name != names[c]) ++c;
+            if (c == 4) {
+                return detail::view_error("point states: '" + name + "' is not 'normal', 'hover', 'selected' or 'first'");
+            }
+            codes.push_back(state_codes[c]);
+        }
+        return ok("cadaclysm_view_set_point_states", [&](detail::ViewState& s) {
+            return s.t->set_point_states(s.handle, id_, codes.empty() ? nullptr : codes.data(), codes.size());
+        });
+    }
+    // Draws the item after every other, depth testing off; picked ahead of what is under it.
+    Result<void> set_on_top(bool on = true) {
+        return ok("cadaclysm_view_set_on_top", [&](detail::ViewState& s) { return s.t->set_on_top(s.handle, id_, on); });
+    }
     // The item's finish: "gloss" (an item shows with this until it is set) -- under the
     // showroom lighting a clear coat mirroring the room, silver at a grazing angle -- "satin"
     // (a weaker, blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads
     // the scene again, as a show does: set it as each item is shown rather than over a
     // finished scene item by item.
-    Result<void> finish(std::string_view finish) {
+    Result<void> set_finish(std::string_view finish) {
         std::uint32_t f = 0;
         if (finish == "gloss") {
             f = CADACLYSM_VIEW_FINISH_GLOSS;
@@ -862,22 +1074,44 @@ public:
     // The user layer the item is on, 0..31 (every item starts on 0): it draws while the layer
     // is on (View::user_layer) and in the viewports whose layer_mask has its bit. A layer past
     // 31 is refused.
-    Result<void> user_layer(std::uint32_t layer) {
+    Result<void> set_user_layer(std::uint32_t layer) {
         return ok("cadaclysm_view_set_item_layer", [&](detail::ViewState& s) { return s.t->set_item_layer(s.handle, id_, layer); });
     }
-    Result<void> node_visible(std::uint32_t node, bool on) {
+    // Hides the item whole, or shows it again (view ABI 1.27), Python's set_item_visible:
+    // hidden, it draws nothing, is never picked or snapped and is left out of every framing;
+    // shown, it draws only while its layer is shown too.
+    Result<void> set_visible(bool visible) {
+        return ok("cadaclysm_view_set_item_visible",
+                  [&](detail::ViewState& s) { return s.t->set_item_visible(s.handle, id_, visible); });
+    }
+    // Draws exactly the nodes `nodes` (the reader's node indices) x-ray, each node alone
+    // (the render view library: its subtree),
+    // replacing the item's previous ghosts (view ABI 1.27), Python's set_node_ghosts;
+    // std::nullopt (or no nodes) clears them.
+    Result<void> set_node_ghosts(const std::optional<std::vector<std::uint32_t>>& nodes) {
+        std::uint32_t count = 0;
+        if (nodes) {
+            Result<std::uint32_t> n = detail::count_of(nodes->size(), "node_ghosts");
+            if (!n) return n.error();
+            count = *n;
+        }
+        return ok("cadaclysm_view_set_node_ghosts", [&](detail::ViewState& s) {
+            return s.t->set_node_ghosts(s.handle, id_, nodes ? detail::non_null(*nodes) : nullptr, count);
+        });
+    }
+    Result<void> set_node_visible(std::uint32_t node, bool on) {
         return ok("cadaclysm_view_set_node_visible",
                   [&](detail::ViewState& s) { return s.t->set_node_visible(s.handle, id_, node, on); });
     }
     // Colours `node` and its subtree (see Colour; the alpha is not drawn); std::nullopt: the
     // node's own colour.
-    Result<void> node_colour(std::uint32_t node, const std::optional<Colour>& rgba) {
+    Result<void> set_node_colour(std::uint32_t node, const std::optional<Colour>& rgba) {
         return ok_paint("cadaclysm_view_set_node_color", rgba, [&](detail::ViewState& s, const float* c) {
             return s.t->set_node_color(s.handle, id_, node, c);
         });
     }
     // Tint `node` toward rgba's colour by its alpha (text: alpha 1); std::nullopt clears.
-    Result<void> node_highlight(std::uint32_t node, const std::optional<Colour>& rgba) {
+    Result<void> set_node_highlight(std::uint32_t node, const std::optional<Colour>& rgba) {
         return ok_paint("cadaclysm_view_set_node_highlight", rgba, [&](detail::ViewState& s, const float* c) {
             return s.t->set_node_highlight(s.handle, id_, node, c);
         });
@@ -889,7 +1123,7 @@ public:
     // `transforms`, Node::raw_transform's layout), drawn in place of each node's rest
     // transform; std::nullopt restores the rest pose. An empty list reaches the library,
     // which refuses it.
-    Result<void> node_transforms(const std::optional<std::vector<std::array<double, 16>>>& transforms) {
+    Result<void> set_node_transforms(const std::optional<std::vector<std::array<double, 16>>>& transforms) {
         std::vector<double> flat;
         std::uint32_t count = 0;
         if (transforms) {
@@ -933,6 +1167,39 @@ protected:
     std::weak_ptr<detail::ViewState> view_;
     std::uint32_t id_ = 0;
 };
+
+// One binding of View::play_animation (view ABI 1.27), Python's AnimationBinding: the
+// animation's target `target` drives `item` (an Item or its id) whole or, with `node` (the
+// reader's node index), that node and its subtree, which move rigidly.
+struct AnimationBinding {
+    std::string target;
+    std::uint32_t item = 0;
+    std::optional<std::uint32_t> node;  // std::nullopt: the item itself (CADACLYSM_VIEW_ALL_NODES)
+
+    AnimationBinding(std::string target_name, std::uint32_t item_id, std::optional<std::uint32_t> node_index = std::nullopt)
+        : target(std::move(target_name)), item(item_id), node(node_index) {}
+    AnimationBinding(std::string target_name, const Item& shown, std::optional<std::uint32_t> node_index = std::nullopt)
+        : target(std::move(target_name)), item(shown.id()), node(node_index) {}
+};
+
+namespace detail {
+// play_animation's bindings as the library reads them; the targets stay `bindings`'s own.
+inline Result<std::vector<CadaclysmViewAnimationBinding>> bindings_of(const std::vector<AnimationBinding>& bindings) {
+    std::vector<CadaclysmViewAnimationBinding> raw;
+    raw.reserve(bindings.size());
+    for (std::size_t k = 0; k < bindings.size(); ++k) {
+        const AnimationBinding& b = bindings[k];
+        if (b.target.find('\0') != std::string::npos)
+            return view_error("binding " + std::to_string(k) + ": the target holds a NUL");
+        CadaclysmViewAnimationBinding row{};
+        row.target = b.target.c_str();
+        row.item = b.item;
+        row.node = b.node ? *b.node : CADACLYSM_VIEW_ALL_NODES;
+        raw.push_back(row);
+    }
+    return raw;
+}
+}  // namespace detail
 
 // A tool as the machining view takes it: shape "flat", "ball", "drill", "vbit" or "bullnose".
 struct MachiningTool {
@@ -986,7 +1253,7 @@ public:
                   [&](detail::ViewState& s) { return s.t->machining_seek(s.handle, id_, move); });
     }
     // "height", "tool" or "deviation" (the last needs a part).
-    Result<void> colour_by(std::string_view mode) {
+    Result<void> set_colour_by(std::string_view mode) {
         std::uint32_t m = 0;
         if (mode == "height") {
             m = CADACLYSM_VIEW_COLOUR_BY_HEIGHT;
@@ -1001,7 +1268,7 @@ public:
                   [&](detail::ViewState& s) { return s.t->machining_colour_by(s.handle, id_, m); });
     }
     // The toolpath and the tool, on or off.
-    Result<void> overlays(bool path = true, bool tool = true) {
+    Result<void> set_overlays(bool path = true, bool tool = true) {
         return ok("cadaclysm_view_machining_overlays",
                   [&](detail::ViewState& s) { return s.t->machining_overlays(s.handle, id_, path, tool); });
     }
@@ -1067,7 +1334,7 @@ private:
     Anchor anchor_ = Anchor::top_left;
 };
 
-// The colour every edge, curve or isocurve draws in, as Python's LineColour: `colour`
+// The colour every edge, curve or isocurve draws in, as Python's LineColour: `set_colour`
 // (0..1 RGB), or each part's own colour where `from_part`.
 struct LineColour {
     std::array<float, 3> colour{};
@@ -1174,7 +1441,7 @@ public:
                         detail::ViewShown{nullptr, detail::ViewAccess::identity(node)});
         if (!item) return item;
         for (std::uint32_t hidden : detail::ViewAccess::siblings_along_path(node)) {
-            auto done = item->node_visible(hidden, false);
+            auto done = item->set_node_visible(hidden, false);
             if (!done) return done.error();
         }
         return item;
@@ -1420,8 +1687,9 @@ public:
     // -- overlays (1.24): a HUD over the whole window
 
     // A 2D shape over the window: `shape` in pixels (one profile unit a pixel, y up), its origin
-    // hung `x`, `y` pixels inward from `anchor` -- a closed profile filled (holes cut, even-odd),
-    // stroked where the style says (OverlayStyle). Drawn after everything else, never moved by
+    // hung `x`, `y` pixels inward from `anchor` -- stroked, in its own colour or white, and its
+    // closed loops filled (holes cut, even-odd) only where the style gives a fill (OverlayStyle).
+    // Drawn after everything else, never moved by
     // the camera, kept in place as the window resizes; a click on it picks it (ViewPick::overlay)
     // and nothing beneath.
     Result<Overlay> show_overlay(const blacksmith::Profile& shape, Anchor anchor, float x, float y,
@@ -1430,7 +1698,7 @@ public:
         return show_overlay(one, anchor, x, y, style);
     }
     // Several profiles as one overlay -- a crosshair's two strokes, a frame's two loops: their
-    // fills together by the even-odd rule. The fill falls back on the first coloured profile's
+    // fills together by the even-odd rule. The stroke falls back on the first coloured profile's
     // colour.
     Result<Overlay> show_overlay(const std::vector<std::reference_wrapper<const blacksmith::Profile>>& shapes,
                                  Anchor anchor, float x, float y, const OverlayStyle& style = {}) {
@@ -1570,11 +1838,11 @@ public:
         return state_->t->navigation(state_->handle) == CADACLYSM_VIEW_NAVIGATION_FLY ? Navigation::fly
                                                                                       : Navigation::orbit;
     }
-    Result<void> orthographic(bool on) {
+    Result<void> set_orthographic(bool on) {
         return act("cadaclysm_view_set_orthographic", [&](detail::ViewState& s) { s.t->set_orthographic(s.handle, on); });
     }
     // Panes of their own cameras; empty: the one camera again.
-    Result<void> viewports(const std::vector<Viewport>& list) {
+    Result<void> set_viewports(const std::vector<Viewport>& list) {
         auto n = detail::count_of(list.size(), "viewports");
         if (!n) return n.error();
         std::vector<CadaclysmViewViewport> raw(list.size());
@@ -1594,22 +1862,60 @@ public:
             return s.t->set_viewports(s.handle, raw.empty() ? nullptr : raw.data(), *n);
         });
     }
+    // The view-wide colours of the hover, selected and first point states; std::nullopt puts
+    // that state's default back. Each is three numbers or text (see Colour). A colour not
+    // finite is the library's refusal.
+    Result<void> set_point_state_colours(const std::optional<Colour>& hover = std::nullopt,
+                                         const std::optional<Colour>& selected = std::nullopt,
+                                         const std::optional<Colour>& first = std::nullopt) {
+        const char* call = "cadaclysm_view_set_point_state_colours";
+        Result<detail::Paint> h = detail::paint_for(state_.get(), call, hover);
+        if (!h) return h.error();
+        Result<detail::Paint> sel = detail::paint_for(state_.get(), call, selected);
+        if (!sel) return sel.error();
+        Result<detail::Paint> f = detail::paint_for(state_.get(), call, first);
+        if (!f) return f.error();
+        return act(call, [&](detail::ViewState& s) { s.t->set_point_state_colours(s.handle, h->data(), sel->data(), f->data()); });
+    }
+    // A caption in the corner of a viewport, picked as `viewport_label`; std::nullopt `text`
+    // clears it, std::nullopt `colour` draws it in the default (white); a colour is three
+    // numbers or text (see Colour). Text holding a NUL is refused (the C string would end there).
+    Result<void> set_viewport_label(std::uint32_t viewport, const std::optional<std::string>& text,
+                                    const std::optional<Colour>& colour = std::nullopt) {
+        if (text && text->find('\0') != std::string::npos)
+            return detail::view_error("viewport label " + detail::quoted(*text) +
+                                      ": a NUL character cannot be shown (the C string ends there)");
+        const char* call = "cadaclysm_view_set_viewport_label";
+        Result<detail::Paint> c = detail::paint_for(state_.get(), call, colour);
+        if (!c) return c.error();
+        return ok(call, [&](detail::ViewState& s) {
+            return s.t->set_viewport_label(s.handle, viewport, text ? text->c_str() : nullptr, c->data());
+        });
+    }
+    // A border round a viewport in `colour` (three numbers or text, see Colour); std::nullopt
+    // takes it away.
+    Result<void> set_viewport_border(std::uint32_t viewport, const std::optional<Colour>& colour) {
+        const char* call = "cadaclysm_view_set_viewport_border";
+        Result<detail::Paint> c = detail::paint_for(state_.get(), call, colour);
+        if (!c) return c.error();
+        return ok(call, [&](detail::ViewState& s) { return s.t->set_viewport_border(s.handle, viewport, c->data()); });
+    }
     // Exact surfaces (false) or triangles (true).
-    Result<void> surfaces(bool triangles) {
+    Result<void> set_surfaces(bool triangles) {
         return ok("cadaclysm_view_set_surfaces",
                   [&](detail::ViewState& s) { return s.t->set_surfaces(s.handle, triangles ? 1u : 0u); });
     }
     // CADACLYSM_VIEW_LAYER_*.
-    Result<void> layer(std::uint32_t which, bool on) {
+    Result<void> set_layer(std::uint32_t which, bool on) {
         return ok("cadaclysm_view_set_layer", [&](detail::ViewState& s) { return s.t->set_layer(s.handle, which, on); });
     }
-    // User layer `layer`, 0..31, on or off in every viewport (all start on); see
+    // User layer `set_layer`, 0..31, on or off in every viewport (all start on); see
     // Item::user_layer. A layer past 31 is refused.
-    Result<void> user_layer(std::uint32_t layer, bool on) {
+    Result<void> set_user_layer(std::uint32_t layer, bool on) {
         return ok("cadaclysm_view_set_user_layer", [&](detail::ViewState& s) { return s.t->set_user_layer(s.handle, layer, on); });
     }
     // The clear colour: three numbers or text (see Colour).
-    Result<void> background(const Colour& rgb) {
+    Result<void> set_background(const Colour& rgb) {
         auto c = detail::paint_for(state_.get(), "cadaclysm_view_set_background", rgb);
         if (!c) return c.error();
         return act("cadaclysm_view_set_background", [&](detail::ViewState& s) { s.t->set_background(s.handle, c->data()); });
@@ -1617,7 +1923,7 @@ public:
     // How plain parts are lit, as Python's View.lighting: "headlight" (the default) -- whatever
     // faces the camera is bright -- or "studio", a key light fixed above the scene with an
     // ambient and a camera fill. Another name is refused before the library is called.
-    Result<void> lighting(const std::string& name) {
+    Result<void> set_lighting(const std::string& name) {
         if (name != "headlight" && name != "studio")
             return detail::view_error("lighting '" + name + "': 'headlight' or 'studio'");
         std::uint32_t which = name == "studio" ? CADACLYSM_VIEW_LIGHTING_STUDIO : CADACLYSM_VIEW_LIGHTING_HEADLIGHT;
@@ -1639,7 +1945,7 @@ public:
     Result<LineColour> curve_colour() { return line_colour(CADACLYSM_VIEW_LAYER_CURVES); }
     Result<LineColour> isocurve_colour() { return line_colour(CADACLYSM_VIEW_LAYER_ISOCURVES); }
     // The view-wide occluded style (see OccludedStyle); "solid" and "off" items never use it.
-    Result<void> occluded_style(const OccludedStyle& style) {
+    Result<void> set_occluded_style(const OccludedStyle& style) {
         CadaclysmViewOccludedStyle raw{};
         raw.size = sizeof raw;
         raw.dash = style.dash;
@@ -1668,8 +1974,8 @@ public:
         if (raw.has_colour) style.colour = std::array<float, 3>{raw.colour[0], raw.colour[1], raw.colour[2]};
         return style;
     }
-    // The timeline of machining jobs. play: at `speed` times real time, stopping at its end
-    // unless loop() is on (play at the end starts again from 0).
+    // The timeline of machining jobs and animations. play: at `speed` times real time, stopping at its end
+    // unless set_loop() is on (play at the end starts again from 0).
     Result<void> play(double speed = 1.0) {
         if (!std::isfinite(speed)) return detail::view_error("play speed: a finite number");
         return ok("cadaclysm_view_timeline_play", [&](detail::ViewState& s) { return s.t->timeline_play(s.handle, speed); });
@@ -1683,7 +1989,7 @@ public:
         return ok("cadaclysm_view_timeline_seek",
                   [&](detail::ViewState& s) { return s.t->timeline_seek(s.handle, seconds); });
     }
-    Result<void> loop(bool on = true) {
+    Result<void> set_loop(bool on = true) {
         return ok("cadaclysm_view_timeline_set_loop",
                   [&](detail::ViewState& s) { return s.t->timeline_set_loop(s.handle, on); });
     }
@@ -1724,10 +2030,36 @@ public:
         }
         return lines;
     }
+    // Plays a kernel Animation on the timeline (view ABI 1.27), Python's play_animation: each
+    // binding drives a shown item, or a node of it, by one of the animation's targets --
+    // placement, visibility, colour and ghosting, as the animation's tracks say. The view plays
+    // its own copy: the animation may be changed or closed after (a closed one reaches the
+    // library as NULL, "play_animation: the animation is null"). The track's id, for
+    // remove_track; the clock is play, seek and pause's. Refused with the library's reason (an
+    // unknown item or node, a target bound twice, a node scaled, no kernel loaded, a library
+    // with no timeline); a target holding a NUL before the library is called.
+    Result<std::uint32_t> play_animation(const blacksmith::Animation& animation,
+                                         const std::vector<AnimationBinding>& bindings) {
+        Result<std::uint32_t> count = detail::count_of(bindings.size(), "play_animation bindings");
+        if (!count) return count.error();
+        Result<std::vector<CadaclysmViewAnimationBinding>> raw = detail::bindings_of(bindings);
+        if (!raw) return raw.error();
+        if (std::optional<Error> no = detail::refusal(state_.get(), "cadaclysm_view_play_animation")) return *no;
+        std::uint32_t track = state_->t->play_animation(state_->handle, animation.handle(),
+                                                        raw->empty() ? nullptr : raw->data(), *count);
+        if (!track) return detail::library_error(*state_);
+        return track;
+    }
+    // Takes animation track `track` (play_animation's id) off the timeline, putting back what
+    // it drove as it was when it began to play; refused for no such track.
+    Result<void> remove_track(std::uint32_t track) {
+        return ok("cadaclysm_view_timeline_remove",
+                  [&](detail::ViewState& s) { return s.t->timeline_remove(s.handle, track); });
+    }
     // Levels of detail, as Python's View.lod: parts of `min_triangles` or more (0: the
     // library's default, 2,048) get coarser levels, and a moving frame draws as `motion`
     // says -- "detailed" or "smooth" (see wake_ms); std::nullopt turns them off (the default).
-    Result<void> lod(std::optional<std::string> motion = std::string("detailed"), std::uint32_t min_triangles = 0) {
+    Result<void> set_lod(std::optional<std::string> motion = std::string("detailed"), std::uint32_t min_triangles = 0) {
         if (!motion) return ok("cadaclysm_view_set_lod", [&](detail::ViewState& s) { return s.t->set_lod(s.handle, nullptr); });
         if (*motion != "detailed" && *motion != "smooth")
             return detail::view_error("motion '" + *motion + "': one of detailed, smooth or none");
@@ -1752,7 +2084,7 @@ public:
     Result<ViewPick> pick(std::uint32_t x, std::uint32_t y, std::uint32_t viewport = 0) {
         const char* call = state_ && state_->drawn ? "cadaclysm_view_request_pick_in" : "cadaclysm_view_draw";
         if (auto no = detail::refusal(state_.get(), call)) return *no;
-        CadaclysmViewPick raw;
+        CadaclysmViewPick raw = detail::no_raw_pick();
         std::vector<char> err(CVL_ERROR, 0);
         if (!cvl_pick(state_->t, state_->handle, &state_->drawn, viewport, x, y, &raw, err.data(), err.size()))
             return detail::view_error(err.data());
@@ -1766,8 +2098,7 @@ public:
     // yet" is the library's own message.
     Result<std::optional<ViewPick>> last_pick() {
         if (auto no = detail::refusal(state_.get(), "cadaclysm_view_pick_result")) return *no;
-        CadaclysmViewPick raw{};
-        raw.size = sizeof raw;
+        CadaclysmViewPick raw = detail::no_raw_pick();
         if (state_->t->pick_result(state_->handle, &raw)) return std::optional<ViewPick>(detail::pick_of(raw));
         const char* said = state_->t->last_error();
         const std::string waiting = said ? said : "";
@@ -1869,11 +2200,86 @@ public:
         if (auto no = detail::refusal(state_.get(), "cadaclysm_view_run")) return *no;
         CadaclysmViewCamera cam{};
         cam.size = sizeof cam;
-        CadaclysmViewPick pk{};
-        pk.size = sizeof pk;
+        CadaclysmViewPick pk = detail::no_raw_pick();
         if (!state_->t->run(state_->handle, &cam, &pk)) return detail::library_error(*state_);
         state_->mark_closed();
         return camera_of(cam, pk, state_->y_up);
+    }
+    // Runs the window on this thread, handing each input event to `on_event` as the window
+    // handles it (view ABI 1.26); returning false closes the window and ends the run. The
+    // callback may change the scene or the camera: it is called between pumps, never from
+    // inside the library. The close event is handed over last when the window closes by itself
+    // (Escape, its close button). Returns the camera the window closed on and the last pick, as
+    // run() does; the window is then closed.
+    Result<Camera> run(const std::function<bool(const InputEvent&)>& on_event) {
+        if (auto no = detail::live_refusal(state_.get(), "cadaclysm_view_pump")) return *no;
+        if (!on_event) return detail::view_error("run: no callback");
+        std::optional<Camera> closed_on;
+        std::optional<ViewPick> picked;
+        bool stopping = false;
+        while (!closed_on) {
+            const std::uint32_t state = state_->closed ? static_cast<std::uint32_t>(CADACLYSM_VIEW_CLOSED)
+                                                       : state_->t->pump(state_->handle, 16);
+            if (state != CADACLYSM_VIEW_OPEN && state != CADACLYSM_VIEW_CLOSED) return detail::library_error(*state_);
+            while (!closed_on) {
+                Result<std::optional<InputEvent>> next = next_event();
+                if (!next) return next.error();
+                if (!*next) break;
+                const InputEvent& e = **next;
+                if (e.kind == InputKind::pick) picked = e.pick;
+                if (e.kind == InputKind::close) {
+                    closed_on = e.camera;
+                    if (!stopping) on_event(e);
+                } else if (!stopping && !on_event(e)) {
+                    stopping = true;
+                    Result<void> closing = close_window();
+                    if (!closing) return closing.error();
+                }
+            }
+            if (state == CADACLYSM_VIEW_CLOSED && !closed_on)
+                return detail::view_error("run: the window closed with no close event");
+        }
+        // The answer the last click left for last_pick, taken as run() takes it; else the last
+        // pick event's.
+        CadaclysmViewPick raw = detail::no_raw_pick();
+        if (state_->t->pick_result(state_->handle, &raw))
+            picked = raw.item || raw.viewport_label >= 0 ? std::optional<ViewPick>(detail::pick_of(raw)) : std::nullopt;
+        state_->mark_closed();
+        closed_on->pick = picked;
+        return *closed_on;
+    }
+    // The oldest input event the view's own window handled and has not handed out yet (view
+    // ABI 1.26), without waiting: std::nullopt while none waits. Read them between
+    // view::pump()s, or let run(callback) hand them over. A view in a host's window, or
+    // offscreen, queues nothing. Still answers once the window has closed. A failure other
+    // than "no event" is the library's own message.
+    Result<std::optional<InputEvent>> next_event() {
+        if (auto no = detail::live_refusal(state_.get(), "cadaclysm_view_next_event")) return *no;
+        CadaclysmViewInputEvent raw{};
+        raw.size = sizeof raw;
+        raw.pick_viewport_label = -1;
+        if (state_->t->next_event(state_->handle, &raw)) {
+            Result<InputEvent> e = detail::input_event_of(raw, state_->y_up);
+            if (!e) return e.error();
+            return std::optional<InputEvent>(std::move(*e));
+        }
+        const char* said = state_->t->last_error();
+        const std::string why = said ? said : "";
+        const std::string none = "no event";
+        if (!why.empty() && (why.size() < none.size() || why.compare(why.size() - none.size(), none.size(), none) != 0))
+            return detail::view_error(why);
+        return std::optional<InputEvent>();
+    }
+    // Closes the view's own window as its close button does (view ABI 1.26): closed() turns
+    // true, a close event is queued and a loop around view::pump() ends; close() still owes the
+    // destroy. Nothing for a window already closed; a view in a host's window, or offscreen,
+    // has none to close: the library's refusal.
+    Result<void> close_window() {
+        if (auto no = detail::live_refusal(state_.get(), "cadaclysm_view_close")) return *no;
+        if (state_->closed) return {};
+        if (!state_->t->close(state_->handle)) return detail::library_error(*state_);
+        state_->mark_closed();
+        return {};
     }
     // What image() reads, in physical pixels: {width, height}.
     Result<std::array<std::uint32_t, 2>> size() {
@@ -2049,30 +2455,33 @@ private:
             return detail::view_error("show_overlay: 16 numbers a curve, at least one, not " + std::to_string(beziers.size()));
         Result<std::uint32_t> n = detail::count_of(beziers.size() / 16, "show_overlay");
         if (!n) return n.error();
-        Result<detail::Paint> stroke = detail::paint_for(state_.get(), "cadaclysm_view_show_overlay", style.stroke);
-        if (!stroke) return stroke.error();
-        detail::Paint fill;
-        bool none = false;
-        if (style.fill && style.fill->is_text()) {
-            std::string t = style.fill->text();
+        if (auto no = detail::refusal(state_.get(), "cadaclysm_view_show_overlay")) return *no;
+        auto is_none = [](const std::optional<Colour>& c) {
+            if (!c || !c->is_text()) return false;
+            std::string t = c->text();
             t.erase(0, t.find_first_not_of(" \t"));
             t.erase(t.find_last_not_of(" \t") + 1);
-            std::transform(t.begin(), t.end(), t.begin(), [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
-            none = t == "none";
-        }
-        if (!none) {
-            if (style.fill) {
-                Result<detail::Paint> f = detail::paint(*state_->t, style.fill);
-                if (!f) return f.error();
-                fill = *f;
-            } else if (own) {
-                fill.values = *own;
-                fill.given = true;
-            } else if (!stroke->given) {
-                fill.values = {1.0f, 1.0f, 1.0f, 1.0f};
-                fill.given = true;
+            std::transform(t.begin(), t.end(), t.begin(), [](char ch) { return static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); });
+            return t == "none";
+        };
+        detail::Paint stroke;
+        if (!is_none(style.stroke)) {
+            if (style.stroke) {
+                Result<detail::Paint> s = detail::paint(*state_->t, style.stroke);
+                if (!s) return s.error();
+                stroke = *s;
+            } else {
+                stroke.values = own ? *own : std::array<float, 4>{1.0f, 1.0f, 1.0f, 1.0f};
+                stroke.given = true;
             }
         }
+        detail::Paint fill;
+        if (style.fill && !is_none(style.fill)) {
+            Result<detail::Paint> f = detail::paint(*state_->t, style.fill);
+            if (!f) return f.error();
+            fill = *f;
+        }
+        if (!fill.given && !stroke.given) return detail::view_error("show_overlay: neither a fill nor a stroke");
         CadaclysmViewOverlay raw{};
         raw.size = sizeof raw;
         raw.anchor = static_cast<std::uint32_t>(anchor);
@@ -2082,10 +2491,10 @@ private:
         raw.offset[0] = x;
         raw.offset[1] = y;
         raw.has_fill = fill.given ? 1u : 0u;
-        raw.has_stroke = stroke->given ? 1u : 0u;
+        raw.has_stroke = stroke.given ? 1u : 0u;
         for (std::size_t k = 0; k < 4; ++k) {
             raw.fill_rgba[k] = fill.values[k];
-            raw.stroke_rgba[k] = stroke->values[k];
+            raw.stroke_rgba[k] = stroke.values[k];
         }
         raw.stroke_width = style.stroke_width;
         Result<Item> item = add("cadaclysm_view_show_overlay",
@@ -2107,16 +2516,7 @@ private:
                                   " takes no tolerance: a document is drawn at the tolerance it was read with");
     }
     static Camera camera_of(const CadaclysmViewCamera& cam, const CadaclysmViewPick& picked, bool y_up) {
-        Camera c;
-        for (std::size_t i = 0; i < 3; ++i) {
-            c.eye[i] = cam.eye[i];
-            c.target[i] = cam.target[i];
-            c.up[i] = cam.up[i];
-        }
-        c.orthographic = cam.orthographic != 0;
-        cvl_angles(&cam, y_up ? 1 : 0, &c.azimuth, &c.elevation);
-        if (picked.item) c.pick = detail::pick_of(picked);
-        return c;
+        return detail::camera_of(cam, picked, y_up);
     }
     static Result<Camera> object(bool interactive, const std::string& default_up, const std::string& label,
                                  const CadaclysmBlacksmithSolid* solid, double tolerance, const CadaclysmScene* scene,
@@ -2152,8 +2552,7 @@ private:
         how.no_display = detail::view_no_display;
         CadaclysmViewCamera cam{};
         cam.size = sizeof cam;
-        CadaclysmViewPick picked{};
-        picked.size = sizeof picked;
+        CadaclysmViewPick picked = detail::no_raw_pick();
         std::vector<char> err(CVL_ERROR, 0);
         if (!cvl_draw_object(&detail::ViewAccess::table(**lib), interactive ? 1 : 0, "iso", solid, tolerance, scene,
                              transforms ? detail::non_null(flat) : nullptr, count, detail::non_null(hide), *hidden, node,

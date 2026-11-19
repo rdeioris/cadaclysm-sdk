@@ -95,8 +95,8 @@ static std::string shown(const History& h) {
 // A 10-cube centred on the origin and a pin through it (radius 2, along z, z -10..10), both
 // tracked -- the kernel's oracle 2 cut.
 static std::pair<Solid, Solid> block_and_pin() {
-    Solid block = must(must(Solid::cuboid(10, 10, 10), "cuboid").tracked(), "tracked");
-    Solid pin = must(must(must(Solid::cylinder(2, 20), "cylinder").translate(0, 0, -10), "translate").tracked(), "tracked");
+    Solid block = must(must(Solid::cuboid(10, 10, 10), "cuboid").track(), "tracked");
+    Solid pin = must(must(must(Solid::cylinder(2, 20), "cylinder").translate(0, 0, -10), "translate").track(), "tracked");
     return std::pair<Solid, Solid>(std::move(block), std::move(pin));
 }
 
@@ -122,9 +122,9 @@ static void tracking() {
     check(!must(plain.face_id(0), "face_id"), "an untracked face has no id: " + shown(must(plain.face_id(0), "face_id")));
     check(!must(plain.edge_id(0), "edge_id"), "an untracked edge has no id");
     check(must(plain.face_origins(0), "face_origins").empty(), "an untracked face has no origins");
-    Solid t = must(plain.tracked(), "tracked");
+    Solid t = must(plain.track(), "tracked");
     check(must(t.is_tracked(), "is_tracked"), "tracked() tracks");
-    check(must(must(t.tracked(), "tracked").face_id(5), "face_id") == std::optional<std::uint64_t>(6), "tracked() of a tracked solid keeps its ids");
+    check(must(must(t.track(), "tracked").face_id(5), "face_id") == std::optional<std::uint64_t>(6), "tracked() of a tracked solid keeps its ids");
     for (std::uint32_t f = 0; f < 6; ++f) {
         check(must(t.face_id(f), "face_id") == std::optional<std::uint64_t>(f + 1), "face " + std::to_string(f) + "'s id");
     }
@@ -185,8 +185,10 @@ static void a_cuts_origins_and_history() {
     History again = h;
     check(again == h && !(again != h), "a history equals its copy");
     History e = must(cut.edge_history({block, pin}), "edge_history");
-    std::vector<IdOrigin> three = {IdOrigin(1, 1), IdOrigin(1, 2), IdOrigin(1, 3)};
-    check(e.kept.size() == 12 && e.deleted == three && e.generated.size() == 3 && e.modified.empty(),
+    // The pin's two rims gone, the bore's two new, the pin's seam cut down to the bore's (re-pinned 2026-11-16: the exact route keeps the pin's seam).
+    std::vector<IdOrigin> rims = {IdOrigin(1, 1), IdOrigin(1, 3)};
+    std::vector<std::pair<IdOrigin, std::vector<std::uint64_t>>> seam = {{IdOrigin(1, 2), {15}}};
+    check(e.kept.size() == 12 && e.deleted == rims && e.generated.size() == 2 && e.modified == seam,
           "edge_history's shape: " + shown(e));
     Solid plain = must(Solid::cuboid(1, 1, 1), "cuboid");
     refused_with(cut.history({block, plain}), "history: input 1 is not tracked", "history of an untracked input");
@@ -197,8 +199,8 @@ static void a_cuts_origins_and_history() {
 }
 
 static void a_union_renumbers_the_second_operands_clashing_ids() {
-    Solid a = must(must(Solid::cuboid(10, 10, 10), "cuboid").tracked(), "tracked");
-    Solid b = must(must(must(Solid::cuboid(10, 10, 10), "cuboid").translate(5, 5, 5), "translate").tracked(), "tracked");
+    Solid a = must(must(Solid::cuboid(10, 10, 10), "cuboid").track(), "tracked");
+    Solid b = must(must(must(Solid::cuboid(10, 10, 10), "cuboid").translate(5, 5, 5), "translate").track(), "tracked");
     Solid joined = must(a.join(b), "join");
     check(joined.faces() == 12, "the union has 12 faces");
     std::set<std::uint64_t> firsts;
@@ -225,7 +227,7 @@ static void a_union_renumbers_the_second_operands_clashing_ids() {
 }
 
 static void a_split_halves_the_sides() {
-    Solid block = must(must(Solid::cuboid(2, 4, 6), "cuboid").tracked(), "tracked");
+    Solid block = must(must(Solid::cuboid(2, 4, 6), "cuboid").track(), "tracked");
     std::vector<Solid> pieces = split_xy(block);
     check(pieces.size() == 2, "two pieces");
     std::map<std::uint64_t, std::vector<std::uint64_t>> halves;
@@ -263,7 +265,7 @@ static void a_split_halves_the_sides() {
 }
 
 static void a_fillets_round_is_generated() {
-    Solid block = must(must(Solid::cuboid(10, 10, 10), "cuboid").tracked(), "tracked");
+    Solid block = must(must(Solid::cuboid(10, 10, 10), "cuboid").track(), "tracked");
     Solid rounded = must(block.fillet({0}, 1.0), "fillet");
     check(rounded.faces() == 7, "seven faces");
     std::uint32_t round = bs::NONE;
@@ -279,8 +281,8 @@ static void a_fillets_round_is_generated() {
 }
 
 static void a_flush_join_merged_names_one_origin_per_input() {
-    Solid a = must(must(Solid::cuboid(10, 10, 10), "cuboid").tracked(), "tracked");
-    Solid b = must(must(must(Solid::cuboid(4, 10, 10), "cuboid").translate(7, 0, 0), "translate").tracked(), "tracked");
+    Solid a = must(must(Solid::cuboid(10, 10, 10), "cuboid").track(), "tracked");
+    Solid b = must(must(must(Solid::cuboid(4, 10, 10), "cuboid").translate(7, 0, 0), "translate").track(), "tracked");
     Solid merged = must(a.join(b, bs::DEFAULT_TOLERANCE, {}, true), "join merged");
     check(merged.faces() == 6, "six faces");
     int two = 0;

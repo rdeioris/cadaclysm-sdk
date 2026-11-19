@@ -31,7 +31,7 @@ fn main() -> cadaclysm_sdk::Result<()> {
     };
     view.show_curves(&[curve], Some([0.9, 0.3, 0.1]))?;
     let item = view.show_solid(&cube, 0.05, None)?;
-    item.colour([0.2, 0.5, 0.9])?;
+    item.set_colour([0.2, 0.5, 0.9])?;
     view.standard(Standard::Iso)?;
     view.frame()?;
     if offscreen {

@@ -1,7 +1,9 @@
 import type { Scene, Node } from './cadaclysm';
-import type { Solid, Profile } from './cadaclysm_blacksmith';
+import type { Solid, Profile, Animation } from './cadaclysm_blacksmith';
 
 export class ViewError extends Error {}
+/** What an animation target moves (view ABI 1.27): `item` an Item or its id, `node` a Node or its index (absent: the item itself). */
+export interface AnimationBinding { target: string; item: Item | number; node?: Node | number | null; }
 /** A colour: text -- '#rgb', '#rrggbb' (the '#' optional) or one of the 148 CSS colour names, any case,
  *  read by the view library's own `cadaclysm_view_parse_colour` -- or three numbers in 0..1. */
 export type Colour = string | ArrayLike<number>;
@@ -38,11 +40,13 @@ export interface NativeWindow { kind: 'win32' | 'xlib' | 'xcb' | 'wayland' | 'ap
 export type ViewName = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom' | 'iso';
 export interface ShowOptions { view?: ViewName | [azimuth: number, elevation: number]; azimuth?: number; elevation?: number; zoom?: number; up?: 'z' | 'y'; edges?: boolean; width?: number; height?: number; title?: string; tolerance?: number; rgb?: Colour; }
 /** A pick answer: `clicks` 2 for a double click, else 1; `point` where the ray met the model, null where no depth was read. */
-export interface Pick { item: number; node: number; face: number; clicks: number; point: [number, number, number] | null; /** 1.24: the item is an overlay, picked before anything beneath it. */ overlay: boolean; }
+export interface Pick { item: number; node: number; face: number; clicks: number; point: [number, number, number] | null; /** 1.24: the item is an overlay, picked before anything beneath it. */ overlay: boolean; /** 1.28: the viewport whose label was under the pixel (item is 0 then), or -1 for none. */ viewportLabel: number; }
 /** Where an overlay hangs in the window (view ABI 1.24); its offset is measured inward from it. */
+export type PointShape = 'disc' | 'ring' | 'square' | 'diamond';
+export type PointState = 'normal' | 'hover' | 'selected' | 'first';
 export type Anchor = 'top-left' | 'top' | 'top-right' | 'left' | 'centre' | 'center' | 'right' | 'bottom-left' | 'bottom' | 'bottom-right';
-/** `View.showOverlay`'s style: `fill` a colour or 'none' (unset: the profile's own colour, else white unless a stroke is set). */
-export interface OverlayStyle { fill?: ColourAlpha | 'none' | null; stroke?: ColourAlpha | null; strokeWidth?: number; order?: number; }
+/** `View.showOverlay`'s style: an outline by default -- `stroke` a colour or 'none' (unset: the profile's own colour, else white); `fill` only where given, a colour or 'none'. Neither is refused. */
+export interface OverlayStyle { fill?: ColourAlpha | 'none' | null; stroke?: ColourAlpha | 'none' | null; strokeWidth?: number; order?: number; }
 /** `View.showOverlayText`'s options: showText's, in pixels, plus the overlay order. */
 export interface OverlayTextOptions { size?: number; colour?: Colour; box?: ColourAlpha | null; padding?: number; font?: number; order?: number; }
 /** `View.showOverlayImage`'s options: the size drawn (0: its own), the opacity, the overlay order. */
@@ -52,9 +56,31 @@ export type SnapKind = 'vertex' | 'midpoint' | 'centre' | 'quadrant' | 'edge' | 
 /** A snap answer: the point snapped to, in the coordinates the items were shown in; `edge` null for a face, grid or plane snap; `clicks` 0 for snap() and a hover, 1 or 2 for a click's. */
 export interface Snap { kind: SnapKind; point: [number, number, number]; item: number; node: number; face: number; edge: number | null; tangent: [number, number, number]; axis: [number, number, number]; radius: number; distancePx: number; clicks: number; }
 export interface Camera { eye: number[]; target: number[]; up: number[]; orthographic: boolean; azimuth: number; elevation: number; pick: Pick | null; }
+/** What every input event carries (view ABI 1.26): the library's own clock (only differences mean anything), and how many events a full queue (1024) dropped just before this one. */
+interface InputEventBase { timeMs: number; dropped: number; }
+/** The modifiers held during a pointer, wheel or key event. */
+interface Modifiers { shift: boolean; ctrl: boolean; alt: boolean; meta: boolean; }
+/** A button went down, the pointer moved or a button went up: x, y in physical pixels; button 0 left, 1 middle, 2 right (0 for a move); the touch's pointerId. */
+export interface PointerInputEvent extends InputEventBase, Modifiers { type: 'pointer_down' | 'pointer_move' | 'pointer_up'; x: number; y: number; button: number; pointer: 'mouse' | 'touch' | 'pen'; pointerId: number; }
+/** The wheel turned at x, y: wheelY a DOM deltaY, negative forward (about 100 a notch). */
+export interface WheelInputEvent extends InputEventBase, Modifiers { type: 'wheel'; x: number; y: number; wheelY: number; }
+/** A key went down or up: key is its DOM code ('KeyR', 'Digit1', 'Space', 'Escape', 'ArrowUp', 'ShiftLeft', 'F5'), every key; repeat for the system's auto-repeat. */
+export interface KeyInputEvent extends InputEventBase, Modifiers { type: 'key_down' | 'key_up'; key: string; repeat: boolean; }
+/** The window's drawing area is now width x height physical pixels. */
+export interface ResizeInputEvent extends InputEventBase { type: 'resize'; width: number; height: number; }
+/** A click's pick has landed: what it hit, or null for nothing; `lastPick` gets the same answer. */
+export interface PickInputEvent extends InputEventBase { type: 'pick'; pick: Pick | null; }
+/** With snapping on, a hover's or click's snap has landed (clicks 0 for a hover), or null for none; `lastSnap` gets the same answer. */
+export interface SnapInputEvent extends InputEventBase { type: 'snap'; snap: Snap | null; }
+/** The window closed (Escape, its close button, `closeWindow`): the last event, with the camera it closed on (its pick null). */
+export interface CloseInputEvent extends InputEventBase { type: 'close'; camera: Camera; }
+/** The clock moved (view ABI 1.27): a draw after the timeline played, or after a seek, play or pause; no fields beyond the stamp, read `View.time`. */
+export interface TimelineInputEvent extends InputEventBase { type: 'timeline'; }
+/** One input event a view's own window handled (`View.nextEvent`, `View.run(onEvent)`, view ABI 1.26), told apart by `type`. */
+export type InputEvent = PointerInputEvent | WheelInputEvent | KeyInputEvent | ResizeInputEvent | PickInputEvent | SnapInputEvent | CloseInputEvent | TimelineInputEvent;
 export interface Image { width: number; height: number; rgba: Uint8Array; }
 export interface ViewEvent { type: 'pointer_down' | 'pointer_move' | 'pointer_up' | 'pointer_cancel' | 'wheel' | 'key'; x?: number; y?: number; button?: number; shift?: boolean; pointerId?: number; pointer?: 'mouse' | 'touch' | 'pen'; wheelY?: number; key?: string; keyDown?: boolean; timeMs?: number; }
-/** `layerMask`: the user layers drawn here, bit n for layer n (`Item.userLayer`); every layer when absent. */
+/** `layerMask`: the user layers drawn here, bit n for layer n (`Item.setUserLayer`); every layer when absent. */
 export interface Viewport { rect: number[]; view: ArrayLike<number>; projection: ArrayLike<number>; eye: ArrayLike<number>; grid?: 'none' | 'top' | 'front' | 'right'; layerMask?: number; }
 export interface MeshData { positions: ArrayLike<number>; indices: ArrayLike<number>; normals?: ArrayLike<number> | null; edges?: ArrayLike<number> | null; rgb?: Colour | null; }
 
@@ -63,29 +89,41 @@ export class Item {
   readonly view: View;
   readonly shown: Solid | Scene | Node | null;
   remove(): void;
-  nodeTransforms(transforms: ArrayLike<number>[] | null): void;
-  colour(rgb: Colour): void;
+  setNodeTransforms(transforms: ArrayLike<number>[] | null): void;
+  setColour(rgb: Colour): void;
   setText(text: string): void;
-  placement(matrix: ArrayLike<number> | null): void;
+  setPlacement(matrix: ArrayLike<number> | null): void;
   /** One colour a face (text, or 3 or 4 numbers), or four numbers a face, flat. */
-  faceColours(faces: ArrayLike<number> | null, rgba?: ArrayLike<number> | ReadonlyArray<ColourAlpha>): void;
+  setFaceColours(faces: ArrayLike<number> | null, rgba?: ArrayLike<number> | ReadonlyArray<ColourAlpha>): void;
   frame(): void;
-  xray(on: boolean): void;
+  setXray(on: boolean): void;
+  /** 1.28: draws the item's lines in its own dash and gap, in points; null (or a dash of 0) is solid. A gap of 0 with a dash is refused. */
+  setLineStyle(style: { dash: number; gap: number } | null): void;
+  /** 1.28: a points item's marker. */
+  setPointStyle(style?: { shape?: PointShape; hollow?: boolean }): void;
+  /** 1.28: one state a point, by name or by number 0..3; one entry per point. */
+  setPointStates(states: Iterable<PointState | number>): void;
+  /** 1.28: draws the item after every other with depth testing off, picked ahead of what is under it (refused for overlays, text, images, exact-surface and curve items). */
+  setOnTop(on?: boolean): void;
   /** How its lines and points draw where a surface hides them: 'off' (an item shows with it until set), 'solid' or 'dashed'. */
-  occluded(mode: 'off' | 'solid' | 'dashed'): void;
+  setOccluded(mode: 'off' | 'solid' | 'dashed'): void;
   /** Its finish under the lighting: 'gloss' (an item shows with it until set; under the showroom lighting a clear coat), 'satin' (a weaker, blurred coat) or 'matte' (no mirror). */
-  finish(finish: 'gloss' | 'satin' | 'matte'): void;
+  setFinish(finish: 'gloss' | 'satin' | 'matte'): void;
   /** Its edges in `rgb` (view ABI 1.23), over the view's `setEdgeColour`, its colour and a solid's own edge paint; null takes the view's colour again. */
   setEdgeColour(rgb: Colour | null): void;
   /** Its curves in `rgb` (view ABI 1.23), over the view's `setCurveColour` and its colour; null takes the view's colour again. */
   setCurveColour(rgb: Colour | null): void;
   /** Its isocurves in `rgb` (view ABI 1.23), over the view's `setIsocurveColour` and its colour; null takes the view's colour again. */
   setIsocurveColour(rgb: Colour | null): void;
-  /** The user layer it is on, 0..31 (every item starts on 0): drawn while the layer is on (`View.userLayer`) and in viewports whose `layerMask` has its bit. */
-  userLayer(layer: number): void;
-  nodeVisible(node: number, on: boolean): void;
-  nodeColour(node: number, rgba: ColourAlpha | null): void;
-  nodeHighlight(node: number, rgba: ColourAlpha | null): void;
+  /** The user layer it is on, 0..31 (every item starts on 0): drawn while the layer is on (`View.setUserLayer`) and in viewports whose `layerMask` has its bit. */
+  setUserLayer(layer: number): void;
+  /** Shown or hidden (view ABI 1.27): a hidden item draws nothing, is never picked or snapped and is left out of `frame`; it shows only while its layer is on too. */
+  setVisible(visible: boolean): void;
+  /** The nodes drawn as ghosts (x-ray), each an index or a Node (view ABI 1.27); the set replaces the previous ghosts, null or an empty list clears them. */
+  setNodeGhosts(nodes: Iterable<number | Node> | null): void;
+  setNodeVisible(node: number, on: boolean): void;
+  setNodeColour(node: number, rgba: ColourAlpha | null): void;
+  setNodeHighlight(node: number, rgba: ColourAlpha | null): void;
   frameNode(node: number): void;
 }
 
@@ -118,9 +156,9 @@ export class Machining extends Item {
   /** Jump the timeline to the end of move `move` (0: the untouched stock). */
   seekMove(move: number): void;
   /** 'deviation' needs a part. */
-  colourBy(mode: 'height' | 'tool' | 'deviation'): void;
+  setColourBy(mode: 'height' | 'tool' | 'deviation'): void;
   /** The toolpath and the tool, on or off. */
-  overlays(path?: boolean, tool?: boolean): void;
+  setOverlays(path?: boolean, tool?: boolean): void;
   info(): MachiningInfo;
   /** The stock's heights now, `nx * ny` floats, row y then x; waits for the GPU. */
   heights(): Float32Array;
@@ -157,7 +195,7 @@ export class View {
   setIsocurveColour(rgb: Colour, fromPart?: boolean): void;
   /** The isocurves' colour in use. */
   isocurveColour(): LineColour;
-  lod(motion?: 'detailed' | 'smooth' | null, minTriangles?: number): void;
+  setLod(motion?: 'detailed' | 'smooth' | null, minTriangles?: number): void;
   show(obj: Solid | Scene | Node, rgb?: Colour | null, tolerance?: number): Item;
   /** A kernel solid, read in place; `options` (view ABI 1.21) a material, an opacity 0..1 (1 opaque) and the solid's face numbers to show alone, with no edges (null: every face). */
   showSolid(solid: Solid, tolerance?: number, rgb?: Colour | null, options?: SolidOptions): Item;
@@ -175,7 +213,14 @@ export class View {
   pause(): void;
   /** Set the clock, clamped to [0, duration]. */
   seek(seconds: number): void;
-  loop(on?: boolean): void;
+  setLoop(on?: boolean): void;
+  /**
+   * Plays the kernel `animation` on the timeline (view ABI 1.27); the track's id (1 or more). Each binding is
+   * `{ target, item, node? }` or `[target, item, node?]`. The view plays its own copy: the animation may be closed at once.
+   */
+  playAnimation(animation: Animation, bindings: Iterable<AnimationBinding | [string, Item | number] | [string, Item | number, Node | number | null | undefined]>): number;
+  /** Removes the track `playAnimation` returned and restores what it moved (view ABI 1.27). */
+  removeTrack(track: number): void;
   readonly time: number;
   readonly duration: number;
   readonly playing: boolean;
@@ -196,18 +241,24 @@ export class View {
   dolly(ratio: number): void;
   standard(name: 'top' | 'front' | 'right' | 'iso'): void;
   frame(): void;
-  orthographic(on: boolean): void;
+  setOrthographic(on: boolean): void;
   /** Whether a double click frames what it hit (off by default: a pick answered with clicks 2). */
   setDoubleClickFrames(on: boolean): void;
   /** Moves the orbit point to `point` (a pick's point): the eye keeps its direction and distance; leaves fly mode. */
   focus(point: ArrayLike<number>): void;
   /** How a left drag moves the camera: 'orbit' or 'fly' (after a fly key; Tab toggles it). */
   readonly navigation: 'orbit' | 'fly';
-  viewports(list: Viewport[]): void;
-  layer(name: 'surfaces' | 'edges' | 'curves' | 'isocurves' | 'grid' | 'text', on: boolean): void;
+  setViewports(list: Viewport[]): void;
+  /** 1.28: the colours hover, selected and first points draw in; a missing one restores its default. */
+  setPointStateColours(colours?: { hover?: Colour | null; selected?: Colour | null; first?: Colour | null }): void;
+  /** 1.28: names viewport `i` top left inside it; null clears it. */
+  setViewportLabel(i: number, text: string | null, options?: { colour?: Colour | null }): void;
+  /** 1.28: frames viewport `i` one point inside its edge; null clears it. */
+  setViewportBorder(i: number, colour: Colour | null): void;
+  setLayer(name: 'surfaces' | 'edges' | 'curves' | 'isocurves' | 'grid' | 'text', on: boolean): void;
   /** User layer `layer`, 0..31, on or off in every viewport (all start on). */
-  userLayer(layer: number, on: boolean): void;
-  background(rgb: Colour): void;
+  setUserLayer(layer: number, on: boolean): void;
+  setBackground(rgb: Colour): void;
   pick(x: number, y: number, viewport?: number): Pick | null;
   /** The newest pick answer that landed (a click, a double click), without waiting: undefined while none has, null for a click on nothing; each read once. */
   lastPick(): Pick | null | undefined;
@@ -222,7 +273,18 @@ export class View {
   /** The plane 'grid' and 'plane' snaps land on, in place of the ground grid; null puts the ground grid back. */
   setWorkPlane(origin: ArrayLike<number> | null, xAxis?: ArrayLike<number>, normal?: ArrayLike<number>, step?: number): void;
   draw(): void;
+  /** Blocks until the window is closed; the camera it ended on and the last pick. */
   run(): Camera;
+  /**
+   * The window run on this thread, each input event handed to `onEvent` between pumps as the window handles it
+   * (view ABI 1.26): returning `false` closes the window and ends the run; the 'close' event is handed over last
+   * when the window closes by itself. The camera it closed on and the last pick.
+   */
+  run(onEvent: (event: InputEvent) => boolean | void): Camera;
+  /** The oldest input event the own window handled and has not handed out yet, without waiting; null while none waits (view ABI 1.26). A view in a host's window, or offscreen, queues nothing. */
+  nextEvent(): InputEvent | null;
+  /** Closes the own window as its close button does (view ABI 1.26): `closed` turns true and a 'close' event is queued; `close()` still owes the destroy. Refused for a view in a host's window or offscreen. */
+  closeWindow(): void;
   image(): Image;
   save(path: string): void;
   input(event: ViewEvent): number;

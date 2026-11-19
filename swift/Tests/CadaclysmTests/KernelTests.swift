@@ -59,6 +59,9 @@ final class KernelTests: XCTestCase {
     func testTheLibraryReportsItself() throws {
         XCTAssertFalse(Blacksmith.version().isEmpty)
         XCTAssertFalse(Blacksmith.buildDate().isEmpty)
+        let build = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Blacksmith.build().utf8)) as? [String: String])
+        XCTAssertEqual(build.keys.sorted(), ["branch", "commit", "date", "time", "version"])
+        XCTAssertEqual(build["version"], Blacksmith.version())
         XCTAssertFalse(Blacksmith.brepLayoutId().isEmpty)
         let line = Blacksmith.licenseInfo()
         XCTAssertFalse(line.isEmpty)
@@ -1153,11 +1156,11 @@ final class KernelTests: XCTestCase {
     }
 
     func testScaledMultipliesEveryLength() throws {
-        let big = try Solid.cuboid(1, 2, 3).scaled(2)
+        let big = try Solid.cuboid(1, 2, 3).scale(2)
         let (lo, hi) = try big.bounds
         XCTAssertEqual(hi.x - lo.x, 2, accuracy: 1e-9)
         XCTAssertEqual(hi.z - lo.z, 6, accuracy: 1e-9)
-        XCTAssertThrowsError(try big.scaled(0))
+        XCTAssertThrowsError(try big.scale(0))
     }
 
     // ---- the FEM surface mesh ----------------------------------------------------------
@@ -1481,17 +1484,17 @@ final class KernelTests: XCTestCase {
 
         // The material and the outside style: read back, kept by a cut, written to STEP.
         XCTAssertNil(try cube.material)
-        let steel = try cube.withMaterial("Steel").styled(location: "materials/steel.mtlx", identification: "BrushedSteel")
+        let steel = try cube.withMaterial("Steel").style(location: "materials/steel.mtlx", identification: "BrushedSteel")
         XCTAssertEqual(try steel.material, "Steel")
         XCTAssertEqual(try steel.styleLocation, "materials/steel.mtlx")
         XCTAssertEqual(try steel.styleIdentification, "BrushedSteel")
         XCTAssertEqual(try steel.cut(try cube.withMaterial("Oak").translate(0.5, 0.5, 0.5)).material, "Steel")
-        XCTAssertNil(try cube.styled(identification: "BrushedSteel").styleLocation)
+        XCTAssertNil(try cube.style(identification: "BrushedSteel").styleLocation)
         let steelText = try steel.stepText()
         XCTAssertTrue(steelText.contains("MATERIAL_DESIGNATION('Steel'"))
         XCTAssertTrue(steelText.contains("EXTERNALLY_DEFINED_STYLE(IDENTIFIER('BrushedSteel')"))
         XCTAssertNotNil(refusal { _ = try cube.withMaterial(" ") })
-        XCTAssertNotNil(refusal { _ = try cube.styled() })
+        XCTAssertNotNil(refusal { _ = try cube.style() })
 
         frame.close()
         bracket.close()
@@ -1803,7 +1806,7 @@ final class KernelTests: XCTestCase {
     func testPosedMovesTheShoulder() throws {
         let arm = try armForPosing()
         let before = noStamp(try arm.stepText())
-        let moved = try arm.posed([("shoulder", [0.5])])
+        let moved = try arm.pose([("shoulder", [0.5])])
         XCTAssertEqual(try moved.name, "arm")
         XCTAssertNotEqual(noStamp(try moved.stepText()), before)
         XCTAssertEqual(noStamp(try arm.stepText()), before)
@@ -1826,13 +1829,13 @@ final class KernelTests: XCTestCase {
         let before = noStamp(try frame.stepText())
 
         XCTAssertEqual(
-            refusal { _ = try frame.posed([("turn", [0.3])]) },
+            refusal { _ = try frame.pose([("turn", [0.3])]) },
             "posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path"
         )
-        let turned = try frame.posed([("right\\/rear/turn", [0.3])])
+        let turned = try frame.pose([("right\\/rear/turn", [0.3])])
         XCTAssertEqual(try turned.name, "frame")
         XCTAssertNotEqual(noStamp(try turned.stepText()), before)
-        let rest = try frame.posed([("right\\/rear/turn", [0.0])])
+        let rest = try frame.pose([("right\\/rear/turn", [0.0])])
         XCTAssertEqual(noStamp(try rest.stepText()), before)
         XCTAssertEqual(noStamp(try frame.stepText()), before)
     }
@@ -1840,18 +1843,18 @@ final class KernelTests: XCTestCase {
     func testPosedTakesAStateAndAGroundAndRefusesWithTheKernelsWords() throws {
         let arm = try armForPosing()
         let before = noStamp(try arm.stepText())
-        let viaState = noStamp(try arm.posed(state: "reach").stepText())
-        let viaRow = noStamp(try arm.posed([("shoulder", [0.5])]).stepText())
+        let viaState = noStamp(try arm.pose(state: "reach").stepText())
+        let viaRow = noStamp(try arm.pose([("shoulder", [0.5])]).stepText())
         XCTAssertEqual(viaState, viaRow)
         XCTAssertNotEqual(viaState, before)
-        let grounded = noStamp(try arm.posed([("shoulder", [0.5])], ground: "upper arm").stepText())
+        let grounded = noStamp(try arm.pose([("shoulder", [0.5])], ground: "upper arm").stepText())
         XCTAssertNotEqual(grounded, viaRow)
         XCTAssertEqual(
-            refusal { _ = try arm.posed([("shoulder", [2.0])]) },
+            refusal { _ = try arm.pose([("shoulder", [2.0])]) },
             "posed: value 0 of joint 'shoulder' is 2, outside its range"
         )
         XCTAssertEqual(
-            refusal { _ = try arm.posed(state: "fold") },
+            refusal { _ = try arm.pose(state: "fold") },
             "posed: assembly 'arm' has no state named 'fold'"
         )
         XCTAssertEqual(noStamp(try arm.stepText()), before)
@@ -1860,9 +1863,9 @@ final class KernelTests: XCTestCase {
     func testPosedRefusesAGearCouplingThatDisagrees() throws {
         let gears = try geared()
         let before = noStamp(try gears.stepText())
-        let one = try gears.posed([("drive", [0.4])])
+        let one = try gears.pose([("drive", [0.4])])
         XCTAssertEqual(try one.name, "gears")
-        let message = try XCTUnwrap(refusal { _ = try gears.posed([("drive", [0.4]), ("driven", [0.4])]) })
+        let message = try XCTUnwrap(refusal { _ = try gears.pose([("drive", [0.4]), ("driven", [0.4])]) })
         XCTAssertTrue(
             message.hasPrefix("posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by"),
             message

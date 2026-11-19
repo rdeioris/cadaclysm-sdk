@@ -95,6 +95,8 @@ export interface OpenOptions {
   convention?: number;
   colors?: boolean;
   sourceMetersPerUnit?: number;
+  /** 0 (the default) for none; a lightmap atlas that many texels on a side, read back as `Node.lightmapUvs`. */
+  lightmapResolution?: number;
 }
 export interface OpenMemoryOptions extends OpenOptions { name?: string }
 export type Bytes = Buffer | Uint8Array | ArrayBuffer | string;
@@ -173,17 +175,19 @@ export class Brep {
   static layoutId(): string;
   readonly manifold: Manifold;
   /** This brep with its free edges sewn, and what was sewn; this one is left as it was. Release the new brep. */
-  sewed(options?: { tolerance?: number; vertex?: number }): { brep: Brep; report: SewReport };
+  sew(options?: { tolerance?: number; vertex?: number }): { brep: Brep; report: SewReport };
   /** What is wrong with this brep: free edges and wires, small features, loose edges, what sewing would do, and, asked for, the mesh's cracks. Nothing moves. */
   health(options?: HealthOptions): HealthReport;
   /** This brep with its small features removed, and what was done; this one is left as it was. Release the new brep. */
-  healed(options?: HealOptions): { brep: Brep; report: HealReport };
+  heal(options?: HealOptions): { brep: Brep; report: HealReport };
   /** How far brep edge `edge` may lie off its curve: 0 exact, the distance healing or sewing moved it, null when no trim names the id. */
   edgeTolerance(edge: number): number | null;
+  /** This brep with its free-form surfaces and edge curves given their analytic kind, and what was taken; this one is left as it was. Release the new brep. */
+  recognize(options?: RecognizeOptions): { brep: Brep; report: RecognizeReport };
   release(): void;
 }
 
-/** What `Brep.sewed` did: the edges joined, the free edges before and after, the groups left free, the widest gap sewed, and the two tolerances used. */
+/** What `Brep.sew` did: the edges joined, the free edges before and after, the groups left free, the widest gap sewed, and the two tolerances used. */
 export interface SewReport {
   pairs: number; freeBefore: number; freeAfter: number; refused: number;
   worstGap: number; tolerance: number; vertex: number;
@@ -191,7 +195,7 @@ export interface SewReport {
 
 /** What a small feature is: a `SmallFeature`'s, `HealFix`'s or `HealRefusal`'s `kind`. */
 export type SmallFeatureKind = 'short_edge' | 'collapsed_edge' | 'sliver_face' | 'tiny_face' | 'tiny_body' | 'small_hole';
-/** Why `healed` left a small feature: a `HealRefusal`'s `why`. */
+/** Why `heal` left a small feature: a `HealRefusal`'s `why`. */
 export type HealWhy = 'would_empty_loop' | 'closed' | 'seam' | 'chain' | 'neighbours_part' | 'uneven' | 'non_manifold'
   | 'has_holes' | 'body_guard' | 'toggled' | 'unsupported';
 /** One free edge: a side only one face bounds, with its nearest partner (a row of `freeEdges`) and the gap to it (`Infinity` without one). */
@@ -238,17 +242,17 @@ export class HealthReport {
   /** The free edges of wire number `wire`, in order. */
   wireEdges(wire: number): FreeEdge[];
 }
-/** One small feature `healed` removed: what it was, its number in the input, its size, and how far the vertices it merged moved. */
+/** One small feature `heal` removed: what it was, its number in the input, its size, and how far the vertices it merged moved. */
 export class HealFix {
   constructor(kind: SmallFeatureKind, index: number, size: number, moved: number);
   kind: SmallFeatureKind; index: number; size: number; moved: number;
 }
-/** One small feature `healed` left, and why; `figure` the chain's width or the neighbours' gap, else 0. */
+/** One small feature `heal` left, and why; `figure` the chain's width or the neighbours' gap, else 0. */
 export class HealRefusal {
   constructor(kind: SmallFeatureKind, index: number, why: HealWhy, figure: number);
   kind: SmallFeatureKind; index: number; why: HealWhy; figure: number;
 }
-/** What `healed` did: the fixes, the features left and why, and the body's health before and after. */
+/** What `heal` did: the fixes, the features left and why, and the body's health before and after. */
 export class HealReport {
   constructor(tolerance: number, moved: number, guarded: boolean, fixes: HealFix[], refused: HealRefusal[], smallBefore: number, smallAfter: number,
     freeBefore: number, freeAfter: number, closedBefore: boolean, closedAfter: boolean, nonmanifoldBefore: number, nonmanifoldAfter: number);
@@ -261,8 +265,37 @@ export class HealReport {
 }
 /** `health`'s options: `tolerance` (omitted takes the default, `1e-4` times the diagonal) and `mesh` (also mesh the body and report its cracks). */
 export interface HealthOptions { tolerance?: number; mesh?: boolean }
-/** `healed`'s options: `tolerance` as `health`'s, and the three kinds of fix, each on unless `false`. */
+/** `heal`'s options: `tolerance` as `health`'s, and the three kinds of fix, each on unless `false`. */
 export interface HealOptions { tolerance?: number; edges?: boolean; faces?: boolean; holes?: boolean }
+/** A face's analytic kind as `recognize` gives it: a `RecognizedFace`'s `kind`. */
+export type RecognizedFaceKind = 'plane' | 'cylinder' | 'cone' | 'sphere' | 'torus';
+/** An edge curve's analytic kind as `recognize` gives it: a `RecognizedEdge`'s `kind`. */
+export type RecognizedEdgeKind = 'line' | 'circle' | 'ellipse';
+/** Why `recognize` left a face free-form: a `RecognizeRefusal`'s `why`. */
+export type RecognizeWhy = 'no_kind' | 'mixed_normals' | 'parameter_trims' | 'too_few_samples';
+/** One face `recognize` gave an analytic kind: its face number (unchanged), its kind, and how far any sample of it lies from the analytic surface. */
+export class RecognizedFace {
+  constructor(face: number, kind: RecognizedFaceKind, deviation: number);
+  face: number; kind: RecognizedFaceKind; deviation: number;
+}
+/** One face `recognize` left free-form, and why; `closest` the nearest kind's deviation for `no_kind`, else null. */
+export class RecognizeRefusal {
+  constructor(face: number, why: RecognizeWhy, closest: number | null);
+  face: number; why: RecognizeWhy; closest: number | null;
+}
+/** One edge whose curve `recognize` gave an analytic kind: its brep edge id (as `edgeTolerance` takes one), its kind, and how far it lies from the analytic curve. */
+export class RecognizedEdge {
+  constructor(edge: number, kind: RecognizedEdgeKind, deviation: number);
+  edge: number; kind: RecognizedEdgeKind; deviation: number;
+}
+/** What `recognize` did: the faces and edges given an analytic kind, the faces left and why, and the tolerance it fitted to. */
+export class RecognizeReport {
+  constructor(tolerance: number, faces: RecognizedFace[], refused: RecognizeRefusal[], edges: RecognizedEdge[], edgesLeft: number, worstFace: number, worstEdge: number);
+  tolerance: number; faces: RecognizedFace[]; refused: RecognizeRefusal[]; edges: RecognizedEdge[];
+  edgesLeft: number; worstFace: number; worstEdge: number;
+}
+/** `recognize`'s options: `tolerance` (omitted, or not finite and positive, takes the default, `1e-6` of the body's extent). */
+export interface RecognizeOptions { tolerance?: number }
 /** Whether a brep's faces make a manifold, read off its topology (`Brep.manifold`). */
 export interface Manifold {
   faces: number; edges: number; vertices: number;
@@ -383,8 +416,15 @@ export class TaskTime {
   lateStart: number | null; lateFinish: number | null;
   actualStart: number | null; actualFinish: number | null;
   duration: number | null;
+  /** `'ELAPSEDTIME'`, `'WORKTIME'` or `'NOTDEFINED'`; null where the file gives none. */
+  durationKind: DurationKind | null;
+  /** The duration in working time: that many working days, then that many seconds of working time; null where there is none. */
+  workDuration: { days: number; seconds: number } | null;
 }
 
+export type DurationKind = 'ELAPSEDTIME' | 'WORKTIME' | 'NOTDEFINED';
+export type CalendarKind = 'FIRSTSHIFT' | 'SECONDSHIFT' | 'THIRDSHIFT' | 'NOTDEFINED' | 'USERDEFINED';
+export type RecurrenceKind = 'DAILY' | 'WEEKLY' | 'MONTHLY_BY_DAY_OF_MONTH' | 'MONTHLY_BY_POSITION' | 'BY_DAY_COUNT' | 'BY_WEEKDAY_COUNT' | 'YEARLY_BY_DAY_OF_MONTH' | 'YEARLY_BY_POSITION';
 export type TaskKind = 'attendance' | 'construction' | 'demolition' | 'dismantle' | 'disposal' | 'installation' | 'logistic' | 'maintenance' | 'move' | 'operation' | 'removal' | 'renovation' | 'notdefined' | 'other';
 export type TaskLinkKind = 'finish_start' | 'start_start' | 'finish_finish' | 'start_finish' | 'notdefined' | 'other';
 export type ScheduleKind = 'planned' | 'actual' | 'baseline' | 'notdefined' | 'other';
@@ -420,8 +460,56 @@ export class Task {
   /** The summary task nesting it, or null at the top. */
   readonly parent: Task | null;
   readonly time: TaskTime;
+  /** The index of the work calendar this task works on (`scene.calendars()[i]`), or null. */
+  readonly calendarIndex: number | null;
+  /** The work calendar this task works on, or null. */
+  readonly calendar: WorkCalendar | null;
   /** The nodes it builds or removes. */
   readonly nodes: Node[];
+}
+
+/** A repeating set of days (and times of day) in a `WorkTime`'s pattern. */
+export class Recurrence {
+  private constructor();
+  kind: RecurrenceKind;
+  /** 1..31, sorted. */ days: number[];
+  /** 1 = Monday .. 7 = Sunday, sorted. */ weekdays: number[];
+  /** 1..12, sorted. */ months: number[];
+  position: number | null; interval: number | null; occurrences: number | null;
+  /** `[start, end]` pairs in seconds after midnight; empty for all day. */
+  periods: [number, number][];
+}
+
+/** A repeating set of working (or, among a calendar's `exceptions`, non-working) periods. */
+export class WorkTime {
+  private constructor();
+  name: string;
+  /** Midnight of its first day, seconds since 1970-01-01T00:00, or null for an open end. */
+  start: number | null;
+  /** Midnight of its last day (included), or null for an open end. */
+  finish: number | null;
+  /** Null for every day of the range, all day. */
+  pattern: Recurrence | null;
+}
+
+/** When work happens (`IfcWorkCalendar`). From `Scene.calendars()` or `Task.calendar`. */
+export class WorkCalendar {
+  private constructor();
+  index: number;
+  equals(other: WorkCalendar): boolean;
+  readonly name: string;
+  readonly identification: string;
+  readonly kind: CalendarKind;
+  /** The text of a user-defined kind; `''` otherwise. */
+  readonly kindName: string;
+  readonly working: WorkTime[];
+  readonly exceptions: WorkTime[];
+  /** The working periods overlapping `from`..`to` (seconds since 1970-01-01T00:00), clipped, sorted and merged. Throws for a non-finite date or `from` after `to`. */
+  workingPeriods(from: number, to: number): [number, number][];
+  /** The working seconds in `from`..`to`. */
+  workingSeconds(from: number, to: number): number;
+  /** The date `days` working days, then `seconds` of working time, after `from` (before it, when negative). Throws when no working time lies within 100 years. */
+  addWork(from: number, days: number, seconds?: number): number;
 }
 
 /** A building's programme: an `IfcWorkSchedule` and the tasks it controls. From `Scene.schedules()`. */
@@ -485,6 +573,8 @@ export class Node {
   mesh(): Mesh;
   /** `mesh()` in `double`, copied at call time -- null with nothing to mesh; survives `Scene.forgetMeshes()` and `Scene.close()` as `mesh()`'s copy does. */
   mesh64(): Mesh64 | null;
+  /** Two floats a vertex in `mesh()`'s order, inside the unit square; null when not asked for at open or not fitted. A copy. */
+  readonly lightmapUvs: Float32Array | null;
   meshLod(level: number): Mesh;
   lodError(level: number): number;
   /**
@@ -547,6 +637,8 @@ export class Scene {
   sequences(): Sequence[];
   /** The file's IFC work schedules, in file order. Empty for a file that records none. */
   schedules(): WorkSchedule[];
+  /** The file's IFC work calendars, in file order. Empty for a file that records none. */
+  calendars(): WorkCalendar[];
   /** The link the file declares as the mechanism's base, or null when it declares none. */
   readonly base: Link | null;
   /** The mechanism posed by `values` ([Joint, sequence of numbers] rows, or `StateValue`s), with `ground` held fixed. */

@@ -524,6 +524,8 @@ struct OpenOptions {
     bool colors = false;
     double source_metres_per_unit = 0.0;
     std::string name = "<memory>";
+    // A lightmap atlas that many texels on a side, read back as `Node::lightmap_uvs`; 0 for none.
+    std::uint32_t lightmap_resolution = 0;
 };
 
 inline Result<Scene> open(const std::string& path, const OpenOptions& options = OpenOptions());
@@ -1227,6 +1229,106 @@ inline Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> health
 }
 }  // namespace detail
 
+// ---- recognition: Brep::recognize's report, plain data.
+// One face Brep::recognize gave an analytic kind: its `face` number (the same before and
+// after), its `kind` ("plane", "cylinder", "cone", "sphere" or "torus"), and how far any
+// sample of it or point of its edges lies from the analytic surface (`deviation`).
+struct RecognizedFace {
+    std::uint32_t face = 0;
+    std::string kind;
+    double deviation = 0.0;
+};
+
+// One face Brep::recognize left free-form, and why: "no_kind" (no kind fits within the
+// tolerance; `closest` the deviation of the kind that came closest), "mixed_normals" (its
+// normals point both ways), "parameter_trims" (a trim in its surface's parameters could not
+// be lifted to space) or "too_few_samples"; `closest` is nullopt for all but "no_kind".
+struct RecognizeRefusal {
+    std::uint32_t face = 0;
+    std::string why;
+    std::optional<double> closest;
+};
+
+// One edge whose curve Brep::recognize gave an analytic kind: its brep `edge` id (as
+// edge_tolerance() takes one), its `kind` ("line", "circle" or "ellipse"), and how far any
+// point of the curve or the edge lies from the analytic curve (`deviation`).
+struct RecognizedEdge {
+    std::uint32_t edge = 0;
+    std::string kind;
+    double deviation = 0.0;
+};
+
+// What Brep::recognize did, as plain data: the `tolerance` it fitted to, the `faces`
+// given an analytic kind and those `refused`, the `edges` given one (in edge order), how
+// many edges were left free-form (`edges_left`), and the furthest any face and any edge
+// taken lies from its analytic form (`worst_face`, `worst_edge`; 0 when none was taken).
+struct RecognizeReport {
+    double tolerance = 0.0;
+    std::vector<RecognizedFace> faces;
+    std::vector<RecognizeRefusal> refused;
+    std::vector<RecognizedEdge> edges;
+    std::uint32_t edges_left = 0;
+    double worst_face = 0.0;
+    double worst_edge = 0.0;
+};
+
+namespace detail {
+// The kinds a RecognizedFace and a RecognizedEdge name, and the reasons a RecognizeRefusal
+// gives, by the C ABI's number.
+inline constexpr const char* RECOGNIZE_FACE_KINDS[5] = {"plane", "cylinder", "cone", "sphere", "torus"};
+inline constexpr const char* RECOGNIZE_EDGE_KINDS[3] = {"line", "circle", "ellipse"};
+inline constexpr const char* RECOGNIZE_WHYS[4] = {"no_kind", "mixed_normals", "parameter_trims", "too_few_samples"};
+
+// The flat rows of cadaclysm_brep_recognize_summary and the row readers, in their order: counts (10: faces per
+// kind, faces left, edges per kind, edges left) and sizes (3: tolerance, worst face, worst
+// edge); faces, refusals and edges two items and one size a row. A number outside its table
+// is refused.
+inline Result<RecognizeReport> recognize_report(const std::uint32_t (&counts)[10], const double (&sizes)[3],
+                                                const std::vector<std::uint32_t>& face_items, const std::vector<double>& face_sizes,
+                                                const std::vector<std::uint32_t>& refused_items, const std::vector<double>& refused_sizes,
+                                                const std::vector<std::uint32_t>& edge_items, const std::vector<double>& edge_sizes) {
+    RecognizeReport r;
+    r.tolerance = sizes[0];
+    r.worst_face = sizes[1];
+    r.worst_edge = sizes[2];
+    r.edges_left = counts[9];
+    std::size_t face_count = std::min(face_items.size() / 2, face_sizes.size());
+    r.faces.reserve(face_count);
+    for (std::size_t i = 0; i < face_count; ++i) {
+        std::uint32_t kind = face_items[2 * i + 1];
+        if (kind >= 5) return Error{"recognized: face kind " + std::to_string(kind) + " is not one of the five", Origin::reader};
+        RecognizedFace f;
+        f.face = face_items[2 * i];
+        f.kind = RECOGNIZE_FACE_KINDS[kind];
+        f.deviation = face_sizes[i];
+        r.faces.push_back(std::move(f));
+    }
+    std::size_t refused_count = std::min(refused_items.size() / 2, refused_sizes.size());
+    r.refused.reserve(refused_count);
+    for (std::size_t i = 0; i < refused_count; ++i) {
+        std::uint32_t why = refused_items[2 * i + 1];
+        if (why >= 4) return Error{"recognized: why " + std::to_string(why) + " is not one of the four", Origin::reader};
+        RecognizeRefusal f;
+        f.face = refused_items[2 * i];
+        f.why = RECOGNIZE_WHYS[why];
+        if (!std::isnan(refused_sizes[i])) f.closest = refused_sizes[i];
+        r.refused.push_back(std::move(f));
+    }
+    std::size_t edge_count = std::min(edge_items.size() / 2, edge_sizes.size());
+    r.edges.reserve(edge_count);
+    for (std::size_t i = 0; i < edge_count; ++i) {
+        std::uint32_t kind = edge_items[2 * i + 1];
+        if (kind >= 3) return Error{"recognized: edge kind " + std::to_string(kind) + " is not one of the three", Origin::reader};
+        RecognizedEdge e;
+        e.edge = edge_items[2 * i];
+        e.kind = RECOGNIZE_EDGE_KINDS[kind];
+        e.deviation = edge_sizes[i];
+        r.edges.push_back(std::move(e));
+    }
+    return r;
+}
+}  // namespace detail
+
 // A node's exact B-rep, shared with the scene (not copied), for
 // blacksmith::Solid::from_node. Holds a reference of its own, so it outlives the
 // scene; released when destroyed or on release().
@@ -1255,7 +1357,7 @@ public:
     // twice are joined. A larger `tolerance` also joins two curves between the same
     // two vertices that part by up to it; `vertex` is what decides which edges are
     // candidates at all, and raising it is what could close a slot. Nothing moves.
-    Result<std::pair<Brep, SewReport>> sewed(std::optional<double> tolerance = std::nullopt,
+    Result<std::pair<Brep, SewReport>> sew(std::optional<double> tolerance = std::nullopt,
                                             std::optional<double> vertex = std::nullopt) const {
         if (!ptr_) return Error{"brep: released", Origin::reader};
         std::uint32_t counts[4] = {};
@@ -1276,7 +1378,7 @@ public:
 
     // What is wrong with this brep, as a HealthReport: the free edges (the sides one face
     // bounds) and the wires they chain into, with each edge's nearest partner and the gap
-    // to it; the features below `tolerance`; the loose edges; and what sewed() would join
+    // to it; the features below `tolerance`; the loose edges; and what sew() would join
     // and leave. `tolerance` is the length below which a feature is small and a gap closes
     // -- nullopt, or a value that is not finite and positive, takes the default, 1e-4 times
     // the diagonal (the report shows what was used). `mesh` also meshes the brep and reports
@@ -1320,7 +1422,7 @@ public:
     // fixes that made it worse (`guarded`). `edges`, `faces` and `holes` switch each kind of
     // fix; a kind switched off is refused as "toggled". `tolerance` nullopt, or a value that
     // is not finite and positive, takes the default (the report shows what was used).
-    Result<std::pair<Brep, HealReport>> healed(std::optional<double> tolerance = std::nullopt, bool edges = true,
+    Result<std::pair<Brep, HealReport>> heal(std::optional<double> tolerance = std::nullopt, bool edges = true,
                                                bool faces = true, bool holes = true) const {
         if (!ptr_) return Error{"brep: released", Origin::reader};
         struct Free {
@@ -1356,6 +1458,46 @@ public:
         double t = ::cadaclysm_brep_edge_tolerance(ptr_.get(), edge);
         if (std::isnan(t)) return std::optional<double>();
         return std::optional<double>(t);
+    }
+
+    // This brep with its free-form surfaces and edge curves given their analytic kind, and
+    // what was taken, as a new Brep and a RecognizeReport; this one is left as it was. A
+    // NURBS (or revolved, extruded or swept) surface that is a plane, cylinder, cone, sphere or
+    // torus within `tolerance` of every sample of its faces and every point of their edges
+    // becomes exactly that, and an edge curve that is a line, circle or ellipse within it
+    // likewise -- so a file that stored analytic faces as NURBS (a .3dm especially) comes back
+    // as they were made. Faces and edges keep their numbers. `tolerance` nullopt, or a value
+    // that is not finite and positive, takes the default, 1e-6 of the body's extent -- not the
+    // file's declared tolerance, at which a fillet's blend reads as a torus (the report shows
+    // what was used).
+    Result<std::pair<Brep, RecognizeReport>> recognize(std::optional<double> tolerance = std::nullopt) const {
+        if (!ptr_) return Error{"brep: released", Origin::reader};
+        struct Free {
+            void operator()(CadaclysmRecognize* r) const noexcept { ::cadaclysm_brep_recognize_free(r); }
+        };
+        std::unique_ptr<CadaclysmRecognize, Free> h(::cadaclysm_brep_recognized(ptr_.get(), tolerance.value_or(std::nan(""))));
+        if (!h) return detail::reader_error("recognized");
+        std::uint32_t counts[10] = {};
+        double sizes[3] = {};
+        if (!::cadaclysm_brep_recognize_summary(h.get(), counts, sizes)) return detail::reader_error("recognized");
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> faces = detail::health_rows(
+            [](const CadaclysmRecognize* p, std::uint32_t* items, double* s) { return ::cadaclysm_brep_recognize_faces(p, items, s); },
+            h.get(), 2, 1, "recognized");
+        if (!faces) return faces.error();
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> refused = detail::health_rows(
+            [](const CadaclysmRecognize* p, std::uint32_t* items, double* s) { return ::cadaclysm_brep_recognize_refused(p, items, s); },
+            h.get(), 2, 1, "recognized");
+        if (!refused) return refused.error();
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> edges = detail::health_rows(
+            [](const CadaclysmRecognize* p, std::uint32_t* items, double* s) { return ::cadaclysm_brep_recognize_edges(p, items, s); },
+            h.get(), 2, 1, "recognized");
+        if (!edges) return edges.error();
+        Result<RecognizeReport> report = detail::recognize_report(counts, sizes, faces->first, faces->second, refused->first,
+                                                                  refused->second, edges->first, edges->second);
+        if (!report) return report.error();
+        const CadaclysmBrep* body = ::cadaclysm_brep_recognize_body(h.get());
+        if (body == nullptr) return detail::reader_error("recognized");
+        return std::pair<Brep, RecognizeReport>(Brep(body), std::move(report).value());
     }
 
     void release() noexcept { ptr_.reset(); }
@@ -2178,6 +2320,15 @@ public:
     // that empty. Every level shares the level-0 vertices -- the same positions, only
     // the indices differ -- so upload the vertices once and switch level by index range.
     Mesh mesh_lod(std::uint32_t level) const { return Mesh(scene_, ::cadaclysm_node_mesh_lod(h(), index_, level)); }
+    // A second set of texture coordinates for mesh(), two floats a vertex in its order, packed
+    // into the unit square with no two triangles overlapping: what a baked lightmap needs. Empty
+    // when not asked for at open, for a node with no B-rep, and for a body whose charts did not
+    // fit. A view into the scene.
+    Span<const float> lightmap_uvs() const {
+        std::uint32_t count = 0;
+        const float* p = ::cadaclysm_node_mesh_lightmap_uvs(h(), index_, &count);
+        return p != nullptr && count != 0 ? Span<const float>(p, std::size_t(count) * 2) : Span<const float>();
+    }
     // How far mesh_lod(level) moved the surface, in the scene's units; zero at level 0.
     float lod_error(std::uint32_t level) const { return ::cadaclysm_node_lod_error(h(), index_, level); }
 
@@ -2925,6 +3076,17 @@ struct ElementState {
 // Every date pair a task gives, each seconds since 1970-01-01T00:00 -- no zone:
 // `std::chrono::sys_seconds{std::chrono::seconds{static_cast<long long>(seconds)}}` -- or
 // nothing where the file gives none. `duration` is in seconds.
+//
+// `duration_kind` is "ELAPSEDTIME", "WORKTIME" or "NOTDEFINED", nothing where the file gives
+// none; `work_duration` is the duration in working time, nothing where there is none (an
+// IFC2X3 task, or no duration).
+
+// A duration in working time: that many working days, then that many seconds of working time.
+struct WorkDuration {
+    double days = 0;
+    double seconds = 0;
+};
+
 struct TaskTime {
     std::optional<double> schedule_start;
     std::optional<double> schedule_finish;
@@ -2935,9 +3097,26 @@ struct TaskTime {
     std::optional<double> actual_start;
     std::optional<double> actual_finish;
     std::optional<double> duration;
+    std::optional<std::string> duration_kind;
+    std::optional<WorkDuration> work_duration;
 };
 
 namespace detail {
+inline const char* calendar_kind_word(std::uint32_t code) {
+    static const char* const words[] = {"FIRSTSHIFT", "SECONDSHIFT", "THIRDSHIFT", "NOTDEFINED", "USERDEFINED"};
+    return words[code < 5 ? code : 3];  // out of range: "NOTDEFINED"
+}
+inline const char* recurrence_kind_word(std::uint32_t code) {
+    static const char* const words[] = {"DAILY", "WEEKLY", "MONTHLY_BY_DAY_OF_MONTH", "MONTHLY_BY_POSITION",
+                                        "BY_DAY_COUNT", "BY_WEEKDAY_COUNT", "YEARLY_BY_DAY_OF_MONTH",
+                                        "YEARLY_BY_POSITION"};
+    return words[code < 8 ? code : 0];  // out of range: "DAILY"
+}
+inline std::optional<std::string> duration_kind_word(std::uint32_t code) {
+    static const char* const words[] = {"ELAPSEDTIME", "WORKTIME", "NOTDEFINED"};
+    if (code < 3) return std::string(words[code]);
+    return std::nullopt;
+}
 inline const char* schedule_kind_word(std::uint32_t code) {
     static const char* const words[] = {"planned", "actual", "baseline", "notdefined", "other"};
     return words[code < 5 ? code : 3];  // out of range: "notdefined"
@@ -2963,6 +3142,180 @@ inline std::optional<double> given(bool has, double value) {
 }
 }  // namespace detail
 
+// A repeating set of days (and times of day) in a WorkTime's pattern (IfcRecurrencePattern).
+struct Recurrence {
+    // "DAILY", "WEEKLY", "MONTHLY_BY_DAY_OF_MONTH", "MONTHLY_BY_POSITION", "BY_DAY_COUNT",
+    // "BY_WEEKDAY_COUNT", "YEARLY_BY_DAY_OF_MONTH" or "YEARLY_BY_POSITION".
+    std::string kind;
+    // Days of the month (1..31), weekdays (1 = Monday .. 7 = Sunday) and months (1..12), sorted.
+    std::vector<std::uint8_t> days;
+    std::vector<std::uint8_t> weekdays;
+    std::vector<std::uint8_t> months;
+    std::optional<std::int32_t> position;
+    std::optional<std::uint32_t> interval;
+    std::optional<std::uint32_t> occurrences;
+    // (start, end) pairs in seconds after midnight; empty for all day.
+    std::vector<std::pair<double, double>> periods;
+};
+
+// A repeating set of working (or, among a calendar's exceptions, non-working) periods, valid
+// between two dates (IfcWorkTime). `start` and `finish` are midnight of their day, in seconds
+// since 1970-01-01T00:00, or nothing for an open end; the finish day is included. `pattern`
+// is nothing for every day of the range, all day.
+struct WorkTime {
+    std::string name;
+    std::optional<double> start;
+    std::optional<double> finish;
+    std::optional<Recurrence> pattern;
+};
+
+// When work happens (IfcWorkCalendar). From Scene::calendars or Task::calendar. Borrows from
+// the scene like Node. Dates are seconds since 1970-01-01T00:00, no zone. The queries return an
+// Error carrying the library's message for a date that is not finite or a `from` after `to`.
+struct WorkCalendar {
+    // Its index in Scene::calendars.
+    std::uint32_t index = 0;
+    // Its name, else its identification, else "calendar #k" (k from 1, in file order).
+    std::string name;
+    // "" where none.
+    std::string identification;
+    // "FIRSTSHIFT", "SECONDSHIFT", "THIRDSHIFT", "NOTDEFINED" or "USERDEFINED".
+    std::string kind;
+    // The text of a user-defined kind (kind == "USERDEFINED"); "" otherwise.
+    std::string kind_name;
+
+    // Its working times, in file order.
+    std::vector<WorkTime> working() const {
+        const CadaclysmScene* handle = scene_.get("WorkCalendar").handle;
+        return work_times(handle, false, ::cadaclysm_calendar_working_count(handle, index));
+    }
+
+    // Its exception (non-working) times, in file order.
+    std::vector<WorkTime> exceptions() const {
+        const CadaclysmScene* handle = scene_.get("WorkCalendar").handle;
+        return work_times(handle, true, ::cadaclysm_calendar_exception_count(handle, index));
+    }
+
+    // The working periods overlapping `from`..`to`, clipped to it, sorted and merged:
+    // (start, end) pairs, no two touching or overlapping.
+    Result<std::vector<std::pair<double, double>>> working_periods(double from, double to) const {
+        const CadaclysmScene* handle = scene_.get("WorkCalendar").handle;
+        std::uint32_t count = 0;
+        std::uint32_t status = ::cadaclysm_calendar_working_periods(handle, index, from, to, nullptr, 0, &count);
+        if (status != 0) return status_error(status);
+        std::vector<double> flat(2 * static_cast<std::size_t>(count));
+        if (count > 0) {
+            status = ::cadaclysm_calendar_working_periods(handle, index, from, to, flat.data(), count, &count);
+            if (status != 0) return status_error(status);
+        }
+        std::vector<std::pair<double, double>> out;
+        out.reserve(count);
+        for (std::uint32_t i = 0; i < count && 2 * static_cast<std::size_t>(i) + 1 < flat.size(); ++i) {
+            out.emplace_back(flat[2 * i], flat[2 * i + 1]);
+        }
+        return out;
+    }
+
+    // The working seconds in `from`..`to`.
+    Result<double> working_seconds(double from, double to) const {
+        const CadaclysmScene* handle = scene_.get("WorkCalendar").handle;
+        double out = 0;
+        std::uint32_t status = ::cadaclysm_calendar_working_seconds(handle, index, from, to, &out);
+        if (status != 0) return status_error(status);
+        return out;
+    }
+
+    // The date `days` working days and then `seconds` of working time after `from` (before it,
+    // when negative). A forward result landing at the start of a working day is the end of the
+    // previous one. An Error when no working time lies within 100 years.
+    Result<double> add_work(double from, double days, double seconds = 0) const {
+        const CadaclysmScene* handle = scene_.get("WorkCalendar").handle;
+        double out = 0;
+        std::uint32_t status = ::cadaclysm_calendar_add_work(handle, index, from, days, seconds, &out);
+        if (status != 0) return status_error(status);
+        return out;
+    }
+
+    // Same scene, same index.
+    bool operator==(const WorkCalendar& other) const noexcept {
+        return index == other.index && scene_.identity() == other.scene_.identity();
+    }
+    bool operator!=(const WorkCalendar& other) const noexcept { return !(*this == other); }
+
+private:
+    friend class Scene;
+    friend struct Task;
+
+    static Error status_error(std::uint32_t status) {
+        return Error{detail::text(::cadaclysm_calendar_error_message(status)), Origin::reader};
+    }
+
+    static WorkCalendar read(const detail::Ref<detail::SceneState>& scene, std::uint32_t c) {
+        const CadaclysmScene* handle = scene.get("WorkCalendar").handle;
+        WorkCalendar calendar;
+        calendar.index = c;
+        calendar.name = detail::text(::cadaclysm_calendar_name(handle, c));
+        calendar.identification = detail::text(::cadaclysm_calendar_identification(handle, c));
+        calendar.kind = detail::calendar_kind_word(::cadaclysm_calendar_kind(handle, c));
+        calendar.kind_name = detail::text(::cadaclysm_calendar_kind_name(handle, c));
+        calendar.scene_ = scene;
+        return calendar;
+    }
+
+    enum class List { days, weekdays, months };
+
+    // One of a work time's number lists; each C call is written out so the parity gate sees it.
+    static std::uint32_t list_call(List which, const CadaclysmScene* handle, std::uint32_t c, bool exception,
+                                   std::uint32_t w, std::uint8_t* out, std::uint32_t capacity) {
+        switch (which) {
+            case List::days: return ::cadaclysm_calendar_work_time_days(handle, c, exception, w, out, capacity);
+            case List::weekdays: return ::cadaclysm_calendar_work_time_weekdays(handle, c, exception, w, out, capacity);
+            case List::months: return ::cadaclysm_calendar_work_time_months(handle, c, exception, w, out, capacity);
+        }
+        return 0;
+    }
+
+    static std::vector<std::uint8_t> numbers(const CadaclysmScene* handle, std::uint32_t c, bool exception,
+                                             std::uint32_t w, List which) {
+        std::uint32_t n = list_call(which, handle, c, exception, w, nullptr, 0);
+        std::vector<std::uint8_t> out(n);
+        if (n > 0) list_call(which, handle, c, exception, w, out.data(), n);
+        return out;
+    }
+
+    std::vector<WorkTime> work_times(const CadaclysmScene* handle, bool exception, std::uint32_t count) const {
+        std::vector<WorkTime> out;
+        out.reserve(count);
+        for (std::uint32_t w = 0; w < count; ++w) {
+            CadaclysmWorkTime raw{};
+            ::cadaclysm_calendar_work_time(handle, index, exception, w, &raw);
+            WorkTime time;
+            time.name = detail::text(::cadaclysm_calendar_work_time_name(handle, index, exception, w));
+            time.start = detail::given(raw.has_start, raw.start);
+            time.finish = detail::given(raw.has_finish, raw.finish);
+            if (raw.has_pattern) {
+                Recurrence pattern;
+                pattern.kind = detail::recurrence_kind_word(raw.kind);
+                pattern.days = numbers(handle, index, exception, w, List::days);
+                pattern.weekdays = numbers(handle, index, exception, w, List::weekdays);
+                pattern.months = numbers(handle, index, exception, w, List::months);
+                if (raw.has_position) pattern.position = raw.position;
+                if (raw.has_interval) pattern.interval = raw.interval;
+                if (raw.has_occurrences) pattern.occurrences = raw.occurrences;
+                std::uint32_t n = ::cadaclysm_calendar_work_time_periods(handle, index, exception, w, nullptr, 0);
+                std::vector<double> flat(2 * static_cast<std::size_t>(n));
+                if (n > 0) ::cadaclysm_calendar_work_time_periods(handle, index, exception, w, flat.data(), n);
+                for (std::uint32_t i = 0; i < n; ++i) pattern.periods.emplace_back(flat[2 * i], flat[2 * i + 1]);
+                time.pattern = std::move(pattern);
+            }
+            out.push_back(std::move(time));
+        }
+        return out;
+    }
+
+    detail::Ref<detail::SceneState> scene_;
+};
+
 // One task of a WorkSchedule, from WorkSchedule::tasks. Borrows from the scene like Node.
 struct Task {
     // Its index in WorkSchedule::tasks.
@@ -2984,6 +3337,22 @@ struct Task {
 
     // The index of the work schedule this task belongs to (scene.schedules()[i]).
     std::uint32_t schedule_index() const { return schedule_; }
+
+    // The index of the work calendar this task works on (scene.calendars()[i]), nothing where
+    // it has none.
+    std::optional<std::uint32_t> calendar_index() const {
+        const CadaclysmScene* handle = scene_.get("Task").handle;
+        std::uint32_t out = 0;
+        if (!::cadaclysm_task_calendar(handle, schedule_, index, &out)) return std::nullopt;
+        return out;
+    }
+
+    // The work calendar this task works on, nothing where it has none.
+    std::optional<WorkCalendar> calendar() const {
+        std::optional<std::uint32_t> c = calendar_index();
+        if (!c) return std::nullopt;
+        return WorkCalendar::read(scene_, *c);
+    }
 
     // The summary task nesting it, nothing at the top.
     std::optional<Task> parent() const {
@@ -3036,6 +3405,12 @@ private:
         task.time.actual_start = detail::given(raw.has_actual_start, raw.actual_start);
         task.time.actual_finish = detail::given(raw.has_actual_finish, raw.actual_finish);
         task.time.duration = detail::given(raw.has_duration, raw.duration);
+        task.time.duration_kind = detail::duration_kind_word(::cadaclysm_task_duration_kind(handle, s, t));
+        double work_days = 0;
+        double work_seconds = 0;
+        if (::cadaclysm_task_work_duration(handle, s, t, &work_days, &work_seconds)) {
+            task.time.work_duration = WorkDuration{work_days, work_seconds};
+        }
         task.scene_ = scene;
         task.schedule_ = s;
         return task;
@@ -3420,6 +3795,18 @@ public:
         return out;
     }
 
+    // The file's work calendars -- IfcWorkCalendar, each when work happens. Empty for a file
+    // that records none.
+    std::vector<WorkCalendar> calendars() const {
+        const CadaclysmScene* handle = h();
+        std::uint32_t count = ::cadaclysm_calendar_count(handle);
+        std::vector<WorkCalendar> out;
+        out.reserve(count);
+        detail::Ref<detail::SceneState> r = ref();
+        for (std::uint32_t i = 0; i < count; ++i) out.push_back(WorkCalendar::read(r, i));
+        return out;
+    }
+
     // The link the file declares as the mechanism's base, or nothing when it declares
     // none (the default ground is then the link on the most joints; see pose()).
     std::optional<Link> base() const {
@@ -3709,6 +4096,7 @@ inline void fill_options(CadaclysmOpenOptions& raw, const OpenOptions& options) 
     raw.uvs = (options.convention & UV_WORLD) ? CADACLYSM_UV_WORLD_SCALE : CADACLYSM_UV_NONE;
     raw.colors = options.colors ? CADACLYSM_COLORS_PER_FACE : CADACLYSM_COLORS_NONE;
     raw.source_meters_per_unit = options.source_metres_per_unit;
+    raw.lightmap_resolution = options.lightmap_resolution;
 }
 
 inline Result<void> check_schema(const OpenOptions& options) {

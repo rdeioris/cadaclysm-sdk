@@ -246,7 +246,7 @@ final class BlacksmithAssemblySweptClashTests: XCTestCase {
         let got = try XCTUnwrap(rows.first).first.solid().boundsBoxAt(tol)
         let co = cos(1.5), si = sin(1.5)
         let want = try Solid.cuboid(3, 0.2, 0.2).translate(1.5, 0, 0).boundsBoxAt(tol)
-            .moved(try Frame(values: [0, 0, 0, co, si, 0, -si, co, 0, 0, 0, 1]))
+            .move(try Frame(values: [0, 0, 0, co, si, 0, -si, co, 0, 0, 0, 1]))
         for k in 0..<3 {
             XCTAssertGreaterThanOrEqual(got.lo[k], want.lo[k] - 1e-6, "\(got) in \(want)")
             XCTAssertLessThanOrEqual(got.hi[k], want.hi[k] + 1e-6, "\(got) in \(want)")

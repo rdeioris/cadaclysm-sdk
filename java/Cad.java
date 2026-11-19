@@ -157,7 +157,10 @@ public final class Cad {
             // The pick hook is not exposed here; init leaves both null, which takes the
             // library's own choice among a zip's candidates.
             ValueLayout.ADDRESS.withName("pick"),
-            ValueLayout.ADDRESS.withName("pick_user"));
+            ValueLayout.ADDRESS.withName("pick_user"),
+            // Last in the header; OpenOptions.lightmapResolution.
+            ValueLayout.JAVA_INT.withName("lightmap_resolution"),
+            MemoryLayout.paddingLayout(4));
 
     /**
      * {@code CadaclysmSvgOptions}. {@code cadaclysm_svg_options_init} fills the whole struct,
@@ -277,6 +280,29 @@ public final class Cad {
             ValueLayout.JAVA_BOOLEAN.withName("has_duration"),
             MemoryLayout.paddingLayout(7),
             ValueLayout.JAVA_DOUBLE.withName("duration"));
+
+    // CadaclysmWorkTime: (bool, double) pairs for the two dates, then has_pattern and the pattern's
+    // kind, and (bool, int) pairs for position, interval and occurrences -- each bool padded to
+    // the next field's alignment, 64 bytes. Pinned by bindings.rs.
+    private static final MemoryLayout WORK_TIME = MemoryLayout.structLayout(
+            ValueLayout.JAVA_BOOLEAN.withName("has_start"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("start"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_finish"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("finish"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_pattern"),
+            MemoryLayout.paddingLayout(3),
+            ValueLayout.JAVA_INT.withName("kind"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_position"),
+            MemoryLayout.paddingLayout(3),
+            ValueLayout.JAVA_INT.withName("position"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_interval"),
+            MemoryLayout.paddingLayout(3),
+            ValueLayout.JAVA_INT.withName("interval"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_occurrences"),
+            MemoryLayout.paddingLayout(3),
+            ValueLayout.JAVA_INT.withName("occurrences"));
 
     // CadaclysmElementState: two ints, a double, a bool padded to the next double -- 32
     // bytes. Pinned by bindings.rs.
@@ -436,10 +462,12 @@ public final class Cad {
             NODE_CURVES, NODE_ISOCURVES, REALIZE_ALL, REALIZED, REALIZE_TOTAL, CANCEL,
             NODE_BREP, BREP_RELEASE, BREP_LAYOUT_ID, BREP_MANIFOLD, BREP_SEW, MESH_FORMAT_LABEL,
             BREP_HEALTH, BREP_HEALTH_FREE, BREP_HEALTH_SUMMARY, BREP_HEALTH_FREE_EDGES, BREP_HEALTH_WIRES,
+            BREP_RECOGNIZED, BREP_RECOGNIZE_BODY, BREP_RECOGNIZE_FREE, BREP_RECOGNIZE_SUMMARY,
+            BREP_RECOGNIZE_FACES, BREP_RECOGNIZE_REFUSED, BREP_RECOGNIZE_EDGES,
             BREP_HEALTH_SMALL, BREP_HEALTH_CRACK_EDGES, BREP_HEALED, BREP_HEAL_BODY, BREP_HEAL_FREE,
             BREP_HEAL_SUMMARY, BREP_HEAL_FIXES, BREP_HEAL_REFUSED, BREP_EDGE_TOLERANCE,
             FORMAT_COUNT, FORMAT_NAME, FORMAT_EXTENSIONS, PICK_SAVE, GEOMETRY_DIAGNOSTIC_COUNT,
-            GEOMETRY_DIAGNOSTIC, FORGET_MESHES, LOD_LEVELS, NODE_MESH_LOD, NODE_LOD_ERROR,
+            GEOMETRY_DIAGNOSTIC, FORGET_MESHES, LOD_LEVELS, NODE_MESH_LOD, NODE_MESH_LIGHTMAP_UVS, NODE_LOD_ERROR,
             NODE_EDGE_BEZIERS, NODE_CURVE_BEZIERS, NODE_ISOCURVE_BEZIERS,
             NODE_COLLISION, NODE_COLLISION_HULL,
             MESHLETS_BUILD, MESHLETS_COUNT, MESHLETS_FREE, MESHLET_TRIANGLE_COUNT, MESHLET_VERTEX_COUNT,
@@ -458,6 +486,11 @@ public final class Cad {
             SCHEDULE_COUNT, SCHEDULE_NAME, SCHEDULE_IDENTIFICATION, SCHEDULE_KIND, SCHEDULE_KIND_NAME, SCHEDULE_START, SCHEDULE_FINISH,
             TASK_COUNT, TASK_NAME, TASK_IDENTIFICATION, TASK_KIND, TASK_KIND_NAME, TASK_STATUS, TASK_MILESTONE, TASK_PARENT,
             TASK_TIME_OF, TASK_NODE_COUNT, TASK_NODES, TASK_LINK_COUNT, TASK_LINK, TASK_LINK_KIND_NAME, SCHEDULE_AT,
+            CALENDAR_COUNT, CALENDAR_NAME, CALENDAR_IDENTIFICATION, CALENDAR_KIND, CALENDAR_KIND_NAME,
+            CALENDAR_WORKING_COUNT, CALENDAR_EXCEPTION_COUNT, CALENDAR_WORK_TIME, CALENDAR_WORK_TIME_NAME,
+            CALENDAR_WORK_TIME_DAYS, CALENDAR_WORK_TIME_WEEKDAYS, CALENDAR_WORK_TIME_MONTHS, CALENDAR_WORK_TIME_PERIODS,
+            TASK_CALENDAR, TASK_DURATION_KIND, TASK_WORK_DURATION,
+            CALENDAR_WORKING_PERIODS, CALENDAR_WORKING_SECONDS, CALENDAR_ADD_WORK, CALENDAR_ERROR_MESSAGE,
             POSE, POSE_STATE, POSE_FREE, POSE_GROUND, POSE_NODE_COUNT, POSE_NODE_TRANSFORM,
             POSE_UNSOLVED_COUNT, POSE_UNSOLVED, POSE_DIAGNOSTIC_COUNT, POSE_DIAGNOSTIC, POSE_OUT_OF_RANGE_COUNT, POSE_OUT_OF_RANGE, KINEMATICS_BASE,
             FEM_OPTIONS_INIT, NODE_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
@@ -564,6 +597,13 @@ public final class Cad {
         BREP_HEAL_SUMMARY = bind(linker, lib, "cadaclysm_brep_heal_summary", FunctionDescriptor.of(B, A, A, A));
         BREP_HEAL_FIXES = bind(linker, lib, "cadaclysm_brep_heal_fixes", FunctionDescriptor.of(I, A, A, A));
         BREP_HEAL_REFUSED = bind(linker, lib, "cadaclysm_brep_heal_refused", FunctionDescriptor.of(I, A, A, A));
+        BREP_RECOGNIZED = bind(linker, lib, "cadaclysm_brep_recognized", FunctionDescriptor.of(A, A, D));
+        BREP_RECOGNIZE_BODY = bind(linker, lib, "cadaclysm_brep_recognize_body", FunctionDescriptor.of(A, A));
+        BREP_RECOGNIZE_FREE = bind(linker, lib, "cadaclysm_brep_recognize_free", FunctionDescriptor.ofVoid(A));
+        BREP_RECOGNIZE_SUMMARY = bind(linker, lib, "cadaclysm_brep_recognize_summary", FunctionDescriptor.of(B, A, A, A));
+        BREP_RECOGNIZE_FACES = bind(linker, lib, "cadaclysm_brep_recognize_faces", FunctionDescriptor.of(I, A, A, A));
+        BREP_RECOGNIZE_REFUSED = bind(linker, lib, "cadaclysm_brep_recognize_refused", FunctionDescriptor.of(I, A, A, A));
+        BREP_RECOGNIZE_EDGES = bind(linker, lib, "cadaclysm_brep_recognize_edges", FunctionDescriptor.of(I, A, A, A));
         BREP_EDGE_TOLERANCE = bind(linker, lib, "cadaclysm_brep_edge_tolerance", FunctionDescriptor.of(D, A, I));
         MESH_FORMAT_LABEL = bind(linker, lib, "cadaclysm_mesh_format_label", FunctionDescriptor.of(A, I));
         FORMAT_COUNT = bind(linker, lib, "cadaclysm_format_count", FunctionDescriptor.of(I));
@@ -575,6 +615,7 @@ public final class Cad {
         FORGET_MESHES = bind(linker, lib, "cadaclysm_forget_meshes", FunctionDescriptor.ofVoid(A));
         LOD_LEVELS = bind(linker, lib, "cadaclysm_lod_levels", FunctionDescriptor.of(I));
         NODE_MESH_LOD = bind(linker, lib, "cadaclysm_node_mesh_lod", FunctionDescriptor.of(MESH, A, I, I));
+        NODE_MESH_LIGHTMAP_UVS = bind(linker, lib, "cadaclysm_node_mesh_lightmap_uvs", FunctionDescriptor.of(A, A, I, A));
         NODE_LOD_ERROR = bind(linker, lib, "cadaclysm_node_lod_error", FunctionDescriptor.of(F, A, I, I));
         NODE_EDGE_BEZIERS = bind(linker, lib, "cadaclysm_node_edge_beziers", FunctionDescriptor.of(BEZIERS, A, I));
         NODE_CURVE_BEZIERS = bind(linker, lib, "cadaclysm_node_curve_beziers", FunctionDescriptor.of(BEZIERS, A, I));
@@ -688,6 +729,28 @@ public final class Cad {
         TASK_LINK = bind(linker, lib, "cadaclysm_task_link", FunctionDescriptor.of(B, A, I, I, A, A, A, A, A));
         TASK_LINK_KIND_NAME = bind(linker, lib, "cadaclysm_task_link_kind_name", FunctionDescriptor.of(A, A, I, I));
         SCHEDULE_AT = bind(linker, lib, "cadaclysm_schedule_at", FunctionDescriptor.of(L, A, I, D, I, A, I));
+        // IFC work calendars: their words, work times and recurrence lists, what a task takes from
+        // one, and the three queries (each returns a status; CALENDAR_ERROR_MESSAGE is its text).
+        CALENDAR_COUNT = bind(linker, lib, "cadaclysm_calendar_count", FunctionDescriptor.of(I, A));
+        CALENDAR_NAME = bind(linker, lib, "cadaclysm_calendar_name", FunctionDescriptor.of(A, A, I));
+        CALENDAR_IDENTIFICATION = bind(linker, lib, "cadaclysm_calendar_identification", FunctionDescriptor.of(A, A, I));
+        CALENDAR_KIND = bind(linker, lib, "cadaclysm_calendar_kind", FunctionDescriptor.of(I, A, I));
+        CALENDAR_KIND_NAME = bind(linker, lib, "cadaclysm_calendar_kind_name", FunctionDescriptor.of(A, A, I));
+        CALENDAR_WORKING_COUNT = bind(linker, lib, "cadaclysm_calendar_working_count", FunctionDescriptor.of(I, A, I));
+        CALENDAR_EXCEPTION_COUNT = bind(linker, lib, "cadaclysm_calendar_exception_count", FunctionDescriptor.of(I, A, I));
+        CALENDAR_WORK_TIME = bind(linker, lib, "cadaclysm_calendar_work_time", FunctionDescriptor.of(B, A, I, B, I, A));
+        CALENDAR_WORK_TIME_NAME = bind(linker, lib, "cadaclysm_calendar_work_time_name", FunctionDescriptor.of(A, A, I, B, I));
+        CALENDAR_WORK_TIME_DAYS = bind(linker, lib, "cadaclysm_calendar_work_time_days", FunctionDescriptor.of(I, A, I, B, I, A, I));
+        CALENDAR_WORK_TIME_WEEKDAYS = bind(linker, lib, "cadaclysm_calendar_work_time_weekdays", FunctionDescriptor.of(I, A, I, B, I, A, I));
+        CALENDAR_WORK_TIME_MONTHS = bind(linker, lib, "cadaclysm_calendar_work_time_months", FunctionDescriptor.of(I, A, I, B, I, A, I));
+        CALENDAR_WORK_TIME_PERIODS = bind(linker, lib, "cadaclysm_calendar_work_time_periods", FunctionDescriptor.of(I, A, I, B, I, A, I));
+        TASK_CALENDAR = bind(linker, lib, "cadaclysm_task_calendar", FunctionDescriptor.of(B, A, I, I, A));
+        TASK_DURATION_KIND = bind(linker, lib, "cadaclysm_task_duration_kind", FunctionDescriptor.of(I, A, I, I));
+        TASK_WORK_DURATION = bind(linker, lib, "cadaclysm_task_work_duration", FunctionDescriptor.of(B, A, I, I, A, A));
+        CALENDAR_WORKING_PERIODS = bind(linker, lib, "cadaclysm_calendar_working_periods", FunctionDescriptor.of(I, A, I, D, D, A, I, A));
+        CALENDAR_WORKING_SECONDS = bind(linker, lib, "cadaclysm_calendar_working_seconds", FunctionDescriptor.of(I, A, I, D, D, A));
+        CALENDAR_ADD_WORK = bind(linker, lib, "cadaclysm_calendar_add_work", FunctionDescriptor.of(I, A, I, D, D, D, A));
+        CALENDAR_ERROR_MESSAGE = bind(linker, lib, "cadaclysm_calendar_error_message", FunctionDescriptor.of(A, I));
         // Posing: the mechanism posed by
         // explicit values or a named state, copied eagerly into a Pose and freed (POSE_FREE) before
         // the C handle escapes anywhere -- see Scene.copyPose.
@@ -1034,6 +1097,7 @@ public final class Cad {
         out.set(ValueLayout.JAVA_INT, offset(OPEN_OPTIONS, "colors"), options.colours() ? 1 : 0);
         out.set(ValueLayout.JAVA_DOUBLE, offset(OPEN_OPTIONS, "source_meters_per_unit"),
                 options.sourceMetresPerUnit());
+        out.set(ValueLayout.JAVA_INT, offset(OPEN_OPTIONS, "lightmap_resolution"), options.lightmapResolution());
         return out;
     }
 
@@ -1280,10 +1344,22 @@ public final class Cad {
      * of inside {@link #convention()}.
      */
     public record OpenOptions(Convention convention, boolean fileUnits, boolean uvWorld,
-                               String schema, boolean colours, double sourceMetresPerUnit) {
-        /** The file's own axes and units, no extra schema, no colours. */
+                               String schema, boolean colours, double sourceMetresPerUnit,
+                               int lightmapResolution) {
+        public OpenOptions {
+            if (lightmapResolution < 0)
+                throw new IllegalArgumentException("lightmapResolution must be 0 (off) or a texel count, not " + lightmapResolution);
+        }
+
+        /** The options without a lightmap: what every caller before lightmaps wrote. */
+        public OpenOptions(Convention convention, boolean fileUnits, boolean uvWorld,
+                           String schema, boolean colours, double sourceMetresPerUnit) {
+            this(convention, fileUnits, uvWorld, schema, colours, sourceMetresPerUnit, 0);
+        }
+
+        /** The file's own axes and units, no extra schema, no colours, no lightmap. */
         public static OpenOptions defaults() {
-            return new OpenOptions(Convention.NATIVE, false, false, null, false, 0.0);
+            return new OpenOptions(Convention.NATIVE, false, false, null, false, 0.0, 0);
         }
     }
 
@@ -2512,6 +2588,77 @@ public final class Cad {
         }
     }
 
+    /** One face {@link Brep#recognize} gave an analytic kind: its {@code face} number (the same
+     *  before and after), its {@code kind} ("plane", "cylinder", "cone", "sphere" or "torus"),
+     *  and how far any sample of it or point of its edges lies from the analytic surface
+     *  ({@code deviation}). */
+    public record RecognizedFace(int face, String kind, double deviation) {
+    }
+
+    /** One face {@link Brep#recognize} left free-form, and why: {@code why} is "no_kind" (no
+     *  kind fits within the tolerance), "mixed_normals", "parameter_trims" (a trim in its
+     *  surface's parameters could not be lifted to space) or "too_few_samples"; {@code closest}
+     *  the deviation of the kind that came closest for "no_kind", null otherwise. */
+    public record RecognizeRefusal(int face, String why, Double closest) {
+    }
+
+    /** One edge whose curve {@link Brep#recognize} gave an analytic kind: its brep {@code edge}
+     *  id (as {@link Brep#edgeTolerance} takes one), its {@code kind} ("line", "circle" or
+     *  "ellipse"), and how far any point of the curve or the edge lies from the analytic curve
+     *  ({@code deviation}). */
+    public record RecognizedEdge(int edge, String kind, double deviation) {
+    }
+
+    /** The face kinds a {@link RecognizedFace} names, by the C ABI's number. */
+    private static final String[] RECOGNIZE_FACE_KINDS = {"plane", "cylinder", "cone", "sphere", "torus"};
+
+    /** The curve kinds a {@link RecognizedEdge} names, by the C ABI's number. */
+    private static final String[] RECOGNIZE_EDGE_KINDS = {"line", "circle", "ellipse"};
+
+    /** The reasons a {@link RecognizeRefusal} gives, by the C ABI's number. */
+    private static final String[] RECOGNIZE_WHYS = {"no_kind", "mixed_normals", "parameter_trims", "too_few_samples"};
+
+    /**
+     * What {@link Brep#recognize} did, as plain data: the {@code tolerance} it fitted to, the
+     * {@code faces} given an analytic kind and those {@code refused}, the {@code edges} given
+     * one (in edge order), how many edges were left on a free-form curve ({@code edgesLeft}),
+     * and the furthest a face ({@code worstFace}) and an edge ({@code worstEdge}) taken lies
+     * from its analytic form (0 when none was taken). Faces and edges are numbered as in the
+     * body, before and after alike.
+     */
+    public record RecognizeReport(double tolerance, List<RecognizedFace> faces, List<RecognizeRefusal> refused,
+                                  List<RecognizedEdge> edges, int edgesLeft, double worstFace, double worstEdge) {
+        public RecognizeReport {
+            faces = List.copyOf(faces);
+            refused = List.copyOf(refused);
+            edges = List.copyOf(edges);
+        }
+
+        /** From the flat rows {@code cadaclysm_brep_recognize_summary} and the row readers write,
+         *  in their order: counts (10: faces per kind, faces left, edges per kind, edges left)
+         *  and sizes (3: tolerance, worst face, worst edge); faces, refusals and edges each 2
+         *  items and 1 size a row. A NaN {@code closest} reads as null. */
+        public static RecognizeReport of(int[] counts, double[] sizes, int[] faceItems, double[] faceSizes, int[] refusedItems,
+                                         double[] refusedSizes, int[] edgeItems, double[] edgeSizes) {
+            List<RecognizedFace> faces = new ArrayList<>(faceSizes.length);
+            for (int i = 0; i < faceSizes.length; i++)
+                faces.add(new RecognizedFace(faceItems[2 * i], RECOGNIZE_FACE_KINDS[faceItems[2 * i + 1]], faceSizes[i]));
+            List<RecognizeRefusal> refused = new ArrayList<>(refusedSizes.length);
+            for (int i = 0; i < refusedSizes.length; i++)
+                refused.add(new RecognizeRefusal(refusedItems[2 * i], RECOGNIZE_WHYS[refusedItems[2 * i + 1]],
+                        Double.isNaN(refusedSizes[i]) ? null : refusedSizes[i]));
+            List<RecognizedEdge> edges = new ArrayList<>(edgeSizes.length);
+            for (int i = 0; i < edgeSizes.length; i++)
+                edges.add(new RecognizedEdge(edgeItems[2 * i], RECOGNIZE_EDGE_KINDS[edgeItems[2 * i + 1]], edgeSizes[i]));
+            return new RecognizeReport(sizes[0], faces, refused, edges, counts[9], sizes[1], sizes[2]);
+        }
+    }
+
+    /** A recognised brep and its {@link RecognizeReport}, from {@link Brep#recognize}. The brep
+     *  is the caller's to close. */
+    public record Recognized(Brep brep, RecognizeReport report) {
+    }
+
     /**
      * A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with the
      * scene rather than copied: a reference of this object's own, given back by {@link
@@ -2583,7 +2730,7 @@ public final class Cad {
          *  curves between the same two vertices that part by up to it; {@code vertex} is what
          *  decides which edges are candidates at all, and raising it is what could close a
          *  slot. Nothing moves. Pass null for either to take its default. */
-        public Sewn sewed(Double tolerance, Double vertex) {
+        public Sewn sew(Double tolerance, Double vertex) {
             MemorySegment p = pointer();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment counts = arena.allocate(ValueLayout.JAVA_INT, 4);
@@ -2657,15 +2804,15 @@ public final class Cad {
             }
         }
 
-        /** {@link #healed(Double, boolean, boolean, boolean)} at the default tolerance, every
+        /** {@link #heal(Double, boolean, boolean, boolean)} at the default tolerance, every
          *  kind of fix on. */
-        public Healed healed() {
-            return healed(null, true, true, true);
+        public Healed heal() {
+            return heal(null, true, true, true);
         }
 
-        /** {@link #healed(Double, boolean, boolean, boolean)} with every kind of fix on. */
-        public Healed healed(Double tolerance) {
-            return healed(tolerance, true, true, true);
+        /** {@link #heal(Double, boolean, boolean, boolean)} with every kind of fix on. */
+        public Healed heal(Double tolerance) {
+            return heal(tolerance, true, true, true);
         }
 
         /** This brep with its small features removed, and what was done, as a new {@link Brep}
@@ -2678,7 +2825,7 @@ public final class Cad {
          *  is refused as "toggled". {@code tolerance} null, or a value that is not finite and
          *  positive, takes the default (the report shows what was used). The brep is the
          *  caller's to close. */
-        public Healed healed(Double tolerance, boolean edges, boolean faces, boolean holes) {
+        public Healed heal(Double tolerance, boolean edges, boolean faces, boolean holes) {
             MemorySegment p = pointer();
             MemorySegment h;
             try {
@@ -2723,6 +2870,57 @@ public final class Cad {
             } catch (Throwable t) {
                 throw unchecked(t);
             } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+        }
+
+        /** {@link #recognize(Double)} at the default tolerance. */
+        public Recognized recognize() {
+            return recognize(null);
+        }
+
+        /** This brep with its free-form surfaces and edge curves given their analytic kind, and
+         *  what was taken, as a new {@link Brep} and a {@link RecognizeReport}; this one is left
+         *  as it was. A NURBS (or revolved, extruded or swept) surface that is a plane,
+         *  cylinder, cone, sphere or torus within {@code tolerance} of every sample of its faces
+         *  and every point of their edges becomes exactly that, and an edge curve that is a
+         *  line, circle or ellipse within it likewise -- so a file that stored analytic faces as
+         *  NURBS (a {@code .3dm} especially) comes back as they were made. Faces and edges keep
+         *  their numbers. {@code tolerance} null, or a value that is not finite and positive,
+         *  takes the default, 1e-6 of the body's extent -- not the file's declared tolerance, at
+         *  which a fillet's blend reads as a torus (the report shows what was used). The brep is
+         *  the caller's to close. */
+        public Recognized recognize(Double tolerance) {
+            MemorySegment p = pointer();
+            MemorySegment h;
+            try {
+                h = (MemorySegment) BREP_RECOGNIZED.invokeExact(p, tolerance == null ? Double.NaN : tolerance);
+            } catch (Throwable t) {
+                throw unchecked(t);
+            }
+            if (h.address() == 0) throw new CadaclysmException(lastErrorOr("recognized"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment counts = arena.allocate(ValueLayout.JAVA_INT, 10);
+                MemorySegment sizes = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                if (!(boolean) BREP_RECOGNIZE_SUMMARY.invokeExact(h, counts, sizes)) throw new CadaclysmException(lastErrorOr("recognized"));
+                HealthRows faces = HealthRows.read(BREP_RECOGNIZE_FACES, h, 2, 1);
+                HealthRows refused = HealthRows.read(BREP_RECOGNIZE_REFUSED, h, 2, 1);
+                HealthRows edges = HealthRows.read(BREP_RECOGNIZE_EDGES, h, 2, 1);
+                RecognizeReport report = RecognizeReport.of(counts.toArray(ValueLayout.JAVA_INT), sizes.toArray(ValueLayout.JAVA_DOUBLE),
+                        faces.ids(), faces.sizes(), refused.ids(), refused.sizes(), edges.ids(), edges.sizes());
+                MemorySegment body = (MemorySegment) BREP_RECOGNIZE_BODY.invokeExact(h);
+                if (body.address() == 0) throw new CadaclysmException(lastErrorOr("recognized"));
+                return new Recognized(new Brep(body), report);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unchecked(t);
+            } finally {
+                try {
+                    BREP_RECOGNIZE_FREE.invokeExact(h);
+                } catch (Throwable t) {
+                    throw unchecked(t);
+                }
                 java.lang.ref.Reference.reachabilityFence(this);
             }
         }
@@ -3850,7 +4048,13 @@ public final class Cad {
      *  where the file gives none; {@code duration} is in seconds. From {@link Task#time()}. */
     public record TaskTime(Double scheduleStart, Double scheduleFinish, Double earlyStart, Double earlyFinish,
                            Double lateStart, Double lateFinish, Double actualStart, Double actualFinish,
-                           Double duration) {}
+                           Double duration, String durationKind, WorkDuration workDuration) {}
+
+    /** A duration in working time: {@code days} working days, then {@code seconds} of working time.
+     *  {@link TaskTime#workDuration()} is null where the task has none (an IFC2X3 task, or no
+     *  duration); {@link TaskTime#durationKind()} is {@code "ELAPSEDTIME"}, {@code "WORKTIME"} or
+     *  {@code "NOTDEFINED"}, null where the file gives none. */
+    public record WorkDuration(double days, double seconds) {}
 
     /** One task of a {@link WorkSchedule} ({@code IfcTask}). {@code kind} is {@code "attendance"},
      *  {@code "construction"}, {@code "demolition"}, {@code "dismantle"}, {@code "disposal"},
@@ -3860,10 +4064,17 @@ public final class Cad {
      *  {@code parent} is the summary task nesting this one, null for a top-level task. From
      *  {@link WorkSchedule#tasks()}. */
     public record Task(int schedule, int index, String name, String identification, String kind, String kindName,
-                       String status, boolean milestone, Task parent, TaskTime time, Scene scene) {
+                       String status, boolean milestone, Task parent, TaskTime time, Integer calendarIndex,
+                       Scene scene) {
         /** The index of the work schedule this task belongs to ({@code scene.schedules().get(i)}). */
         public int scheduleIndex() {
             return schedule;
+        }
+
+        /** The work calendar this task works on, or null where it has none. {@code calendarIndex}
+         *  is its index in {@code scene.calendars()}, null where the task has none. */
+        public WorkCalendar calendar() {
+            return calendarIndex == null ? null : readCalendar(scene, calendarIndex);
         }
 
         /** The nodes this task builds or removes, in node order. */
@@ -3937,7 +4148,7 @@ public final class Cad {
                     word(TASK_KINDS, invokeIntAt(TASK_KIND, h, index, i)),
                     string(invokeStringAt(TASK_KIND_NAME, h, index, i)),
                     string(invokeStringAt(TASK_STATUS, h, index, i)),
-                    milestone, parent, readTaskTime(scene, index, i), scene);
+                    milestone, parent, readTaskTime(scene, index, i), readTaskCalendar(scene, index, i), scene);
             visiting[i] = false;
             return tasks[i];
         }
@@ -4044,9 +4255,237 @@ public final class Cad {
                     optionalDouble(s, "has_late_finish", "late_finish"),
                     optionalDouble(s, "has_actual_start", "actual_start"),
                     optionalDouble(s, "has_actual_finish", "actual_finish"),
-                    optionalDouble(s, "has_duration", "duration"));
+                    optionalDouble(s, "has_duration", "duration"),
+                    durationKind(scene, schedule, task),
+                    workDuration(scene, schedule, task));
         } catch (CadaclysmException e) {
             throw e;
+        } catch (Throwable t) {
+            throw unchecked(t);
+        }
+    }
+
+    private static final String[] DURATION_KINDS = {"ELAPSEDTIME", "WORKTIME", "NOTDEFINED"};
+
+    private static String durationKind(Scene scene, int schedule, int task) {
+        int kind;
+        try {
+            kind = (int) TASK_DURATION_KIND.invokeExact(scene.handle(), schedule, task);
+        } catch (Throwable t) {
+            throw unchecked(t);
+        }
+        return kind >= 0 && kind < DURATION_KINDS.length ? DURATION_KINDS[kind] : null;
+    }
+
+    private static WorkDuration workDuration(Scene scene, int schedule, int task) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment days = arena.allocate(ValueLayout.JAVA_DOUBLE);
+            MemorySegment seconds = arena.allocate(ValueLayout.JAVA_DOUBLE);
+            boolean has = (boolean) TASK_WORK_DURATION.invokeExact(scene.handle(), schedule, task, days, seconds);
+            return has ? new WorkDuration(days.get(ValueLayout.JAVA_DOUBLE, 0), seconds.get(ValueLayout.JAVA_DOUBLE, 0)) : null;
+        } catch (Throwable t) {
+            throw unchecked(t);
+        }
+    }
+
+    private static Integer readTaskCalendar(Scene scene, int schedule, int task) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ValueLayout.JAVA_INT);
+            boolean has = (boolean) TASK_CALENDAR.invokeExact(scene.handle(), schedule, task, out);
+            return has ? out.get(ValueLayout.JAVA_INT, 0) : null;
+        } catch (Throwable t) {
+            throw unchecked(t);
+        }
+    }
+
+    // ---- Work calendars -------------------------------------------------------------------
+
+    private static final String[] CALENDAR_KINDS = {"FIRSTSHIFT", "SECONDSHIFT", "THIRDSHIFT", "NOTDEFINED", "USERDEFINED"};
+    private static final String[] RECURRENCE_KINDS = {"DAILY", "WEEKLY", "MONTHLY_BY_DAY_OF_MONTH", "MONTHLY_BY_POSITION",
+            "BY_DAY_COUNT", "BY_WEEKDAY_COUNT", "YEARLY_BY_DAY_OF_MONTH", "YEARLY_BY_POSITION"};
+
+    /** A repeating set of days (and times of day) in a {@link WorkTime}'s pattern
+     *  ({@code IfcRecurrencePattern}). {@code kind} is {@code "DAILY"}, {@code "WEEKLY"},
+     *  {@code "MONTHLY_BY_DAY_OF_MONTH"}, {@code "MONTHLY_BY_POSITION"}, {@code "BY_DAY_COUNT"},
+     *  {@code "BY_WEEKDAY_COUNT"}, {@code "YEARLY_BY_DAY_OF_MONTH"} or {@code "YEARLY_BY_POSITION"}.
+     *  {@code days} (1..31), {@code weekdays} (1 = Monday .. 7 = Sunday) and {@code months} (1..12)
+     *  are sorted; {@code position}, {@code interval} and {@code occurrences} are null where the
+     *  file gives none; {@code periods} are {@code {start, end}} pairs in seconds after midnight,
+     *  empty for all day. */
+    public record Recurrence(String kind, List<Integer> days, List<Integer> weekdays, List<Integer> months,
+                             Integer position, Integer interval, Integer occurrences, List<double[]> periods) {}
+
+    /** A repeating set of working (or, among a calendar's exceptions, non-working) periods, valid
+     *  between two dates ({@code IfcWorkTime}). {@code start} and {@code finish} are midnight of
+     *  their day, in seconds since 1970-01-01T00:00, null for an open end; the finish day is
+     *  included. {@code pattern} is null for every day of the range, all day. */
+    public record WorkTime(String name, Double start, Double finish, Recurrence pattern) {}
+
+    /** When work happens ({@code IfcWorkCalendar}). From {@link Scene#calendars()} or
+     *  {@link Task#calendar()}. {@code kind} is {@code "FIRSTSHIFT"}, {@code "SECONDSHIFT"},
+     *  {@code "THIRDSHIFT"}, {@code "NOTDEFINED"} or {@code "USERDEFINED"} ({@code kindName} is a
+     *  user-defined one's text, empty otherwise). Dates are seconds since 1970-01-01T00:00, no zone.
+     *  The queries throw {@link CadaclysmException} with the library's message for a date that is
+     *  not finite or a {@code from} after {@code to}. */
+    public record WorkCalendar(int index, String name, String identification, String kind, String kindName,
+                               Scene scene) {
+        /** Its working times, in file order. */
+        public List<WorkTime> working() {
+            return workTimes(scene, index, false, invokeIntAt(CALENDAR_WORKING_COUNT, scene.handle(), index));
+        }
+
+        /** Its exception (non-working) times, in file order. */
+        public List<WorkTime> exceptions() {
+            return workTimes(scene, index, true, invokeIntAt(CALENDAR_EXCEPTION_COUNT, scene.handle(), index));
+        }
+
+        /** The working periods overlapping {@code from}..{@code to}, clipped to it, sorted and
+         *  merged: {@code {start, end}} pairs, no two touching or overlapping. */
+        public List<double[]> workingPeriods(double from, double to) {
+            MemorySegment h = scene.handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment count = arena.allocate(ValueLayout.JAVA_INT);
+                calendarCheck((int) CALENDAR_WORKING_PERIODS.invokeExact(h, index, from, to, MemorySegment.NULL, 0, count));
+                int n = count.get(ValueLayout.JAVA_INT, 0);
+                List<double[]> found = new ArrayList<>(n);
+                if (n == 0) return found;
+                MemorySegment flat = arena.allocate(ValueLayout.JAVA_DOUBLE, 2L * n);
+                calendarCheck((int) CALENDAR_WORKING_PERIODS.invokeExact(h, index, from, to, flat, n, count));
+                for (int i = 0; i < n; i++)
+                    found.add(new double[] {flat.getAtIndex(ValueLayout.JAVA_DOUBLE, 2L * i),
+                            flat.getAtIndex(ValueLayout.JAVA_DOUBLE, 2L * i + 1)});
+                return found;
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unchecked(t);
+            }
+        }
+
+        /** The working seconds in {@code from}..{@code to}. */
+        public double workingSeconds(double from, double to) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                calendarCheck((int) CALENDAR_WORKING_SECONDS.invokeExact(scene.handle(), index, from, to, out));
+                return out.get(ValueLayout.JAVA_DOUBLE, 0);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unchecked(t);
+            }
+        }
+
+        /** The date {@code days} working days and then {@code seconds} of working time after
+         *  {@code from} (before it, when negative). A forward result landing at the start of a
+         *  working day is the end of the previous one. Throws {@link CadaclysmException} when no
+         *  working time lies within 100 years. */
+        public double addWork(double from, double days, double seconds) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                calendarCheck((int) CALENDAR_ADD_WORK.invokeExact(scene.handle(), index, from, days, seconds, out));
+                return out.get(ValueLayout.JAVA_DOUBLE, 0);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unchecked(t);
+            }
+        }
+    }
+
+    private static void calendarCheck(int status) {
+        if (status == 0) return;
+        try {
+            throw new CadaclysmException(string((MemorySegment) CALENDAR_ERROR_MESSAGE.invokeExact(status)));
+        } catch (CadaclysmException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unchecked(t);
+        }
+    }
+
+    private static WorkCalendar readCalendar(Scene scene, int index) {
+        MemorySegment h = scene.handle();
+        return new WorkCalendar(index,
+                string(invokeStringAt(CALENDAR_NAME, h, index)),
+                string(invokeStringAt(CALENDAR_IDENTIFICATION, h, index)),
+                word(CALENDAR_KINDS, invokeIntAt(CALENDAR_KIND, h, index), "NOTDEFINED"),
+                string(invokeStringAt(CALENDAR_KIND_NAME, h, index)),
+                scene);
+    }
+
+    /** One of a pattern's sorted lists (days, weekdays or months), as unsigned bytes. */
+    private static List<Integer> patternNumbers(MethodHandle function, Scene scene, int calendar, boolean exception, int workTime) {
+        MemorySegment h = scene.handle();
+        try (Arena arena = Arena.ofConfined()) {
+            int n = (int) function.invokeExact(h, calendar, exception, workTime, MemorySegment.NULL, 0);
+            List<Integer> found = new ArrayList<>(n);
+            if (n == 0) return found;
+            MemorySegment out = arena.allocate(ValueLayout.JAVA_BYTE, n);
+            int written = (int) function.invokeExact(h, calendar, exception, workTime, out, n);
+            for (int i = 0; i < Math.min(n, written); i++) found.add(out.get(ValueLayout.JAVA_BYTE, i) & 0xFF);
+            return found;
+        } catch (Throwable t) {
+            throw unchecked(t);
+        }
+    }
+
+    private static List<WorkTime> workTimes(Scene scene, int calendar, boolean exception, int count) {
+        MemorySegment h = scene.handle();
+        List<WorkTime> found = new ArrayList<>(count);
+        for (int w = 0; w < count; w++) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = arena.allocate(WORK_TIME);
+                boolean ok = (boolean) CALENDAR_WORK_TIME.invokeExact(h, calendar, exception, w, raw);
+                if (!ok) throw new CadaclysmException(lastErrorOr("calendar_work_time"));
+                Recurrence pattern = null;
+                if (raw.get(ValueLayout.JAVA_BOOLEAN, WORK_TIME.byteOffset(MemoryLayout.PathElement.groupElement("has_pattern")))) {
+                    int n = (int) CALENDAR_WORK_TIME_PERIODS.invokeExact(h, calendar, exception, w, MemorySegment.NULL, 0);
+                    List<double[]> periods = new ArrayList<>(n);
+                    if (n > 0) {
+                        MemorySegment flat = arena.allocate(ValueLayout.JAVA_DOUBLE, 2L * n);
+                        int written = (int) CALENDAR_WORK_TIME_PERIODS.invokeExact(h, calendar, exception, w, flat, n);
+                        for (int i = 0; i < Math.min(n, written); i++)
+                            periods.add(new double[] {flat.getAtIndex(ValueLayout.JAVA_DOUBLE, 2L * i),
+                                    flat.getAtIndex(ValueLayout.JAVA_DOUBLE, 2L * i + 1)});
+                    }
+                    int kind = raw.get(ValueLayout.JAVA_INT, WORK_TIME.byteOffset(MemoryLayout.PathElement.groupElement("kind")));
+                    pattern = new Recurrence(word(RECURRENCE_KINDS, kind, "DAILY"),
+                            patternNumbers(CALENDAR_WORK_TIME_DAYS, scene, calendar, exception, w),
+                            patternNumbers(CALENDAR_WORK_TIME_WEEKDAYS, scene, calendar, exception, w),
+                            patternNumbers(CALENDAR_WORK_TIME_MONTHS, scene, calendar, exception, w),
+                            optionalInt(raw, "has_position", "position"),
+                            optionalInt(raw, "has_interval", "interval"),
+                            optionalInt(raw, "has_occurrences", "occurrences"),
+                            periods);
+                }
+                found.add(new WorkTime(string(invokeStringAt(CALENDAR_WORK_TIME_NAME, h, calendar, exception, w)),
+                        optionalWorkTimeDouble(raw, "has_start", "start"),
+                        optionalWorkTimeDouble(raw, "has_finish", "finish"),
+                        pattern));
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unchecked(t);
+            }
+        }
+        return found;
+    }
+
+    private static Double optionalWorkTimeDouble(MemorySegment s, String has, String value) {
+        return s.get(ValueLayout.JAVA_BOOLEAN, WORK_TIME.byteOffset(MemoryLayout.PathElement.groupElement(has)))
+                ? s.get(ValueLayout.JAVA_DOUBLE, WORK_TIME.byteOffset(MemoryLayout.PathElement.groupElement(value)))
+                : null;
+    }
+
+    private static Integer optionalInt(MemorySegment s, String has, String value) {
+        return s.get(ValueLayout.JAVA_BOOLEAN, WORK_TIME.byteOffset(MemoryLayout.PathElement.groupElement(has)))
+                ? s.get(ValueLayout.JAVA_INT, WORK_TIME.byteOffset(MemoryLayout.PathElement.groupElement(value)))
+                : null;
+    }
+
+    private static MemorySegment invokeStringAt(MethodHandle function, MemorySegment scene, int a, boolean exception, int b) {
+        try {
+            return (MemorySegment) function.invokeExact(scene, a, exception, b);
         } catch (Throwable t) {
             throw unchecked(t);
         }
@@ -4522,6 +4961,22 @@ public final class Cad {
             try (Arena arena = Arena.ofConfined()) {
                 SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(MESH));
                 return meshOf((MemorySegment) NODE_MESH_LOD.invokeExact(allocator, scene.handle(), index, level));
+            } catch (Throwable t) {
+                throw unchecked(t);
+            }
+        }
+
+        /**
+         * A second set of texture coordinates for {@link #mesh()}, two floats a vertex in its order,
+         * packed into the unit square with no two triangles overlapping: what a baked lightmap needs.
+         * Null when not asked for at open, for a node with no B-rep, and for a body whose charts did
+         * not fit. A read-only view into the scene, dead once it closes.
+         */
+        public FloatBuffer lightmapUvs() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment count = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment at = (MemorySegment) NODE_MESH_LIGHTMAP_UVS.invokeExact(scene.handle(), index, count);
+                return floatView(scene.lifetime(), at.address(), Integer.toUnsignedLong(count.get(ValueLayout.JAVA_INT, 0)) * 2);
             } catch (Throwable t) {
                 throw unchecked(t);
             }
@@ -5312,6 +5767,14 @@ public final class Cad {
             return found;
         }
 
+        /** The IFC work calendars the file records, in file order. Empty for a file that records
+         *  none. */
+        public List<WorkCalendar> calendars() {
+            int count = invokeIntOf(CALENDAR_COUNT, handle());
+            List<WorkCalendar> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) found.add(readCalendar(this, i));
+            return found;
+        }
         /** The IFC work schedules the file records, in file order. Empty for a file that records
          *  none. */
         public List<WorkSchedule> schedules() {

@@ -376,6 +376,94 @@ static Result<void> run(const std::string& cube_path) {
                    (bad_word.ok() ? std::string("ok") : bad_word.error().message));
     }
 
+
+    // Work calendars: schedule-calendar.ifc is schedule.ifc with one calendar, Site calendar,
+    // that every task works on. MONDAY is 2026-03-02T00:00:00.
+    const double monday = 1772409600.0;
+    expect(scheduled.calendars().empty(), "schedule.ifc has calendars");
+    if (!schedules.empty()) {
+        std::vector<cadaclysm::Task> plain = schedules[0].tasks();
+        expect(!plain.empty() && !plain[0].calendar_index().has_value() && !plain[0].calendar().has_value(),
+               "a task of schedule.ifc has a calendar");
+    }
+    CADACLYSM_TRY(calendared, cadaclysm::open(cadaclysm::detail::utf8(
+                                  cadaclysm::detail::fs_path(cube_path).parent_path() / "schedule-calendar.ifc")));
+    std::vector<cadaclysm::WorkCalendar> calendars = calendared.calendars();
+    expect(calendars.size() == 1, "schedule-calendar.ifc does not have exactly one calendar");
+    if (calendars.size() == 1) {
+        const cadaclysm::WorkCalendar& cal = calendars[0];
+        expect(cal.name == "Site calendar" && cal.identification == "CAL-1" && cal.kind == "FIRSTSHIFT" &&
+                   cal.kind_name.empty(),
+               "the calendar's name, identification, kind and kind_name are not Site calendar, CAL-1, FIRSTSHIFT, empty");
+        std::vector<cadaclysm::WorkTime> working = cal.working();
+        expect(working.size() == 1, "the calendar does not have exactly one working time");
+        if (working.size() == 1) {
+            const cadaclysm::WorkTime& weekdays = working[0];
+            expect(weekdays.name == "Weekdays" && weekdays.start.has_value() && *weekdays.start == monday - 60 * day &&
+                       !weekdays.finish.has_value() && weekdays.pattern.has_value(),
+                   "Weekdays' name, start, finish and pattern are not Weekdays, 60 days before Monday, none, a pattern");
+            if (weekdays.pattern.has_value()) {
+                const cadaclysm::Recurrence& p = *weekdays.pattern;
+                const std::vector<std::uint8_t> five{1, 2, 3, 4, 5};
+                expect(p.kind == "WEEKLY" && p.days.empty() && p.weekdays == five && p.months.empty(),
+                       "Weekdays' pattern is not WEEKLY on weekdays 1..5");
+                expect(!p.position.has_value() && !p.interval.has_value() && !p.occurrences.has_value(),
+                       "Weekdays' pattern has a position, interval or occurrences");
+                expect(p.periods.size() == 2 && p.periods[0] == std::make_pair(28800.0, 43200.0) &&
+                           p.periods[1] == std::make_pair(46800.0, 61200.0),
+                       "Weekdays' periods are not 08-12 and 13-17");
+            }
+        }
+        std::vector<cadaclysm::WorkTime> exceptions = cal.exceptions();
+        expect(exceptions.size() == 1, "the calendar does not have exactly one exception");
+        if (exceptions.size() == 1) {
+            const cadaclysm::WorkTime& easter = exceptions[0];
+            expect(easter.name == "Easter Monday" && !easter.start.has_value() && !easter.finish.has_value() &&
+                       easter.pattern.has_value() && easter.pattern->kind == "YEARLY_BY_DAY_OF_MONTH" &&
+                       easter.pattern->days == std::vector<std::uint8_t>{6} &&
+                       easter.pattern->months == std::vector<std::uint8_t>{4} && easter.pattern->periods.empty(),
+                   "Easter Monday is not YEARLY_BY_DAY_OF_MONTH on 6 April, all day");
+        }
+
+        std::vector<cadaclysm::WorkSchedule> calendar_schedules = calendared.schedules();
+        expect(!calendar_schedules.empty() && !calendar_schedules[0].tasks().empty(),
+               "schedule-calendar.ifc has no tasks");
+        if (!calendar_schedules.empty() && !calendar_schedules[0].tasks().empty()) {
+            cadaclysm::Task slab_task = calendar_schedules[0].tasks()[0];
+            std::optional<std::uint32_t> slab_calendar = slab_task.calendar_index();
+            expect(slab_calendar.has_value() && *slab_calendar == 0, "Slab's calendar_index is not 0");
+            std::optional<cadaclysm::WorkCalendar> slab_cal = slab_task.calendar();
+            expect(slab_cal.has_value() && *slab_cal == cal, "Slab's calendar is not the file's calendar");
+            expect(slab_task.time.duration_kind.has_value() && *slab_task.time.duration_kind == "WORKTIME" &&
+                       slab_task.time.work_duration.has_value() && slab_task.time.work_duration->days == 10 &&
+                       slab_task.time.work_duration->seconds == 0,
+                   "Slab's duration is not WORKTIME, 10 working days");
+        }
+
+        Result<std::vector<std::pair<double, double>>> week = cal.working_periods(monday, monday + 7 * day);
+        expect(week.ok() && week->size() == 10 && (*week)[0] == std::make_pair(1772438400.0, 1772452800.0),
+               "working_periods over the week of 2026-03-02 is not 10 pairs from 1772438400..1772452800");
+        Result<double> week_seconds = cal.working_seconds(monday, monday + 7 * day);
+        expect(week_seconds.ok() && *week_seconds == 10 * 4 * 3600.0, "working_seconds over the week is not 40 hours");
+        Result<std::vector<std::pair<double, double>>> easter_day = cal.working_periods(1775433600.0, 1775520000.0);
+        expect(easter_day.ok() && easter_day->empty(), "Easter Monday 2026-04-06 has working periods");
+        Result<double> ten_days = cal.add_work(1772438400.0, 10);
+        expect(ten_days.ok() && *ten_days == 1773421200.0, "add_work(Monday 08:00, 10 days) is not Friday 17:00");
+
+        Result<std::vector<std::pair<double, double>>> reversed = cal.working_periods(1, 0);
+        expect(!reversed.ok() && reversed.error().message == "from must not be after to",
+               "working_periods(1, 0) did not fail with 'from must not be after to': " +
+                   (reversed.ok() ? std::string("ok") : reversed.error().message));
+        Result<double> not_finite = cal.working_seconds(std::numeric_limits<double>::quiet_NaN(), 0);
+        expect(!not_finite.ok() && not_finite.error().message == "from and to must be finite",
+               "working_seconds(NaN, 0) did not fail with 'from and to must be finite': " +
+                   (not_finite.ok() ? std::string("ok") : not_finite.error().message));
+        Result<double> infinite = cal.add_work(t0, std::numeric_limits<double>::infinity());
+        expect(!infinite.ok() && infinite.error().message == "from and to must be finite",
+               "add_work(T0, inf) did not fail with 'from and to must be finite': " +
+                   (infinite.ok() ? std::string("ok") : infinite.error().message));
+    }
+
     return {};
 }
 

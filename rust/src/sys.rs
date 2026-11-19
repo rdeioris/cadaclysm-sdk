@@ -51,6 +51,13 @@ pub struct CadaclysmHeal {
     _private: [u8; 0],
 }
 
+/// A recognition report and the recognised body (`cadaclysm_brep_recognized`): owned,
+/// independent of the brep. Opaque; freed with `cadaclysm_brep_recognize_free`.
+#[repr(C)]
+pub struct CadaclysmRecognize {
+    _private: [u8; 0],
+}
+
 /// A posed mechanism -- `Scene::pose` or `Scene::pose_state`'s answer. Opaque; owns its
 /// transforms and does not borrow the scene. Freed with `cadaclysm_pose_free`.
 #[repr(C)]
@@ -94,6 +101,7 @@ pub struct CadaclysmOpenOptions {
     /// `CadaclysmPick`, a function pointer; null takes the library's default.
     pub pick: *const c_void,
     pub pick_user: *mut c_void,
+    pub lightmap_resolution: u32,
 }
 
 #[repr(C)]
@@ -371,6 +379,25 @@ pub struct CadaclysmTaskTime {
     pub duration: f64,
 }
 
+/// `CadaclysmWorkTime`: one work time of a calendar, from `cadaclysm_calendar_work_time`; each
+/// `has_*` says its value is given. 64 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CadaclysmWorkTime {
+    pub has_start: bool,
+    pub start: f64,
+    pub has_finish: bool,
+    pub finish: f64,
+    pub has_pattern: bool,
+    pub kind: u32,
+    pub has_position: bool,
+    pub position: i32,
+    pub has_interval: bool,
+    pub interval: u32,
+    pub has_occurrences: bool,
+    pub occurrences: u32,
+}
+
 /// `CadaclysmElementState`: one element's state on a date, from `cadaclysm_schedule_at`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -447,6 +474,7 @@ entry_points! {
     fn cadaclysm_node_mesh64(scene: *const CadaclysmScene, node: u32) -> CadaclysmMesh64;
     fn cadaclysm_lod_levels() -> u32;
     fn cadaclysm_node_mesh_lod(scene: *const CadaclysmScene, node: u32, level: u32) -> CadaclysmMesh;
+    fn cadaclysm_node_mesh_lightmap_uvs(scene: *const CadaclysmScene, node: u32, out_vertex_count: *mut u32) -> *const f32;
     fn cadaclysm_node_lod_error(scene: *const CadaclysmScene, node: u32, level: u32) -> f32;
     fn cadaclysm_node_collision(scene: *const CadaclysmScene, node: u32, hull_budget: u32, out: *mut CadaclysmCollision) -> bool;
     fn cadaclysm_node_collision_hull(scene: *const CadaclysmScene, node: u32, hull_budget: u32) -> CadaclysmCollisionHull;
@@ -478,6 +506,13 @@ entry_points! {
     fn cadaclysm_brep_heal_fixes(h: *const CadaclysmHeal, items: *mut u32, sizes: *mut f64) -> u32;
     fn cadaclysm_brep_heal_refused(h: *const CadaclysmHeal, items: *mut u32, sizes: *mut f64) -> u32;
     fn cadaclysm_brep_edge_tolerance(brep: *const CadaclysmBrep, edge: u32) -> f64;
+    fn cadaclysm_brep_recognized(brep: *const CadaclysmBrep, tolerance: f64) -> *mut CadaclysmRecognize;
+    fn cadaclysm_brep_recognize_body(r: *const CadaclysmRecognize) -> *const CadaclysmBrep;
+    fn cadaclysm_brep_recognize_free(r: *mut CadaclysmRecognize);
+    fn cadaclysm_brep_recognize_summary(r: *const CadaclysmRecognize, counts: *mut u32, sizes: *mut f64) -> bool;
+    fn cadaclysm_brep_recognize_faces(r: *const CadaclysmRecognize, items: *mut u32, sizes: *mut f64) -> u32;
+    fn cadaclysm_brep_recognize_refused(r: *const CadaclysmRecognize, items: *mut u32, sizes: *mut f64) -> u32;
+    fn cadaclysm_brep_recognize_edges(r: *const CadaclysmRecognize, items: *mut u32, sizes: *mut f64) -> u32;
     fn cadaclysm_brep_layout_id() -> *const c_char;
     fn cadaclysm_surface_matrix(scene: *const CadaclysmScene, out: *mut f32);
     fn cadaclysm_node_bounds(scene: *const CadaclysmScene, node: u32) -> CadaclysmBounds;
@@ -606,6 +641,34 @@ entry_points! {
         out: *mut CadaclysmElementState,
         capacity: u32
     ) -> i64;
+    fn cadaclysm_calendar_count(scene: *const CadaclysmScene) -> u32;
+    fn cadaclysm_calendar_name(scene: *const CadaclysmScene, c: u32) -> *const c_char;
+    fn cadaclysm_calendar_identification(scene: *const CadaclysmScene, c: u32) -> *const c_char;
+    fn cadaclysm_calendar_kind(scene: *const CadaclysmScene, c: u32) -> u32;
+    fn cadaclysm_calendar_kind_name(scene: *const CadaclysmScene, c: u32) -> *const c_char;
+    fn cadaclysm_calendar_working_count(scene: *const CadaclysmScene, c: u32) -> u32;
+    fn cadaclysm_calendar_exception_count(scene: *const CadaclysmScene, c: u32) -> u32;
+    fn cadaclysm_calendar_work_time(scene: *const CadaclysmScene, c: u32, exception: bool, w: u32, out: *mut CadaclysmWorkTime) -> bool;
+    fn cadaclysm_calendar_work_time_name(scene: *const CadaclysmScene, c: u32, exception: bool, w: u32) -> *const c_char;
+    fn cadaclysm_calendar_work_time_days(scene: *const CadaclysmScene, c: u32, exception: bool, w: u32, out: *mut u8, capacity: u32) -> u32;
+    fn cadaclysm_calendar_work_time_weekdays(scene: *const CadaclysmScene, c: u32, exception: bool, w: u32, out: *mut u8, capacity: u32) -> u32;
+    fn cadaclysm_calendar_work_time_months(scene: *const CadaclysmScene, c: u32, exception: bool, w: u32, out: *mut u8, capacity: u32) -> u32;
+    fn cadaclysm_calendar_work_time_periods(scene: *const CadaclysmScene, c: u32, exception: bool, w: u32, out: *mut f64, capacity: u32) -> u32;
+    fn cadaclysm_task_calendar(scene: *const CadaclysmScene, s: u32, t: u32, out: *mut u32) -> bool;
+    fn cadaclysm_task_duration_kind(scene: *const CadaclysmScene, s: u32, t: u32) -> u32;
+    fn cadaclysm_task_work_duration(scene: *const CadaclysmScene, s: u32, t: u32, days: *mut f64, seconds: *mut f64) -> bool;
+    fn cadaclysm_calendar_working_periods(
+        scene: *const CadaclysmScene,
+        c: u32,
+        from: f64,
+        to: f64,
+        out: *mut f64,
+        capacity: u32,
+        count: *mut u32
+    ) -> u32;
+    fn cadaclysm_calendar_working_seconds(scene: *const CadaclysmScene, c: u32, from: f64, to: f64, out: *mut f64) -> u32;
+    fn cadaclysm_calendar_add_work(scene: *const CadaclysmScene, c: u32, from: f64, days: f64, seconds: f64, out: *mut f64) -> u32;
+    fn cadaclysm_calendar_error_message(status: u32) -> *const c_char;
     fn cadaclysm_fem_options_init(options: *mut CadaclysmFemOptions);
     fn cadaclysm_node_fem_mesh(
         scene: *const CadaclysmScene,

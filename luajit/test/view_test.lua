@@ -153,7 +153,7 @@ return function(t)
     if not v then return end
     -- Off: the grid lies across the empty view's centre and moves with the camera, so the centre
     -- and corner compare the cube against the background alone.
-    v:layer("grid", false)
+    v:set_layer("grid", false)
     local empty = v:image()
     t.eq(empty.width * empty.height * 4, 160 * 120 * 4, "image size")
     local solid = bs.Solid.cuboid(20, 20, 20)
@@ -176,7 +176,7 @@ return function(t)
     points:remove()
     v:close()
     t.raises(function() v:draw() end, "closed")
-    t.raises(function() item:colour({ 1, 0, 0 }) end, "closed")
+    t.raises(function() item:set_colour({ 1, 0, 0 }) end, "closed")
   end)
 
   t.test("pick on a never-drawn view, size, lod and wake_ms answer as Python does", function()
@@ -190,20 +190,20 @@ return function(t)
     t.eq(v:pick(1, 1), nil, "a corner picked something")
     -- 1.16's user layers: the cube on layer 3, the layer off (nothing to pick) and on again;
     -- layer 32 refused, for an item and for the view.
-    cube:user_layer(3)
-    v:user_layer(3, false)
+    cube:set_user_layer(3)
+    v:set_user_layer(3, false)
     t.eq(v:pick(48, 48), nil, "an item on a layer switched off was picked")
-    v:user_layer(3, true)
+    v:set_user_layer(3, true)
     local back = v:pick(48, 48)
     t.ok(back and back.item == cube.id, "an item on a layer switched on again was not picked")
-    t.raises(function() cube:user_layer(32) end, "past 31")
-    t.raises(function() v:user_layer(32, false) end, "past 31")
+    t.raises(function() cube:set_user_layer(32) end, "past 31")
+    t.raises(function() v:set_user_layer(32, false) end, "past 31")
     local w, h = v:size()
     t.eq(w * 1000 + h, 96096, "size")
-    v:lod("smooth")
+    v:set_lod("smooth")
     local wake = v:wake_ms()
     t.ok(wake == nil or wake >= 0, "wake_ms")
-    v:lod(false)
+    v:set_lod(false)
     v:close()
   end)
 
@@ -229,14 +229,14 @@ return function(t)
       level = on.children
     end
     t.ok(#expected > 0, "the leaf has no siblings to hide: the case would prove nothing")
-    local hidden, original = {}, view.Item.node_visible
-    view.Item.node_visible = function(self, node, on)
+    local hidden, original = {}, view.Item.set_node_visible
+    view.Item.set_node_visible = function(self, node, on)
       if on == false then hidden[#hidden + 1] = type(node) == "table" and node.index or node end
       return original(self, node, on)
     end
     local shown
     local ok, err = pcall(function() shown = v:show_node(leaf) end)
-    view.Item.node_visible = original
+    view.Item.set_node_visible = original
     if not ok then error(err, 0) end
     table.sort(hidden)
     table.sort(expected)
@@ -267,16 +267,16 @@ return function(t)
     v:standard("iso")
     v:frame()
     local rest = v:image()
-    item:node_transforms(transforms)
+    item:set_node_transforms(transforms)
     t.ok(changed(rest, v:image()) > 0, "the pose moved nothing on screen")
-    item:node_transforms(nil)
+    item:set_node_transforms(nil)
     t.ok(changed(rest, v:image()) < 160 * 160 / 1000, "nil did not restore the rest pose")
-    local wrong = t.raises(function() item:node_transforms({ transforms[1] }) end)
+    local wrong = t.raises(function() item:set_node_transforms({ transforms[1] }) end)
     t.ok(is_view_error(wrong) and tostring(wrong):find("1 transforms were given", 1, true), "a wrong count: " .. tostring(wrong))
     -- An empty list is a count of zero, refused on it -- not the NULL that restores the rest pose.
-    item:node_transforms(transforms)
+    item:set_node_transforms(transforms)
     local posed = v:image()
-    local empty = t.raises(function() item:node_transforms({}) end)
+    local empty = t.raises(function() item:set_node_transforms({}) end)
     t.ok(is_view_error(empty), "an empty transforms list: " .. tostring(empty))
     t.eq(changed(posed, v:image()), 0, "an empty list restored the rest pose")
     scene:close()
@@ -434,7 +434,7 @@ return function(t)
     local v = offscreen(64, 48)
     if not v then return end
     local id = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }
-    v:viewports({ { rect = { 0, 0, 64, 48 }, view = id, projection = id, eye = { 0, 0, 1 } } })
+    v:set_viewports({ { rect = { 0, 0, 64, 48 }, view = id, projection = id, eye = { 0, 0, 1 } } })
     v:set_camera(0, { kind = "ortho", axis_view = { 0, 0, -1 }, axis_right = { 1, 0, 0 }, axis_up = { 0, 1, 0 }, height = 3, radius = 1 })
     local c = v:camera(0)
     t.eq(c.kind, "ortho"); t.eq(c.height, 3)
@@ -452,17 +452,17 @@ return function(t)
       t.near(again.axis_up[k], moved.axis_up[k], 1e-6, "camera() -> set_camera() keeps the basis")
     end
     t.eq(again.height, moved.height)
-    t.raises(function() v:viewport_rects({ { 0, 0, 64, 48 }, { 0, 0, 1, 1 } }) end, "cadaclysm_view_set_viewport_rects")
-    v:viewport_rects({ { 0, 0, 64, 48 } })
-    t.raises(function() v:viewport_rects({ { 0, 0, 64, -1 } }) end, "viewport_rects: rect 1's h")
+    t.raises(function() v:set_viewport_rects({ { 0, 0, 64, 48 }, { 0, 0, 1, 1 } }) end, "cadaclysm_view_set_viewport_rects")
+    v:set_viewport_rects({ { 0, 0, 64, 48 } })
+    t.raises(function() v:set_viewport_rects({ { 0, 0, 64, -1 } }) end, "viewport_rects: rect 1's h")
     t.raises(function() v:orbit(1, 1, -2) end, "orbit viewport")
-    v:tap(3, 0)
-    t.raises(function() v:tap(-1, 0) end, "cadaclysm_view_set_tap")
+    v:set_tap(3, 0)
+    t.raises(function() v:set_tap(-1, 0) end, "cadaclysm_view_set_tap")
     t.ok(v:aim(0, { 0, 1, 0 }, { 0, 0, 1 }))
-    v:pivot(0, { 1, 2, 3 }); v:pivot(0, nil)
+    v:set_pivot(0, { 1, 2, 3 }); v:set_pivot(0, nil)
     v:standard("top", 0)   -- (frame needs something shown: the file's solid cases cover framing)
     -- Another viewport's moves are its own (the `_in` calls): viewport 1's centre moves, 0's stays.
-    v:viewports({ { rect = { 0, 0, 32, 48 }, view = id, projection = id, eye = { 0, 0, 1 } },
+    v:set_viewports({ { rect = { 0, 0, 32, 48 }, view = id, projection = id, eye = { 0, 0, 1 } },
                   { rect = { 32, 0, 32, 48 }, view = id, projection = id, eye = { 0, 0, 1 } } })
     local ortho = { kind = "ortho", axis_view = { 0, 0, -1 }, axis_right = { 1, 0, 0 }, axis_up = { 0, 1, 0 }, height = 3, radius = 1 }
     v:set_camera(0, ortho); v:set_camera(1, ortho)
@@ -487,13 +487,13 @@ return function(t)
       function() v:orbit(nil, 1) end,
       function() v:zoom("a") end,
       function() v:standard(nil) end,
-      function() v:layer("sky", true) end,
-      function() v:background(nil) end,
-      function() v:background({ 1, 2 }) end,
+      function() v:set_layer("sky", true) end,
+      function() v:set_background(nil) end,
+      function() v:set_background({ 1, 2 }) end,
       function() v:pick(nil, 3) end,
       function() v:pick(-1, 3) end,
-      function() v:lod("fast") end,
-      function() v:lod("smooth", -1) end,
+      function() v:set_lod("fast") end,
+      function() v:set_lod("smooth", -1) end,
       function() v:resize(nil, 4) end,
       function() v:input(nil) end,
       function() v:input({ type = "flick" }) end,
@@ -505,22 +505,22 @@ return function(t)
       function() v:show_curves({ 1, 2, 3 }) end,
       function() v:show_image({ 1, 2 }, "", 0, 0) end,
       function() v:show_image({ 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0 }, "abc", 1, 1) end,
-      function() v:viewports({ 5 }) end,
-      function() v:viewports({ { rect = { 0, 0, 1 }, view = {}, projection = {}, eye = {} } }) end,
-      function() item:colour(nil) end,
-      function() item:colour({ 1, 2 }) end,
-      function() item:placement({ 1, 2, 3 }) end,
-      function() item:node_colour(nil, { 1, 1, 1 }) end,
-      function() item:node_highlight(0, { 1, 1 }) end,
-      function() item:node_visible("a", true) end,
-      function() item:node_visible({}, true) end,
+      function() v:set_viewports({ 5 }) end,
+      function() v:set_viewports({ { rect = { 0, 0, 1 }, view = {}, projection = {}, eye = {} } }) end,
+      function() item:set_colour(nil) end,
+      function() item:set_colour({ 1, 2 }) end,
+      function() item:set_placement({ 1, 2, 3 }) end,
+      function() item:set_node_colour(nil, { 1, 1, 1 }) end,
+      function() item:set_node_highlight(0, { 1, 1 }) end,
+      function() item:set_node_visible("a", true) end,
+      function() item:set_node_visible({}, true) end,
       function() v:show_image({ 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 9 }, "abcd", 1, 1) end,
       function() v:show_mesh({ positions = { 0, 0, 0, 1 }, indices = { 0 } }) end,
       function() item:frame_node(nil) end,
-      function() item:node_transforms({ { 1, 2, 3 } }) end,
-      function() item:node_transforms(5) end,
-      function() item:face_colours({ 0, 1 }, { { 1, 0, 0, 1 } }) end,
-      function() item:face_colours({ 0 }, {}) end,
+      function() item:set_node_transforms({ { 1, 2, 3 } }) end,
+      function() item:set_node_transforms(5) end,
+      function() item:set_face_colours({ 0, 1 }, { { 1, 0, 0, 1 } }) end,
+      function() item:set_face_colours({ 0 }, {}) end,
       function() view.pump("soon") end,
       function() view.use(5) end,
       function() view.View.offscreen(nil, 5) end,
@@ -544,20 +544,20 @@ return function(t)
     if not v then return end
     local item = v:show_solid(bs.Solid.cuboid(5, 5, 5))
     -- Face colours: nil clears every face; an empty list colours none and is accepted (Python's).
-    item:face_colours({ 0, 1, 2, 3, 4, 5 }, { { 1, 0, 0, 1 }, { 1, 0, 0, 1 }, { 1, 0, 0, 1 }, { 1, 0, 0, 1 }, { 1, 0, 0, 1 }, { 1, 0, 0, 1 } })
+    item:set_face_colours({ 0, 1, 2, 3, 4, 5 }, { { 1, 0, 0, 1 }, { 1, 0, 0, 1 }, { 1, 0, 0, 1 }, { 1, 0, 0, 1 }, { 1, 0, 0, 1 }, { 1, 0, 0, 1 } })
     v:standard("iso")
     v:frame()
     local red = v:image()
-    item:face_colours({}, {})
+    item:set_face_colours({}, {})
     t.eq(changed(red, v:image()) > 0, true, "an empty face list changed nothing (the red faces stayed)")
-    item:face_colours(nil)
+    item:set_face_colours(nil)
     -- An empty mesh is the library's refusal (or an empty item), never a crash on a NULL.
     local ok, err = pcall(function() v:show_mesh({ positions = {}, indices = {} }) end)
     t.ok(ok or is_view_error(err), "an empty mesh: " .. tostring(err))
     ok, err = pcall(function() v:show_lines({}) end)
     t.ok(ok or is_view_error(err), "no lines: " .. tostring(err))
     -- An empty viewport list clears them, as Python's does.
-    v:viewports({})
+    v:set_viewports({})
     v:close()
   end)
 
@@ -681,7 +681,7 @@ return function(t)
     lib.C.cadaclysm_view_set_layer = function(_, which, on) got = { which, on }; return true end
     view.use(lib)
     local v = view.View.new({ width = 8, height = 8 })
-    v:layer("text", false)
+    v:set_layer("text", false)
     t.eq(got[1], 5); t.eq(got[2], false)
     view._reset()
   end)
@@ -712,7 +712,7 @@ return function(t)
   t.test("a label draws and picks on the real library", function()
     local v = offscreen(64, 64)
     if not v then return end
-    v:background("black")
+    v:set_background("black")
     -- Lime glyphs on a red box: a swapped colour/box pair would still show both colours,
     -- so the counts tell them apart (the box is bigger than the glyphs).
     local label = v:show_text("HH", { 0, 0, 0 }, { colour = "lime", size = 24, align = "centre", box = "red", on_top = true })
@@ -757,14 +757,14 @@ return function(t)
     view.use(colour_fake(state))
     local v = view.View.new({ width = 8, height = 8 })
     local item = v:show_mesh({ positions = { 0, 0, 0, 1, 0, 0, 0, 1, 0 }, indices = { 0, 1, 2 }, rgb = "red" })
-    item:colour("#00f")
-    v:background("SteelBlue")
-    item:node_colour(0, "white")
-    item:node_highlight(0, "#f00")
-    item:face_colours({ 0, 1 }, { "00ff00", { 0, 0, 1, 0.5 } })
+    item:set_colour("#00f")
+    v:set_background("SteelBlue")
+    item:set_node_colour(0, "white")
+    item:set_node_highlight(0, "#f00")
+    item:set_face_colours({ 0, 1 }, { "00ff00", { 0, 0, 1, 0.5 } })
     v:show_lines({ 0, 0, 0, 1, 1, 1 }, "#ffffff")
     v:show_curves({ 0, 0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 1, 3, 0, 0, 1 }, "LIME")
-    item:colour({ 0.5, 0.5, 0.5 })   -- numbers never reach the parser
+    item:set_colour({ 0.5, 0.5, 0.5 })   -- numbers never reach the parser
     t.eq(table.concat(state.seen, " | "), table.concat({
       "mesh 1.000,0.000,0.000", "colour 0.000,0.000,1.000", "background 0.275,0.510,0.706",
       "node_colour 1.000,1.000,1.000,1.000", "node_highlight 1.000,0.000,0.000,1.000",
@@ -821,10 +821,10 @@ return function(t)
     local item = v:show_mesh({ positions = { 0, 0, 0, 1, 0, 0, 0, 1, 0 }, indices = { 0, 1, 2 } })
     local before = #state.seen
     for _, case in ipairs({
-      { "blurple", function() item:colour("blurple") end },
-      { "transparent", function() v:background("transparent") end },
-      { "nope", function() item:node_highlight(0, "nope") end },
-      { "rgb(1, 2, 3)", function() item:face_colours({ 0 }, { "rgb(1, 2, 3)" }) end },
+      { "blurple", function() item:set_colour("blurple") end },
+      { "transparent", function() v:set_background("transparent") end },
+      { "nope", function() item:set_node_highlight(0, "nope") end },
+      { "rgb(1, 2, 3)", function() item:set_face_colours({ 0 }, { "rgb(1, 2, 3)" }) end },
       { "#f00a", function() v:show_lines({ 0, 0, 0, 1, 1, 1 }, "#f00a") end },
     }) do
       local ok, err = pcall(case[2])
@@ -839,8 +839,8 @@ return function(t)
   t.test("colour text draws on the real library; text it refuses raises its own words", function()
     local v = offscreen(64, 48)
     if not v then return end
-    v:layer("grid", false)
-    v:background("#ff0")
+    v:set_layer("grid", false)
+    v:set_background("#ff0")
     local item = v:show_mesh({ positions = { -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0 }, indices = { 0, 1, 2, 0, 2, 3 }, rgb = "Blue" })
     v:standard("top")
     v:frame()
@@ -849,10 +849,10 @@ return function(t)
     t.ok(b > 150 and r < 80 and g < 80, ("the centre is not blue: %d %d %d"):format(r, g, b))
     r, g, b = pixel(img, 1, 1)
     t.ok(r > 150 and g > 150 and b < 80, ("the corner is not the yellow background: %d %d %d"):format(r, g, b))
-    item:colour("lime")
+    item:set_colour("lime")
     r, g, b = pixel(v:image(), 32, 24)
     t.ok(g > 150 and r < 80 and b < 80, ("the centre is not lime: %d %d %d"):format(r, g, b))
-    local ok, err = pcall(function() item:colour("blurple") end)
+    local ok, err = pcall(function() item:set_colour("blurple") end)
     t.ok(not ok and is_view_error(err) and tostring(err):find("^cadaclysm_view_parse_colour: .*not 'blurple'$") ~= nil, tostring(err))
     v:close()
   end)
@@ -861,9 +861,107 @@ return function(t)
     local v = offscreen(64, 48)
     if not v then return end
     local item = v:show_mesh({ positions = { -1, -1, 0, 1, -1, 0, 1, 1, 0 }, indices = { 0, 1, 2 } })
-    for _, name in ipairs({ "off", "solid", "dashed" }) do item:occluded(name) end
-    t.raises(function() item:occluded() end, "occluded: 'nil' is not 'off', 'solid' or 'dashed'")
-    t.raises(function() item:occluded("_list") end, "occluded: '_list' is not 'off', 'solid' or 'dashed'")
+    for _, name in ipairs({ "off", "solid", "dashed" }) do item:set_occluded(name) end
+    t.raises(function() item:set_occluded() end, "occluded: 'nil' is not 'off', 'solid' or 'dashed'")
+    t.raises(function() item:set_occluded("_list") end, "occluded: '_list' is not 'off', 'solid' or 'dashed'")
+    v:close()
+  end)
+
+  t.test("1.28's drafting styles on the real library: dashes, point styles and states, marks, on top", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    t.ok(ffi.sizeof("CadaclysmViewPick") == 44 and ffi.sizeof("CadaclysmViewEventPick") == 40, "the 1.28 pick and the event's")
+    local line = v:show_lines({ -1, 0, 0, 1, 0, 0 })
+    line:set_line_style(6, 4)
+    line:set_line_style()
+    t.raises(function() line:set_line_style(6, 0) end)
+    line:set_on_top(true)
+    line:set_on_top(false)
+    local pts = v:show_points({ 0, 0, 0, 1, 0, 0 }, nil, 9)
+    pts:set_point_style("diamond", true)
+    t.raises(function() pts:set_point_style("star") end, "point style: 'star' is not 'disc', 'ring', 'square' or 'diamond'")
+    pts:set_point_states({ "first", "hover" })
+    pts:set_point_states({ 0, 2 })
+    t.raises(function() pts:set_point_states({ "hover" }) end)
+    v:set_point_state_colours{ hover = { 1, 0, 0 } }
+    v:set_point_state_colours{}
+    v:set_viewport_border(0, { 1, 0, 0 })
+    v:set_viewport_label(0, "FRONT")
+    t.raises(function() v:set_viewport_label(0, "a\0b") end, "NUL")
+    local label
+    for _, xy in ipairs({ { 8, 8 }, { 10, 10 }, { 12, 8 }, { 9, 12 }, { 14, 10 }, { 7, 6 } }) do
+      local p = not label and v:pick(xy[1], xy[2]) or nil
+      if p and p.viewport_label ~= nil then label = p end
+    end
+    t.ok(label and label.item == 0 and label.viewport_label == 0, "the label picks as viewport 0")
+    v:set_viewport_label(0, nil)
+    v:set_viewport_border(0, nil)
+    t.raises(function() v:set_viewport_border(3, { 1, 0, 0 }) end)
+    v:close()
+  end)
+
+  t.test("the point shapes and states are the header's numbers, by name and on the wire", function()
+    local path = t.fixture("crates/cadaclysm-view-capi/include/cadaclysm_view.h")
+    local state = {}
+    local lib = colour_fake(state)
+    local sent = {}
+    lib.C.cadaclysm_view_show_points = function() return 17 end
+    lib.C.cadaclysm_view_set_point_style = function(_, id, shape, hollow) sent.style = { id, shape, hollow } return true end
+    lib.C.cadaclysm_view_set_point_states = function(_, id, states, n)
+      sent.states = {}
+      for i = 0, n - 1 do sent.states[#sent.states + 1] = states[i] end
+      sent.n = n
+      return true
+    end
+    view.use(lib)
+    local v = view.View.new({ width = 8, height = 8 })
+    local item = v:show_points({ 0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0 })
+    local header
+    if path then
+      local f = assert(io.open(path, "rb"))
+      header = f:read("*a")
+      f:close()
+    end
+    local function number(prefix, name)
+      if not header then return nil end
+      return tonumber(header:match("#define " .. prefix .. name:upper() .. " (%d+)"))
+    end
+    for _, name in ipairs({ "disc", "ring", "square", "diamond" }) do
+      local code = view._POINT_SHAPES[name]
+      if header then t.eq(code, number("CADACLYSM_VIEW_POINT_", name), "the header's " .. name) end
+      item:set_point_style(name, false)
+      t.eq(sent.style[2], code, "the wire carries " .. name)
+      if header then t.eq(tonumber(sent.style[2]), number("CADACLYSM_VIEW_POINT_", name), "the header's number on the wire: " .. name) end
+    end
+    item:set_point_style("ring", true)
+    t.ok(sent.style[3] == true, "hollow reaches the library")
+    item:set_point_states({ "normal", "hover", "selected", "first" })
+    t.eq(table.concat(sent.states, ","), "0,1,2,3", "the states in order on the wire")
+    for i, name in ipairs({ "normal", "hover", "selected", "first" }) do
+      if header then t.eq(sent.states[i], number("CADACLYSM_VIEW_POINT_STATE_", name), "the header's number on the wire: " .. name) end
+      t.eq(view._POINT_STATES[name], i - 1, name)
+    end
+    t.raises(function() item:set_point_states({ "normal", 7 }) end)
+    t.raises(function() item:set_point_states({ "bogus" }) end)
+    v:close()
+  end)
+
+  t.test("a NUL in a viewport label is refused before the library sees it; nil clears", function()
+    local state = {}
+    local lib = colour_fake(state)
+    local calls = {}
+    lib.C.cadaclysm_view_set_viewport_label = function(_, i, text, rgb)
+      calls[#calls + 1] = { i, text == nil and "NULL" or ffi.string(text), rgb ~= nil and rgb[0] or "NULL" }
+      return true
+    end
+    view.use(lib)
+    local v = view.View.new({ width = 8, height = 8 })
+    local e = t.raises(function() v:set_viewport_label(0, "FR\0ONT") end, "NUL")
+    t.eq(#calls, 0, "no call made")
+    v:set_viewport_label(1, "TOP", "red")
+    v:set_viewport_label(1, nil)
+    t.eq(calls[1][2] .. calls[1][3], "TOP1", "text and colour on the wire")
+    t.eq(calls[2][2], "NULL", "nil is NULL")
     v:close()
   end)
 
@@ -871,9 +969,9 @@ return function(t)
     local v = offscreen(64, 48)
     if not v then return end
     local item = v:show_mesh({ positions = { -1, -1, 0, 1, -1, 0, 1, 1, 0 }, indices = { 0, 1, 2 } })
-    for _, name in ipairs({ "gloss", "satin", "matte" }) do item:finish(name) end
-    t.raises(function() item:finish() end, "finish: 'nil' is not 'gloss', 'satin' or 'matte'")
-    t.raises(function() item:finish("_list") end, "finish: '_list' is not 'gloss', 'satin' or 'matte'")
+    for _, name in ipairs({ "gloss", "satin", "matte" }) do item:set_finish(name) end
+    t.raises(function() item:set_finish() end, "finish: 'nil' is not 'gloss', 'satin' or 'matte'")
+    t.raises(function() item:set_finish("_list") end, "finish: '_list' is not 'gloss', 'satin' or 'matte'")
     v:close()
   end)
 
@@ -982,11 +1080,11 @@ return function(t)
 
   -- ---- view ABI 1.8: the pick's clicks and point, the double-click opt-in, focus, navigation ----
 
-  t.test("CadaclysmViewPick is the header 1.24 layout: clicks 16, has_point 20, point 24, overlay 36, 40 bytes", function()
-    t.eq(ffi.sizeof("CadaclysmViewPick"), 40)
+  t.test("CadaclysmViewPick is the header 1.28 layout: clicks 16, has_point 20, point 24, overlay 36, viewport_label 40, 44 bytes", function()
+    t.eq(ffi.sizeof("CadaclysmViewPick"), 44)
     local at = {}
-    for _, f in ipairs({ "size", "item", "node", "face", "clicks", "has_point", "point", "overlay" }) do at[#at + 1] = ffi.offsetof("CadaclysmViewPick", f) end
-    t.eq(table.concat(at, ","), "0,4,8,12,16,20,24,36")
+    for _, f in ipairs({ "size", "item", "node", "face", "clicks", "has_point", "point", "overlay", "viewport_label" }) do at[#at + 1] = ffi.offsetof("CadaclysmViewPick", f) end
+    t.eq(table.concat(at, ","), "0,4,8,12,16,20,24,36,40")
   end)
 
   t.test("a pick answer and run's pick carry clicks, and the point only where the library set one", function()
@@ -1018,19 +1116,23 @@ return function(t)
     view._reset()
   end)
 
-  t.test("a library answering view ABI 1.8 (1.24 or 2.25) is refused with its version", function()
+  t.test("a library answering view ABI 1.8 (1.27 or 2.28) is refused with its version", function()
     local function answering(version)
       return { cadaclysm_view_abi_version = function() return version end }
     end
     local e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 8)) end, "view ABI 1.8")
-    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.25 or a later 1.x")
-    e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 25)) end, "view ABI 2.25")
-    t.eq(tostring(e), "stand-in: view ABI 2.25, this wrapper needs 1.25 or a later 1.x")
-    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 24)) end, "view ABI 1.24")
-    t.eq(tostring(e), "stand-in: view ABI 1.24, this wrapper needs 1.25 or a later 1.x")
-    -- 1.25 passes the gate (this stand-in then fails a later check, never the version's).
-    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 25))
-    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.25 passes the version gate: " .. tostring(why))
+    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.28 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 28)) end, "view ABI 2.28")
+    t.eq(tostring(e), "stand-in: view ABI 2.28, this wrapper needs 1.28 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 25)) end, "view ABI 1.25")
+    t.eq(tostring(e), "stand-in: view ABI 1.25, this wrapper needs 1.28 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 26)) end, "view ABI 1.26")
+    t.eq(tostring(e), "stand-in: view ABI 1.26, this wrapper needs 1.28 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 27)) end, "view ABI 1.27")
+    t.eq(tostring(e), "stand-in: view ABI 1.27, this wrapper needs 1.28 or a later 1.x")
+    -- 1.28 passes the gate (this stand-in then fails a later check, never the version's).
+    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 28))
+    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.28 passes the version gate: " .. tostring(why))
   end)
 
   t.test("stats: the 1.25 layout; an offscreen view's frames are its images, each with its cost", function()
@@ -1066,7 +1168,7 @@ return function(t)
     t.eq(ffi.offsetof("CadaclysmViewPick", "overlay"), 36, "CadaclysmViewPick.overlay")
     local v = offscreen(200, 120)
     if not v then return end
-    v:background("black")
+    v:set_background("black")
     local under = v:show_solid(bs.Solid.cuboid(80, 80, 20), 0.05, "#808080")
     v:standard("top")
     v:frame()
@@ -1074,9 +1176,9 @@ return function(t)
       local pr, pg, pb = pixel(img, x, y)
       return math.abs(pr - r) < 40 and math.abs(pg - g) < 40 and math.abs(pb - b) < 40
     end
-    -- A rounded red panel with a round hole, by its own colour, at the window's centre.
+    -- A rounded red panel with a round hole, filled red (an outline by default), at the window's centre.
     local shape = bs.Profile.rect(60, 40):round(6):with_hole(bs.Profile.circle(8)):coloured("red")
-    local panel = v:show_overlay(shape, "centre", 0, 0)
+    local panel = v:show_overlay(shape, "centre", 0, 0, { fill = "red" })
     t.ok(getmetatable(panel) == view.Overlay and panel.anchor == "centre", "an Overlay at the centre")
     local img = v:image()
     t.ok(near(img, 120, 60, 255, 0, 0), "the panel red right of its hole")
@@ -1141,6 +1243,55 @@ return function(t)
     v:close()
   end)
 
+  t.test("an overlay profile draws as its outline by default: stroked in its own colour, else white; filled only where given", function()
+    local v = offscreen(120, 80)
+    if not v then return end
+    v:set_background("black")
+    local square = bs.Profile.rect(40, 40)   -- x 40..80, y 20..60 at the window's centre
+    -- Any pixel of row 40 from x0 to x1 passing ok: a 1 px stroke on the right edge (x 80) may
+    -- fall across two columns.
+    local function edge(img, x0, x1, ok)
+      for x = x0, x1 do
+        if ok(pixel(img, x, 40)) then return true end
+      end
+      return false
+    end
+    local function white(r, g, b) return r > 100 and g > 100 and b > 100 end
+    local function red(r, g, b) return r > 100 and g < 60 and b < 60 end
+    local function dark(img, x)
+      local r, g, b = pixel(img, x, 40)
+      return r < 40 and g < 40 and b < 40
+    end
+    -- (a) No style: a white edge, an unfilled inside.
+    local o = v:show_overlay(square, "centre", 0, 0)
+    local img = v:image()
+    t.ok(edge(img, 78, 82, white), "no style: the edge is stroked white")
+    t.ok(dark(img, 60), "no style: the inside is not filled")
+    o:remove()
+    -- (b) A coloured profile: stroked in its colour, still not filled.
+    o = v:show_overlay(square:coloured("red"), "centre", 0, 0)
+    img = v:image()
+    t.ok(edge(img, 78, 82, red) and not edge(img, 78, 82, white), "a coloured profile strokes in its colour")
+    t.ok(dark(img, 60), "a coloured profile is not filled")
+    o:remove()
+    -- (c) Fill only: a fill and stroke "none".
+    o = v:show_overlay(square, "centre", 0, 0, { fill = "lime", stroke = "none" })
+    img = v:image()
+    local r, g, b = pixel(img, 60, 40)
+    t.ok(g > 200 and r < 60 and b < 60, "fill only: the inside is lime")
+    t.ok(not edge(img, 76, 84, function(pr, _, pb) return pr > 60 or pb > 60 end), "fill only: no stroke on the edge")
+    o:remove()
+    -- Raw Beziers have no colour of their own: white.
+    o = v:show_overlay(square:beziers(), "centre", 0, 0)
+    img = v:image()
+    t.ok(edge(img, 78, 82, white) and dark(img, 60), "raw Beziers: stroked white, not filled")
+    o:remove()
+    -- (d) Neither a fill nor a stroke: refused.
+    t.raises(function() v:show_overlay(square, "centre", 0, 0, { fill = "none", stroke = " NONE " }) end,
+      "show_overlay: neither a fill nor a stroke")
+    v:close()
+  end)
+
   t.test("line colours: a colour read back, an item's curve colour drawn and cleared", function()
     local v = offscreen(64, 48)
     if not v then return end
@@ -1174,14 +1325,14 @@ return function(t)
   t.test("occluded style: set, read back, a bad dim refused by the library, false restores the default", function()
     local v = offscreen(64, 64)
     if not v then return end
-    v:occluded_style{ dash = 10, gap = 5, dim = 0.25, colour = { 0.5, 0.5, 0.5 } }
+    v:set_occluded_style{ dash = 10, gap = 5, dim = 0.25, colour = { 0.5, 0.5, 0.5 } }
     local s = v:occluded_style()
     t.ok(s.dash == 10 and s.gap == 5 and math.abs(s.dim - 0.25) < 1e-6 and s.colour[3] == 0.5, "occluded style round trip")
-    t.ok(not pcall(function() v:occluded_style{ dim = 1.5 } end), "dim 1.5 refused")
+    t.ok(not pcall(function() v:set_occluded_style{ dim = 1.5 } end), "dim 1.5 refused")
     t.eq(v:occluded_style().dash, 10, "a refused style leaves the last one")
-    v:occluded_style{ colour = "#ff0000" }
+    v:set_occluded_style{ colour = "#ff0000" }
     t.eq(v:occluded_style().colour[1], 1, "colour text")
-    v:occluded_style(false)
+    v:set_occluded_style(false)
     local d = v:occluded_style()
     t.ok(d.colour == nil and d.dash == 6 and d.gap == 4 and math.abs(d.dim - 0.5) < 1e-6, "default")
     v:close()
@@ -1205,12 +1356,12 @@ return function(t)
     local v = view.View.new({ width = 8, height = 8 })
     state.calls = {}
     t.eq(v:lighting(), "headlight")
-    v:lighting("studio")
+    v:set_lighting("studio")
     t.eq(v:lighting(), "studio")
-    local e = t.raises(function() v:lighting("noon") end, "lighting")
+    local e = t.raises(function() v:set_lighting("noon") end, "lighting")
     t.ok(tostring(e):find('lighting "noon": one of headlight, studio', 1, true), tostring(e))
     t.eq(v:lighting(), "studio")
-    v:lighting("headlight")
+    v:set_lighting("headlight")
     t.eq(v:lighting(), "headlight")
     t.eq(table.concat(state.calls, ","), "lighting,set_lighting 1,lighting,lighting,set_lighting 0,lighting")
     view._reset()
@@ -1282,7 +1433,7 @@ return function(t)
   local function framed_square()
     local v = offscreen(64, 48)
     if not v then return nil end
-    v:layer("grid", false)
+    v:set_layer("grid", false)
     local item = v:show_mesh(SQUARE)
     v:standard("top")
     v:frame()
@@ -1461,7 +1612,7 @@ return function(t)
   local function edged_square()
     local v = offscreen(64, 48)
     if not v then return nil end
-    v:layer("grid", false)
+    v:set_layer("grid", false)
     local item = v:show_mesh({ positions = SQUARE.positions, indices = SQUARE.indices, rgb = { 1, 0, 0 }, edges = SQUARE_EDGES })
     v:standard("top")
     v:frame()
@@ -1643,14 +1794,14 @@ return function(t)
     bad("stock", show(FLAT, nil, nil, "G0", { { 0, 0 }, { 1, 1, 1 } }), "three numbers")
     t.eq(state.seen.shows, 0, "the library was never asked")
     local m = v:show_machining({ { FLAT, "G0" } }, BOX)
-    bad("mode", function() m:colour_by("rainbow") end, "mode 'rainbow': one of height, tool, deviation")
-    bad("mode _list", function() m:colour_by("_list") end, "one of height, tool, deviation")
+    bad("mode", function() m:set_colour_by("rainbow") end, "mode 'rainbow': one of height, tool, deviation")
+    bad("mode _list", function() m:set_colour_by("_list") end, "one of height, tool, deviation")
     bad("seek_move negative", function() m:seek_move(-1) end, "seek_move")
     bad("seek_move fractional", function() m:seek_move(1.5) end, "seek_move")
     bad("seek nan", function() v:seek(0 / 0) end, "finite")
     bad("play inf", function() v:play(math.huge) end, "finite")
     v:close()
-    bad("closed", function() m:colour_by("tool") end, "the view is closed")
+    bad("closed", function() m:set_colour_by("tool") end, "the view is closed")
   end)
 
   t.test("the transport and the machining's own calls reach the library as typed (F4)", function()
@@ -1662,14 +1813,14 @@ return function(t)
     v:play(); t.eq(s.play, 1)
     v:pause(); t.eq(s.calls[#s.calls], "cadaclysm_view_timeline_pause")
     v:seek(2.0); t.eq(s.seek_time, 2.0)
-    v:loop(); t.eq(s.loop, true)
-    v:loop(false); t.eq(s.loop, false)
+    v:set_loop(); t.eq(s.loop, true)
+    v:set_loop(false); t.eq(s.loop, false)
     m:seek_move(3); t.eq(s.seek[1], 7); t.eq(s.seek[2], 3)
-    m:colour_by("tool"); t.eq(s.colour_by[2], 1)
-    m:colour_by("height"); t.eq(s.colour_by[2], 0)
-    m:colour_by("deviation"); t.eq(s.colour_by[2], 2)
-    m:overlays(false); t.eq(s.overlays[1], 7); t.eq(s.overlays[2], false); t.eq(s.overlays[3], true)
-    m:overlays(); t.eq(s.overlays[2], true); t.eq(s.overlays[3], true)
+    m:set_colour_by("tool"); t.eq(s.colour_by[2], 1)
+    m:set_colour_by("height"); t.eq(s.colour_by[2], 0)
+    m:set_colour_by("deviation"); t.eq(s.colour_by[2], 2)
+    m:set_overlays(false); t.eq(s.overlays[1], 7); t.eq(s.overlays[2], false); t.eq(s.overlays[3], true)
+    m:set_overlays(); t.eq(s.overlays[2], true); t.eq(s.overlays[3], true)
     t.eq(v:time(), 1.5); t.eq(v:duration(), 12.5); t.eq(v:playing(), true)
     local lines = v:status()
     t.eq(#lines, 1); t.eq(lines[1], "move 3 of 9 \xC2\xB7 T1 flat 6 mm")
@@ -1680,7 +1831,7 @@ return function(t)
     local z = m:heights()
     t.eq(s.heights_capacity, 8); t.eq(#z, 8); t.eq(z[1 * 4 + 0 + 1], 4)
     -- Item members still work on a Machining
-    m:colour({ 1, 0, 0 }); t.eq(s.colour[1], 7); t.eq(s.colour[2], 1)
+    m:set_colour({ 1, 0, 0 }); t.eq(s.colour[1], 7); t.eq(s.colour[2], 1)
     m:remove()
     v:close()
   end)
@@ -1815,19 +1966,522 @@ return function(t)
     v:pause(); t.eq(v:playing(), false)
     v:seek(10); v:draw(); t.ok(math.abs(v:time() - 10) < 1e-6, "time " .. v:time())
     v:seek(duration + 100); v:draw(); t.ok(math.abs(v:time() - duration) < 1e-6, "clamped " .. v:time())
-    v:loop(); v:loop(false)
+    v:set_loop(); v:set_loop(false)
     t.eq(#v:status() > 0, true)
-    m:colour_by("tool"); m:colour_by("height")
-    local err = t.raises(function() m:colour_by("deviation") end, "cadaclysm_view_machining_colour_by")
+    m:set_colour_by("tool"); m:set_colour_by("height")
+    local err = t.raises(function() m:set_colour_by("deviation") end, "cadaclysm_view_machining_colour_by")
     t.ok(is_view_error(err), "deviation needs a part")
-    m:overlays(false, false); m:overlays()
+    m:set_overlays(false, false); m:set_overlays()
     v:draw()
     m:remove()
     local part = { positions = { -42, -27, 14, 42, -27, 14, 0, 27, 14 }, indices = { 0, 1, 2 } }
     local with_part = v:show_machining(job.programs, job.box, part, job.options)
-    with_part:colour_by("deviation")
+    with_part:set_colour_by("deviation")
     v:draw()
     with_part:remove()
+    v:close()
+  end)
+
+  -- ---- input events (view ABI 1.26): next_event, events, close_window, run(on_event) ----
+
+  -- The header's numbers, written out here: never read back from the wrapper's own tables.
+  local KIND = { pointer_down = 1, pointer_move = 2, pointer_up = 3, wheel = 4, key_down = 5, key_up = 6,
+    resize = 7, pick = 8, snap = 9, close = 10, timeline = 11 }
+  local MOD = { shift = 1, ctrl = 2, alt = 4, meta = 8 }
+
+  -- The fake library's event queue: `state.events` holds raw events as field values (the
+  -- header's numbers), oldest first; close queues a CLOSE carrying a camera, as the library does.
+  local function with_events(state, f)
+    state.events, state.sizes = state.events or {}, {}
+    f.C.cadaclysm_view_next_event = function(_, out)
+      state.calls[#state.calls + 1] = "next_event"
+      state.sizes[#state.sizes + 1] = out.size
+      local e = table.remove(state.events, 1)
+      if not e then state.error = "cadaclysm_view_next_event: no event" return false end
+      out.pick_viewport_label = -1   -- no label hit, unless the event says so
+      for k, x in pairs(e) do
+        if k == "key" then
+          ffi.copy(out.key, x)
+        elseif k == "pick" or k == "snap" or k == "camera" then
+          for field, value in pairs(x) do
+            if type(value) == "table" then
+              for i, n in ipairs(value) do out[k][field][i - 1] = n end
+            else
+              out[k][field] = value
+            end
+          end
+        else
+          out[k] = x
+        end
+      end
+      state.error = ""
+      return true
+    end
+    f.C.cadaclysm_view_close = function()
+      state.calls[#state.calls + 1] = "close"
+      state.events[#state.events + 1] = { kind = KIND.close, camera = { eye = { 1, 2, 3 }, up = { 0, 0, 1 } } }
+      return true
+    end
+    return f
+  end
+
+  local function seen_call(state, name)
+    for _, c in ipairs(state.calls) do if c == name then return true end end
+    return false
+  end
+
+  t.test("CadaclysmViewInputEvent is the header 1.26 layout, 272 bytes; the kinds and modifier bits are the header's", function()
+    t.eq(ffi.sizeof("CadaclysmViewInputEvent"), 272)
+    t.eq(ffi.sizeof("CadaclysmViewEventPick"), 40)
+    local at = {}
+    for _, f in ipairs({ "size", "kind", "time_ms", "x", "y", "wheel_y", "button", "modifiers", "pointer", "pointer_id",
+      "width", "height", "repeat", "dropped", "pad0", "key", "pick", "snap", "camera", "pick_viewport_label" }) do
+      at[#at + 1] = ffi.offsetof("CadaclysmViewInputEvent", f)
+    end
+    t.eq(table.concat(at, ","), "0,4,8,16,20,24,28,32,36,40,44,48,52,56,60,64,96,136,224,268")
+    local n = 0
+    for code, name in pairs(view._INPUT_EVENTS) do
+      n = n + 1
+      t.eq(KIND[name], code, "the wrapper's kind " .. name)
+    end
+    t.eq(n, 11, "eleven kinds")
+    n = 0
+    for name, b in pairs(view._MODS) do
+      n = n + 1
+      t.eq(MOD[name], b, "the wrapper's modifier " .. name)
+    end
+    t.eq(n, 4, "four modifiers")
+    local path = t.fixture("crates/cadaclysm-view-capi/include/cadaclysm_view.h")
+    if not path then return end   -- an SDK checkout: no header beside the wrapper
+    local f = assert(io.open(path, "rb"))
+    local header = f:read("*a")
+    f:close()
+    for name, code in pairs(KIND) do
+      t.ok(header:find("#define CADACLYSM_VIEW_INPUT_EVENT_" .. name:upper() .. " " .. code .. "%s"), "the header's " .. name)
+    end
+    for name, b in pairs(MOD) do
+      t.ok(header:find("#define CADACLYSM_VIEW_MOD_" .. name:upper() .. " " .. b .. "%s"), "the header's " .. name)
+    end
+  end)
+
+  t.test("a pick carries viewport_label from pick and the event; a raw -1 is nil", function()
+    local state = {}
+    local f = with_events(state, fake(state))
+    local answers = { { 0, 2 }, { 5, -1 }, { 0, -1 }, { 6 } }
+    f.C.cadaclysm_view_pick_result = function(_, out)
+      local a = table.remove(answers, 1)
+      out.item = a[1]
+      if a[2] then out.viewport_label = a[2] end   -- { 6 }: the field left as the buffer had it
+      return true
+    end
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+    local label = v:pick(1, 1)
+    t.ok(label and label.item == 0 and label.viewport_label == 2, "a label hit is a pick with item 0")
+    local hit = v:pick(1, 1)
+    t.ok(hit.item == 5 and hit.viewport_label == nil, "an item hit has no label")
+    t.eq(v:pick(1, 1), nil, "nothing hit: nil")
+    t.eq(view.View._new_pick().viewport_label, -1, "a fresh pick buffer says no label hit")
+    local bare = v:pick(1, 1)
+    t.ok(bare and bare.item == 6 and bare.viewport_label == nil, "a library that leaves the field alone gives no label")
+    local queued = f.C.cadaclysm_view_next_event
+    f.C.cadaclysm_view_next_event = function(_, out)
+      state.seen = out.pick_viewport_label   -- what the wrapper's own buffer holds before the library writes
+      out.kind = KIND.pick
+      f.C.cadaclysm_view_next_event = queued   -- once
+      return true
+    end
+    v:next_event()
+    t.eq(state.seen, -1, "the event buffer starts at no label hit")
+    state.events = {
+      { kind = KIND.pick, pick_viewport_label = 3 },
+      { kind = KIND.pick, pick = { item = 4 } },
+      { kind = KIND.pick },
+    }
+    local got = {}
+    for e in v:events() do got[#got + 1] = e end
+    t.ok(got[1].pick and got[1].pick.item == 0 and got[1].pick.viewport_label == 3, "the event's label")
+    t.ok(got[2].pick and got[2].pick.item == 4 and got[2].pick.viewport_label == nil, "an item, no label")
+    t.eq(got[3].pick, nil, "no hit at all")
+    v:close()
+  end)
+
+  t.test("next_event turns each kind into a table by the header's numbers; nil once none is left", function()
+    local state = {}
+    local f = with_events(state, fake(state))
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+    state.events = {
+      { kind = KIND.pointer_down, x = 10, y = 20, button = 2, modifiers = MOD.shift + MOD.alt, time_ms = 5 },
+      { kind = KIND.pointer_move, x = 11, y = 21, pointer = 1, pointer_id = 3 },
+      { kind = KIND.wheel, x = 1, y = 2, wheel_y = -100, modifiers = MOD.ctrl },
+      { kind = KIND.key_down, key = "KeyR", ["repeat"] = 1, modifiers = MOD.meta, dropped = 4 },
+      { kind = KIND.key_up, key = "KeyR" },
+      { kind = KIND.resize, width = 640, height = 480 },
+      { kind = KIND.pick, pick = { item = 3, node = 1, face = 2, clicks = 2, has_point = 1, point = { 1, 2, 3 } } },
+      { kind = KIND.pick },
+      { kind = KIND.snap, snap = { kind = 1, item = 3, edge = 4, clicks = 1 } },
+      { kind = KIND.pointer_up, pointer = 2 },
+    }
+    local got, types = {}, {}
+    for e in v:events() do got[#got + 1] = e; types[#types + 1] = e.type end
+    t.eq(table.concat(types, ","), "pointer_down,pointer_move,wheel,key_down,key_up,resize,pick,pick,snap,pointer_up")
+    local d = got[1]
+    t.ok(d.x == 10 and d.y == 20 and d.button == 2 and d.pointer == "mouse" and d.time_ms == 5 and d.dropped == 0,
+      "the press's fields")
+    t.ok(d.shift and not d.ctrl and d.alt and not d.meta, "SHIFT 1, ALT 4")
+    t.ok(got[2].pointer == "touch" and got[2].pointer_id == 3, "a touch, id 3")
+    t.ok(got[3].wheel_y == -100 and got[3].ctrl and not got[3].shift and got[3].x == 1, "CTRL 2 on the wheel")
+    t.ok(got[4].key == "KeyR" and got[4].key_down and got[4]["repeat"] and got[4].meta and got[4].dropped == 4, "META 8")
+    t.ok(got[5].key == "KeyR" and got[5].key_down == false and got[5]["repeat"] == false, "the key up")
+    t.ok(got[6].width == 640 and got[6].height == 480, "the resize")
+    local p = got[7].pick
+    t.ok(p and p.item == 3 and p.node == 1 and p.face == 2 and p.clicks == 2 and p.overlay == false, "the pick")
+    t.ok(p.point and p.point[1] == 1 and p.point[2] == 2 and p.point[3] == 3, "the pick's point")
+    t.eq(got[8].pick, nil, "a click on nothing")
+    t.ok(got[9].snap and got[9].snap.kind == "vertex" and got[9].snap.edge == 4 and got[9].snap.clicks == 1, "the snap")
+    t.eq(got[10].pointer, "pen")
+    t.eq(v:next_event(), nil, "none left")
+    for _, size in ipairs(state.sizes) do t.eq(size, 272, "the 1.26 struct's size") end
+    -- A failure other than "no event" is the library's words.
+    state.error = nil
+    f.C.cadaclysm_view_next_event = function()
+      state.error = "cadaclysm_view_next_event: CadaclysmViewInputEvent.size is 8; this library needs at least 272"
+      return false
+    end
+    local err = t.raises(function() v:next_event() end, "needs at least 272")
+    t.ok(is_view_error(err), "a ViewError")
+    v:close()
+    t.raises(function() v:next_event() end, "the view is closed")
+    view._reset()
+  end)
+
+  t.test("close_window closes as the close button does; the close event is read after it", function()
+    local state = {}
+    view.use(with_events(state, fake(state)))
+    local v = view.View.new({ width = 8, height = 8 })
+    v:close_window()
+    t.ok(v:closed(), "closed")
+    t.ok(seen_call(state, "close"), "cadaclysm_view_close")
+    v:close_window()
+    local n = 0
+    for _, c in ipairs(state.calls) do if c == "close" then n = n + 1 end end
+    t.eq(n, 1, "a closed window is not closed again")
+    local e = v:next_event()
+    t.ok(e and e.type == "close" and e.camera.eye[3] == 3, "the close event, read on a closed window")
+    view._reset()
+  end)
+
+  t.test("run(on_event) hands every event over; false closes the window and ends the run", function()
+    local state = {}
+    local f = with_events(state, fake(state))
+    f.C.cadaclysm_view_pick_result = function() state.error = "cadaclysm_view_pick_result: no pick result" return false end
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+    state.events = {
+      { kind = KIND.key_down, key = "KeyR" },
+      { kind = KIND.pick, pick = { item = 3, node = 1, face = 2, clicks = 1 } },
+      { kind = KIND.key_down, key = "KeyQ" },
+      { kind = KIND.key_up, key = "KeyQ" },
+    }
+    local seen = {}
+    local cam = v:run(function(e)
+      seen[#seen + 1] = e.type .. ":" .. (e.key or "")
+      if e.key == "KeyR" then
+        v:draw()   -- the callback may call the view
+        return nil
+      end
+      return e.key ~= "KeyQ"
+    end)
+    t.eq(table.concat(seen, ","), "key_down:KeyR,pick:,key_down:KeyQ", "false stops: the key up after it is not handed over")
+    t.ok(seen_call(state, "close") and v:closed(), "the window closed")
+    t.ok(cam.eye[1] == 1 and cam.eye[2] == 2 and cam.eye[3] == 3, "the camera the close event carried")
+    t.ok(cam.pick and cam.pick.item == 3, "the last pick event's, none being left for pick_result")
+    t.eq(state.waits[1], 16, "pumped 16 ms at a time")
+    t.raises(function() v:run(42) end, "a function")
+    view._reset()
+  end)
+
+  t.test("run(on_event) ends on the window's own close, handing the close event over last", function()
+    local state = {}
+    local f = with_events(state, fake(state))
+    local pumps = 0
+    f.C.cadaclysm_view_pump = function()
+      pumps = pumps + 1
+      if pumps == 2 then
+        state.events[#state.events + 1] = { kind = KIND.close, camera = { eye = { 0, -5, 0 }, up = { 0, 0, 1 } } }
+        return 2
+      end
+      return 1
+    end
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+    state.events = { { kind = KIND.resize, width = 5, height = 6 } }
+    local seen = {}
+    local cam = v:run(function(e) seen[#seen + 1] = e.type end)
+    t.eq(table.concat(seen, ","), "resize,close")
+    t.ok(cam.eye[2] == -5 and math.abs(cam.azimuth + 90) < 1e-9, "the close event's camera")
+    t.ok(cam.pick and cam.pick.item == 7, "pick_result's answer, taken as the blocking run takes it")
+    t.ok(v:closed() and not seen_call(state, "close"), "closed by itself: never closed by the wrapper")
+    view._reset()
+  end)
+
+  t.test("an offscreen view queues no event and has no window to close (real library)", function()
+    local v = offscreen(32, 24)
+    if not v then return end
+    t.eq(v:next_event(), nil, "an offscreen view queues nothing")
+    t.raises(function() v:close_window() end, "only a view with a window of its own is closed")
+    v:close()
+  end)
+
+  -- CADACLYSM_VIEW_TEST_QUEUE_INPUT in the process's own environment (the library reads it when
+  -- a view is made); nil removes it.
+  local function set_queue_input(value)
+    if ffi.os == "Windows" then
+      pcall(ffi.cdef, "int SetEnvironmentVariableA(const char *name, const char *value);")
+      ffi.C.SetEnvironmentVariableA("CADACLYSM_VIEW_TEST_QUEUE_INPUT", value)
+    else
+      pcall(ffi.cdef, "int setenv(const char *name, const char *value, int overwrite);")
+      pcall(ffi.cdef, "int unsetenv(const char *name);")
+      if value then ffi.C.setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", value, 1)
+      else ffi.C.unsetenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT") end
+    end
+  end
+
+  t.test("under the testing hook the real library queues what an offscreen view is handed", function()
+    set_queue_input("1")
+    local made, v = pcall(offscreen, 64, 48)
+    set_queue_input(nil)
+    if not made then error(v, 0) end
+    if not v then return end
+    local item = v:show_mesh(SQUARE)
+    v:standard("top")
+    v:frame()
+    v:draw()
+    v:input({ type = "key", key = "KeyZ", key_down = true })
+    v:input({ type = "pointer_down", x = 32, y = 24, shift = true, button = 2, time_ms = 1000 })
+    v:input({ type = "pointer_up", x = 32, y = 24, button = 2, time_ms = 1010 })
+    v:input({ type = "pointer_down", x = 32, y = 24, time_ms = 2000 })
+    v:input({ type = "pointer_up", x = 32, y = 24, time_ms = 2010 })
+    v:draw()
+    v:input({ type = "wheel", x = 3, y = 4, wheel_y = -100 })
+    local got, types = {}, {}
+    for e in v:events() do got[#got + 1] = e; types[#types + 1] = e.type end
+    t.eq(table.concat(types, ","), "key_down,pointer_down,pointer_up,pointer_down,pointer_up,pick,wheel")
+    t.ok(got[1].key == "KeyZ" and got[1].key_down and not got[1].shift, "the key")
+    t.ok(got[2].button == 2 and got[2].shift and not got[2].alt and got[2].pointer == "mouse", "a shifted right press")
+    t.ok(got[4].button == 0 and not got[4].shift, "a plain left press")
+    t.ok(got[7].wheel_y == -100 and got[7].x == 3 and got[7].y == 4, "the wheel")
+    local hit = got[6].pick
+    t.ok(hit and hit.item == item.id and hit.clicks == 1, "the click's pick: the square")
+    local last = v:last_pick()
+    t.ok(last and last.item == hit.item and last.face == hit.face, "last_pick still has it")
+    t.eq(v:next_event(), nil, "all read")
+    v:close()
+  end)
+
+  -- ---- view ABI 1.27: animations (play_animation, remove_track, set_visible, set_node_ghosts) ----
+
+  -- A stand-in for a kernel Animation: only its handle reaches the library.
+  local function stand_in_animation(handle)
+    return { _h = function() return handle end }
+  end
+
+  t.test("play_animation hands the library each binding's target, item and node; refusals come before it", function()
+    local state = {}
+    local f = fake(state)
+    local rows, seen = {}, {}
+    f.C.cadaclysm_view_play_animation = function(_, animation, bindings, count)
+      state.calls[#state.calls + 1] = "play_animation"
+      local row = { tostring(tonumber(ffi.cast("intptr_t", animation))) }
+      for i = 0, tonumber(count) - 1 do
+        row[#row + 1] = ("%s/%d/%d"):format(ffi.string(bindings[i].target), bindings[i].item, bindings[i].node)
+      end
+      if bindings == nil then row[#row + 1] = "NULL" end
+      rows[#rows + 1] = table.concat(row, " ")
+      return #rows
+    end
+    f.C.cadaclysm_view_timeline_remove = function(_, track)
+      if track == 2 then
+        state.error = "timeline_remove: no track 2"
+        return false
+      end
+      seen[#seen + 1] = "remove " .. track
+      state.error = ""
+      return true
+    end
+    f.C.cadaclysm_view_set_item_visible = function(_, id, on) seen[#seen + 1] = ("visible %d %s"):format(id, tostring(on)) return true end
+    f.C.cadaclysm_view_set_node_ghosts = function(_, id, nodes, count)
+      local row = { "ghosts", tostring(id), tostring(tonumber(count)) }
+      if nodes == nil then row[#row + 1] = "NULL" else for i = 0, tonumber(count) - 1 do row[#row + 1] = tostring(nodes[i]) end end
+      seen[#seen + 1] = table.concat(row, " ")
+      return true
+    end
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+    local item, other = v:_item(5), v:_item(6)
+    local anim = stand_in_animation(ffi.cast("void *", 77))
+    local track = v:play_animation(anim, { view.AnimationBinding("lid", item, 3), { target = "spin", item = other.id },
+      { "arm", item, { index = 5 } } })
+    t.eq(track, 1, "the track's id")
+    t.eq(rows[1], "77 lid/5/3 spin/6/4294967295 arm/5/5", "item, node and the whole-item node")
+    t.eq(v:play_animation(anim, {}), 2)
+    t.eq(rows[2], "77 NULL", "no bindings: a NULL array, count 0")
+    local before = #rows
+    local bad = {
+      { { "spin" } }, { { "a\0b", item } }, { { "spin", -1 } }, { { "spin", item, 1.5 } }, { { 42, item } }, { { "spin", {} } },
+    }
+    for _, b in ipairs(bad) do t.raises(function() v:play_animation(anim, b) end, "binding 1") end
+    t.raises(function() v:play_animation(anim, 7) end, "a list of bindings")
+    t.raises(function() v:play_animation({}, { { "spin", item } }) end, "an Animation")
+    t.eq(#rows, before, "each refusal came before the library")
+    -- A nil animation is the library's NULL, and its refusal text is the error.
+    f.C.cadaclysm_view_play_animation = function(_, animation)
+      t.ok(animation == nil, "NULL for no animation")
+      state.error = "play_animation: the animation is null"
+      return 0
+    end
+    local e = t.raises(function() v:play_animation(nil, { { "spin", item } }) end, "the animation is null")
+    t.eq(tostring(e), "play_animation: the animation is null")
+    v:remove_track(1)
+    e = t.raises(function() v:remove_track(2) end, "no track 2")
+    t.eq(tostring(e), "timeline_remove: no track 2")
+    item:set_visible(false)
+    other:set_visible()
+    item:set_node_ghosts({ { index = 2 }, 0 })
+    item:set_node_ghosts(nil)
+    item:set_node_ghosts({})
+    t.raises(function() item:set_node_ghosts({ -1 }) end, "set_node_ghosts node 1")
+    t.eq(table.concat(seen, "; "),
+      "remove 1; visible 5 false; visible 6 true; ghosts 5 2 2 0; ghosts 5 0 NULL; ghosts 5 0")
+    view._reset()
+  end)
+
+  t.test("a timeline event is its kind and stamp alone; the binding struct is the header's 16 bytes", function()
+    local state = {}
+    view.use(with_events(state, fake(state)))
+    local v = view.View.new({ width = 8, height = 8 })
+    state.events = { { kind = KIND.timeline, time_ms = 9.5, x = 3, width = 7 } }
+    local e = v:next_event()
+    local keys = {}
+    for k in pairs(e) do keys[#keys + 1] = k end
+    table.sort(keys)
+    t.eq(table.concat(keys, ","), "dropped,time_ms,type", "no field beyond the stamp")
+    t.ok(e.type == "timeline" and e.time_ms == 9.5 and e.dropped == 0, "CADACLYSM_VIEW_INPUT_EVENT_TIMELINE is 11")
+    t.eq(ffi.sizeof("CadaclysmViewAnimationBinding"), ffi.sizeof("void *") == 8 and 16 or 12, "sizeof the binding")
+    t.eq(ffi.offsetof("CadaclysmViewAnimationBinding", "item"), ffi.sizeof("void *"), "item follows the pointer")
+    t.eq(ffi.offsetof("CadaclysmViewAnimationBinding", "node"), ffi.sizeof("void *") + 4, "node follows the item")
+    view._reset()
+  end)
+
+  -- A 4 x 2 x 1 kernel box shown and framed from the top, as the C ABI's turntable test does.
+  local function shown_box(v)
+    local item = v:show_solid(bs.Solid.cuboid(4, 2, 1))
+    v:standard("top")
+    item:frame()
+    return item
+  end
+  local function drawn(v) v:draw() return v:image() end
+  local function turntable(target)
+    local anim = bs.Animation()
+    anim:rotate(target or "spin", { { 0, 0 }, { 1, 30 } })
+    return anim
+  end
+
+  t.test("a turntable plays on the real library and removing it restores the rest (real library)", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    local item = shown_box(v)
+    local rest = drawn(v)
+    local anim = turntable()
+    local track = v:play_animation(anim, { view.AnimationBinding("spin", item) })
+    t.eq(track, 1, "the first track")
+    anim:close()   -- the view plays its own copy
+    v:seek(1)
+    t.ok(changed(drawn(v), rest) > 0, "turned 30 degrees, the box draws elsewhere")
+    v:remove_track(track)
+    t.eq(changed(drawn(v), rest), 0, "removed: the rest pose again, pixel for pixel")
+    local e = t.raises(function() v:remove_track(track) end, "no track 1")
+    t.eq(tostring(e), "timeline_remove: no track 1")
+    v:close()
+  end)
+
+  t.test("a binding to an unknown item or node is refused with the library's text (real library)", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    local item = shown_box(v)
+    local anim = turntable()
+    local function refused(bindings) return tostring(t.raises(function() v:play_animation(anim, bindings) end, "play_animation")) end
+    t.eq(refused({ { "spin", 9999 } }), "play_animation: no item 9999")
+    t.eq(refused({ { "spin", item, 1 } }), ("play_animation: item %d has no node 1 (it has 1)"):format(item.id), "a solid is one node")
+    t.eq(refused({ { "spin", item }, { "spin", item } }), ('play_animation: target "spin" is bound twice to item %d'):format(item.id))
+    t.eq(tostring(t.raises(function() v:play_animation(nil, { { "spin", item } }) end, "the animation is null")),
+      "play_animation: the animation is null")
+    anim:close()
+    v:close()
+  end)
+
+  t.test("set_visible hides the item and shows it again (real library)", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    local item = shown_box(v)
+    local rest = drawn(v)
+    item:set_visible(false)
+    t.ok(changed(drawn(v), rest) > 0, "hidden: the box is gone")
+    item:set_visible(true)
+    t.eq(changed(drawn(v), rest), 0, "shown again")
+    local ghost = setmetatable({ view = v, id = 9999 }, getmetatable(item))
+    local e = t.raises(function() ghost:set_visible(false) end, "set_item_visible")
+    t.eq(tostring(e), "set_item_visible: no item 9999")
+    v:close()
+  end)
+
+  t.test("set_node_ghosts sets then clears (real library)", function()
+    -- Triangles: the exact surfaces draw an x-ray item as they draw it opaque, alone in the picture.
+    local v = offscreen(64, 48, { surfaces = "triangles" })
+    if not v then return end
+    local item = shown_box(v)
+    local rest = drawn(v)
+    item:set_xray(true)
+    local xray = drawn(v)
+    item:set_xray(false)
+    item:set_node_ghosts({ 0 })
+    local ghosted = drawn(v)
+    t.ok(changed(ghosted, rest) > 0, "node 0 drawn x-ray")
+    t.eq(changed(ghosted, xray), 0, "a solid's one node ghosted is the item x-ray")
+    item:set_node_ghosts(nil)
+    t.eq(changed(drawn(v), rest), 0, "cleared")
+    local e = t.raises(function() item:set_node_ghosts({ 1 }) end, "set_node_ghosts")
+    t.eq(tostring(e), ("set_node_ghosts: item %d has no node 1 (it has 1)"):format(item.id))
+    local ghost = setmetatable({ view = v, id = 9999 }, getmetatable(item))
+    e = t.raises(function() ghost:set_node_ghosts(nil) end, "set_node_ghosts")
+    t.eq(tostring(e), "set_node_ghosts: no item 9999")
+    v:close()
+  end)
+
+  t.test("a seek and a draw queue one timeline event under the testing hook (real library)", function()
+    set_queue_input("1")
+    local made, v = pcall(offscreen, 64, 48)
+    set_queue_input(nil)
+    if not made then error(v, 0) end
+    if not v then return end
+    local item = shown_box(v)
+    local anim = turntable()
+    v:play_animation(anim, { { "spin", item } })
+    anim:close()   -- the view plays its own copy
+    v:draw()
+    for _ in v:events() do end
+    v:seek(0.5)
+    v:draw()
+    local got = {}
+    for e in v:events() do if e.type == "timeline" then got[#got + 1] = e end end
+    t.eq(#got, 1, "one timeline event for the draw after a seek")
+    local keys = {}
+    for k in pairs(got[1]) do keys[#keys + 1] = k end
+    table.sort(keys)
+    t.eq(table.concat(keys, ","), "dropped,time_ms,type", "no fields beyond the stamp")
+    v:draw()
+    for e in v:events() do t.ok(e.type ~= "timeline", "the clock still: none") end
     v:close()
   end)
 end

@@ -163,8 +163,8 @@ final class BlacksmithIntervalTests: XCTestCase {
         XCTAssertFalse(try i(3, 3).isIncreasing)
         XCTAssertTrue(try i(3, 3).isSingleton)
         XCTAssertFalse(up.isSingleton)
-        XCTAssertEqual(up.swapped(), down)
-        XCTAssertEqual(down.swapped(), up)
+        XCTAssertEqual(up.swap(), down)
+        XCTAssertEqual(down.swap(), up)
         XCTAssertEqual([down.t0, down.t1], [6.0, 2.0])
     }
 
@@ -250,8 +250,8 @@ final class BlacksmithFrameVerbTests: XCTestCase {
     func testPlaneVerbsMatchRhino() throws {
         let r = try vectors()
         let p = try Frame.of(try r.nums("plane", "frame"))
-        assertClose(try p.flipped().values, try r.nums("plane", "flip"), exact, "flip")
-        assertClose(try p.rotated(0.6, P3(1, -1, 0.5)).values, try r.nums("plane", "rotate"), exact, "rotate")
+        assertClose(try p.flip().values, try r.nums("plane", "flip"), exact, "flip")
+        assertClose(try p.rotate(0.6, P3(1, -1, 0.5)).values, try r.nums("plane", "rotate"), exact, "rotate")
         for (c, q) in try r.queries("plane") {
             assertClose(p.toLocal(q), try r.point(c, "remap"), exact, c)
             assertClose(p.closestPoint(q), try r.point(c, "closest"), exact, c)

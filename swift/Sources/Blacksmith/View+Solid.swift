@@ -15,9 +15,18 @@ extension View {
                        material: material, opacity: opacity, faces: faces)
     }
 
+    /// Plays `animation` on the view's timeline (view ABI 1.27), its targets bound as `bindings`
+    /// say; the view plays a copy, so the animation may be closed at once. The track's id, for
+    /// `removeTrack`. A closed animation is refused as the kernel refuses it.
+    @discardableResult
+    public func playAnimation(_ animation: Animation, _ bindings: [AnimationBinding]) throws -> UInt32 {
+        try playAnimationHandle(try animation.h(), bindings)
+    }
+
     /// A 2D shape over the window (view ABI 1.24): `shape` in pixels (one profile unit a pixel,
-    /// y up), its origin hung `x`, `y` pixels inward from `anchor` -- a closed profile filled
-    /// (holes cut, even-odd), stroked where `style` says (see OverlayStyle). Drawn after
+    /// y up), its origin hung `x`, `y` pixels inward from `anchor` -- stroked, in its own colour
+    /// or white, and its closed loops filled (holes cut, even-odd) only where `style` gives a
+    /// fill (see OverlayStyle). Drawn after
     /// everything else, never moved by the camera, kept in place as the window resizes; a
     /// click on it picks it (`ViewPick.overlay`) and nothing beneath.
     @discardableResult
@@ -26,7 +35,7 @@ extension View {
         try showOverlay([shape], anchor: anchor, x: x, y: y, style: style)
     }
     /// Several profiles as one overlay -- a crosshair's two strokes, a frame's two loops: their
-    /// fills together by the even-odd rule. The fill falls back on the first coloured profile's
+    /// fills together by the even-odd rule. The stroke falls back on the first coloured profile's
     /// colour.
     @discardableResult
     public func showOverlay(_ shapes: [Profile], anchor: Anchor, x: Float, y: Float,

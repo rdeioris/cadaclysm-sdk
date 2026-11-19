@@ -97,6 +97,8 @@ export function features(): string;
 export function defaultSchema(): string;
 export function version(): string;
 export function buildDate(): string;
+/** The library's build: the commit and branch it was built from (`"unknown"` built from no checkout), when, its version and build date. */
+export function build(): { branch: string; commit: string; date: string; time: string; version: string };
 export function license(textOrPath: string): void;
 export function licenseInfo(): string;
 export function licenseNoticeCount(): number;
@@ -118,6 +120,8 @@ export function option(name: string): number;
 export interface Tolerances { readonly absolute: number | null; readonly angular: number | null }
 /** The tolerance a verb given a null (or 0) `tolerance` works at over `solids` (0 for none). */
 export function effectiveTolerance(...solids: Solid[]): number;
+/** The angle at `vertex` between the arms to `a` and to `b`, in radians 0 to pi. Throws `BuildError` (`angle_points: ...`) for an arm of no length. */
+export function angle(a: Point3, vertex: Point3, b: Point3): number;
 
 export class Profile {
   private constructor();
@@ -149,6 +153,16 @@ export class Profile {
   static fromBeziers(beziers: ArrayLike<number>, recognise?: boolean): Profile;
   /** This profile as rational cubic Béziers, sixteen numbers each, on the sketch plane or carried onto `frame` (twelve numbers). */
   beziers(frame?: ArrayLike<number> | null): Float64Array;
+  /** A profile from piece definitions in `curve.polycurve`'s `pieces` grammar (objects or their JSON text), chained and joined within `tolerance`; closed where the ends meet or `closed` asks. */
+  static fromPieces(pieces: string | Iterable<Record<string, unknown>>, closed?: boolean, tolerance?: number | null): Profile;
+  /** The outline as piece definitions, one per segment: lines, arcs through their middle, cubic `spline` pieces for the rest. */
+  piecesJson(): Array<Record<string, any>>;
+  /** A sketch fillet between two open profiles meeting at an end in straight segments: both cut back to the tangent points, and the arc. */
+  static filletCorner(a: Profile, b: Profile, radius: number, tolerance?: number | null): { a: Array<Record<string, any>>; b: Array<Record<string, any>>; arc: Record<string, any> };
+  /** The exact box `[minX, minY, maxX, maxY]` in the sketch, from the curves' own extremes. */
+  bounds(): [number, number, number, number];
+  /** This profile walked the other way; twice is the profile. */
+  reversed(): Profile;
   /** The closed loops among `pieces`: each the pieces' indices in the order it runs. */
   static loops(pieces: Iterable<Profile>, tolerance?: number | null): number[][];
   /** The order `chain` takes `pieces` in: per piece its index and whether it was turned round. */
@@ -162,6 +176,8 @@ export class Profile {
   withHole(hole: Profile): Profile;
   /** The perimeter of the outer loop -- holes are not counted -- measured to the relative `accuracy` (0: the default). */
   length(accuracy?: number): Length;
+  /** The region's area properties in the profile's own plane (holes subtracted whatever their winding); `accuracy` (relative, in (0, 1)) undefined or null is 1e-9. Fusion's `Profile.areaProperties`. */
+  areaProperties(accuracy?: number | null): AreaProperties;
   /** The point `s` along the outer loop from its start; `segment` is the side. */
   pointAtLength(s: number, accuracy?: number): At;
   /** The outer loop in `n` (1 to 1,000,000) pieces of equal arc length: `n` samples (a profile's outer loop is closed). */
@@ -172,10 +188,36 @@ export class Profile {
   polylines(tolerance?: number | null): Float32Array[];
   /** Every free-form side as lines and arcs within `tolerance` (0.01 by default). */
   toArcs(tolerance?: number | null): Profile;
-  /** Grown by `distance` (shrunk where negative), as zero or more line-and-arc profiles. */
-  offset(distance: number, tolerance?: number | null): Profile[];
+  /** Grown by `distance` (shrunk where negative), as zero or more line-and-arc profiles; `corner` styles the corners where the moved sides part ('round' by default). */
+  offset(distance: number, tolerance?: number | null, corner?: OffsetCorner): Profile[];
+  /** Read as an open chain and offset: `end` 'none' one-sided (to the right of travel for a positive distance), 'flat' / 'round' the capped outline both sides at `|distance|`. */
+  offsetOpen(distance: number, tolerance?: number | null, corner?: OffsetCorner, end?: OffsetEnd): Profile[];
   hits(other: Profile, tolerance?: number | null): Hit[];
   common(other: Profile, tolerance?: number | null): Profile[];
+  /** The region this profile or `other` covers, exact (Rhino's `CreateBooleanUnion`). */
+  union(other: Profile, tolerance?: number | null): Profile[];
+  /** The region of this profile that `other` does not cover, exact. */
+  difference(other: Profile, tolerance?: number | null): Profile[];
+  /** Every region the closed `profiles` split the plane into, each once (Rhino's `CreateBooleanRegions`). */
+  static regions(profiles: Iterable<Profile>, tolerance?: number | null): Profile[];
+  /** Where `point` lies against this closed profile: 'on' within `tolerance` of a loop, else 'inside' or 'outside' (even-odd). */
+  contains(point: Point2, tolerance?: number | null): ProfileContainment;
+  /** How this closed profile's region stands to `other`'s (Rhino's `PlanarClosedCurveRelationship`, touching and overlapping told apart). */
+  relationship(other: Profile, tolerance?: number | null): ProfileRelation;
+  /** The largest and smallest distance between the two outlines, both ways round (Rhino's `GetDistancesBetweenCurves`). */
+  deviation(other: Profile, tolerance?: number | null): Deviation;
+  /** Runs of straight segments simplified by Douglas-Peucker within `tolerance` (Rhino's `Polyline.ReduceSegments`). */
+  reduceSegments(tolerance?: number | null, open?: boolean): Profile;
+  /** Neighbouring segments that are one curve made one: lines turning less than `angleTolerance`, arcs on one circle. */
+  mergeColinear(angleTolerance?: number, open?: boolean, includeSeam?: boolean): Profile;
+  /** The outer loop cut into open pieces where the travel turns by more than `angle` radians. */
+  breakAtKinks(angle: number, open?: boolean): Profile[];
+  /** Whether this closed profile is convex; `strict` also refuses a joint between two lines that does not turn. */
+  isConvex(strict?: boolean): boolean;
+  /** This open chain closed by moving its end onto its start within `tolerance` (Rhino's `MakeClosed`). */
+  makeClosed(tolerance?: number | null): Profile;
+  /** This closed profile with its outer loop restarted at its point nearest `point` (Rhino's `ChangeClosedCurveSeam`). */
+  withSeam(point: Point2): Profile;
   static text(text: string, size?: number, font?: string, halign?: 'left' | 'center' | 'right', valign?: 'baseline' | 'bottom' | 'center' | 'top', spacing?: number, direction?: 'ltr' | 'rtl', fontBytes?: Uint8Array | ArrayBuffer | null): Profile[];
   translate(dx: number, dy: number): Profile;
   /** This outline turned `radians` (counter-clockwise) about `centre`. */
@@ -192,6 +234,7 @@ export class Profile {
   readonly colour: [number, number, number] | null;
   /** This profile as a `Document`'s `profile.path` node holds it, parsed: `{start, segments, holes, colour}`, its exact segments never flattened. What `Document.addProfile` puts in a document. */
   documentPath(): { [key: string]: any };
+  /** Corners rounded by `radius` -- between lines, arcs and splines alike, each cut back and an exact tangent arc put between; a corner the two run straight on through is no corner (a picked one throws). */
   round(radius: number, corners?: Iterable<number> | null, open?: boolean): Profile;
   /** This profile's own loops as SVG text, from directly above by default (`view: 'top'`) -- a sketch lies in z = 0, so its own plane already is the page. */
   svgText(options?: SvgOptions): string;
@@ -243,9 +286,9 @@ export class Frame implements Iterable<number> {
   translate(dx: number, dy: number, dz: number): Frame;
   offset(distance: number): Frame;
   /** The same plane facing the other way: x and y swapped, z reversed. */
-  flipped(): Frame;
+  flip(): Frame;
   /** This frame turned `radians` about `axis` through its origin. */
-  rotated(radians: number, axis: Point3): Frame;
+  rotate(radians: number, axis: Point3): Frame;
   /** `p` in this frame's coordinates. */
   toLocal(p: Point3): number[];
   /** `p` dropped onto the plane along z. */
@@ -312,7 +355,7 @@ export class Quaternion implements Iterable<number> {
   /** The turn's axis, null for the identity. */
   readonly axis: [number, number, number] | null;
   conjugate(): Quaternion;
-  normalized(): Quaternion;
+  normalize(): Quaternion;
   multiply(o: Quaternion): Quaternion;
   equals(other: unknown): boolean;
   [Symbol.iterator](): Iterator<number>;
@@ -334,7 +377,7 @@ export class Interval implements Iterable<number> {
   readonly max: number;
   readonly isIncreasing: boolean;
   readonly isSingleton: boolean;
-  swapped(): Interval;
+  swap(): Interval;
   grown(t: number): Interval;
   union(o: IntervalLike): Interval;
   /** The increasing overlap; null where the two are apart. */
@@ -663,7 +706,7 @@ export type SlantLike = Slant | number;
 
 /** What a small feature is: a `SmallFeature`'s, `HealFix`'s or `HealRefusal`'s `kind`. */
 export type SmallFeatureKind = 'short_edge' | 'collapsed_edge' | 'sliver_face' | 'tiny_face' | 'tiny_body' | 'small_hole';
-/** Why `healed` left a small feature: a `HealRefusal`'s `why`. */
+/** Why `heal` left a small feature: a `HealRefusal`'s `why`. */
 export type HealWhy = 'would_empty_loop' | 'closed' | 'seam' | 'chain' | 'neighbours_part' | 'uneven' | 'non_manifold'
   | 'has_holes' | 'body_guard' | 'toggled' | 'unsupported';
 /** One free edge: a side only one face bounds, with its nearest partner (a row of `freeEdges`) and the gap to it (`Infinity` without one). */
@@ -710,17 +753,17 @@ export class HealthReport {
   /** The free edges of wire number `wire`, in order. */
   wireEdges(wire: number): FreeEdge[];
 }
-/** One small feature `healed` removed: what it was, its number in the input, its size, and how far the vertices it merged moved. */
+/** One small feature `heal` removed: what it was, its number in the input, its size, and how far the vertices it merged moved. */
 export class HealFix {
   constructor(kind: SmallFeatureKind, index: number, size: number, moved: number);
   kind: SmallFeatureKind; index: number; size: number; moved: number;
 }
-/** One small feature `healed` left, and why; `figure` the chain's width or the neighbours' gap, else 0. */
+/** One small feature `heal` left, and why; `figure` the chain's width or the neighbours' gap, else 0. */
 export class HealRefusal {
   constructor(kind: SmallFeatureKind, index: number, why: HealWhy, figure: number);
   kind: SmallFeatureKind; index: number; why: HealWhy; figure: number;
 }
-/** What `healed` did: the fixes, the features left and why, and the body's health before and after. */
+/** What `heal` did: the fixes, the features left and why, and the body's health before and after. */
 export class HealReport {
   constructor(tolerance: number, moved: number, guarded: boolean, fixes: HealFix[], refused: HealRefusal[], smallBefore: number, smallAfter: number,
     freeBefore: number, freeAfter: number, closedBefore: boolean, closedAfter: boolean, nonmanifoldBefore: number, nonmanifoldAfter: number);
@@ -733,8 +776,37 @@ export class HealReport {
 }
 /** `health`'s options: `tolerance` (omitted takes the default, `1e-4` times the diagonal) and `mesh` (also mesh the body and report its cracks). */
 export interface HealthOptions { tolerance?: number; mesh?: boolean }
-/** `healed`'s options: `tolerance` as `health`'s, and the three kinds of fix, each on unless `false`. */
+/** `heal`'s options: `tolerance` as `health`'s, and the three kinds of fix, each on unless `false`. */
 export interface HealOptions { tolerance?: number; edges?: boolean; faces?: boolean; holes?: boolean }
+/** A face's analytic kind as `recognize` gives it: a `RecognizedFace`'s `kind`. */
+export type RecognizedFaceKind = 'plane' | 'cylinder' | 'cone' | 'sphere' | 'torus';
+/** An edge curve's analytic kind as `recognize` gives it: a `RecognizedEdge`'s `kind`. */
+export type RecognizedEdgeKind = 'line' | 'circle' | 'ellipse';
+/** Why `recognize` left a face free-form: a `RecognizeRefusal`'s `why`. */
+export type RecognizeWhy = 'no_kind' | 'mixed_normals' | 'parameter_trims' | 'too_few_samples';
+/** One face `recognize` gave an analytic kind: its face number (unchanged), its kind, and how far any sample of it lies from the analytic surface. */
+export class RecognizedFace {
+  constructor(face: number, kind: RecognizedFaceKind, deviation: number);
+  face: number; kind: RecognizedFaceKind; deviation: number;
+}
+/** One face `recognize` left free-form, and why; `closest` the nearest kind's deviation for `no_kind`, else null. */
+export class RecognizeRefusal {
+  constructor(face: number, why: RecognizeWhy, closest: number | null);
+  face: number; why: RecognizeWhy; closest: number | null;
+}
+/** One edge whose curve `recognize` gave an analytic kind: its brep edge id (as `edgeTolerance` takes one), its kind, and how far it lies from the analytic curve. */
+export class RecognizedEdge {
+  constructor(edge: number, kind: RecognizedEdgeKind, deviation: number);
+  edge: number; kind: RecognizedEdgeKind; deviation: number;
+}
+/** What `recognize` did: the faces and edges given an analytic kind, the faces left and why, and the tolerance it fitted to. */
+export class RecognizeReport {
+  constructor(tolerance: number, faces: RecognizedFace[], refused: RecognizeRefusal[], edges: RecognizedEdge[], edgesLeft: number, worstFace: number, worstEdge: number);
+  tolerance: number; faces: RecognizedFace[]; refused: RecognizeRefusal[]; edges: RecognizedEdge[];
+  edgesLeft: number; worstFace: number; worstEdge: number;
+}
+/** `recognize`'s options: `tolerance` (omitted, or not finite and positive, takes the default, `1e-6` of the body's extent). */
+export interface RecognizeOptions { tolerance?: number }
 /** Whether a solid's faces make a manifold, read off its topology (`Solid.manifold`). */
 export interface Manifold {
   faces: number; edges: number; vertices: number;
@@ -912,7 +984,7 @@ export class CurveBodyFoot {
   /** The curve passes through the boundary: `distance` is exactly 0 and the earliest crossing in `t` answers. */
   readonly crossing: boolean;
 }
-/** The nearest of a list of things to a curve (`NurbsCurve.closestObject`). */
+/** The nearest of a list of things to a curve (`NurbsCurve.closestObject`). An answer kind the library names and this wrapper does not know throws. */
 export class NearestObject {
   private constructor();
   /** The item's index in the list asked. */
@@ -923,12 +995,50 @@ export class NearestObject {
   readonly t: number;
   readonly pointOnCurve: number[];
   readonly pointOnItem: number[];
-  /** A solid's or a projector's answer; null for a curve, a mesh or a point. */
+  /** A solid's or a projector's answer; null for a curve, a mesh, a surface or a point. */
   readonly body: CurveBodyFoot | null;
-  /** A curve's answer, side `a` the curve asked; null for a solid, a projector, a mesh or a point. */
+  /** A curve's answer, side `a` the curve asked; null for a solid, a projector, a mesh, a surface or a point. */
   readonly pair: CurvePair | null;
   /** A `TriangleMesh`'s answer; null for any other item. */
   readonly mesh: CurveMeshFoot | null;
+  /** A `NurbsSurface`'s answer; null for any other item. */
+  readonly surface: CurveSurfaceFoot | null;
+}
+/** The nearest point of a `NurbsSurface` to a query point (`NurbsSurface.closestPoint`). Exact: no tolerance, no `refined` figure. */
+export class SurfacePoint {
+  private constructor();
+  /** The point on the surface. */
+  readonly point: number[];
+  /** From the query point to `point`. */
+  readonly distance: number;
+  /** The surface's `u` parameter at `point`: among equal distances the lower `u`, then the lower `v`, answers. */
+  readonly u: number;
+  /** The surface's `v` parameter at `point`. */
+  readonly v: number;
+  /** The surface's unit normal at `(u, v)` (`dS/du x dS/dv`), or `[0, 0, 0]` where it has none: a pole, where the partials are parallel. */
+  readonly normal: number[];
+  /** True where `point` lies on an edge of the patch (`u` or `v` at an end of the domain) and the way to the query point is not along the normal: the edge, not the interior, is what is nearest. */
+  readonly boundary: boolean;
+}
+/** The nearest points of a curve and a `NurbsSurface` (`NurbsSurface.curveClosestPoints`, a `NearestObject`'s answer for a surface). The surface's side is named as `SurfacePoint` names its point, flat. Exact. */
+export class CurveSurfaceFoot {
+  private constructor();
+  /** From `pointOnCurve` to `pointOnSurface`. */
+  readonly distance: number;
+  /** The curve's parameter at `pointOnCurve`. */
+  readonly t: number;
+  readonly pointOnCurve: number[];
+  readonly pointOnSurface: number[];
+  /** The surface's `u` parameter at `pointOnSurface`. */
+  readonly u: number;
+  /** The surface's `v` parameter at `pointOnSurface`. */
+  readonly v: number;
+  /** The surface's unit normal at `(u, v)`, or `[0, 0, 0]` at a pole. */
+  readonly normal: number[];
+  /** True where `pointOnSurface` lies on an edge of the patch and the way to the curve is not along the normal. */
+  readonly boundary: boolean;
+  /** The curve passes through the surface: `distance` is exactly 0, at the earliest crossing in `t`. A curve that touches without passing through is distance 0 and false. */
+  readonly crossing: boolean;
 }
 /** The nearest point of a `TriangleMesh` to a query point (`TriangleMesh.closestPoint`). Exact: no tolerance, no `refined` figure. */
 export class MeshPoint {
@@ -987,6 +1097,12 @@ export class Solid {
   static wedge(x: number, y: number, z: number, topX: number): Solid;
   /** A right pyramid of `sides` sides (at least 3): its base the regular polygon of circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`). */
   static pyramid(sides: number, r: number, h: number): Solid;
+  /** The base flange: `profile` as a flat sheet under `frame` (null: the world's xy), its top in the frame's plane, the sheet `rule.thickness` below it; throws `sheet_base: ...`. */
+  static sheetBase(profile: Profile, rule: SheetRule, frame?: FrameLike | null, tolerance?: number | null): Solid;
+  /** A contour flange: the open path `path` in `frame`'s plane (the sheet seen from its side), `width` deep along the frame's z, each corner a bend of `rule`'s radius. */
+  static sheetContour(path: Iterable<Point2>, width: number, rule: SheetRule, frame?: FrameLike | null, tolerance?: number | null): Solid;
+  /** A flat outline folded: `profile` under `frame`, each of `bends` a bend -- a `FlatPattern`'s outline and bends, edited and folded again. */
+  static foldFlat(profile: Profile, bends: Iterable<Bend>, rule: SheetRule, frame?: FrameLike | null, tolerance?: number | null): Solid;
   /** The sheet lofted through the section curves, `degree` across them; `loose` shapes it by them, `closed` makes it periodic across them. */
   static loftCurves(sections: Iterable<NurbsCurve>, degree?: number, loose?: boolean, closed?: boolean): Solid;
   /** `sections` swept along `rail`; `frame` `'rmf'` rotation-minimising or `'fixed'` keeping `up` upright. The sheet's `sheetError` says how close the fit is. */
@@ -1030,9 +1146,11 @@ export class Solid {
   /** What is wrong with this solid: free edges and wires, small features, loose edges, what sewing would do, and, asked for, the mesh's cracks. Nothing moves. */
   health(options?: HealthOptions): HealthReport;
   /** This solid with its small features removed, and what was done; this one is left as it was. */
-  healed(options?: HealOptions): { solid: Solid; report: HealReport };
+  heal(options?: HealOptions): { solid: Solid; report: HealReport };
   /** How far brep edge `edge` may lie off its curve: 0 exact, the distance healing or sewing moved it, null when no trim names the id. */
   edgeTolerance(edge: number): number | null;
+  /** This solid with its free-form surfaces and edge curves given their analytic kind, and what was taken; this one is left as it was. */
+  recognize(options?: RecognizeOptions): { solid: Solid; report: RecognizeReport };
   /** What this solid declares about its own precision; null in a field nothing declared. */
   readonly tolerances: Tolerances;
   /** This solid declaring `absolute` and `angular` (radians); null (or 0) declares nothing. */
@@ -1044,9 +1162,15 @@ export class Solid {
   place(frame: FrameLike): Solid;
   /** The closed outlines where the plane `Z = z` cuts this solid, as profiles with holes. */
   section(z: number, tolerance?: number | null): Profile[];
+  /** This solid cut by the plane through `origin` square to `normal`, as curves in space (exact where the crossing is a line, circle, ellipse or NURBS); none for a plane missing it. `tolerance` 0 or null: the solid's effective tolerance. */
+  sectionCurves(origin: Point3, normal: Point3, tolerance?: number | null): SectionCurve[];
+  /** This solid cut by the planes square to `end - start` through `start` and every `interval` on towards `end`: every plane's curves in plane order, each one's `plane` its index. */
+  contourCurves(start: Point3, end: Point3, interval: number, tolerance?: number | null): SectionCurve[];
+  /** The `[start, end]` intervals of the swept parameter along which face `face`'s isocurve lies inside its trims, ascending. */
+  faceIsoIntervals(face: number, alongU: boolean, at: number): [number, number][];
   translate(dx: number, dy: number, dz: number): Solid;
   /** This solid scaled by `factor` about the origin: every length times `factor`, exactly. */
-  scaled(factor: number): Solid;
+  scale(factor: number): Solid;
   rotate(axis: AxisLine, radians: number): Solid;
   mirror(plane: FrameLike): Solid;
   /** Through the affine map `t` -- a `Transform` or 16 numbers -- exactly, colours and name kept. */
@@ -1069,8 +1193,76 @@ export class Solid {
   curvatureTurns(face?: number, samples?: number): CurvatureTurns;
   /** The worst kink of the highlight lines crossing edge `edge`, at `samples` points along it. */
   highlightKink(edge: Edge | number, samples?: number): HighlightKink;
+  /** Faces `faces` drafted to `angle` (radians, the new draft angle, positive where a face looks partly along the pull) against `plane`'s z about the neutral plane through its origin; throws `draft: ...`. */
+  draft(faces: number | Iterable<number>, plane: FrameLike, angle: number, tolerance?: number | null, progress?: Progress | null): Solid;
+  /** Faces `faces` drafted both ways from the neutral plane `plane`: above it to `above` against +z, below it to `below` against -z. */
+  draftTwoSided(faces: number | Iterable<number>, plane: FrameLike, above: number, below: number, tolerance?: number | null, progress?: Progress | null): Solid;
+  /** The point of face `face` nearest `point` and the draft angle there against `pull`. */
+  draftAngleAt(face: number, point: Point3, pull: Point3): DraftPoint;
+  /** Every face's draft against `pull`, one `FaceDraft` per face in face order; `threshold` in radians (1 degree by default). */
+  draftAnalysis(pull: Point3, threshold?: number, tolerance?: number | null): FaceDraft[];
+  /** Edge flanges on `edges` of a sheet body's broad face, each turned `angle` (> 0 up) and `length` high, bent at `rule`'s radius; `offsets` `[start, end]` in from the edge's ends (null: full length); throws `sheet_flange: ...`. */
+  sheetFlange(edges: Iterable<Edge | number>, angle: number, length: number, rule: SheetRule, offsets?: [number, number] | null, tolerance?: number | null): Solid;
+  /** Hems on `edges`: `length` the lip, `gap` the gap inside (0: the thickness), `angle` a rolled hem's turn (0: 1.5 pi); throws `sheet_hem: ...`. */
+  sheetHem(edges: Iterable<Edge | number>, kind: HemKind, length: number, rule: SheetRule, gap?: number, angle?: number, tolerance?: number | null): Solid;
+  /** A bend on the line through two points `line` across flat broad face `face`, the material on the line's left turned `angle`; throws `sheet_fold: ...`. */
+  sheetFold(face: number, line: [Point3, Point3] | ArrayLike<number>, angle: number, rule: SheetRule, tolerance?: number | null): Solid;
+  /** Rips along sharp wall edges: a slot `gap` wide (0: a tenth of the wall), so `sheetConvert` can lay it flat; throws `sheet_rip: ...`. */
+  sheetRip(edges: Iterable<Edge | number>, gap?: number, tolerance?: number | null): Solid;
+  /** A shelled solid of constant thickness made sheet metal from `fixedFace`, every sharp edge a bend of `rule`'s radius; throws `sheet_convert: ...`. */
+  sheetConvert(fixedFace: number, rule: SheetRule, tolerance?: number | null): Solid;
+  /** `rule`'s corner relief cut at every corner where two bend zones end close together. */
+  sheetCornerRelief(rule: SheetRule, tolerance?: number | null): Solid;
+  /** A rip from `a` to `b` on flat broad face `face`: a slot `gap` wide (0: a tenth of the thickness) through that wall only, an end on the outline breaking through; throws `sheet_rip_points: ...`. */
+  sheetRipPoints(face: number, a: Point3, b: Point3, gap?: number, tolerance?: number | null): Solid;
+  /** The wall under broad face `face` (flat or a bend) removed through the thickness; throws `sheet_rip_face: ...`. */
+  sheetRipFace(face: number, tolerance?: number | null): Solid;
+  /** Two walls joined by a bend of `rule`'s radius at outline edges `edgeA` and `edgeB` (a wall's broad face meeting its square end), outer mould line kept; throws `sheet_join: ...`. */
+  sheetJoin(edgeA: Edge | number, edgeB: Edge | number, rule: SheetRule, tolerance?: number | null): Solid;
+  /** Rounds of `radius` on thickness `edges`, laid into the flat pattern (cut on a convex corner, filled on a concave one); throws `sheet_fillet: ...`. */
+  sheetFillet(edges: Iterable<Edge | number>, radius: number, rule: SheetRule, tolerance?: number | null): Solid;
+  /** Chamfers `distance` along both sides on thickness `edges`, as `sheetFillet`; throws `sheet_chamfer: ...`. */
+  sheetChamfer(edges: Iterable<Edge | number>, distance: number, rule: SheetRule, tolerance?: number | null): Solid;
+  /** Whether the body is sheet metal: two broad sides of constant thickness, flat faces and cylindrical bends. */
+  isSheetMetal(tolerance?: number | null): boolean;
+  /** The faces of every bend, two a bend; throws for a body that is not sheet metal. */
+  sheetBendFaces(tolerance?: number | null): number[];
+  /** The body read as sheet metal from `fixedFace` (null: its largest flat broad face); throws `sheet_info: ...`. */
+  sheetInfo(fixedFace?: number | null, tolerance?: number | null): SheetInfo;
+  /** The body unfolded from flat broad face `fixedFace` under `rule`, every bend laid flat at its allowance; throws `flat_pattern: ...`. */
+  flatPattern(fixedFace: number, rule: SheetRule, tolerance?: number | null): FlatPattern;
+  /** Faces `faces` (null: all) laid flat in the xy plane, `curves` and `points` following; throws `unroll: ...`. */
+  unroll(faces?: Iterable<number> | null, curves?: Iterable<NurbsCurve>, points?: Iterable<Point3>, explode?: boolean, tolerance?: number | null): Unrolled;
+  /** Where `p` lies against face `face`: its nearest point of the face and `where` -- inside, on the boundary (within `tolerance` of an edge or vertex) or off. `tolerance` undefined or null: the solid's effective tolerance. Fusion's `isPointOnFace`, Rhino's `IsPointOnFace`. */
+  facePoint(face: number, p: Point3, tolerance?: number | null): FacePoint;
+  /** A point strictly inside face `face`'s trims, on its surface -- Fusion's `pointOnFace`. */
+  faceInnerPoint(face: number): FacePoint;
+  /** The nearest point to `p` of edge `edge` on its own curve over its range, `on` where it is within `tolerance` (undefined or null: the solid's effective tolerance). */
+  edgePoint(edge: Edge | number, p: Point3, tolerance?: number | null): EdgePoint;
+  /** A point on edge `edge`: its curve at the middle of its range -- Fusion's `pointOnEdge`. */
+  edgeInnerPoint(edge: Edge | number): EdgePoint;
+  /** `[width, height]` of the rectangle face `face` would flatten to (Rhino's `GetSurfaceSize`). */
+  faceSize(face: number): [number, number];
+  /** How edge `edge`'s two faces meet along it, at `samples` points (16 at fewest); `angularTolerance` undefined or null: the solid's declared angle, else the option `tolerance.angular`. */
+  edgeConvexity(edge: Edge | number, angularTolerance?: number | null, samples?: number): EdgeConvexity;
+  /** Every edge's convexity kind, in `edges()`' order. */
+  edgesConvexity(angularTolerance?: number | null): Convexity[];
+  /** The indices of the edges whose faces meet concave all along (Fusion's `concaveEdges`). */
+  concaveEdges(angularTolerance?: number | null): number[];
+  /** The indices of the edges whose faces meet convex all along (Fusion's `convexEdges`). */
+  convexEdges(angularTolerance?: number | null): number[];
+  /** Face `face` and every face reached from it across smooth edges, breadth first (Fusion's `tangentiallyConnectedFaces`). */
+  tangentFaces(face: number, angularTolerance?: number | null): number[];
+  /** Edge `edge` and every edge reached from it through vertices where the curves run on with the same tangent, in the order found (Fusion's `tangentiallyConnectedEdges`). */
+  tangentEdges(edge: Edge | number, angularTolerance?: number | null): number[];
+  /** The faces in groups joined smoothly, each ascending, the groups in the order of their lowest face (Rhino's `GetTangentConnectedComponents`). */
+  tangentFaceGroups(angularTolerance?: number | null): number[][];
+  /** The angle between this solid's `kind` `index` and `other`'s `otherKind` `otherIndex` (`other` may be this solid). Fusion's `measureAngle`. */
+  angleTo(kind: AngleEntity, index: Edge | number, other: Solid, otherKind: AngleEntity, otherIndex: Edge | number): Angle;
+  /** Face `face`'s smallest radius of curvature (Infinity for a plane), signed curvature, where and its direction; a grid of `samples` steps each way where no closed form answers. Fusion's `MinimumRadiusAnalyses`. */
+  faceMinimumRadius(face: number, samples?: number): MinimumRadius;
   /** The face as a sheet of its own, its side bent to meet `other`'s at G`level` (0, 1 or 2). */
-  matched(side: SheetSide, other: Solid, otherSide: SheetSide, level?: number, face?: number, otherFace?: number): Solid;
+  match(side: SheetSide, other: Solid, otherSide: SheetSide, level?: number, face?: number, otherFace?: number): Solid;
   /** This sheet cut along `curve`, nothing removed. */
   splitByCurve(curve: NurbsCurve, direction?: Point3 | null, tolerance?: number | null): Solid;
   /** This sheet cut along `curve` and one side thrown away. */
@@ -1095,10 +1287,24 @@ export class Solid {
   hole(points: Point3 | Iterable<Point3>, diameter: number, options?: HoleOptions): [Solid, HoleReport];
   /** The tool `hole` cuts with, from the same arguments. */
   holeTool(points: Point3 | Iterable<Point3>, diameter: number, options?: HoleOptions): Solid;
+  /** This body with a screw thread cut into cylindrical face `face`, and what it did. */
+  thread(face: number, size?: string | ThreadSize | null, options?: ThreadOptions): [Solid, ThreadReport];
+  /** The cutter `thread` cuts with, from the same arguments: one closed coil. */
+  threadTool(face: number, size?: string | ThreadSize | null, options?: ThreadOptions): Solid;
+  /** This body unchanged but for a cosmetic thread recorded on face `face`. */
+  cosmeticThread(face: number, size?: string | ThreadSize | null, options?: CosmeticThreadOptions): Solid;
+  /** Face `face`'s cosmetic thread record, or null where it has no complete one. */
+  threadRecord(face: number): ThreadRecord | null;
+  /** Every face's cosmetic thread record, as `[face, record]` in face order. */
+  threadRecords(): [number, ThreadRecord][];
   /** This body with a rib along `curve`, an open curve in `plane`, thickened `thickness`. */
   rib(curve: NurbsCurve, plane: FrameLike, thickness: number, options?: RibOptions): Solid;
   /** The slab `rib` joins, alone, from the same arguments. */
   ribTool(curve: NurbsCurve, plane: FrameLike, thickness: number, options?: RibOptions): Solid;
+  /** This body with a revolved rib: the region `rib` would fill in the plane of the axis and `curve`, swung `angle` radians about the axis. */
+  ribRevolved(curve: NurbsCurve, axisPoint: Point3, axisDirection: Point3, angle: number, options?: RibRevolvedOptions): Solid;
+  /** The solid `ribRevolved` joins, alone, from the same arguments. */
+  ribRevolvedTool(curve: NurbsCurve, axisPoint: Point3, axisDirection: Point3, angle: number, options?: RibRevolvedOptions): Solid;
   /** This body with a web along each of `curves` (open curves in `plane`), `thickness` thick. */
   web(curves: NurbsCurve | Iterable<NurbsCurve>, plane: FrameLike, thickness: number, options?: WebOptions): Solid;
   /** The walls `web` joins, alone, from the same arguments. */
@@ -1137,9 +1343,12 @@ export class Solid {
    * `tolerance` -- OCCT's `BRepAlgoAPI_Check`. Each argument is checked alone (no faces, features
    * smaller than `tolerance`, loose edges, where it passes through itself); `operation` adds what
    * that verb refuses each argument for (a boolean wants both closed, a split or trim its tool, a
-   * merge closed manifolds of analytic faces). An empty array is a valid pair; nothing is changed.
-   * `progress` hears `health`, then `mesh`, `cull`, `cross`, `snap` and `curve`. Throws for an
-   * unknown operation or a `tolerance` not positive and finite.
+   * merge closed manifolds of analytic faces); with `other`, the sub-shapes of the two a boolean
+   * would merge or struggle with come too (`merge_vertex`, `merge_edge`, `merge_face`,
+   * `tangent_face`). An empty array is a valid pair; nothing is changed. `progress` hears
+   * `health`, `curve_on_surface` and `continuity`, then `mesh`, `cull`, `cross`, `snap` and
+   * `curve`; with `other`, `pairs`. Throws for an unknown operation or a `tolerance` not
+   * positive and finite.
    */
   check(other?: Solid | null, operation?: CheckOperation | null, tolerance?: number | null, progress?: Progress | null): Finding[];
   /**
@@ -1217,6 +1426,8 @@ export class Solid {
   projector(tolerance?: number | null): Projector;
   /** This solid's measuring tessellation as a `TriangleMesh` (within a third of `tolerance` of the surface; undefined, null, 0 or NaN: unset): answers against it are exact for the mesh, not for the body. A copy: it answers on after this solid is closed. */
   triangleMesh(tolerance?: number | null): TriangleMesh;
+  /** Face `face`'s surface, its trims ignored, as an exact `NurbsSurface`: a NURBS face as it is (clamped if it came unclamped); a cylinder, cone, sphere or torus in its exact rational form over a range that covers the face; a plane as the bilinear patch over the rectangle its trims span. `(u, v)` are the NURBS's own parameters. A copy: it answers on after this solid is closed. Throws for a face out of range or a surface with no exact NURBS form. */
+  faceSurface(face: number): NurbsSurface;
   /** The nearest point to `p` of face `face` alone, inside its trims or on its boundary: exact, always `refined`. */
   faceClosestPoint(face: number, p: Point3): PointFoot;
   /** The nearest point to `p` of edge `edge` (an index into `edges()`, or the `Edge`) on its own curve over its range. Exact. */
@@ -1303,7 +1514,7 @@ export class Solid {
   /** The vertex nearest `vertexRef` within `tolerance`; null where none is that near. */
   findVertex(vertexRef: Iterable<number>, tolerance?: number | null): number | null;
   /** This solid tracked: faces numbered 1..n, edges 1..m, each its own origin; tracking rides on through every verb. */
-  tracked(): Solid;
+  track(): Solid;
   /** Whether this solid carries face and edge ids. */
   readonly isTracked: boolean;
   /** Face `face`'s id, null where this solid is untracked. Ids are numbers (they count up from 1 per solid). */
@@ -1355,7 +1566,7 @@ export class Solid {
   /** This solid drawn in a style defined outside the file (`identification` in the library at
    *  `location`: a MaterialX or MDL file), written to STEP as an EXTERNALLY_DEFINED_STYLE beside
    *  its colour. Either may be null, not both. */
-  styled(location?: string | null, identification?: string | null): Solid;
+  style(location?: string | null, identification?: string | null): Solid;
   /** Where this solid's outside style lives, or null. */
   readonly styleLocation: string | null;
   /** This solid's outside style's name in its library, or null. */
@@ -1415,7 +1626,7 @@ export interface PairOptions {
   pitch?: number | null;
 }
 
-/** A joint (or state) key: a path string, or an array of names that `posed` escapes and joins. */
+/** A joint (or state) key: a path string, or an array of names that `pose` escapes and joins. */
 export type JointKey = string | Iterable<string>;
 export type PosedValues = Map<JointKey, number | Iterable<number>> | Iterable<[JointKey, number | Iterable<number>]> | { [joint: string]: number | Iterable<number> };
 export interface PosedOptions {
@@ -1509,18 +1720,18 @@ export class Assembly {
    * for a one-freedom joint, else a list in the pair's freedom order. Throws the kernel's own text
    * when it refuses (an ambiguous name, a value out of range, an unknown state).
    */
-  posed(values?: PosedValues | null, options?: PosedOptions): Assembly;
+  pose(values?: PosedValues | null, options?: PosedOptions): Assembly;
   /**
    * The placement path of every solid under this assembly, at any depth: depth first,
    * placements in order, names joined by "/" with a "/" or backslash inside a name escaped with
-   * a backslash (as `posed`'s keys). The index `sweptClash`'s rows use.
+   * a backslash (as `pose`'s keys). The index `sweptClash`'s rows use.
    */
   parts(): string[];
   /**
    * Every pair of this assembly's solids (indexed as `parts()` lists them) that penetrates,
    * touches or comes within `clearance` (0 by default) of the other anywhere while this
    * assembly's own mechanism moves through `keyframes`, as `SweptClash` rows. Each keyframe is
-   * `posed`'s `values`, and every keyframe names the same joints with as many values each (the
+   * `pose`'s `values`, and every keyframe names the same joints with as many values each (the
    * first fixes their order); keyframe `k` is at time `k`. Between two keyframes each joint value
    * moves linearly, so a link swinging about a joint goes round its arc. Only this assembly's own
    * joints move: a sub-assembly rides the link its placement is in. `ground` one of this
@@ -1656,7 +1867,8 @@ export class Overlap {
 export type CheckOperation = 'join' | 'cut' | 'common' | 'split_sheet' | 'trim' | 'merge' | 'intersect';
 /** What `Solid.check` can find wrong with an argument. */
 export type FindingKind = 'no_faces' | 'open' | 'region_wall' | 'non_manifold' | 'face_kind' | 'short_edge' | 'collapsed_edge'
-  | 'sliver_face' | 'tiny_face' | 'tiny_body' | 'small_hole' | 'loose_edge' | 'self_intersection' | 'self_overlap' | 'unmeshable';
+  | 'sliver_face' | 'tiny_face' | 'tiny_body' | 'small_hole' | 'loose_edge' | 'curve_on_surface' | 'c0_inside'
+  | 'self_intersection' | 'self_overlap' | 'unmeshable';
 /**
  * One thing wrong with one argument (`Solid.check`): `kind` names it, `argument` is 0 for the
  * solid checked and 1 for `other`, and `index`, `other` and `size` are what the kind gives (null,
@@ -1664,8 +1876,15 @@ export type FindingKind = 'no_faces' | 'open' | 'region_wall' | 'non_manifold' |
  * length; `face_kind` -- the face; `short_edge` -- the edge, its length; `collapsed_edge` -- the
  * trim; `sliver_face` -- the face, its width; `tiny_face` -- the face, its area; `tiny_body` --
  * its diagonal; `small_hole` -- the loop, its area or width; `loose_edge` -- the edge, how far its
- * sides part; `self_intersection` -- the two faces (one face twice for a fold), the crossing's
- * length; `self_overlap` -- the two faces.
+ * sides part; `curve_on_surface` -- the edge (the trim, for a trim naming none), the face it
+ * leaves, the largest deviation; `c0_inside` -- the face alone for a crease inside it, or the edge
+ * and the lowest-numbered face it bounds for a kink along its curve, the angle in radians;
+ * `self_intersection` -- the two faces (one face twice for a fold), the crossing's length;
+ * `self_overlap` -- the two faces.
+ * On the pair (`argument` 0, the index in the solid checked, other in `other`):
+ * `merge_vertex` -- the two vertices, their distance; `merge_edge` -- the two edges, the
+ * largest gap; `merge_face` -- the two faces, the largest separation; `tangent_face` -- the
+ * two faces, the tangent stretch's length.
  */
 export class Finding {
   private constructor();
@@ -1682,7 +1901,7 @@ export class Box {
   hi: [number, number, number];
   constructor(lo: ArrayLike<number>, hi: ArrayLike<number>);
   /** This box moved by `frame` (rigid), boxed again on the world axes. */
-  moved(frame: FrameLike): Box;
+  move(frame: FrameLike): Box;
   /** Whether this box and `other` share a point (touching counts). */
   overlaps(other: Box): boolean;
 }
@@ -1925,12 +2144,93 @@ export class Page {
   svg(): string;
   /** The page as DXF R2000 (`AC1015`) text. */
   dxf(): string;
+  /** `flat`'s flat pattern at `at`: the outline on `OUTLINE`, bend lines on `BEND_UP`/`BEND_DOWN`; `extents` the zones' edges on `BEND_EXTENT`, `table` a ruled bend table on `BEND_TABLE`, `labels` a label on each line, `notes` a bend note under each on `BEND_NOTE`, `dimensions` the overall width and height on `DIMENSION`, `folded` the folded part's front view beside the flat on `FOLDED`/`FOLDED_HIDDEN`. */
+  addFlatPattern(flat: FlatPattern, at?: [number, number], extents?: boolean, table?: boolean, labels?: boolean, notes?: boolean,
+    dimensions?: boolean, folded?: boolean): this;
   close(): void;
   readonly closed: boolean;
   [Symbol.dispose](): void;
 }
 /** A DXF file's closed loops as profiles, holes nested; `tolerance` null the effective tolerance over the drawing's extents. */
 export function dxfProfiles(text: string, tolerance?: number | null): Profile[];
+/**
+ * An untrimmed NURBS surface, immutable: nearest points and nearest points to a curve, answered
+ * exactly against it. `points` is the control net of `counts = [nU, nV]` points, rows along `u`
+ * (point `i * nV + j` is row `i`, column `j`): `[x, y, z]` triples, one flat list of numbers, or a
+ * typed array. Degrees 1 to 7 (3 by default); `weights` one per point (positive and finite) or
+ * null for a plain B-spline; `knotsU`/`knotsV` the full clamped knot vectors (`n + degree + 1`
+ * each) or null for clamped and uniform over [0, 1]. Everything is copied. `close()` frees this
+ * handle; so does leaving a `using` block or the garbage collector. Throws for a degree out of
+ * range, too few points for a degree, a point that is not finite, a bad weight, bad knots, or a
+ * net that is not its counts' points.
+ */
+export class NurbsSurface {
+  constructor(points: Iterable<Point3> | Iterable<number> | Float64Array, counts: Iterable<number> | [number, number], degreeU?: number, degreeV?: number,
+    weights?: Iterable<number> | Float64Array | null, knotsU?: Iterable<number> | Float64Array | null, knotsV?: Iterable<number> | Float64Array | null);
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** The degree along `u`. */
+  readonly degreeU: number;
+  /** The degree along `v`. */
+  readonly degreeV: number;
+  /** The control net's size, `[nU, nV]`. */
+  readonly counts: [number, number];
+  /** The parameter domain, `[[u0, u1], [v0, v1]]`. */
+  readonly domain: [[number, number], [number, number]];
+  /** The point at `(u, v)`. Throws for a parameter outside the domain or not finite. */
+  pointAt(u: number, v: number): number[];
+  /** The unit normal at `(u, v)` (`dS/du x dS/dv`, normalised). Throws for a parameter outside the domain or not finite, or at a pole. */
+  normalAt(u: number, v: number): number[];
+  /** The whole surface as an open one-face sheet. The sheet's face is this surface reparametrised over [0, 1] x [0, 1]: its `Solid.faceSurface` has domain [0, 1]^2, not this one's. */
+  toSheet(): Solid;
+  /** The nearest point of the surface to `p` (the lower `u`, then `v`, among equal distances), or null beyond `maxDistance` (undefined, null, NaN or Infinity: no limit; a point on the surface is within 0). Exact. */
+  closestPoint(p: Point3, maxDistance?: number | null): SurfacePoint | null;
+  /** The nearest points of `curve` and the surface (`crossing` true, distance 0, at the earliest crossing in `t`), or null beyond `maxDistance` (undefined, null, NaN or Infinity: no limit). Exact. */
+  curveClosestPoints(curve: NurbsCurve, maxDistance?: number | null): CurveSurfaceFoot | null;
+  /** The control net, `nU * nV` `[x, y, z]` points, rows along `u` (point `i * nV + j` is row `i`, column `j`). */
+  controlPoints(): number[][];
+  /** The weights, one per control point in the net's order (all 1 for a plain B-spline). */
+  weights(): number[];
+  /** The full knot vector along `direction`: `n + degree + 1` values. */
+  knots(direction: SurfaceDirection): number[];
+  /** The same surface raised `by` degrees along `direction` (to at most 12) -- exactly. */
+  elevate(direction: SurfaceDirection, by?: number): NurbsSurface;
+  /** The knot `t` (strictly inside the domain) inserted `times` times along `direction` -- the same surface, exactly. */
+  insertKnot(direction: SurfaceDirection, t: number, times?: number): NurbsSurface;
+  /** All of `knots` (non-decreasing, each strictly inside the domain) inserted along `direction` -- the same surface, exactly. */
+  refineKnots(direction: SurfaceDirection, knots: Iterable<number>): NurbsSurface;
+  /** Up to `times` copies of the inner knot `t` along `direction` removed while every row stays within `tolerance` (undefined or null: the net's effective tolerance); `removed` how many went. */
+  removeKnot(direction: SurfaceDirection, t: number, times?: number, tolerance?: number | null): { surface: NurbsSurface; removed: number };
+  /** The surface continued `length` past `side` along its own end polynomials: curvature-continuous, every old `(u, v)` keeping its point. */
+  extend(side: SurfaceSide, length: number): NurbsSurface;
+  /** The point and its partials to second order at `(u, v)`: `[S, Su, Sv, Suu, Suv, Svv]`, three numbers each. */
+  secondDerivatives(u: number, v: number): [number[], number[], number[], number[], number[], number[]];
+  /** The principal, Gaussian and mean curvatures and the principal directions at `(u, v)`. Throws at a pole. */
+  curvature(u: number, v: number): SurfaceCurvature;
+  /** The bicubic Hermite surface through a `u.length` x `v.length` grid: each node's point, `dS/du`, `dS/dv` and twist (node `(i, j)` at `i * v.length + j`). */
+  static hermite(u: Iterable<number>, v: Iterable<number>, points: Iterable<Point3> | Iterable<number> | Float64Array, du: Iterable<Point3> | Iterable<number> | Float64Array,
+    dv: Iterable<Point3> | Iterable<number> | Float64Array, twists: Iterable<Point3> | Iterable<number> | Float64Array): NurbsSurface;
+}
+/** A `NurbsSurface`'s parameter direction. */
+export type SurfaceDirection = 'u' | 'v';
+/** A `NurbsSurface`'s side, for `extend`. */
+export type SurfaceSide = 'u_start' | 'u_end' | 'v_start' | 'v_end';
+/**
+ * A surface's bending at a point (`NurbsSurface.curvature`), signed about `normal` (`dS/du x dS/dv`,
+ * unit): positive where the surface bends toward the normal. `k1 >= k2` are the principal curvatures,
+ * `dir1` and `dir2` their unit directions, `gaussian = k1 * k2`, `mean = (k1 + k2) / 2`. Frozen.
+ */
+export class SurfaceCurvature {
+  private constructor();
+  readonly k1: number;
+  readonly k2: number;
+  readonly dir1: number[];
+  readonly dir2: number[];
+  readonly gaussian: number;
+  readonly mean: number;
+  readonly normal: number[];
+}
 /**
  * Parts meshed once, asked pose after pose which of them interfere. `close()` frees this handle;
  * so does leaving a `using` block or the garbage collector.
@@ -2178,6 +2478,37 @@ export class Interpolator {
   cubic(t: number): number | number[];
   catmullRom(t: number): number | number[];
 }
+/** A curve's length mass properties (`NurbsCurve.mass`), per unit length density, each figure beside its error. */
+export interface LengthMass {
+  readonly length: number;
+  readonly lengthError: number;
+  readonly centroid: number[];
+  readonly centroidError: number;
+  /** About the centroid, 3x3 rows, the products negated. */
+  readonly inertia: number[][];
+  readonly inertiaError: number;
+  /** Ascending. */
+  readonly principalMoments: number[];
+  /** Row `i` the unit axis of moment `i`, right-handed. */
+  readonly principalAxes: number[][];
+  /** The radii of gyration about the principal axes. */
+  readonly radii: number[];
+  readonly accuracyMet: boolean;
+  readonly fromPolyline: boolean;
+}
+/** One curve of a solid's section or contours (`Solid.sectionCurves`, `Solid.contourCurves`). Frozen. */
+export class SectionCurve {
+  private constructor();
+  readonly curve: NurbsCurve;
+  /** The contour plane it lies in; 0 for a single section. */
+  readonly plane: number;
+  /** It comes back to its start. */
+  readonly closed: boolean;
+  /** Every piece of it was an exact curve. */
+  readonly exact: boolean;
+  /** Its fit error; 0 where exact. */
+  readonly error: number;
+}
 /** A curve's bending at a parameter (`NurbsCurve.curvature`). Frozen. */
 export class Curvature {
   private constructor();
@@ -2245,6 +2576,209 @@ export class HighlightKink {
   readonly lightDirection: number[];
   readonly samples: number;
 }
+/** A point of a face and the draft angle there (`Solid.draftAngleAt`): `uv` null where there are none, `angle` in radians. Frozen. */
+export class DraftPoint {
+  private constructor();
+  readonly point: number[];
+  readonly uv: number[] | null;
+  readonly normal: number[];
+  readonly angle: number;
+}
+/** What a face's draft is (`FaceDraft.kind`). */
+export type DraftKind = 'positive' | 'negative' | 'vertical' | 'mixed' | 'undercut';
+/** One face's draft over a body (`Solid.draftAnalysis`): angles in radians, areas the measuring mesh's. Frozen. */
+export class FaceDraft {
+  private constructor();
+  readonly face: number;
+  readonly min: number;
+  readonly max: number;
+  readonly area: number;
+  readonly positive: number;
+  readonly negative: number;
+  readonly vertical: number;
+  readonly undercut: number;
+  readonly kind: DraftKind;
+}
+/** A sheet-metal bend relief (`SheetRule.relief`). */
+export type SheetRelief = 'none' | 'rectangular' | 'round' | 'tear';
+/** A sheet-metal corner relief (`SheetRule.corner`). */
+export type SheetCorner = 'none' | 'square' | 'round' | 'tear';
+/** A hem's kind (`Solid.sheetHem`). */
+export type HemKind = 'flat' | 'open' | 'rolled' | 'teardrop';
+/** `SheetRule`'s options, every size 0 for the one from the thickness. */
+export interface SheetRuleOptions {
+  /** The bends' inner radius; null (the default) the thickness, 0 a hundredth of it. */
+  bendRadius?: number | null;
+  /** The neutral layer `K T` past the inner face, in [0, 1]; 0.44 by default. */
+  kFactor?: number;
+  relief?: SheetRelief;
+  reliefWidth?: number;
+  reliefDepth?: number;
+  corner?: SheetCorner;
+  cornerSize?: number;
+  miterGap?: number;
+}
+/** How a sheet-metal part is made: its `thickness`, bends and reliefs. Frozen. */
+export class SheetRule {
+  constructor(thickness: number, options?: SheetRuleOptions);
+  readonly thickness: number;
+  readonly bendRadius: number | null;
+  readonly kFactor: number;
+  readonly relief: SheetRelief;
+  readonly reliefWidth: number;
+  readonly reliefDepth: number;
+  readonly corner: SheetCorner;
+  readonly cornerSize: number;
+  readonly miterGap: number;
+}
+/** One bend of a sheet body (`Solid.sheetInfo`): `angle` signed, > 0 up from the fixed side; `axis` a point and a unit direction; `line` two points on the mid-thickness surface. Frozen. */
+export class BendInfo {
+  private constructor();
+  readonly aFace: number;
+  readonly bFace: number;
+  readonly radius: number;
+  readonly angle: number;
+  readonly axis: [number[], number[]];
+  readonly line: [number[], number[]];
+}
+/** A body read as sheet metal (`Solid.sheetInfo`). Frozen. */
+export class SheetInfo {
+  private constructor();
+  readonly thickness: number;
+  readonly fixedFace: number;
+  readonly bends: readonly BendInfo[];
+}
+/** One bend zone of a flat pattern, in the flat's own plane: each line two `[x, y]` points. Frozen. */
+export class FlatBend {
+  private constructor();
+  readonly centre: [number[], number[]];
+  readonly start: [number[], number[]];
+  readonly end: [number[], number[]];
+  readonly angle: number;
+  readonly radius: number;
+  readonly kFactor: number;
+  readonly up: boolean;
+  readonly allowance: number;
+  readonly deduction: number;
+}
+/** A bend to fold (`Solid.foldFlat`): its `line` across the flat, the signed `angle` (> 0 up), inner `radius` and `kFactor`. Frozen. */
+export class Bend {
+  constructor(line: [Point2, Point2], angle: number, radius: number, kFactor: number);
+  readonly line: [number[], number[]];
+  readonly angle: number;
+  readonly radius: number;
+  readonly kFactor: number;
+}
+/** A sheet body laid flat (`Solid.flatPattern`). `close()` frees its handle; so does leaving a `using` block or the garbage collector. */
+export class FlatPattern {
+  private constructor();
+  /** Twelve numbers: origin, x, y, z; the sheet lies below its plane. */
+  readonly frame: number[];
+  readonly bends: FlatBend[];
+  readonly foldBends: Bend[];
+  /** The flat body, a new solid. */
+  readonly body: Solid;
+  /** The flat's outline in the frame's plane, a new profile. */
+  readonly profile: Profile;
+  /** The flat pattern alone as DXF R2000 text in `units`. */
+  dxf(units?: keyof typeof PAGE_UNITS, extents?: boolean, table?: boolean, labels?: boolean, notes?: boolean, dimensions?: boolean,
+    folded?: boolean): string;
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+}
+/** Faces of a solid laid flat (`Solid.unroll`), read at once: `points` null where a point is on no face laid flat, `cuts` pairs of source faces. */
+export class Unrolled {
+  private constructor();
+  readonly sheet: Solid;
+  readonly faces: number[];
+  readonly curves: NurbsCurve[][];
+  readonly points: (number[] | null)[];
+  readonly notDevelopable: number[];
+  readonly cuts: [number, number][];
+}
+/** Where a point lies against a face. */
+export type FaceRelation = 'inside' | 'boundary' | 'off';
+/** How an edge's two faces meet. */
+export type Convexity = 'smooth' | 'convex' | 'concave' | 'mixed' | 'open';
+/** What `Solid.angleTo` reads: a face or an edge. */
+export type AngleEntity = 'face' | 'edge';
+/** Where a point lies against a face (`Solid.facePoint`, `Solid.faceInnerPoint`): the nearest point of the face, its uv, the distance and `where`. Frozen. */
+export class FacePoint {
+  private constructor();
+  readonly point: number[];
+  readonly uv: number[];
+  readonly distance: number;
+  readonly where: FaceRelation;
+}
+/** The nearest point of an edge's curve (`Solid.edgePoint`, `Solid.edgeInnerPoint`): the point, the curve's parameter `t`, the distance and `on`. Frozen. */
+export class EdgePoint {
+  private constructor();
+  readonly point: number[];
+  readonly t: number;
+  readonly distance: number;
+  readonly on: boolean;
+}
+/** How an edge's two faces meet (`Solid.edgeConvexity`): the kind, the smallest and largest signed turn (radians, negative concave) and where, the points asked. Frozen. */
+export class EdgeConvexity {
+  private constructor();
+  readonly kind: Convexity;
+  readonly angleMin: number;
+  readonly angleMax: number;
+  readonly atMin: number[];
+  readonly atMax: number[];
+  readonly samples: number;
+}
+/** The angle between two faces or edges (`Solid.angleTo`), a point on each and what they were read as. Frozen. */
+export class Angle {
+  private constructor();
+  readonly angle: number;
+  readonly atA: number[];
+  readonly atB: number[];
+  readonly kind: 'planes' | 'lines' | 'line_plane';
+}
+/** A face's smallest radius of curvature (`Solid.faceMinimumRadius`). Frozen. */
+export class MinimumRadius {
+  private constructor();
+  readonly radius: number;
+  readonly curvature: number;
+  readonly at: number[];
+  readonly uv: number[];
+  readonly direction: number[];
+  readonly samples: number;
+}
+/** A profile's area properties in its own plane (`Profile.areaProperties`): `secondMoments` `[Ixx, Iyy, Ixy]` about the centroid (`Ixy` not negated), principal moments ascending and their unit axes. Frozen. */
+/** `Profile.offset`'s and `offsetOpen`'s corner styles. */
+export type OffsetCorner = 'round' | 'sharp' | 'smooth' | 'chamfer';
+/** `Profile.offsetOpen`'s end styles. */
+export type OffsetEnd = 'none' | 'flat' | 'round';
+/** `Profile.contains`' answers. */
+export type ProfileContainment = 'inside' | 'outside' | 'on';
+/** `Profile.relationship`'s answers. */
+export type ProfileRelation = 'disjoint' | 'touching' | 'overlapping' | 'a_inside_b' | 'b_inside_a' | 'equal';
+/** How far apart two profiles' outlines run (`Profile.deviation`): the largest distance between `maxA` (on the profile asked) and `maxB`, the smallest between `minA` and `minB`. Points are `[x, y]`. Frozen. */
+export class Deviation {
+  private constructor();
+  readonly maxDistance: number;
+  readonly maxA: [number, number];
+  readonly maxB: [number, number];
+  readonly minDistance: number;
+  readonly minA: [number, number];
+  readonly minB: [number, number];
+}
+export class AreaProperties {
+  private constructor();
+  readonly area: number;
+  readonly areaError: number;
+  readonly perimeter: number;
+  readonly centroid: number[];
+  readonly centroidError: number;
+  readonly secondMoments: number[];
+  readonly momentsError: number;
+  readonly principalMoments: number[];
+  readonly principalAxes: number[][];
+  readonly accuracyMet: boolean;
+}
 /** How well an N-sided patch meets (`Solid.patchReport`). Frozen. */
 export class PatchReport {
   private constructor();
@@ -2298,10 +2832,73 @@ export interface HoleOptions {
   headDiameter?: number;
   headDepth?: number;
   headAngle?: number;
+  /** A tapped hole's size: a designation or a `ThreadSize`. */
+  thread?: string | ThreadSize | null;
+  threadDepth?: number | null;
+  threadModelled?: boolean;
+  leftHanded?: boolean;
   tolerance?: number | null;
 }
+/** `Solid.cosmeticThread`'s options: an explicit form, the span, the hand. */
+export interface CosmeticThreadOptions {
+  pitch?: number | null;
+  diameter?: number | null;
+  length?: number | null;
+  offset?: number;
+  reverse?: boolean;
+  leftHanded?: boolean;
+  tolerance?: number | null;
+}
+/** `Solid.thread`'s options; `angle` the included flank angle, radians (60 degrees by default). */
+export interface ThreadOptions extends CosmeticThreadOptions { angle?: number }
+/** A thread size table row's family. */
+export type ThreadFamily = 'iso_metric_coarse' | 'iso_metric_fine' | 'unc' | 'unf';
+/** One row of the thread size table; millimetres. Frozen. */
+export class ThreadSize {
+  private constructor();
+  readonly family: ThreadFamily;
+  readonly designation: string;
+  readonly size: string;
+  readonly major: number;
+  readonly pitch: number;
+  readonly minor: number;
+  readonly pitchDiameter: number;
+  readonly tapDrill: number;
+  readonly clearance: Readonly<{ fine?: number; medium?: number; coarse?: number }>;
+}
+/** What `Solid.thread` did. Frozen. */
+export class ThreadReport {
+  private constructor();
+  readonly internal: boolean;
+  readonly major: number;
+  readonly minor: number;
+  readonly pitch: number;
+  readonly start: readonly [number, number, number];
+  readonly direction: readonly [number, number, number];
+  readonly length: number;
+  readonly turns: number;
+  readonly facesAdded: number;
+}
+/** A cosmetic thread as a face carries it. Frozen. */
+export class ThreadRecord {
+  private constructor();
+  readonly designation: string;
+  readonly major: number;
+  readonly pitch: number;
+  readonly length: number;
+  readonly offset: number;
+  readonly internal: boolean;
+  readonly leftHanded: boolean;
+  readonly reverse: boolean;
+}
+/** The whole thread size table. */
+export function threadSizes(): ThreadSize[];
+/** The row `designation` names (forgiving: case, spaces, coarse by default, UN by TPI). */
+export function threadSize(designation: string): ThreadSize;
 /** `Solid.rib`'s options. */
 export interface RibOptions { side?: RibSide; toward?: Point3 | null; tolerance?: number | null }
+/** `Solid.ribRevolved`'s options. */
+export interface RibRevolvedOptions { toward?: Point3 | null; tolerance?: number | null }
 /** `Solid.web`'s options; `bothWays` false by default. */
 export interface WebOptions { side?: WebSide; depth?: number | null; bothWays?: boolean; tolerance?: number | null }
 /** What `Solid.pattern` or `Solid.patternFeature` did. Frozen. */
@@ -2317,6 +2914,7 @@ export class HoleReport {
   readonly holes: number;
   readonly bottoms: readonly number[];
   readonly facesAdded: number;
+  readonly threadDepths: readonly number[];
 }
 /** Placements for `Solid.pattern` and `Solid.patternFeature`: rigid `Transform`s, instance 0 the identity. Angles in radians. */
 export class Pattern {
@@ -2328,6 +2926,10 @@ export class Pattern {
 }
 /** How `NurbsCurve.tween` blends: control point by control point, after making the curves compatible, or through arc-length samples. */
 export type TweenMethod = 'plain' | 'matching' | 'sampling';
+/** `NurbsCurve.conicType`'s answer (null: no conic). */
+export type ConicType = 'circle' | 'ellipse' | 'hyperbola' | 'parabola';
+/** `NurbsCurve.conicType`'s answers by the C ABI's number: null (none), then the four conics. */
+export const CONIC_TYPES: readonly [null, 'circle', 'ellipse', 'hyperbola', 'parabola'];
 /**
  * A curve in space -- always a NURBS, so a line, an arc or a conic is an exact rational one.
  * Immutable; every edit returns a new curve. `close()` frees it, so does leaving a `using` block
@@ -2339,7 +2941,7 @@ export class NurbsCurve {
   close(): void;
   readonly closed: boolean;
   [Symbol.dispose](): void;
-  /** The largest distance from the fitted points; null unless made by `fit`, `fair`, `faired`, `projectedToFace` or `pulledToFace`. */
+  /** The largest distance from the fitted points; null unless made by `fit`, `fair`, `faired`, `projectToFace` or `pullToFace`. */
   readonly fitError: number | null;
   static through(points: Iterable<Point3>, degree?: number, closed?: boolean, startTangent?: Point3 | null, endTangent?: Point3 | null): NurbsCurve;
   static fit(points: Iterable<Point3>, degree?: number, tolerance?: number | null): NurbsCurve;
@@ -2347,21 +2949,65 @@ export class NurbsCurve {
   static fair(points: Iterable<Point3>, degree?: number, tolerance?: number | null, noInflection?: NoInflection): NurbsCurve;
   static fromEdge(solid: Solid, edge: Edge | number): NurbsCurve;
   static isocurve(solid: Solid, face: number, alongU: boolean, at: number): NurbsCurve;
+  /** A helix or spiral about `axis` (six numbers, or a point and a direction) from `start`; `endRadius` null: a helix. Its `fitError` is its largest distance from the exact spiral. */
+  static spiral(axis: ArrayLike<number> | [Point3, Point3], start: Point3, pitch: number, turns: number, endRadius?: number | null): NurbsCurve;
+  /** The pieces of face `face`'s isocurve inside its trims, in order along it; each one's `fitError` 0 where exact. */
+  static faceIsocurves(solid: Solid, face: number, alongU: boolean, at: number, tolerance?: number | null): NurbsCurve[];
   static blend(a: NurbsCurve, aEnd: boolean, b: NurbsCurve, bEnd: boolean, continuity?: number, bulge?: number): NurbsCurve;
-  static joined(curves: Iterable<NurbsCurve>, tolerance?: number): NurbsCurve;
+  static join(curves: Iterable<NurbsCurve>, tolerance?: number): NurbsCurve;
   /** `count` curves blending from this one to `other`; `samples` is required by `'sampling'` and refused otherwise. */
   tween(other: NurbsCurve, count: number, method?: TweenMethod, samples?: number | null, align?: boolean, tolerance?: number | null): NurbsCurve[];
-  projectedToPlane(origin: Point3, normal: Point3, direction?: Point3 | null): NurbsCurve;
-  projectedToFace(solid: Solid, face: number, direction: Point3, tolerance?: number | null): NurbsCurve;
-  pulledToFace(solid: Solid, face: number, tolerance?: number | null): NurbsCurve;
+  projectToPlane(origin: Point3, normal: Point3, direction?: Point3 | null): NurbsCurve;
+  projectToFace(solid: Solid, face: number, direction: Point3, tolerance?: number | null): NurbsCurve;
+  pullToFace(solid: Solid, face: number, tolerance?: number | null): NurbsCurve;
+  /** This curve, lying on face `face` of `solid`, read back into the surface's parameters: a uv curve in the z = 0 plane (x is u, y is v); past a pole its parameter no longer pairs with this curve's. */
+  pullBack(solid: Solid, face: number, tolerance?: number | null): NurbsCurve;
+  /** This uv curve (in the z = 0 plane: x is u, y is v) carried out through face `face`'s surface of `solid`. */
+  pushUp(solid: Solid, face: number, tolerance?: number | null): NurbsCurve;
+  /** This curve carried onto face `face` of `solid` (along `direction`, or pulled where that is null) and fitted to the surface parameter it crosses (Rhino's FitCurveToSurface): its parameter is that surface parameter, its knots the surface's in that direction plus `knots`; `fitError` bounds the distance from the exact trace. */
+  fitToFace(solid: Solid, face: number, direction?: Point3 | null, knots?: Iterable<number>, tolerance?: number | null): NurbsCurve;
+  /** A smooth curve through `points` lying on face `face` of `solid`, interpolated in the surface's parameters. */
+  static throughOnFace(solid: Solid, face: number, points: Iterable<Point3>, closed?: boolean, tolerance?: number | null): NurbsCurve;
+  /** A smooth curve through surface parameters `uvs` (`[u, v]` each) of face `face` of `solid`. */
+  static throughUvOnFace(solid: Solid, face: number, uvs: Iterable<[number, number]>, closed?: boolean, tolerance?: number | null): NurbsCurve;
+  /** The shortest path (a geodesic) on face `face`'s surface of `solid` from surface parameters `a` to `b`. */
+  static shortPath(solid: Solid, face: number, a: [number, number], b: [number, number], tolerance?: number | null): NurbsCurve;
   /** This curve, lying on the sheet `solid`, offset `distance` along it (positive: left of its run seen from the outward side). */
   offsetOnSheet(solid: Solid, distance: number, tolerance?: number | null): NurbsCurve;
-  reversed(): NurbsCurve;
-  trimmed(t0: number, t1: number): NurbsCurve;
-  extended(length: number, atStart?: boolean): NurbsCurve;
-  elevated(by?: number): NurbsCurve;
-  transformed(t: Transform | MatrixLike): NurbsCurve;
+  reverse(): NurbsCurve;
+  trim(t0: number, t1: number): NurbsCurve;
+  extend(length: number, atStart?: boolean): NurbsCurve;
+  elevate(by?: number): NurbsCurve;
+  transform(t: Transform | MatrixLike): NurbsCurve;
   clone(): NurbsCurve;
+  /** This curve with the knot `t` (strictly inside the domain) inserted `times` times -- the same curve, exactly. */
+  insertKnot(t: number, times?: number): NurbsCurve;
+  /** This curve with all of `knots` (non-decreasing, each strictly inside the domain) inserted -- the same curve, exactly. */
+  refineKnots(knots: Iterable<number>): NurbsCurve;
+  /** Up to `times` copies of the inner knot `t` removed while the curve stays within `tolerance` (undefined or null: its effective tolerance); `removed` how many went. */
+  removeKnot(t: number, times?: number, tolerance?: number | null): { curve: NurbsCurve; removed: number };
+  /** `curves` made compatible: one degree, one knot vector over [0, 1], one control-point count -- each still the same point set. */
+  static makeCompatible(curves: Iterable<NurbsCurve>): NurbsCurve[];
+  /** The same curve over the domain `[lo, hi]`, the parameter mapped affinely. */
+  reparametrize(lo: number, hi: number): NurbsCurve;
+  /** The control points and weights over evenly spaced knots on the domain; the shape moves unless the knots were uniform already. */
+  makeUniform(): NurbsCurve;
+  /** Every weight 1, the control points where they were. */
+  nonRational(): NurbsCurve;
+  /** The Greville abscissae: each control point's parameter. */
+  grevilleParameters(): number[];
+  /** The curve's points at its Greville abscissae, one per control point. */
+  grevillePoints(): number[][];
+  /** A periodic curve of the same degree: through its Greville points on [0, 1] (`smooth`, the default), or its control polygon wrapped over uniform knots on `[0, m]`. */
+  periodic(smooth?: boolean): NurbsCurve;
+  /** The curve halfway between this one and `other` (`other` lined up first); two arcs about one centre give the arc of the mean radius. */
+  mean(other: NurbsCurve, tolerance?: number | null): NurbsCurve;
+  /** This curve turned (a closed one's seam moved) to run with `other` -- the same point set. */
+  linedUpWith(other: NurbsCurve, tolerance?: number | null): NurbsCurve;
+  /** Whether `other` runs the same way as this curve. */
+  directionsMatch(other: NurbsCurve, tolerance?: number | null): boolean;
+  /** Which conic this curve is within `tolerance` (undefined or null: its effective tolerance), or null for none. */
+  conicType(tolerance?: number | null): ConicType | null;
   readonly degree: number;
   readonly controlPoints: number[][];
   readonly weights: number[];
@@ -2376,13 +3022,26 @@ export class NurbsCurve {
   closestPoint(p: Point3, maxDistance: number | null | undefined): CurveFoot | null;
   /** The nearest points of this curve and `other` (side `a` this curve; distance 0 where they cross), or null where they lie farther apart than `maxDistance` (undefined, null, NaN or Infinity: no limit). Exact. */
   closestPoints(other: NurbsCurve, maxDistance?: number | null): CurvePair | null;
-  /** The item of `items` nearest to this curve -- each a `Solid`, a `NurbsCurve`, a `Projector`, a `TriangleMesh` or a point -- or null where none lies within `maxDistance` (undefined, null, NaN or Infinity: no limit) or the list is empty. Equal distances go to the earlier item. `tolerance` (undefined, null, 0 or NaN: each solid's effective tolerance) sizes each solid's search; a projector keeps its own. */
-  closestObject(items: Iterable<Solid | NurbsCurve | Projector | TriangleMesh | Point3>, maxDistance?: number | null, tolerance?: number | null): NearestObject | null;
+  /** The item of `items` nearest to this curve -- each a `Solid`, a `NurbsCurve`, a `Projector`, a `TriangleMesh`, a `NurbsSurface` or a point -- or null where none lies within `maxDistance` (undefined, null, NaN or Infinity: no limit) or the list is empty. Equal distances go to the earlier item. `tolerance` (undefined, null, 0 or NaN: each solid's effective tolerance) sizes each solid's search; a projector keeps its own. */
+  closestObject(items: Iterable<Solid | NurbsCurve | Projector | TriangleMesh | NurbsSurface | Point3>, maxDistance?: number | null, tolerance?: number | null): NearestObject | null;
   /** The point and its derivatives up to `order` (at most 8): `order + 1` points. */
   derivatives(t: number, order?: number): number[][];
   curvature(t: number): Curvature;
   length(accuracy?: number): Length;
   pointAtLength(s: number, accuracy?: number): At;
+  /** The length over `[t0, t1]` of the curve's parameter. */
+  lengthBetween(t0: number, t1: number, accuracy?: number): Length;
+  /** The point at the fraction `f` (0 to 1) of the curve's length. */
+  pointAtNormalizedLength(f: number, accuracy?: number): At;
+  /** The points at each fraction (0 to 1) of the curve's length, in the order given. */
+  pointsAtNormalizedLengths(fs: Iterable<number>, accuracy?: number): At[];
+  /** Points each `distance` in a straight line from the one before, from the start. */
+  divideEquidistant(distance: number): At[];
+  /** Where the curve crosses the planes square to `end - start` every `interval` from `start`. */
+  divideAsContour(start: Point3, end: Point3, interval: number): At[];
+  mass(accuracy?: number): LengthMass;
+  /** `['u', v]` along u with v held, `['v', u]` along v with u held, or null. */
+  isIsoparametric(solid: Solid, face: number, tolerance?: number | null): ['u' | 'v', number] | null;
   divideByCount(n: number, accuracy?: number): At[];
   divideByLength(step: number, accuracy?: number): At[];
   planeHits(origin: Point3, normal: Point3): At[];
@@ -2395,6 +3054,69 @@ export class NurbsCurve {
   knotContinuity(): KnotContinuity;
   /** `n + 1` pairs `[point, point - scale * kappa * normal]` along the domain. */
   comb(n?: number, scale?: number): [number[], number[]][];
+}
+/** An animation channel's name; `'visible'` and `'ghost'` always hold, as `'nearest'`. */
+export type AnimationChannel = 'translate' | 'rotate' | 'scale' | 'visible' | 'colour' | 'ghost' | 'value';
+/** One key of a track: `[time, value]`, the time in seconds, the value a number or an array of numbers. */
+export type AnimationKey = readonly [number, number | ArrayLike<number>];
+/**
+ * One track of an `Animation`, read back as it was given. `mode` is the mode as asked, `values` numbers
+ * at `dimension` 1 and one array of `dimension` numbers a key otherwise, `pivot` and `axis` the origin
+ * and +Z unless set. Frozen, and equal by value.
+ */
+export class AnimationTrack {
+  private constructor();
+  readonly target: string;
+  readonly channel: AnimationChannel;
+  readonly mode: InterpolatorMode;
+  readonly times: readonly number[];
+  readonly values: readonly number[] | readonly (readonly number[])[];
+  readonly dimension: number;
+  readonly pivot: readonly number[];
+  readonly axis: readonly number[];
+}
+/**
+ * Keyframe tracks over named targets: what moves, turns, scales, shows, tints or ghosts, and when. A host
+ * asks, at a time `t` in seconds, for each target's `placementAt` and each track's `valueAt`. An unknown
+ * channel or mode name, key values of unequal length and a pivot or axis that is not 3 numbers throw a
+ * `TypeError`; the library's refusals throw `BuildError`. `close()` frees it, so does leaving a `using`
+ * block or the garbage collector.
+ */
+export class Animation {
+  constructor();
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** An independent copy. */
+  clone(): Animation;
+  /** How many tracks. */
+  readonly count: number;
+  /** The latest key time over all tracks, in seconds; 0 with none. */
+  readonly duration: number;
+  /** The target names, in order of first appearance. */
+  readonly targets: string[];
+  /** Adds a track; answers its index. */
+  addTrack(target: string, channel: AnimationChannel, keys: Iterable<AnimationKey>, mode?: InterpolatorMode): number;
+  /** Sets the point a rotate or scale track works about, and a rotate's axis (+Z by default). */
+  setPivot(track: number, pivot: ArrayLike<number>, axis?: ArrayLike<number>): void;
+  translate(target: string, keys: Iterable<AnimationKey>, mode?: InterpolatorMode): number;
+  /** Keys are degrees; `pivot` the origin and `axis` +Z by default. */
+  rotate(target: string, keys: Iterable<AnimationKey>, options?: { pivot?: ArrayLike<number>; axis?: ArrayLike<number>; mode?: InterpolatorMode }): number;
+  scale(target: string, keys: Iterable<AnimationKey>, options?: { pivot?: ArrayLike<number>; mode?: InterpolatorMode }): number;
+  /** Always `'nearest'`. */
+  visible(target: string, keys: Iterable<AnimationKey>): number;
+  colour(target: string, keys: Iterable<AnimationKey>, mode?: InterpolatorMode): number;
+  /** Always `'nearest'`. */
+  ghost(target: string, keys: Iterable<AnimationKey>): number;
+  value(target: string, keys: Iterable<AnimationKey>, mode?: InterpolatorMode): number;
+  /** Track `i` as it was given. */
+  track(i: number): AnimationTrack;
+  /** Track `track`'s value at `t` seconds: a number at dimension 1, an array otherwise. */
+  valueAt(track: number, t: number): number | number[];
+  /** Every track's value at `t`, in track order, shaped as `valueAt` shapes each. */
+  valuesAt(t: number): (number | number[])[];
+  /** A target's placement at `t`, by name or index: 4 columns of 4, `m[col][row]`. */
+  placementAt(target: string | number, t: number): number[][];
 }
 export class Edge {
   private constructor();
@@ -2758,6 +3480,21 @@ export class Document {
   value(id: string): any;
   /** What node `id` evaluated to, by its kind: a `Solid`, a `Profile`, an array of `Profile`, a `NurbsCurve`, a `Subd`, an array of these, or a value; null for no such node or one that failed. */
   result(id: string): any;
+  /** A counter that moves with every change to the document's state, never with an evaluation, a save or a read; 1 for a new or loaded document. */
+  readonly revision: number;
+  /** The nodes as `save` writes them: all in document order, or those `ids` names, in that order. */
+  nodes(ids?: Iterable<string> | null): Array<Record<string, any>>;
+  /** The ids node `id` reads (with `transitive`, however far), in document order. */
+  inputs(id: string, transitive?: boolean): string[];
+  /** The ids of the nodes that read node `id` (with `transitive`, however far). */
+  readers(id: string, transitive?: boolean): string[];
+  /** Node `id`'s sketch curve or profiles as rational cubic Béziers, sixteen numbers each, optionally carried onto `frame`. */
+  resultBeziers(id: string, frame?: ArrayLike<number> | null): Float64Array;
+  /** App `app`'s own data about the document, or null when it keeps none. */
+  meta(app: string): any;
+  /** `op` tried on a scratch copy, the nodes `ids` names evaluated; their results are the probe's until `end()`. With `body`, ended on leaving and `body`'s return returned. */
+  probe(op: string | Record<string, unknown>, ids: Iterable<string>): { statuses: NodeStatus[]; end(): void };
+  probe<T>(op: string | Record<string, unknown>, ids: Iterable<string>, body: (statuses: NodeStatus[]) => T): T;
 }
 
 // ---- CAM: tools, stock and a job -------------------------------------------------------

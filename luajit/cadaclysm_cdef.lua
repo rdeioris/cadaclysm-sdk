@@ -157,6 +157,42 @@ typedef enum CadaclysmPhase {
   CADACLYSM_PHASE_DEMOLISHED = 4,
 } CadaclysmPhase;
 
+typedef enum CadaclysmCalendarKind {
+  CADACLYSM_CALENDAR_FIRSTSHIFT = 0,
+  CADACLYSM_CALENDAR_SECONDSHIFT = 1,
+  CADACLYSM_CALENDAR_THIRDSHIFT = 2,
+  CADACLYSM_CALENDAR_NOTDEFINED = 3,
+  CADACLYSM_CALENDAR_OTHER = 4,
+} CadaclysmCalendarKind;
+
+typedef enum CadaclysmRecurrenceKind {
+  CADACLYSM_RECURRENCE_DAILY = 0,
+  CADACLYSM_RECURRENCE_WEEKLY = 1,
+  CADACLYSM_RECURRENCE_MONTHLY_BY_DAY_OF_MONTH = 2,
+  CADACLYSM_RECURRENCE_MONTHLY_BY_POSITION = 3,
+  CADACLYSM_RECURRENCE_BY_DAY_COUNT = 4,
+  CADACLYSM_RECURRENCE_BY_WEEKDAY_COUNT = 5,
+  CADACLYSM_RECURRENCE_YEARLY_BY_DAY_OF_MONTH = 6,
+  CADACLYSM_RECURRENCE_YEARLY_BY_POSITION = 7,
+} CadaclysmRecurrenceKind;
+
+typedef enum CadaclysmDurationKind {
+  CADACLYSM_DURATION_ELAPSED = 0,
+  CADACLYSM_DURATION_WORK = 1,
+  CADACLYSM_DURATION_NOTDEFINED = 2,
+  CADACLYSM_DURATION_UNSET = 3,
+} CadaclysmDurationKind;
+
+typedef enum CadaclysmCalendarStatus {
+  CADACLYSM_CALENDAR_STATUS_OK = 0,
+  CADACLYSM_CALENDAR_STATUS_NOT_FINITE = 1,
+  CADACLYSM_CALENDAR_STATUS_REVERSED = 2,
+  CADACLYSM_CALENDAR_STATUS_NO_WORKING_TIME = 3,
+  CADACLYSM_CALENDAR_STATUS_NO_SUCH_CALENDAR = 4,
+
+  CADACLYSM_CALENDAR_STATUS_TOO_LONG = 5,
+} CadaclysmCalendarStatus;
+
 typedef struct CadaclysmBrep CadaclysmBrep;
 
 typedef struct CadaclysmFemMesh CadaclysmFemMesh;
@@ -168,6 +204,8 @@ typedef struct CadaclysmHealth CadaclysmHealth;
 typedef struct CadaclysmMeshlets CadaclysmMeshlets;
 
 typedef struct CadaclysmPose CadaclysmPose;
+
+typedef struct CadaclysmRecognize CadaclysmRecognize;
 
 typedef struct CadaclysmScene CadaclysmScene;
 
@@ -220,6 +258,8 @@ typedef struct CadaclysmOpenOptions {
   CadaclysmPick pick;
 
   void *pick_user;
+
+  uint32_t lightmap_resolution;
 } CadaclysmOpenOptions;
 
 typedef struct CadaclysmBounds {
@@ -332,6 +372,21 @@ typedef struct CadaclysmElementState {
   bool has_variance;
   double variance;
 } CadaclysmElementState;
+
+typedef struct CadaclysmWorkTime {
+  bool has_start;
+  double start;
+  bool has_finish;
+  double finish;
+  bool has_pattern;
+  uint32_t kind;
+  bool has_position;
+  int32_t position;
+  bool has_interval;
+  uint32_t interval;
+  bool has_occurrences;
+  uint32_t occurrences;
+} CadaclysmWorkTime;
 
 typedef struct CadaclysmPolylines {
   const float *positions;
@@ -636,6 +691,10 @@ bool cadaclysm_node_visible(const struct CadaclysmScene *scene, uint32_t node);
 
 struct CadaclysmMesh cadaclysm_node_mesh(const struct CadaclysmScene *scene, uint32_t node);
 
+const float *cadaclysm_node_mesh_lightmap_uvs(const struct CadaclysmScene *scene,
+                                              uint32_t node,
+                                              uint32_t *out_vertex_count);
+
 struct CadaclysmMesh cadaclysm_node_mesh_anchored(const struct CadaclysmScene *scene,
                                                   uint32_t node,
                                                   double *out_anchor);
@@ -836,6 +895,95 @@ int64_t cadaclysm_schedule_at(const struct CadaclysmScene *scene,
                               uint32_t dates,
                               struct CadaclysmElementState *out,
                               uint32_t capacity);
+
+uint32_t cadaclysm_calendar_count(const struct CadaclysmScene *scene);
+
+const char *cadaclysm_calendar_name(const struct CadaclysmScene *scene, uint32_t c);
+
+const char *cadaclysm_calendar_identification(const struct CadaclysmScene *scene, uint32_t c);
+
+uint32_t cadaclysm_calendar_kind(const struct CadaclysmScene *scene, uint32_t c);
+
+const char *cadaclysm_calendar_kind_name(const struct CadaclysmScene *scene, uint32_t c);
+
+uint32_t cadaclysm_calendar_working_count(const struct CadaclysmScene *scene, uint32_t c);
+
+uint32_t cadaclysm_calendar_exception_count(const struct CadaclysmScene *scene, uint32_t c);
+
+bool cadaclysm_calendar_work_time(const struct CadaclysmScene *scene,
+                                  uint32_t c,
+                                  bool exception,
+                                  uint32_t w,
+                                  struct CadaclysmWorkTime *out);
+
+const char *cadaclysm_calendar_work_time_name(const struct CadaclysmScene *scene,
+                                              uint32_t c,
+                                              bool exception,
+                                              uint32_t w);
+
+uint32_t cadaclysm_calendar_work_time_days(const struct CadaclysmScene *scene,
+                                           uint32_t c,
+                                           bool exception,
+                                           uint32_t w,
+                                           uint8_t *out,
+                                           uint32_t capacity);
+
+uint32_t cadaclysm_calendar_work_time_weekdays(const struct CadaclysmScene *scene,
+                                               uint32_t c,
+                                               bool exception,
+                                               uint32_t w,
+                                               uint8_t *out,
+                                               uint32_t capacity);
+
+uint32_t cadaclysm_calendar_work_time_months(const struct CadaclysmScene *scene,
+                                             uint32_t c,
+                                             bool exception,
+                                             uint32_t w,
+                                             uint8_t *out,
+                                             uint32_t capacity);
+
+uint32_t cadaclysm_calendar_work_time_periods(const struct CadaclysmScene *scene,
+                                              uint32_t c,
+                                              bool exception,
+                                              uint32_t w,
+                                              double *out,
+                                              uint32_t capacity);
+
+bool cadaclysm_task_calendar(const struct CadaclysmScene *scene,
+                             uint32_t s,
+                             uint32_t t,
+                             uint32_t *out);
+
+uint32_t cadaclysm_task_duration_kind(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+bool cadaclysm_task_work_duration(const struct CadaclysmScene *scene,
+                                  uint32_t s,
+                                  uint32_t t,
+                                  double *days,
+                                  double *seconds);
+
+uint32_t cadaclysm_calendar_working_periods(const struct CadaclysmScene *scene,
+                                            uint32_t c,
+                                            double from,
+                                            double to,
+                                            double *out,
+                                            uint32_t capacity,
+                                            uint32_t *count);
+
+uint32_t cadaclysm_calendar_working_seconds(const struct CadaclysmScene *scene,
+                                            uint32_t c,
+                                            double from,
+                                            double to,
+                                            double *out);
+
+uint32_t cadaclysm_calendar_add_work(const struct CadaclysmScene *scene,
+                                     uint32_t c,
+                                     double from,
+                                     double days,
+                                     double seconds,
+                                     double *out);
+
+const char *cadaclysm_calendar_error_message(uint32_t status);
 
 struct CadaclysmPose *cadaclysm_pose(const struct CadaclysmScene *scene,
                                      const uint32_t *joints,
@@ -1059,6 +1207,29 @@ uint32_t cadaclysm_brep_heal_fixes(const struct CadaclysmHeal *h, uint32_t *item
 uint32_t cadaclysm_brep_heal_refused(const struct CadaclysmHeal *h, uint32_t *items, double *sizes);
 
 double cadaclysm_brep_edge_tolerance(const struct CadaclysmBrep *brep, uint32_t edge);
+
+struct CadaclysmRecognize *cadaclysm_brep_recognized(const struct CadaclysmBrep *brep,
+                                                     double tolerance);
+
+const struct CadaclysmBrep *cadaclysm_brep_recognize_body(const struct CadaclysmRecognize *r);
+
+void cadaclysm_brep_recognize_free(struct CadaclysmRecognize *r);
+
+bool cadaclysm_brep_recognize_summary(const struct CadaclysmRecognize *r,
+                                      uint32_t *counts,
+                                      double *sizes);
+
+uint32_t cadaclysm_brep_recognize_faces(const struct CadaclysmRecognize *r,
+                                        uint32_t *items,
+                                        double *sizes);
+
+uint32_t cadaclysm_brep_recognize_refused(const struct CadaclysmRecognize *r,
+                                          uint32_t *items,
+                                          double *sizes);
+
+uint32_t cadaclysm_brep_recognize_edges(const struct CadaclysmRecognize *r,
+                                        uint32_t *items,
+                                        double *sizes);
 
 void cadaclysm_svg_options_init(struct CadaclysmSvgOptions *options);
 

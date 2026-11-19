@@ -80,11 +80,14 @@ static void rig_note(const char *text) {
     memcpy(rig_log + used, text, n + 1);
 }
 // The rig's pick in `p`, up to `p->size` as the library writes it.
+static int rig_old_pick; // a library that writes the pick only up to 1.27's fields
 static void rig_fill(CadaclysmViewPick *p) {
     uint32_t size = p->size;
     CadaclysmViewPick answer = rig_pick;
+    size_t n = size < sizeof answer ? size : sizeof answer;
     answer.size = size;
-    memcpy(p, &answer, size < sizeof answer ? size : sizeof answer);
+    if (rig_old_pick && n > offsetof(CadaclysmViewPick, viewport_label)) n = offsetof(CadaclysmViewPick, viewport_label);
+    memcpy(p, &answer, n);
 }
 // A window the user closed with the camera straight down the +y axis, the rig's pick.
 static bool rig_run(CadaclysmView *v, CadaclysmViewCamera *c, CadaclysmViewPick *p) {
@@ -450,6 +453,294 @@ static uint32_t rig_seen_info_size(void) { return rig_info_size_seen; }
 static uint32_t rig_seen_heights_capacity(void) { return rig_heights_capacity; }
 static int rig_status_calls_made(void) { return rig_status_calls; }
 
+// 1.26's input events: next_event's queue, oldest first; close and a CLOSED pump queue a
+// CLOSE event (the camera straight down -y, or `rig_closing`'s).
+static CadaclysmViewInputEvent rig_events[32];
+static int rig_event_count, rig_event_next, rig_closes, rig_event_calls;
+static uint32_t rig_event_size;
+static char rig_event_refusal[256];
+static CadaclysmViewInputEvent rig_closing;
+static int rig_closing_set, rig_pick_landed = 1;
+static void rig_queue(const CadaclysmViewInputEvent *e) {
+    if (rig_event_count < 32) rig_events[rig_event_count++] = *e;
+}
+static bool rig_next_event(CadaclysmView *v, CadaclysmViewInputEvent *out) {
+    uint32_t size = out->size;
+    (void)v;
+    ++rig_event_calls;
+    rig_event_size = size;
+    if (rig_event_refusal[0]) {
+        strcpy(rig_said, rig_event_refusal);
+        return false;
+    }
+    if (rig_event_next >= rig_event_count) {
+        strcpy(rig_said, "cadaclysm_view_next_event: no event");
+        return false;
+    }
+    *out = rig_events[rig_event_next++];
+    out->size = size;
+    rig_said[0] = 0;
+    return true;
+}
+static bool rig_close(CadaclysmView *v) {
+    CadaclysmViewInputEvent e;
+    (void)v;
+    ++rig_closes;
+    memset(&e, 0, sizeof e);
+    e.kind = CADACLYSM_VIEW_INPUT_EVENT_CLOSE;
+    e.camera.eye[1] = -5.0f;
+    e.camera.up[2] = 1.0f;
+    rig_queue(&e);
+    return true;
+}
+static uint32_t rig_pump_events(CadaclysmView *v, uint32_t ms) {
+    uint32_t answer = rig_pump(v, ms);
+    if (answer == CADACLYSM_VIEW_CLOSED && rig_closing_set) {
+        rig_queue(&rig_closing); // the window closed by itself: its close event with it
+        rig_closing_set = 0;
+    }
+    if (answer == 0) strcpy(rig_said, "pump: refused");
+    return answer;
+}
+static bool rig_pick_result_or_none(CadaclysmView *v, CadaclysmViewPick *p) {
+    if (!rig_pick_landed) {
+        strcpy(rig_said, "cadaclysm_view_pick_result: no pick result");
+        return false;
+    }
+    return rig_pick_result(v, p);
+}
+static void rig_push_event(uint32_t kind, uint32_t modifiers, float x, float y, float wheel_y, uint32_t button,
+                           uint32_t pointer, uint32_t pointer_id, uint32_t width, uint32_t height, uint32_t repeat,
+                           uint32_t dropped, double time_ms, const char *key, uint32_t pick_item, uint32_t pick_clicks,
+                           uint32_t snap_kind, uint32_t snap_edge, float ex, float ey, float ez, float ux, float uy,
+                           float uz, int closing, int32_t pick_label) {
+    CadaclysmViewInputEvent e;
+    memset(&e, 0, sizeof e);
+    e.pick_viewport_label = pick_label;
+    e.kind = kind;
+    e.modifiers = modifiers;
+    e.x = x;
+    e.y = y;
+    e.wheel_y = wheel_y;
+    e.button = button;
+    e.pointer = pointer;
+    e.pointer_id = pointer_id;
+    e.width = width;
+    e.height = height;
+    e.repeat = repeat;
+    e.dropped = dropped;
+    e.time_ms = time_ms;
+    memcpy(e.key, key, strlen(key) < sizeof e.key ? strlen(key) : sizeof e.key);
+    e.pick.item = pick_item;
+    e.pick.clicks = pick_clicks;
+    e.snap.kind = snap_kind;
+    e.snap.edge = snap_edge;
+    e.camera.eye[0] = ex;
+    e.camera.eye[1] = ey;
+    e.camera.eye[2] = ez;
+    e.camera.up[0] = ux;
+    e.camera.up[1] = uy;
+    e.camera.up[2] = uz;
+    if (closing) {
+        rig_closing = e;
+        rig_closing_set = 1;
+    } else {
+        rig_queue(&e);
+    }
+}
+static void rig_refuse_events(const char *text) {
+    strncpy(rig_event_refusal, text, sizeof rig_event_refusal - 1);
+    rig_event_refusal[sizeof rig_event_refusal - 1] = 0;
+}
+static void rig_set_pick_landed(int on) { rig_pick_landed = on != 0; }
+static int rig_closes_made(void) { return rig_closes; }
+static int rig_event_calls_made(void) { return rig_event_calls; }
+static uint32_t rig_event_size_seen(void) { return rig_event_size; }
+static size_t rig_input_event_layout(int i) {
+    static const size_t offsets[] = {
+        offsetof(CadaclysmViewInputEvent, size),       offsetof(CadaclysmViewInputEvent, kind),
+        offsetof(CadaclysmViewInputEvent, time_ms),    offsetof(CadaclysmViewInputEvent, x),
+        offsetof(CadaclysmViewInputEvent, y),          offsetof(CadaclysmViewInputEvent, wheel_y),
+        offsetof(CadaclysmViewInputEvent, button),     offsetof(CadaclysmViewInputEvent, modifiers),
+        offsetof(CadaclysmViewInputEvent, pointer),    offsetof(CadaclysmViewInputEvent, pointer_id),
+        offsetof(CadaclysmViewInputEvent, width),      offsetof(CadaclysmViewInputEvent, height),
+        offsetof(CadaclysmViewInputEvent, repeat),     offsetof(CadaclysmViewInputEvent, dropped),
+        offsetof(CadaclysmViewInputEvent, pad0),       offsetof(CadaclysmViewInputEvent, key),
+        offsetof(CadaclysmViewInputEvent, pick),       offsetof(CadaclysmViewInputEvent, snap),
+        offsetof(CadaclysmViewInputEvent, camera),     offsetof(CadaclysmViewInputEvent, pick_viewport_label),
+        sizeof(CadaclysmViewInputEvent),
+    };
+    return offsets[i];
+}
+
+// 1.27's animations: what play_animation, timeline_remove, set_item_visible and
+// set_node_ghosts were handed, and the track ids play_animation answers (1, 2, ...); a
+// refusal text makes all four fail with it.
+typedef struct {
+    char target[32];
+    uint32_t item, node;
+} RigBinding;
+static RigBinding rig_bindings[8];
+static const void *rig_play_anim;
+static uint32_t rig_play_count, rig_next_track = 1, rig_removed_track, rig_vis_item, rig_ghost_item, rig_ghost_count;
+static uint32_t rig_ghost_nodes[8];
+static int rig_play_anim_null, rig_play_array_null, rig_vis_on, rig_ghost_null, rig_anim_calls;
+static char rig_anim_refusal[256];
+static bool rig_anim_refuses(void) {
+    ++rig_anim_calls;
+    if (!rig_anim_refusal[0]) return false;
+    strcpy(rig_said, rig_anim_refusal);
+    return true;
+}
+static uint32_t rig_play_animation(CadaclysmView *v, const CadaclysmBlacksmithAnimation *a,
+                                   const CadaclysmViewAnimationBinding *b, uint32_t n) {
+    uint32_t k;
+    (void)v;
+    rig_play_anim = a;
+    rig_play_anim_null = a == NULL;
+    rig_play_array_null = b == NULL;
+    rig_play_count = n;
+    for (k = 0; b != NULL && k < n && k < 8; ++k) {
+        strncpy(rig_bindings[k].target, b[k].target ? b[k].target : "(null)", 31);
+        rig_bindings[k].target[31] = 0;
+        rig_bindings[k].item = b[k].item;
+        rig_bindings[k].node = b[k].node;
+    }
+    if (rig_anim_refuses()) return 0;
+    return rig_next_track++;
+}
+static bool rig_timeline_remove(CadaclysmView *v, uint32_t track) {
+    (void)v;
+    rig_removed_track = track;
+    return !rig_anim_refuses();
+}
+static bool rig_set_item_visible(CadaclysmView *v, uint32_t item, bool on) {
+    (void)v;
+    rig_vis_item = item;
+    rig_vis_on = on;
+    return !rig_anim_refuses();
+}
+static bool rig_set_node_ghosts(CadaclysmView *v, uint32_t item, const uint32_t *nodes, uint32_t n) {
+    uint32_t k;
+    (void)v;
+    rig_ghost_item = item;
+    rig_ghost_null = nodes == NULL;
+    rig_ghost_count = n;
+    for (k = 0; nodes != NULL && k < n && k < 8; ++k) rig_ghost_nodes[k] = nodes[k];
+    return !rig_anim_refuses();
+}
+static const void *rig_seen_play_anim(void) { return rig_play_anim; }
+static int rig_seen_play_anim_null(void) { return rig_play_anim_null; }
+static int rig_seen_play_array_null(void) { return rig_play_array_null; }
+static uint32_t rig_seen_play_count(void) { return rig_play_count; }
+static int rig_seen_anim_calls(void) { return rig_anim_calls; }
+static uint32_t rig_seen_removed_track(void) { return rig_removed_track; }
+static const char *rig_seen_binding_target(int k) { return rig_bindings[k].target; }
+static uint32_t rig_seen_binding_item(int k) { return rig_bindings[k].item; }
+static uint32_t rig_seen_binding_node(int k) { return rig_bindings[k].node; }
+static uint32_t rig_seen_vis_item(void) { return rig_vis_item; }
+static int rig_seen_vis_on(void) { return rig_vis_on; }
+static uint32_t rig_seen_ghost_item(void) { return rig_ghost_item; }
+static int rig_seen_ghost_null(void) { return rig_ghost_null; }
+static uint32_t rig_seen_ghost_count(void) { return rig_ghost_count; }
+static uint32_t rig_seen_ghost_node(int k) { return rig_ghost_nodes[k]; }
+static size_t rig_binding_layout(int i) {
+    static const size_t offsets[] = {
+        offsetof(CadaclysmViewAnimationBinding, target),
+        offsetof(CadaclysmViewAnimationBinding, item),
+        offsetof(CadaclysmViewAnimationBinding, node),
+        sizeof(CadaclysmViewAnimationBinding),
+    };
+    return offsets[i];
+}
+static void rig_refuse_animations(const char *text) {
+    strncpy(rig_anim_refusal, text, sizeof rig_anim_refusal - 1);
+    rig_anim_refusal[sizeof rig_anim_refusal - 1] = 0;
+}
+static void rig_animations_reset(void) {
+    memset(rig_bindings, 0, sizeof rig_bindings);
+    memset(rig_ghost_nodes, 0, sizeof rig_ghost_nodes);
+    rig_play_anim = NULL;
+    rig_play_count = rig_removed_track = rig_vis_item = rig_ghost_item = rig_ghost_count = 0;
+    rig_next_track = 1;
+    rig_play_anim_null = rig_play_array_null = rig_vis_on = rig_ghost_null = rig_anim_calls = 0;
+    rig_anim_refusal[0] = 0;
+}
+
+// 1.28's drafting calls: each logs the numbers it was handed, as text, in rig_style_log.
+static char rig_style_log[1024];
+static void rig_style_note(const char *text) {
+    size_t used = strlen(rig_style_log), n = strlen(text);
+    if (used + n + 3 >= sizeof rig_style_log) return;
+    if (used) {
+        memcpy(rig_style_log + used, "; ", 2);
+        used += 2;
+    }
+    memcpy(rig_style_log + used, text, n + 1);
+}
+static void rig_colour_text(char *out, size_t n, const float *c) {
+    if (!c)
+        snprintf(out, n, "nil");
+    else
+        snprintf(out, n, "%g,%g,%g", c[0], c[1], c[2]);
+}
+static bool rig_set_line_style(CadaclysmView *v, uint32_t item, float dash, float gap) {
+    char text[128];
+    (void)v;
+    snprintf(text, sizeof text, "line_style %u %g %g", item, dash, gap);
+    rig_style_note(text);
+    return true;
+}
+static bool rig_set_point_style(CadaclysmView *v, uint32_t item, uint32_t shape, bool hollow) {
+    char text[128];
+    (void)v;
+    snprintf(text, sizeof text, "point_style %u %u %d", item, shape, (int)hollow);
+    rig_style_note(text);
+    return true;
+}
+static bool rig_set_point_states(CadaclysmView *v, uint32_t item, const uint8_t *states, size_t n) {
+    char text[128];
+    size_t k, used;
+    (void)v;
+    used = (size_t)snprintf(text, sizeof text, "point_states %u %zu:", item, n);
+    for (k = 0; k < n && used + 8 < sizeof text; ++k) used += (size_t)snprintf(text + used, sizeof text - used, " %u", (unsigned)states[k]);
+    rig_style_note(text);
+    return true;
+}
+static void rig_set_point_state_colours(CadaclysmView *v, const float *h, const float *s, const float *f) {
+    char a[48], b[48], c[48], text[160];
+    (void)v;
+    rig_colour_text(a, sizeof a, h);
+    rig_colour_text(b, sizeof b, s);
+    rig_colour_text(c, sizeof c, f);
+    snprintf(text, sizeof text, "state_colours %s %s %s", a, b, c);
+    rig_style_note(text);
+}
+static bool rig_set_viewport_label(CadaclysmView *v, uint32_t viewport, const char *label, const float *c) {
+    char col[48], text[160];
+    (void)v;
+    rig_colour_text(col, sizeof col, c);
+    snprintf(text, sizeof text, "label %u %s %s", viewport, label ? label : "nil", col);
+    rig_style_note(text);
+    return true;
+}
+static bool rig_set_viewport_border(CadaclysmView *v, uint32_t viewport, const float *c) {
+    char col[48], text[160];
+    (void)v;
+    rig_colour_text(col, sizeof col, c);
+    snprintf(text, sizeof text, "border %u %s", viewport, col);
+    rig_style_note(text);
+    return true;
+}
+static bool rig_set_on_top(CadaclysmView *v, uint32_t item, bool on) {
+    char text[64];
+    (void)v;
+    snprintf(text, sizeof text, "on_top %u %d", item, (int)on);
+    rig_style_note(text);
+    return true;
+}
+static const char *rig_styles_logged(void) { return rig_style_log; }
+
 static void *rig_fn(const char *name) {
     static const struct {
         const char *name;
@@ -500,6 +791,21 @@ static void *rig_fn(const char *name) {
         {"timeline_duration", (void *)rig_timeline_duration},
         {"timeline_playing", (void *)rig_timeline_playing},
         {"timeline_status", (void *)rig_timeline_status},
+        {"play_animation", (void *)rig_play_animation},
+        {"timeline_remove", (void *)rig_timeline_remove},
+        {"set_item_visible", (void *)rig_set_item_visible},
+        {"set_node_ghosts", (void *)rig_set_node_ghosts},
+        {"next_event", (void *)rig_next_event},
+        {"set_line_style", (void *)rig_set_line_style},
+        {"set_point_style", (void *)rig_set_point_style},
+        {"set_point_states", (void *)rig_set_point_states},
+        {"set_point_state_colours", (void *)rig_set_point_state_colours},
+        {"set_viewport_label", (void *)rig_set_viewport_label},
+        {"set_viewport_border", (void *)rig_set_viewport_border},
+        {"set_on_top", (void *)rig_set_on_top},
+        {"close", (void *)rig_close},
+        {"pump_events", (void *)rig_pump_events},
+        {"pick_result_or_none", (void *)rig_pick_result_or_none},
     };
     size_t i;
     for (i = 0; i < sizeof calls / sizeof calls[0]; ++i)
@@ -513,6 +819,9 @@ static void rig_reset(void) {
     rig_count = rig_bits = 0;
     memset(rig_waits, 0, sizeof rig_waits);
     memset(&rig_pick, 0, sizeof rig_pick);
+    rig_pick.viewport_label = -1;
+    rig_style_log[0] = 0;
+    rig_old_pick = 0;
     rig_log[0] = 0;
     rig_navigation = 0;
     memset(&rig_snap_settings, 0, sizeof rig_snap_settings);
@@ -525,6 +834,12 @@ static void rig_reset(void) {
     rig_points_count = 0;
     rig_points_rgb_null = rig_points_calls = 0;
     rig_machining_reset();
+    rig_animations_reset();
+    rig_event_count = rig_event_next = rig_closes = rig_event_calls = 0;
+    rig_event_size = 0;
+    rig_event_refusal[0] = 0;
+    rig_closing_set = 0;
+    rig_pick_landed = 1;
 }
 static void rig_set_pick(uint32_t item, uint32_t node, uint32_t face, uint32_t clicks, uint32_t has_point, float x,
                          float y, float z) {
@@ -537,6 +852,8 @@ static void rig_set_pick(uint32_t item, uint32_t node, uint32_t face, uint32_t c
     rig_pick.point[1] = y;
     rig_pick.point[2] = z;
 }
+static void rig_set_pick_label(int32_t label) { rig_pick.viewport_label = label; }
+static void rig_set_old_pick(int on) { rig_old_pick = on != 0; }
 static void rig_set_navigation(uint32_t n) { rig_navigation = n; }
 static const char *rig_logged(void) { return rig_log; }
 static void rig_say(const char *text) {
@@ -572,8 +889,13 @@ func Calls(names ...string) map[string]unsafe.Pointer {
 	out := map[string]unsafe.Pointer{}
 	for _, n := range names {
 		call := n
-		if n == "create_fails" {
+		switch n {
+		case "create_fails":
 			call = "create"
+		case "pump_events":
+			call = "pump"
+		case "pick_result_or_none":
+			call = "pick_result"
 		}
 		out[call] = Fn(n)
 	}
@@ -631,6 +953,22 @@ func SetNavigation(n uint32) { C.rig_set_navigation(C.uint32_t(n)) }
 // Log is what set_double_click_frames, focus and navigation were called with since Reset,
 // "; " between calls.
 func Log() string { return C.GoString(C.rig_logged()) }
+
+// StyleLog is what 1.28's drafting calls were handed since Reset, one text each, joined by "; ".
+func StyleLog() string { return C.GoString(C.rig_styles_logged()) }
+
+// SetPickLabel is the viewport_label of the pick pick_result and run hand back (Reset: -1, none).
+func SetPickLabel(label int32) { C.rig_set_pick_label(C.int32_t(label)) }
+
+// OldPick makes pick_result and run write the pick only up to the fields before 1.28's label, as an older
+// library does: the host's own buffer init is then what the label reads.
+func OldPick(on bool) {
+	v := 0
+	if on {
+		v = 1
+	}
+	C.rig_set_old_pick(C.int(v))
+}
 
 // SnapSettings is what the last set_snap was handed -- its size, kinds, aperture and marker
 // -- and how many set_snap calls were made since Reset.
@@ -783,3 +1121,145 @@ func StatusCalls() int { return int(C.rig_status_calls_made()) }
 // machining_heights was handed.
 func InfoSize() uint32        { return uint32(C.rig_seen_info_size()) }
 func HeightsCapacity() uint32 { return uint32(C.rig_seen_heights_capacity()) }
+
+// Event is one raw CadaclysmViewInputEvent for next_event's queue (view ABI 1.26): the
+// header's numbers as given, nothing translated. PickItem/PickClicks, SnapKind/SnapEdge and
+// Eye/Up fill the pick, snap and camera.
+type Event struct {
+	Kind, Modifiers                uint32
+	X, Y, WheelY                   float32
+	Button, Pointer, PointerID     uint32
+	Width, Height, Repeat, Dropped uint32
+	TimeMS                         float64
+	Key                            string
+	PickItem, PickClicks           uint32
+	PickLabel                      *int32 // pick_viewport_label (1.28); nil: -1, none
+	SnapKind, SnapEdge             uint32
+	Eye, Up                        [3]float32
+}
+
+func push(e Event, closing bool) {
+	k := C.CString(e.Key)
+	defer C.free(unsafe.Pointer(k))
+	c := C.int(0)
+	if closing {
+		c = 1
+	}
+	label := C.int32_t(-1)
+	if e.PickLabel != nil {
+		label = C.int32_t(*e.PickLabel)
+	}
+	C.rig_push_event(C.uint32_t(e.Kind), C.uint32_t(e.Modifiers), C.float(e.X), C.float(e.Y), C.float(e.WheelY),
+		C.uint32_t(e.Button), C.uint32_t(e.Pointer), C.uint32_t(e.PointerID), C.uint32_t(e.Width), C.uint32_t(e.Height),
+		C.uint32_t(e.Repeat), C.uint32_t(e.Dropped), C.double(e.TimeMS), k, C.uint32_t(e.PickItem), C.uint32_t(e.PickClicks),
+		C.uint32_t(e.SnapKind), C.uint32_t(e.SnapEdge), C.float(e.Eye[0]), C.float(e.Eye[1]), C.float(e.Eye[2]),
+		C.float(e.Up[0]), C.float(e.Up[1]), C.float(e.Up[2]), c, label)
+}
+
+// QueueEvents appends events to next_event's queue (rigged as "next_event").
+func QueueEvents(events ...Event) {
+	for _, e := range events {
+		push(e, false)
+	}
+}
+
+// ClosingEvent is the CLOSE event the next CLOSED answer of the "pump_events" pump queues: the
+// window closing by itself.
+func ClosingEvent(e Event) { push(e, true) }
+
+// RefuseEvents makes next_event fail with text from now on ("": answer again).
+func RefuseEvents(text string) {
+	c := C.CString(text)
+	defer C.free(unsafe.Pointer(c))
+	C.rig_refuse_events(c)
+}
+
+// PickLanded is whether "pick_result_or_none" answers the rig's pick (true, as after Reset) or
+// "no pick result".
+func PickLanded(on bool) {
+	c := C.int(0)
+	if on {
+		c = 1
+	}
+	C.rig_set_pick_landed(c)
+}
+
+// Closes is how many close calls were made since Reset.
+func Closes() int { return int(C.rig_closes_made()) }
+
+// EventCalls is how many next_event calls were made since Reset, and the size the last one
+// was handed.
+func EventCalls() (calls int, size uint32) {
+	return int(C.rig_event_calls_made()), uint32(C.rig_event_size_seen())
+}
+
+// InputEventLayout is CadaclysmViewInputEvent's field offsets in the header's order (size,
+// kind, time_ms, x, y, wheel_y, button, modifiers, pointer, pointer_id, width, height, repeat,
+// dropped, pad0, key, pick, snap, camera, pick_viewport_label), then its size.
+func InputEventLayout() [21]uintptr {
+	var out [21]uintptr
+	for i := range out {
+		out[i] = uintptr(C.rig_input_event_layout(C.int(i)))
+	}
+	return out
+}
+
+// SeenBinding is one CadaclysmViewAnimationBinding play_animation was handed.
+type SeenBinding struct {
+	Target     string
+	Item, Node uint32
+}
+
+// Played is what the last play_animation was handed: the animation's address (0 for NULL), the
+// bindings array's NULL-ness and count, the first eight bindings, and how many animation calls
+// of the four were made since Reset.
+type Played struct {
+	Animation    uintptr
+	AnimNull     bool
+	ArrayNull    bool
+	Count        uint32
+	Bindings     []SeenBinding
+	AnimCalls    int
+	RemovedTrack uint32
+}
+
+// PlayedAnimation reads back the last play_animation.
+func PlayedAnimation() Played {
+	p := Played{Animation: uintptr(C.rig_seen_play_anim()), AnimNull: C.rig_seen_play_anim_null() != 0,
+		ArrayNull: C.rig_seen_play_array_null() != 0, Count: uint32(C.rig_seen_play_count()), AnimCalls: int(C.rig_seen_anim_calls()),
+		RemovedTrack: uint32(C.rig_seen_removed_track())}
+	for k := 0; k < int(p.Count) && k < 8; k++ {
+		p.Bindings = append(p.Bindings, SeenBinding{Target: C.GoString(C.rig_seen_binding_target(C.int(k))),
+			Item: uint32(C.rig_seen_binding_item(C.int(k))), Node: uint32(C.rig_seen_binding_node(C.int(k)))})
+	}
+	return p
+}
+
+// Visible is the item and flag the last set_item_visible was handed.
+func Visible() (item uint32, on bool) { return uint32(C.rig_seen_vis_item()), C.rig_seen_vis_on() != 0 }
+
+// Ghosts is what the last set_node_ghosts was handed: the item, whether the array was NULL,
+// the count and the first eight nodes.
+func Ghosts() (item uint32, null bool, count uint32, nodes []uint32) {
+	for k := 0; k < int(C.rig_seen_ghost_count()) && k < 8; k++ {
+		nodes = append(nodes, uint32(C.rig_seen_ghost_node(C.int(k))))
+	}
+	return uint32(C.rig_seen_ghost_item()), C.rig_seen_ghost_null() != 0, uint32(C.rig_seen_ghost_count()), nodes
+}
+
+// RefuseAnimations makes play_animation, timeline_remove, set_item_visible and set_node_ghosts
+// fail with text from now on ("": answer again).
+func RefuseAnimations(text string) {
+	c := C.CString(text)
+	defer C.free(unsafe.Pointer(c))
+	C.rig_refuse_animations(c)
+}
+
+// BindingLayout is CadaclysmViewAnimationBinding's offsets (target, item, node) and size.
+func BindingLayout() [4]uintptr {
+	var out [4]uintptr
+	for i := range out {
+		out[i] = uintptr(C.rig_binding_layout(C.int(i)))
+	}
+	return out
+}

@@ -16,7 +16,7 @@
 //	v, _ := view.New(&view.Options{Title: "Parts", Width: 900, Height: 600})
 //	defer v.Close()
 //	item, _ := v.ShowSolid(solid, blacksmith.DefaultTolerance, nil)
-//	item.Colour([3]float32{0.9, 0.3, 0.1}) // or "#e64d1a", "tomato"
+//	item.SetColour([3]float32{0.9, 0.3, 0.1}) // or "#e64d1a", "tomato"
 //	v.Frame()
 //	v.Run()                 // or Pump in a loop of your own
 //
@@ -160,6 +160,10 @@ static bool cv_machining_colour_by(const CvlTable *t, CadaclysmView *v, uint32_t
 static bool cv_machining_overlays(const CvlTable *t, CadaclysmView *v, uint32_t i, bool p, bool tool) { return t->machining_overlays(v, i, p, tool); }
 static bool cv_machining_info(const CvlTable *t, CadaclysmView *v, uint32_t i, CadaclysmViewMachiningInfo *o) { return t->machining_info(v, i, o); }
 static bool cv_machining_heights(const CvlTable *t, CadaclysmView *v, uint32_t i, float *z, size_t n) { return t->machining_heights(v, i, z, n); }
+static bool cv_timeline_remove(const CvlTable *t, CadaclysmView *v, uint32_t track) { return t->timeline_remove(v, track); }
+static uint32_t cv_play_animation(const CvlTable *t, CadaclysmView *v, const void *a, const CadaclysmViewAnimationBinding *b, uint32_t n) { return t->play_animation(v, (const CadaclysmBlacksmithAnimation *)a, b, n); }
+static bool cv_set_item_visible(const CvlTable *t, CadaclysmView *v, uint32_t i, bool on) { return t->set_item_visible(v, i, on); }
+static bool cv_set_node_ghosts(const CvlTable *t, CadaclysmView *v, uint32_t i, const uint32_t *n, uint32_t c) { return t->set_node_ghosts(v, i, n, c); }
 static bool cv_timeline_play(const CvlTable *t, CadaclysmView *v, double s) { return t->timeline_play(v, s); }
 static bool cv_timeline_pause(const CvlTable *t, CadaclysmView *v) { return t->timeline_pause(v); }
 static bool cv_timeline_seek(const CvlTable *t, CadaclysmView *v, double s) { return t->timeline_seek(v, s); }
@@ -174,9 +178,18 @@ static uint32_t cv_show_overlay(const CvlTable *t, CadaclysmView *v, const Cadac
 static uint32_t cv_show_overlay_image(const CvlTable *t, CadaclysmView *v, const CadaclysmViewOverlayImage *o) { return t->show_overlay_image(v, o); }
 static bool cv_move_overlay(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t a, float x, float y) { return t->move_overlay(v, i, a, x, y); }
 static bool cv_stats(const CvlTable *t, CadaclysmView *v, CadaclysmViewStats *o) { return t->stats(v, o); }
+static bool cv_next_event(const CvlTable *t, CadaclysmView *v, CadaclysmViewInputEvent *e) { return t->next_event(v, e); }
+static bool cv_close(const CvlTable *t, CadaclysmView *v) { return t->close(v); }
 static bool cv_set_colour(const CvlTable *t, CadaclysmView *v, uint32_t i, const float *rgb) { return t->set_colour(v, i, rgb); }
 static bool cv_set_xray(const CvlTable *t, CadaclysmView *v, uint32_t i, bool on) { return t->set_xray(v, i, on); }
 static bool cv_set_occluded(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t m) { return t->set_occluded(v, i, m); }
+static bool cv_set_line_style(const CvlTable *t, CadaclysmView *v, uint32_t i, float d, float g) { return t->set_line_style(v, i, d, g); }
+static bool cv_set_point_style(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t s, bool h) { return t->set_point_style(v, i, s, h); }
+static bool cv_set_point_states(const CvlTable *t, CadaclysmView *v, uint32_t i, const uint8_t *s, size_t n) { return t->set_point_states(v, i, s, n); }
+static void cv_set_point_state_colours(const CvlTable *t, CadaclysmView *v, const float *h, const float *s, const float *f) { t->set_point_state_colours(v, h, s, f); }
+static bool cv_set_viewport_label(const CvlTable *t, CadaclysmView *v, uint32_t k, const char *s, const float *c) { return t->set_viewport_label(v, k, s, c); }
+static bool cv_set_viewport_border(const CvlTable *t, CadaclysmView *v, uint32_t k, const float *c) { return t->set_viewport_border(v, k, c); }
+static bool cv_set_on_top(const CvlTable *t, CadaclysmView *v, uint32_t i, bool on) { return t->set_on_top(v, i, on); }
 static bool cv_set_item_line_colour(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t l, const float *rgb) { return t->set_item_line_colour(v, i, l, rgb); }
 static bool cv_set_line_colour(const CvlTable *t, CadaclysmView *v, uint32_t l, const float *rgb, uint32_t p) { return t->set_line_colour(v, l, rgb, p); }
 static bool cv_line_colour(const CvlTable *t, CadaclysmView *v, uint32_t l, float *rgb, uint32_t *p) { return t->line_colour(v, l, rgb, p); }
@@ -227,6 +240,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -305,7 +319,7 @@ const (
 	WindowAppKit  = C.CADACLYSM_VIEW_WINDOW_APPKIT
 	WindowKms     = C.CADACLYSM_VIEW_WINDOW_KMS // 1.17: Window.WindowId the connector, Window.Display an *C.int DRM fd or nil
 
-	LayerSurfaces  = C.CADACLYSM_VIEW_LAYER_SURFACES // View.Layer
+	LayerSurfaces  = C.CADACLYSM_VIEW_LAYER_SURFACES // View.SetLayer
 	LayerEdges     = C.CADACLYSM_VIEW_LAYER_EDGES
 	LayerCurves    = C.CADACLYSM_VIEW_LAYER_CURVES
 	LayerIsocurves = C.CADACLYSM_VIEW_LAYER_ISOCURVES
@@ -347,7 +361,7 @@ const (
 // by the view library's own cadaclysm_view_parse_colour, so the forms are those of every
 // wrapper. Text (or three numbers) where an alpha is taken means an alpha of 1. nil, or a
 // nil pointer, is "none" where a call takes none (ShowSolid's rgb: the solid's own paint;
-// NodeColour: the node's own colour) and refused where it does not. Text the library
+// SetNodeColour: the node's own colour) and refused where it does not. Text the library
 // refuses is refused with its message; any other type is refused.
 type Colour interface{}
 
@@ -443,7 +457,7 @@ func find(stem, variable, what string, dirs []string) (string, error) {
 }
 
 // checkABI is cvl_check_abi, which every open runs on the library's answer first: nil for
-// 1.24 or a later 1.x, else the refusal naming `path`.
+// 1.26 or a later 1.x, else the refusal naming `path`.
 func checkABI(version uint32, path string) error {
 	cp := C.CString(path)
 	defer C.free(unsafe.Pointer(cp))
@@ -549,7 +563,8 @@ type Item struct {
 	id   uint32
 }
 
-// Pick is what is under a pixel: Item 0 for nothing. Clicks is 2 for a double click's
+// Pick is what is under a pixel: Item 0 with ViewportLabel -1 for nothing; Item 0 with
+// ViewportLabel 0 or more is a viewport label's (1.28). Clicks is 2 for a double click's
 // pick, else 1; Point is where the ray met the model, in the coordinates the items were
 // shown in, when HasPoint -- false (and Point zero) where the library read no depth (no
 // hit, a machining stock, the terminal library). Overlay (1.24): the item is an overlay --
@@ -560,6 +575,10 @@ type Pick struct {
 	HasPoint                 bool
 	Point                    [3]float32
 	Overlay                  bool
+	// ViewportLabel (1.28): the viewport whose label was over the pixel, else -1. Every
+	// answer sets it; a Pick built by hand (the zero value, Pick{}) reads 0 -- viewport 0's
+	// label -- so set it to -1 there.
+	ViewportLabel int32
 }
 
 // pickOf is a library's pick answer as a Pick.
@@ -570,6 +589,20 @@ func pickOf(p *C.CadaclysmViewPick) Pick {
 		out.Point = [3]float32{float32(p.point[0]), float32(p.point[1]), float32(p.point[2])}
 	}
 	out.Overlay = p.overlay != 0
+	out.ViewportLabel = int32(p.viewport_label)
+	return out
+}
+
+// eventPickOf is pickOf for an input event's pick (CadaclysmViewEventPick, the 1.26 layout;
+// the label is the event's own pick_viewport_label, 1.28).
+func eventPickOf(p *C.CadaclysmViewEventPick, label C.int32_t) Pick {
+	out := Pick{Item: uint32(p.item), Node: uint32(p.node), Face: uint32(p.face), Clicks: uint32(p.clicks)}
+	if p.has_point != 0 {
+		out.HasPoint = true
+		out.Point = [3]float32{float32(p.point[0]), float32(p.point[1]), float32(p.point[2])}
+	}
+	out.Overlay = p.overlay != 0
+	out.ViewportLabel = int32(label)
 	return out
 }
 
@@ -664,6 +697,138 @@ type Camera struct {
 	Orthographic       bool
 	Azimuth, Elevation float64
 	Pick               *Pick
+}
+
+// InputKind is what an InputEvent reports: a CADACLYSM_VIEW_INPUT_EVENT_* (view ABI 1.26; the timeline kind 1.27).
+type InputKind uint32
+
+const (
+	InputEventPointerDown InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_POINTER_DOWN
+	InputEventPointerMove InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_POINTER_MOVE
+	InputEventPointerUp   InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_POINTER_UP
+	InputEventWheel       InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_WHEEL
+	InputEventKeyDown     InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_KEY_DOWN
+	InputEventKeyUp       InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_KEY_UP
+	InputEventResize      InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_RESIZE
+	InputEventPick        InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_PICK
+	InputEventSnap        InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_SNAP
+	InputEventClose       InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_CLOSE
+	InputEventTimeline    InputKind = C.CADACLYSM_VIEW_INPUT_EVENT_TIMELINE
+)
+
+var inputKindNames = map[InputKind]string{
+	InputEventPointerDown: "pointer_down", InputEventPointerMove: "pointer_move", InputEventPointerUp: "pointer_up",
+	InputEventWheel: "wheel", InputEventKeyDown: "key_down", InputEventKeyUp: "key_up", InputEventResize: "resize",
+	InputEventPick: "pick", InputEventSnap: "snap", InputEventClose: "close", InputEventTimeline: "timeline",
+}
+
+// String is the kind as Python's next_event names it: "pointer_down", "pointer_move",
+// "pointer_up", "wheel", "key_down", "key_up", "resize", "pick", "snap", "close" or "timeline".
+func (k InputKind) String() string {
+	if name, ok := inputKindNames[k]; ok {
+		return name
+	}
+	return strconv.FormatUint(uint64(k), 10)
+}
+
+// InputEvent is one input event a view's own window handled (view ABI 1.26, View.NextEvent
+// and View.RunWith): the window still orbits, zooms and closes by itself -- the events report,
+// they do not intercept. Kind says which fields mean anything:
+//   - InputEventPointerDown, InputEventPointerMove, InputEventPointerUp: X, Y in physical
+//     pixels; Button (ButtonLeft, ButtonMiddle, ButtonRight; 0 for a move); the modifiers
+//     held; Pointer "mouse", "touch" or "pen", and the touch's PointerID.
+//   - InputEventWheel: X, Y and WheelY, a DOM deltaY (negative forward, about 100 a notch);
+//     the modifiers.
+//   - InputEventKeyDown, InputEventKeyUp: Key, its DOM code ("KeyR", "Digit1", "Space",
+//     "Escape", "ArrowUp", "ShiftLeft", "F5") -- every key, the ones the view binds too; the
+//     modifiers; Repeat for the system's auto-repeat.
+//   - InputEventResize: Width x Height, the drawing area's new physical size.
+//   - InputEventPick: a click's pick has landed -- Pick, nil for nothing; LastPick gets the
+//     same answer.
+//   - InputEventSnap: with snapping on, a hover's or a click's snap has landed -- Snap, nil
+//     for none; LastSnap gets the same answer.
+//   - InputEventClose: the window closed (Escape, its close button, CloseWindow) -- the last
+//     event; Camera the camera it closed on, as Run returns it (its Pick nil).
+//   - InputEventTimeline (view ABI 1.27): a draw whose timeline clock moved -- no fields beyond
+//     TimeMS and Dropped.
+//
+// Every event has TimeMS on the library's own clock (only differences mean anything) and
+// Dropped, how many events a full queue (1024) dropped just before this one.
+type InputEvent struct {
+	Kind                   InputKind
+	TimeMS                 float64
+	Dropped                uint32
+	X, Y, WheelY           float32
+	Button                 uint32
+	Shift, Ctrl, Alt, Meta bool
+	Pointer                string
+	PointerID              uint32
+	Key                    string
+	Repeat                 bool
+	Width, Height          uint32
+	Pick                   *Pick
+	Snap                   *Snap
+	Camera                 *Camera
+}
+
+// inputEventOf is a library's input event as an InputEvent; a kind this package does not
+// know is refused.
+func inputEventOf(raw *C.CadaclysmViewInputEvent, yUp bool) (InputEvent, error) {
+	e := InputEvent{Kind: InputKind(raw.kind), TimeMS: float64(raw.time_ms), Dropped: uint32(raw.dropped)}
+	mods := uint32(raw.modifiers)
+	switch e.Kind {
+	case InputEventPointerDown, InputEventPointerMove, InputEventPointerUp:
+		e.X, e.Y, e.Button, e.PointerID = float32(raw.x), float32(raw.y), uint32(raw.button), uint32(raw.pointer_id)
+		switch uint32(raw.pointer) {
+		case C.CADACLYSM_VIEW_POINTER_MOUSE:
+			e.Pointer = "mouse"
+		case C.CADACLYSM_VIEW_POINTER_TOUCH:
+			e.Pointer = "touch"
+		case C.CADACLYSM_VIEW_POINTER_PEN:
+			e.Pointer = "pen"
+		default:
+			e.Pointer = strconv.FormatUint(uint64(raw.pointer), 10)
+		}
+	case InputEventWheel:
+		e.X, e.Y, e.WheelY = float32(raw.x), float32(raw.y), float32(raw.wheel_y)
+	case InputEventKeyDown, InputEventKeyUp:
+		key := make([]byte, 0, len(raw.key))
+		for _, c := range raw.key {
+			if c == 0 {
+				break
+			}
+			key = append(key, byte(c))
+		}
+		e.Key, e.Repeat = string(key), raw.repeat != 0
+	case InputEventResize:
+		e.Width, e.Height = uint32(raw.width), uint32(raw.height)
+	case InputEventPick:
+		if raw.pick.item != 0 || raw.pick_viewport_label >= 0 {
+			pick := eventPickOf(&raw.pick, raw.pick_viewport_label)
+			e.Pick = &pick
+		}
+	case InputEventSnap:
+		if raw.snap.kind != 0 {
+			snap := snapOf(&raw.snap)
+			e.Snap = &snap
+		}
+	case InputEventTimeline:
+		// the stamp and the drop count alone
+	case InputEventClose:
+		var none C.CadaclysmViewPick
+		none.viewport_label = -1
+		cam := camera(&raw.camera, &none, yUp)
+		e.Camera = &cam
+	default:
+		return InputEvent{}, refused(fmt.Sprintf("next_event: kind %d is not a CADACLYSM_VIEW_INPUT_EVENT_* this SDK knows", uint32(raw.kind)))
+	}
+	if e.Kind <= InputEventKeyUp {
+		e.Shift = mods&C.CADACLYSM_VIEW_MOD_SHIFT != 0
+		e.Ctrl = mods&C.CADACLYSM_VIEW_MOD_CTRL != 0
+		e.Alt = mods&C.CADACLYSM_VIEW_MOD_ALT != 0
+		e.Meta = mods&C.CADACLYSM_VIEW_MOD_META != 0
+	}
+	return e, nil
 }
 
 // The views of every thread, alive (not yet Closed). views and each view's handle, closed
@@ -809,15 +974,24 @@ func (v *View) mine() bool {
 	return thread() == v.thread
 }
 
-// refusal is Python's _call: a closed view, another goroutine's view, a closed window, each
-// refused with the C call's name. A closed view is checked first: Close unlocked its maker,
-// which may since run on another thread.
-func (v *View) refusal(call string) error {
+// liveRefusal is a closed view or another goroutine's view, refused with the C call's name:
+// the refusals of a call that a closed window still answers (next_event, close). A closed
+// view is checked first: Close unlocked its maker, which may since run on another thread.
+func (v *View) liveRefusal(call string) error {
 	if v == nil || v.handle == nil {
 		return &Error{Message: call + ": " + ErrClosed.Error(), err: ErrClosed}
 	}
 	if !v.mine() {
 		return refused(call + ": a view belongs to the thread that made it")
+	}
+	return nil
+}
+
+// refusal is Python's _call: a closed view, another goroutine's view, a closed window, each
+// refused with the C call's name.
+func (v *View) refusal(call string) error {
+	if err := v.liveRefusal(call); err != nil {
+		return err
 	}
 	if v.closed {
 		return &Error{Message: call + ": " + ErrWindowClosed.Error(), err: ErrWindowClosed}
@@ -1346,8 +1520,8 @@ func (m *Machining) SeekMove(move uint32) error {
 	})
 }
 
-// ColourBy colours the stock: "height", "tool" or "deviation" (the last needs a part).
-func (m *Machining) ColourBy(mode string) error {
+// SetColourBy colours the stock: "height", "tool" or "deviation" (the last needs a part).
+func (m *Machining) SetColourBy(mode string) error {
 	modes := map[string]C.uint32_t{"height": C.CADACLYSM_VIEW_COLOUR_BY_HEIGHT, "tool": C.CADACLYSM_VIEW_COLOUR_BY_TOOL,
 		"deviation": C.CADACLYSM_VIEW_COLOUR_BY_DEVIATION}
 	c, ok := modes[mode]
@@ -1360,8 +1534,8 @@ func (m *Machining) ColourBy(mode string) error {
 	})
 }
 
-// Overlays turns the toolpath and the tool on or off (both are on when shown).
-func (m *Machining) Overlays(path, tool bool) error {
+// SetOverlays turns the toolpath and the tool on or off (both are on when shown).
+func (m *Machining) SetOverlays(path, tool bool) error {
 	defer runtime.KeepAlive(m.view)
 	return m.ok("cadaclysm_view_machining_overlays", func(v *View) C.bool {
 		return C.cv_machining_overlays(v.lib.t, v.handle, C.uint32_t(m.id), C.bool(path), C.bool(tool))
@@ -1482,12 +1656,13 @@ type Profile interface {
 	Colour() ([3]float64, bool, error)
 }
 
-// OverlayStyle is how ShowOverlay draws a shape. Fill: where set, its colour (a Colour), or
-// "none" for no fill; nil, the profile's own colour (Profile.Coloured), else white -- unless
-// a Stroke is set, when an uncoloured profile is not filled. Stroke: only where set,
-// StrokeWidth pixels wide (0: 1); an open profile, never filled, draws only with one. Order:
-// lower draws first, equal orders in show order (shapes, text and images share it). A nil
-// *OverlayStyle is every default.
+// OverlayStyle is how ShowOverlay draws a shape. A profile is a sketch, so it draws as its
+// outline by default. Stroke: where set, its colour (a Colour), or "none" for no stroke; nil,
+// the profile's own colour (Profile.Coloured), else white; StrokeWidth pixels wide (0: 1).
+// Fill: only where set, its colour, or "none" for no fill -- a panel needs one. Fill only is
+// a Fill and Stroke "none"; neither a fill nor a stroke is refused. Order: lower draws first,
+// equal orders in show order (shapes, text and images share it). A nil *OverlayStyle is every
+// default.
 type OverlayStyle struct {
 	Fill        Colour
 	Stroke      Colour
@@ -1531,8 +1706,9 @@ func (o *Overlay) MoveToAnchor(anchor Anchor, x, y float32) error {
 }
 
 // ShowOverlay shows a 2D shape over the window: shape in pixels (one profile unit a pixel,
-// y up), its origin hung x, y pixels inward from anchor -- a closed profile filled (holes
-// cut, even-odd), stroked where style says. Drawn after everything else, never moved by the
+// y up), its origin hung x, y pixels inward from anchor -- stroked, in its own colour or
+// white, and its closed loops filled (holes cut, even-odd) only where style gives a fill
+// (see OverlayStyle). Drawn after everything else, never moved by the
 // camera, kept in place as the window resizes; a click on it picks it (Pick.Overlay) and
 // nothing beneath.
 func (v *View) ShowOverlay(shape Profile, anchor Anchor, x, y float32, style *OverlayStyle) (*Overlay, error) {
@@ -1540,7 +1716,7 @@ func (v *View) ShowOverlay(shape Profile, anchor Anchor, x, y float32, style *Ov
 }
 
 // ShowOverlayProfiles shows several profiles as one overlay -- a crosshair's two strokes, a
-// frame's two loops: their fills together by the even-odd rule. The fill falls back on the
+// frame's two loops: their fills together by the even-odd rule. The stroke falls back on the
 // first coloured profile's colour.
 func (v *View) ShowOverlayProfiles(shapes []Profile, anchor Anchor, x, y float32, style *OverlayStyle) (*Overlay, error) {
 	if len(shapes) == 0 {
@@ -1593,24 +1769,29 @@ func (v *View) showOverlayCurves(beziers []float32, own *[4]C.float, anchor Anch
 	if err := v.refusal("cadaclysm_view_show_overlay"); err != nil {
 		return nil, err
 	}
-	stroke, err := v.lib.paint(style.Stroke)
-	if err != nil {
-		return nil, err
+	isNone := func(c Colour) bool {
+		text, isText := c.(string)
+		return isText && strings.EqualFold(strings.TrimSpace(text), "none")
 	}
-	var fill *[4]C.float
-	if text, isText := style.Fill.(string); isText && strings.EqualFold(strings.TrimSpace(text), "none") {
-		fill = nil
-	} else if style.Fill != nil {
+	var stroke, fill *[4]C.float
+	switch {
+	case isNone(style.Stroke):
+	case style.Stroke != nil:
+		if stroke, err = v.lib.paint(style.Stroke); err != nil {
+			return nil, err
+		}
+	case own != nil:
+		stroke = own
+	default:
+		stroke = &[4]C.float{1, 1, 1, 1}
+	}
+	if style.Fill != nil && !isNone(style.Fill) {
 		if fill, err = v.lib.paint(style.Fill); err != nil {
 			return nil, err
 		}
 	}
-	if fill == nil && style.Fill == nil {
-		if own != nil {
-			fill = own
-		} else if stroke == nil {
-			fill = &[4]C.float{1, 1, 1, 1}
-		}
+	if fill == nil && stroke == nil {
+		return nil, refused("show_overlay: neither a fill nor a stroke")
 	}
 	var pin runtime.Pinner
 	defer pin.Unpin()
@@ -1998,8 +2179,8 @@ func (i *Item) Remove() error {
 	return err
 }
 
-// Colour paints the whole item: numbers or text (a Colour; not nil).
-func (i *Item) Colour(rgb Colour) error {
+// SetColour paints the whole item: numbers or text (a Colour; not nil).
+func (i *Item) SetColour(rgb Colour) error {
 	c, err := i.view.paintFor("cadaclysm_view_set_colour", rgb, true)
 	if err != nil {
 		return err
@@ -2009,8 +2190,8 @@ func (i *Item) Colour(rgb Colour) error {
 	})
 }
 
-// Placement is a column-major 4x4, kept across uploads; nil takes it back.
-func (i *Item) Placement(m *[16]float64) error {
+// SetPlacement is a column-major 4x4, kept across uploads; nil takes it back.
+func (i *Item) SetPlacement(m *[16]float64) error {
 	return i.ok("cadaclysm_view_set_placement", func(v *View) C.bool {
 		var p *C.double
 		if m != nil {
@@ -2020,10 +2201,10 @@ func (i *Item) Placement(m *[16]float64) error {
 	})
 }
 
-// FaceColours paints faces (the item's pick numbering), one colour each (the alpha is not
+// SetFaceColours paints faces (the item's pick numbering), one colour each (the alpha is not
 // drawn): rgba is a [][4]float32, a [][3]float32, a []string of colour text or a []Colour,
 // as long as faces; both empty (or nil): every face its own colour again.
-func (i *Item) FaceColours(faces []uint32, rgba any) error {
+func (i *Item) SetFaceColours(faces []uint32, rgba any) error {
 	var list []Colour
 	switch x := rgba.(type) {
 	case nil:
@@ -2079,16 +2260,16 @@ func (i *Item) Frame() error {
 	return i.ok("cadaclysm_view_frame", func(v *View) C.bool { return C.cv_frame(v.lib.t, v.handle, C.uint32_t(i.id)) })
 }
 
-// Xray draws the item's triangles through whatever is in front of them.
-func (i *Item) Xray(on bool) error {
+// SetXray draws the item's triangles through whatever is in front of them.
+func (i *Item) SetXray(on bool) error {
 	return i.ok("cadaclysm_view_set_xray", func(v *View) C.bool {
 		return C.cv_set_xray(v.lib.t, v.handle, C.uint32_t(i.id), C.bool(on))
 	})
 }
 
-// Occluded sets how the item's lines and points draw where a surface hides them: "off"
+// SetOccluded sets how the item's lines and points draw where a surface hides them: "off"
 // (not drawn, the default), "solid" (drawn through) or "dashed" (dashed and dimmed).
-func (i *Item) Occluded(mode string) error {
+func (i *Item) SetOccluded(mode string) error {
 	m, ok := map[string]C.uint32_t{"off": C.CADACLYSM_VIEW_OCCLUDED_OFF, "solid": C.CADACLYSM_VIEW_OCCLUDED_SOLID, "dashed": C.CADACLYSM_VIEW_OCCLUDED_DASHED}[mode]
 	if !ok {
 		return fmt.Errorf("occluded: %q is not \"off\", \"solid\" or \"dashed\"", mode)
@@ -2098,12 +2279,63 @@ func (i *Item) Occluded(mode string) error {
 	})
 }
 
-// Finish sets the item's finish: "gloss" (an item shows with this until it is set) -- under
+var pointShapes = []string{"disc", "ring", "square", "diamond"}
+var pointStates = []string{"normal", "hover", "selected", "first"}
+
+// The numbers sent for each name: the header's own constants, so the tables cannot drift from it.
+var pointShapeCodes = [4]C.uint32_t{C.CADACLYSM_VIEW_POINT_DISC, C.CADACLYSM_VIEW_POINT_RING, C.CADACLYSM_VIEW_POINT_SQUARE, C.CADACLYSM_VIEW_POINT_DIAMOND}
+var pointStateCodes = [4]C.uint8_t{C.CADACLYSM_VIEW_POINT_STATE_NORMAL, C.CADACLYSM_VIEW_POINT_STATE_HOVER, C.CADACLYSM_VIEW_POINT_STATE_SELECTED, C.CADACLYSM_VIEW_POINT_STATE_FIRST}
+
+// SetLineStyle draws the item's lines in its own dash (view ABI 1.28): dash points on, gap
+// off; 0 is solid.
+func (i *Item) SetLineStyle(dash, gap float32) error {
+	return i.ok("cadaclysm_view_set_line_style", func(v *View) C.bool {
+		return C.cv_set_line_style(v.lib.t, v.handle, C.uint32_t(i.id), C.float(dash), C.float(gap))
+	})
+}
+
+// SetPointStyle sets a points item's marker (view ABI 1.28): "disc", "ring", "square" or
+// "diamond", filled or hollow.
+func (i *Item) SetPointStyle(shape string, hollow bool) error {
+	s := slices.Index(pointShapes, shape)
+	if s < 0 {
+		return fmt.Errorf("point style: '%s' is not 'disc', 'ring', 'square' or 'diamond'", shape)
+	}
+	return i.ok("cadaclysm_view_set_point_style", func(v *View) C.bool {
+		return C.cv_set_point_style(v.lib.t, v.handle, C.uint32_t(i.id), pointShapeCodes[s], C.bool(hollow))
+	})
+}
+
+// SetPointStates sets one state a point (view ABI 1.28): "normal", "hover", "selected" or "first".
+func (i *Item) SetPointStates(states []string) error {
+	codes := make([]C.uint8_t, len(states)+1)
+	for k, s := range states {
+		c := slices.Index(pointStates, s)
+		if c < 0 {
+			return fmt.Errorf("point states: '%s' is not 'normal', 'hover', 'selected' or 'first'", s)
+		}
+		codes[k] = pointStateCodes[c]
+	}
+	return i.ok("cadaclysm_view_set_point_states", func(v *View) C.bool {
+		return C.cv_set_point_states(v.lib.t, v.handle, C.uint32_t(i.id), &codes[0], C.size_t(len(states)))
+	})
+}
+
+// SetOnTop draws the item after every other, depth testing off (view ABI 1.28); it is picked
+// ahead of what is under it. Refused (the library's message) for overlays, text, images,
+// exact-surface and show_curves items.
+func (i *Item) SetOnTop(on bool) error {
+	return i.ok("cadaclysm_view_set_on_top", func(v *View) C.bool {
+		return C.cv_set_on_top(v.lib.t, v.handle, C.uint32_t(i.id), C.bool(on))
+	})
+}
+
+// SetFinish sets the item's finish: "gloss" (an item shows with this until it is set) -- under
 // the showroom lighting a clear coat mirroring the room, silver at a grazing angle -- "satin"
 // (a weaker, blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads the
 // scene again, as a show does: set it as each item is shown rather than over a finished
 // scene item by item.
-func (i *Item) Finish(finish string) error {
+func (i *Item) SetFinish(finish string) error {
 	f, ok := map[string]C.uint32_t{"gloss": C.CADACLYSM_VIEW_FINISH_GLOSS, "satin": C.CADACLYSM_VIEW_FINISH_SATIN, "matte": C.CADACLYSM_VIEW_FINISH_MATTE}[finish]
 	if !ok {
 		return fmt.Errorf("finish: %q is not \"gloss\", \"satin\" or \"matte\"", finish)
@@ -2113,17 +2345,42 @@ func (i *Item) Finish(finish string) error {
 	})
 }
 
-// UserLayer puts the item on user layer `layer`, 0..31 (every item starts on 0): it draws
-// while the layer is on (View.UserLayer) and in the viewports whose LayerMask has its bit. A
+// SetUserLayer puts the item on user layer `layer`, 0..31 (every item starts on 0): it draws
+// while the layer is on (View.SetUserLayer) and in the viewports whose LayerMask has its bit. A
 // layer past 31 is refused.
-func (i *Item) UserLayer(layer uint32) error {
+func (i *Item) SetUserLayer(layer uint32) error {
 	return i.ok("cadaclysm_view_set_item_layer", func(v *View) C.bool {
 		return C.cv_set_item_layer(v.lib.t, v.handle, C.uint32_t(i.id), C.uint32_t(layer))
 	})
 }
 
-// NodeVisible shows or hides a scene node (the reader's index) and its subtree.
-func (i *Item) NodeVisible(node uint32, on bool) error {
+// SetVisible shows or hides the whole item (view ABI 1.27); an animation's visible track
+// writes it too.
+func (i *Item) SetVisible(on bool) error {
+	return i.ok("cadaclysm_view_set_item_visible", func(v *View) C.bool {
+		return C.cv_set_item_visible(v.lib.t, v.handle, C.uint32_t(i.id), C.bool(on))
+	})
+}
+
+// SetNodeGhosts draws exactly these nodes of the item (the reader's indices, a solid has one,
+// node 0) x-ray, and the rest as they were (view ABI 1.27). nil or empty clears the ghosts. A
+// node past the item's is refused ("set_node_ghosts: item N has no node K (it has M)").
+func (i *Item) SetNodeGhosts(nodes []uint32) error {
+	n, err := count(len(nodes), "set_node_ghosts nodes")
+	if err != nil {
+		return err
+	}
+	return i.ok("cadaclysm_view_set_node_ghosts", func(v *View) C.bool {
+		var p *C.uint32_t // nil: NULL with count 0, as Python's None
+		if nodes != nil {
+			p = uint32s(nodes)
+		}
+		return C.cv_set_node_ghosts(v.lib.t, v.handle, C.uint32_t(i.id), p, n)
+	})
+}
+
+// SetNodeVisible shows or hides a scene node (the reader's index) and its subtree.
+func (i *Item) SetNodeVisible(node uint32, on bool) error {
 	return i.ok("cadaclysm_view_set_node_visible", func(v *View) C.bool {
 		return C.cv_set_node_visible(v.lib.t, v.handle, C.uint32_t(i.id), C.uint32_t(node), C.bool(on))
 	})
@@ -2155,9 +2412,9 @@ func (i *Item) SetIsocurveColour(rgb Colour) error {
 	return i.lineColour(C.CADACLYSM_VIEW_LAYER_ISOCURVES, rgb)
 }
 
-// NodeColour colours a node's subtree: a Colour (the alpha is not drawn); nil: the node's
+// SetNodeColour colours a node's subtree: a Colour (the alpha is not drawn); nil: the node's
 // own colour.
-func (i *Item) NodeColour(node uint32, rgba Colour) error {
+func (i *Item) SetNodeColour(node uint32, rgba Colour) error {
 	p, err := i.view.paintFor("cadaclysm_view_set_node_color", rgba, false)
 	if err != nil {
 		return err
@@ -2167,9 +2424,9 @@ func (i *Item) NodeColour(node uint32, rgba Colour) error {
 	})
 }
 
-// NodeHighlight tints a node's subtree toward rgba's colour by its alpha (a Colour; text:
+// SetNodeHighlight tints a node's subtree toward rgba's colour by its alpha (a Colour; text:
 // alpha 1); nil clears.
-func (i *Item) NodeHighlight(node uint32, rgba Colour) error {
+func (i *Item) SetNodeHighlight(node uint32, rgba Colour) error {
 	p, err := i.view.paintFor("cadaclysm_view_set_node_highlight", rgba, false)
 	if err != nil {
 		return err
@@ -2186,10 +2443,10 @@ func (i *Item) FrameNode(node uint32) error {
 	})
 }
 
-// NodeTransforms poses a shown scene: one column-major 4x4 per scene node, in index order
+// SetNodeTransforms poses a shown scene: one column-major 4x4 per scene node, in index order
 // (Pose.RawTransform's layout), drawn in place of each node's rest transform; nil restores
 // the rest pose. An empty, non-nil list reaches the library, which refuses it.
-func (i *Item) NodeTransforms(transforms [][16]float64) error {
+func (i *Item) SetNodeTransforms(transforms [][16]float64) error {
 	n, err := count(len(transforms), "node_transforms")
 	if err != nil {
 		return err
@@ -2231,13 +2488,13 @@ func (v *View) Dolly(ratio float32) error {
 	return v.act("cadaclysm_view_dolly", func() { C.cv_dolly(v.lib.t, v.handle, C.float(ratio)) })
 }
 
-// Orthographic switches the projection.
-func (v *View) Orthographic(on bool) error {
+// SetOrthographic switches the projection.
+func (v *View) SetOrthographic(on bool) error {
 	return v.act("cadaclysm_view_set_orthographic", func() { C.cv_set_orthographic(v.lib.t, v.handle, C.bool(on)) })
 }
 
-// Background is the clear colour, linear 0..1: numbers or text (a Colour; not nil).
-func (v *View) Background(rgb Colour) error {
+// SetBackground is the clear colour, linear 0..1: numbers or text (a Colour; not nil).
+func (v *View) SetBackground(rgb Colour) error {
 	c, err := v.paintFor("cadaclysm_view_set_background", rgb, true)
 	if err != nil {
 		return err
@@ -2261,8 +2518,8 @@ func (v *View) Frame() error {
 	return v.ok("cadaclysm_view_frame", func() C.bool { return C.cv_frame(v.lib.t, v.handle, 0) })
 }
 
-// Surfaces is "exact" or "triangles".
-func (v *View) Surfaces(which string) error {
+// SetSurfaces is "exact" or "triangles".
+func (v *View) SetSurfaces(which string) error {
 	var s C.uint32_t
 	switch which {
 	case "exact":
@@ -2384,6 +2641,60 @@ func (v *View) SetOccludedStyle(s OccludedStyle) error {
 	return v.ok("cadaclysm_view_set_occluded_style", func() C.bool { return C.cv_set_occluded_style(v.lib.t, v.handle, &raw) })
 }
 
+// SetPointStateColours sets the view-wide colours a hover, selected and first point draws in
+// (view ABI 1.28), each a Colour (numbers or text); nil restores that state's default.
+func (v *View) SetPointStateColours(hover, selected, first Colour) error {
+	const call = "cadaclysm_view_set_point_state_colours"
+	h, err := v.paintFor(call, hover, false)
+	if err != nil {
+		return err
+	}
+	s, err := v.paintFor(call, selected, false)
+	if err != nil {
+		return err
+	}
+	f, err := v.paintFor(call, first, false)
+	if err != nil {
+		return err
+	}
+	return v.act(call, func() { C.cv_set_point_state_colours(v.lib.t, v.handle, h, s, f) })
+}
+
+// SetViewportLabel names a viewport in its corner (view ABI 1.28): nil text takes the label
+// off; colour is a Colour (numbers or text), nil the default (white). A NUL in text is
+// refused (the C string ends there).
+func (v *View) SetViewportLabel(viewport uint32, text *string, colour Colour) error {
+	const call = "cadaclysm_view_set_viewport_label"
+	if text != nil && strings.ContainsRune(*text, 0) {
+		return refused("viewport label " + pyRepr(*text) + ": a NUL character cannot be shown (the C string ends there)")
+	}
+	c, err := v.paintFor(call, colour, false)
+	if err != nil {
+		return err
+	}
+	var cs *C.char
+	if text != nil {
+		cs = C.CString(*text)
+		defer C.free(unsafe.Pointer(cs))
+	}
+	return v.ok(call, func() C.bool {
+		return C.cv_set_viewport_label(v.lib.t, v.handle, C.uint32_t(viewport), cs, c)
+	})
+}
+
+// SetViewportBorder sets the border drawn round a viewport (view ABI 1.28) in colour, a Colour
+// (numbers or text); nil takes it off.
+func (v *View) SetViewportBorder(viewport uint32, colour Colour) error {
+	const call = "cadaclysm_view_set_viewport_border"
+	c, err := v.paintFor(call, colour, false)
+	if err != nil {
+		return err
+	}
+	return v.ok(call, func() C.bool {
+		return C.cv_set_viewport_border(v.lib.t, v.handle, C.uint32_t(viewport), c)
+	})
+}
+
 // OccludedStyle reports the view's occluded style, the defaults as their values.
 func (v *View) OccludedStyle() (OccludedStyle, error) {
 	raw := C.CadaclysmViewOccludedStyle{}
@@ -2416,6 +2727,84 @@ func (v *View) Pause() error {
 	return v.ok("cadaclysm_view_timeline_pause", func() C.bool { return C.cv_timeline_pause(v.lib.t, v.handle) })
 }
 
+// Animation is a kernel animation passed by handle: *blacksmith.Animation. The view plays its
+// own copy, so the animation is the caller's again, free to change or Close, when
+// PlayAnimation returns.
+type Animation interface{ AnimationHandle() unsafe.Pointer }
+
+// AnimationBinding binds one target of an Animation to a shown item (Item, an *Item of this
+// view), or to a node of it and the node's whole subtree (Node, the reader's node index; nil
+// binds the item itself). Python's AnimationBinding.
+type AnimationBinding struct {
+	Target string
+	Item   *Item
+	Node   *uint32
+}
+
+// PlayAnimation plays a kernel animation on the view's timeline (view ABI 1.27), each binding
+// driving its target on its item or node, and returns the new track's id (1 or more), which
+// RemoveTrack takes. The timeline does not start: Play and Seek move it. A nil animation reaches
+// the library, which refuses it ("play_animation: the animation is null"); a closed one is
+// refused as "animation: closed". A binding whose target holds a NUL, or whose item is nil or
+// another view's, is refused before the library; the library refuses an item not shown, a node
+// past the item's, a target bound twice and the rest, with its own text. No bindings is a NULL
+// array with count 0.
+func (v *View) PlayAnimation(a Animation, bindings []AnimationBinding) (uint32, error) {
+	const call = "cadaclysm_view_play_animation"
+	if err := v.refusal(call); err != nil {
+		return 0, err
+	}
+	var h unsafe.Pointer
+	if a != nil {
+		if h = a.AnimationHandle(); h == nil {
+			return 0, refused("animation: closed")
+		}
+	}
+	defer runtime.KeepAlive(a)
+	n, err := count(len(bindings), "play_animation bindings")
+	if err != nil {
+		return 0, err
+	}
+	var array *C.CadaclysmViewAnimationBinding
+	if len(bindings) > 0 {
+		for k, b := range bindings {
+			if b.Item == nil || b.Item.view != v {
+				return 0, refused(fmt.Sprintf("binding %d: item is nil or not an item of this view", k))
+			}
+			if strings.IndexByte(b.Target, 0) >= 0 {
+				return 0, refused(fmt.Sprintf("binding %d: target holds a NUL", k))
+			}
+		}
+		array = (*C.CadaclysmViewAnimationBinding)(C.malloc(C.size_t(len(bindings)) * C.size_t(unsafe.Sizeof(C.CadaclysmViewAnimationBinding{}))))
+		defer C.free(unsafe.Pointer(array))
+		slots := unsafe.Slice(array, len(bindings))
+		for k, b := range bindings {
+			target := C.CString(b.Target)
+			defer C.free(unsafe.Pointer(target))
+			slots[k].target = target
+			slots[k].item = C.uint32_t(b.Item.id)
+			slots[k].node = C.uint32_t(C.CADACLYSM_VIEW_ALL_NODES)
+			if b.Node != nil {
+				slots[k].node = C.uint32_t(*b.Node)
+			}
+		}
+	}
+	track := C.cv_play_animation(v.lib.t, v.handle, h, array, n)
+	if track == 0 {
+		return 0, v.failed()
+	}
+	return uint32(track), nil
+}
+
+// RemoveTrack takes animation track `track` off the timeline (view ABI 1.27), putting back
+// what it drove as it was at play; a track no animation played is refused ("timeline_remove:
+// no track N").
+func (v *View) RemoveTrack(track uint32) error {
+	return v.ok("cadaclysm_view_timeline_remove", func() C.bool {
+		return C.cv_timeline_remove(v.lib.t, v.handle, C.uint32_t(track))
+	})
+}
+
 // Seek sets the timeline's clock, clamped to [0, Duration].
 func (v *View) Seek(seconds float64) error {
 	if math.IsNaN(seconds) || math.IsInf(seconds, 0) {
@@ -2425,8 +2814,8 @@ func (v *View) Seek(seconds float64) error {
 	return v.ok("cadaclysm_view_timeline_seek", func() C.bool { return C.cv_timeline_seek(v.lib.t, v.handle, C.double(seconds)) })
 }
 
-// Loop sets whether the timeline starts again at its end.
-func (v *View) Loop(on bool) error {
+// SetLoop sets whether the timeline starts again at its end.
+func (v *View) SetLoop(on bool) error {
 	defer runtime.KeepAlive(v)
 	return v.ok("cadaclysm_view_timeline_set_loop", func() C.bool { return C.cv_timeline_set_loop(v.lib.t, v.handle, C.bool(on)) })
 }
@@ -2483,16 +2872,16 @@ func (v *View) Status() ([]string, error) {
 	return []string{}, nil
 }
 
-// Layer switches a CADACLYSM_VIEW_LAYER_* layer.
-func (v *View) Layer(layer uint32, on bool) error {
+// SetLayer switches a CADACLYSM_VIEW_LAYER_* layer.
+func (v *View) SetLayer(layer uint32, on bool) error {
 	return v.ok("cadaclysm_view_set_layer", func() C.bool {
 		return C.cv_set_layer(v.lib.t, v.handle, C.uint32_t(layer), C.bool(on))
 	})
 }
 
-// UserLayer switches user layer `layer`, 0..31, on or off in every viewport (all start on);
-// see Item.UserLayer. A layer past 31 is refused.
-func (v *View) UserLayer(layer uint32, on bool) error {
+// SetUserLayer switches user layer `layer`, 0..31, on or off in every viewport (all start on);
+// see Item.SetUserLayer. A layer past 31 is refused.
+func (v *View) SetUserLayer(layer uint32, on bool) error {
 	return v.ok("cadaclysm_view_set_user_layer", func() C.bool {
 		return C.cv_set_user_layer(v.lib.t, v.handle, C.uint32_t(layer), C.bool(on))
 	})
@@ -2500,7 +2889,7 @@ func (v *View) UserLayer(layer uint32, on bool) error {
 
 // Viewport is one pane: its rectangle (x, y, width, height in physical pixels from the top
 // left), its camera's column-major view and projection, the eye, a CADACLYSM_VIEW_GRID_* grid,
-// and the user layers it draws (LayerMask: bit n for layer n, see Item.UserLayer; 0, the zero
+// and the user layers it draws (LayerMask: bit n for layer n, see Item.SetUserLayer; 0, the zero
 // value, draws every layer).
 type Viewport struct {
 	Rect             [4]uint32
@@ -2510,8 +2899,8 @@ type Viewport struct {
 	LayerMask        uint32
 }
 
-// Viewports draws panes of their own cameras; nil or empty: the one camera again.
-func (v *View) Viewports(list []Viewport) error {
+// SetViewports draws panes of their own cameras; nil or empty: the one camera again.
+func (v *View) SetViewports(list []Viewport) error {
 	n, err := count(len(list), "viewports")
 	if err != nil {
 		return err
@@ -2538,7 +2927,8 @@ func (v *View) Viewports(list []Viewport) error {
 	return v.ok("cadaclysm_view_set_viewports", func() C.bool { return C.cv_set_viewports(v.lib.t, v.handle, first, n) })
 }
 
-// Pick is what is under (x, y) of a viewport; Item 0 for nothing. As Python's pick: a view
+// Pick is what is under (x, y) of a viewport; Item 0 for nothing, unless ViewportLabel is 0
+// or more: a viewport label was hit (1.28). As Python's pick: a view
 // never drawn is drawn first; a failure is the library's own message, or "pick: the answer
 // never landed (...)".
 func (v *View) Pick(x, y, viewport uint32) (Pick, error) {
@@ -2550,6 +2940,7 @@ func (v *View) Pick(x, y, viewport uint32) (Pick, error) {
 		return Pick{}, err
 	}
 	var raw C.CadaclysmViewPick
+	raw.viewport_label = -1
 	var msg [C.CVL_ERROR]C.char
 	if C.cvl_pick(v.lib.t, v.handle, &v.drawn, C.uint32_t(viewport), C.uint32_t(x), C.uint32_t(y), &raw, &msg[0], C.CVL_ERROR) == 0 {
 		return Pick{}, refused(C.GoString(&msg[0]))
@@ -2568,6 +2959,7 @@ func (v *View) LastPick() (pick Pick, landed bool, err error) {
 		return Pick{}, false, err
 	}
 	raw := C.CadaclysmViewPick{}
+	raw.viewport_label = -1
 	raw.size = C.uint32_t(unsafe.Sizeof(raw))
 	if C.cv_pick_result(v.lib.t, v.handle, &raw) {
 		return pickOf(&raw), true, nil
@@ -2694,10 +3086,10 @@ func (v *View) Draw() error {
 	return err
 }
 
-// Lod sets the levels of detail, as Python's View.lod: parts of minTriangles or more (0:
+// SetLod sets the levels of detail, as Python's View.set_lod: parts of minTriangles or more (0:
 // the library's default, 2,048) get coarser levels, and a moving frame draws as motion
 // says -- "detailed" or "smooth" (see WakeMs); "" turns them off (the default).
-func (v *View) Lod(motion string, minTriangles uint32) error {
+func (v *View) SetLod(motion string, minTriangles uint32) error {
 	if motion == "" {
 		return v.ok("cadaclysm_view_set_lod", func() C.bool { return C.cv_set_lod(v.lib.t, v.handle, nil) })
 	}
@@ -2741,7 +3133,7 @@ func camera(c *C.CadaclysmViewCamera, p *C.CadaclysmViewPick, yUp bool) Camera {
 	}
 	C.cvl_angles(c, y, &az, &el)
 	out.Azimuth, out.Elevation = float64(az), float64(el)
-	if p.item != 0 {
+	if p.item != 0 || p.viewport_label >= 0 {
 		pick := pickOf(p)
 		out.Pick = &pick
 	}
@@ -2757,12 +3149,125 @@ func (v *View) Run() (Camera, error) {
 	c := C.CadaclysmViewCamera{}
 	c.size = C.uint32_t(unsafe.Sizeof(c))
 	p := C.CadaclysmViewPick{}
+	p.viewport_label = -1
 	p.size = C.uint32_t(unsafe.Sizeof(p))
 	if !bool(C.cv_run(v.lib.t, v.handle, &c, &p)) {
 		return Camera{}, v.failed()
 	}
 	v.markClosed()
 	return camera(&c, &p, v.yUp), nil
+}
+
+// RunWith runs the window on this goroutine, handing each input event to onEvent as the
+// window handles it (view ABI 1.26); returning false closes the window and ends the run. The
+// callback may change the scene or the camera: it is called between pumps, never from inside
+// the library. The close event is handed over last when the window closes by itself (Escape,
+// its close button). As Run: the camera the window closed on and the last pick, and the
+// window is then closed.
+func (v *View) RunWith(onEvent func(InputEvent) bool) (Camera, error) {
+	if err := v.liveRefusal("cadaclysm_view_pump"); err != nil {
+		return Camera{}, err
+	}
+	if onEvent == nil {
+		return Camera{}, refused("run: no callback")
+	}
+	var closedOn *Camera
+	var picked *Pick
+	stopping := false
+	for closedOn == nil {
+		state := C.uint32_t(C.CADACLYSM_VIEW_CLOSED)
+		if !v.closed {
+			state = C.cv_pump(v.lib.t, v.handle, 16)
+		}
+		if state != C.CADACLYSM_VIEW_OPEN && state != C.CADACLYSM_VIEW_CLOSED {
+			return Camera{}, v.failed()
+		}
+		for closedOn == nil {
+			e, ok, err := v.NextEvent()
+			if err != nil {
+				return Camera{}, err
+			}
+			if !ok {
+				break
+			}
+			if e.Kind == InputEventPick {
+				picked = e.Pick
+			}
+			if e.Kind == InputEventClose {
+				closedOn = e.Camera
+				if !stopping {
+					onEvent(e)
+				}
+			} else if !stopping && !onEvent(e) {
+				stopping = true
+				if err := v.CloseWindow(); err != nil {
+					return Camera{}, err
+				}
+			}
+		}
+		if state == C.CADACLYSM_VIEW_CLOSED && closedOn == nil {
+			return Camera{}, refused("run: the window closed with no close event")
+		}
+	}
+	// The answer the last click left for LastPick, taken as Run takes it; else the last pick
+	// event's.
+	raw := C.CadaclysmViewPick{}
+	raw.viewport_label = -1
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	if C.cv_pick_result(v.lib.t, v.handle, &raw) {
+		picked = nil
+		if raw.item != 0 || raw.viewport_label >= 0 {
+			pick := pickOf(&raw)
+			picked = &pick
+		}
+	}
+	v.markClosed()
+	out := *closedOn
+	out.Pick = picked
+	return out, nil
+}
+
+// NextEvent is the oldest input event the view's own window handled and has not handed out
+// yet (view ABI 1.26), without waiting: ok is false while none waits. Read them between
+// Pumps, or let RunWith hand them over. A view in a host's window, or offscreen, queues
+// nothing. Still answers once the window has closed. A failure other than "no event" is the
+// library's own message.
+func (v *View) NextEvent() (e InputEvent, ok bool, err error) {
+	if err := v.liveRefusal("cadaclysm_view_next_event"); err != nil {
+		return InputEvent{}, false, err
+	}
+	raw := C.CadaclysmViewInputEvent{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	if C.cv_next_event(v.lib.t, v.handle, &raw) {
+		e, err := inputEventOf(&raw, v.yUp)
+		if err != nil {
+			return InputEvent{}, false, err
+		}
+		return e, true, nil
+	}
+	said := C.GoString(C.cv_last_error(v.lib.t))
+	if said != "" && !strings.HasSuffix(said, "no event") {
+		return InputEvent{}, false, refused(said)
+	}
+	return InputEvent{}, false, nil
+}
+
+// CloseWindow closes the view's own window as its close button does (view ABI 1.26): Closed
+// turns true, a close event is queued and a loop around Pump ends; Close still owes the
+// destroy. Nothing for a window already closed; a view in a host's window, or offscreen, has
+// none to close: the library's refusal.
+func (v *View) CloseWindow() error {
+	if err := v.liveRefusal("cadaclysm_view_close"); err != nil {
+		return err
+	}
+	if v.closed {
+		return nil
+	}
+	if !bool(C.cv_close(v.lib.t, v.handle)) {
+		return v.failed()
+	}
+	v.markClosed()
+	return nil
 }
 
 // Size is what Image reads, in physical pixels.
@@ -3120,6 +3625,7 @@ func draw(solid, scene unsafe.Pointer, tolerance float64, transforms [][16]float
 	c := C.CadaclysmViewCamera{}
 	c.size = C.uint32_t(unsafe.Sizeof(c))
 	p := C.CadaclysmViewPick{}
+	p.viewport_label = -1
 	p.size = C.uint32_t(unsafe.Sizeof(p))
 	mode := C.int(0)
 	if interactive {

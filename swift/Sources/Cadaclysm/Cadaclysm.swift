@@ -374,7 +374,7 @@ public func resolveSchema(_ model: String, schema: String?) throws -> (chosen: S
 }
 
 /// `CadaclysmOpenOptions` for these arguments, alive for the duration of `body`.
-private func withOptions<R>(_ convention: Convention, schema: String?, colors: Bool,
+private func withOptions<R>(_ convention: Convention, schema: String?, colors: Bool, lightmapResolution: UInt32,
                             _ body: (UnsafePointer<CadaclysmOpenOptions>) -> R) -> R {
     var options = CadaclysmOpenOptions()
     cadaclysm_open_options_init(&options)
@@ -384,6 +384,7 @@ private func withOptions<R>(_ convention: Convention, schema: String?, colors: B
     options.uvs = packed & Convention.uvWorld.rawValue != 0
         ? UInt32(CADACLYSM_UV_WORLD_SCALE.rawValue) : UInt32(CADACLYSM_UV_NONE.rawValue)
     options.colors = colors ? UInt32(CADACLYSM_COLORS_PER_FACE.rawValue) : UInt32(CADACLYSM_COLORS_NONE.rawValue)
+    options.lightmap_resolution = lightmapResolution
     guard let schema = schema else {
         return withUnsafePointer(to: &options) { body($0) }
     }
@@ -403,11 +404,13 @@ private func withOptions<R>(_ convention: Convention, schema: String?, colors: B
 /// the file says it speaks); every schema the library ships is built in, so a STEP or IFC file
 /// opens with nil. `convention` is the space to read into, optionally with `.fileUnits` and
 /// `.uvWorld`. `colors` asks for per-vertex colours on bodies the file painted in more than one
-/// colour. A `.zip` opens its first readable member; `Scene.sourceName` says which.
+/// colour. `lightmapResolution`: a lightmap atlas that many texels on a side, one chart per B-rep
+/// face, read back as `Node.lightmapUvs`; 0 for none. A `.zip` opens its first readable member;
+/// `Scene.sourceName` says which.
 ///
 /// Throws `CadaclysmError` carrying the library's reason; never returns a dead scene.
 public func open(_ path: String, schema: String? = nil, convention: Convention = .native,
-                 colors: Bool = false) throws -> Scene {
+                 colors: Bool = false, lightmapResolution: UInt32 = 0) throws -> Scene {
     guard FileManager.default.fileExists(atPath: path) else {
         throw CadaclysmError("\(path): no such file")
     }
@@ -416,7 +419,7 @@ public func open(_ path: String, schema: String? = nil, convention: Convention =
     // A directory goes over whole: the library keys each schema under the name the schema
     // itself declares, which is the only authority on the matter.
     if let schema = schema, isDirectory(schema) {
-        if let handle = withOptions(convention, schema: schema, colors: colors, { cadaclysm_open(path, $0) }) {
+        if let handle = withOptions(convention, schema: schema, colors: colors, lightmapResolution: lightmapResolution, { cadaclysm_open(path, $0) }) {
             return Scene(handle: handle, path: path, schemaPath: schema, convention: convention)
         }
         throw CadaclysmError("\(name): \(lastError())")
@@ -425,7 +428,7 @@ public func open(_ path: String, schema: String? = nil, convention: Convention =
     let (chosen, fallbacks) = try resolveSchema(path, schema: schema)
     let candidates: [String?] = chosen != nil || fallbacks.isEmpty ? [chosen] : fallbacks
     for candidate in candidates {
-        if let handle = withOptions(convention, schema: candidate, colors: colors, { cadaclysm_open(path, $0) }) {
+        if let handle = withOptions(convention, schema: candidate, colors: colors, lightmapResolution: lightmapResolution, { cadaclysm_open(path, $0) }) {
             return Scene(handle: handle, path: path, schemaPath: candidate, convention: convention)
         }
     }
@@ -439,9 +442,10 @@ public func open(_ path: String, schema: String? = nil, convention: Convention =
 /// file to read a `FILE_SCHEMA` line from; `name` stands as the scene's `path`. The bytes are
 /// copied; `data` can be reused as soon as this returns. Otherwise as `open`.
 public func openMemory(_ data: Data, format: String, schema: String? = nil, name: String = "<memory>",
-                       convention: Convention = .native, colors: Bool = false) throws -> Scene {
+                       convention: Convention = .native, colors: Bool = false,
+                       lightmapResolution: UInt32 = 0) throws -> Scene {
     let handle = data.withUnsafeBytes { bytes in
-        withOptions(convention, schema: schema, colors: colors) { options in
+        withOptions(convention, schema: schema, colors: colors, lightmapResolution: lightmapResolution) { options in
             cadaclysm_open_memory(bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, format, options)
         }
     }
@@ -451,8 +455,10 @@ public func openMemory(_ data: Data, format: String, schema: String? = nil, name
 
 /// `openMemory` over a byte array.
 public func openMemory(_ bytes: [UInt8], format: String, schema: String? = nil, name: String = "<memory>",
-                       convention: Convention = .native, colors: Bool = false) throws -> Scene {
-    try openMemory(Data(bytes), format: format, schema: schema, name: name, convention: convention, colors: colors)
+                       convention: Convention = .native, colors: Bool = false,
+                       lightmapResolution: UInt32 = 0) throws -> Scene {
+    try openMemory(Data(bytes), format: format, schema: schema, name: name,
+                convention: convention, colors: colors, lightmapResolution: lightmapResolution)
 }
 
 // ---- views over library memory ------------------------------------------------------------------
@@ -1010,9 +1016,102 @@ private func healWhy(_ code: UInt32) -> String {
     Int(code) < healWhys.count ? healWhys[Int(code)] : "unknown"
 }
 
-/// `healed`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.
+/// `heal`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.
 func healFlags(edges: Bool, faces: Bool, holes: Bool) -> UInt32 {
     (edges ? 1 : 0) | (faces ? 2 : 0) | (holes ? 4 : 0)
+}
+
+/// One face `Brep.recognize` gave an analytic kind: its `face` number (the same before and after), its
+/// `kind` -- `"plane"`, `"cylinder"`, `"cone"`, `"sphere"` or `"torus"` -- and the `deviation`,
+/// the furthest any sample of the face or point of its edges lies from the analytic surface.
+public struct RecognizedFace: Hashable, Sendable {
+    public let face: Int
+    public let kind: String
+    public let deviation: Double
+
+    public init(face: Int, kind: String, deviation: Double) {
+        self.face = face
+        self.kind = kind
+        self.deviation = deviation
+    }
+}
+
+/// One face `Brep.recognize` left free-form, and why: its `face` number; `why` is `"no_kind"` (no kind
+/// fits within the tolerance), `"mixed_normals"`, `"parameter_trims"` or `"too_few_samples"`;
+/// `closest` the deviation of the kind that came closest, for `"no_kind"`, else nil.
+public struct RecognizeRefusal: Hashable, Sendable {
+    public let face: Int
+    public let why: String
+    public let closest: Double?
+
+    public init(face: Int, why: String, closest: Double?) {
+        self.face = face
+        self.why = why
+        self.closest = closest
+    }
+}
+
+/// One edge whose curve `Brep.recognize` gave an analytic kind: its brep `edge` id (as `edgeTolerance`
+/// takes one), its `kind` -- `"line"`, `"circle"` or `"ellipse"` -- and the `deviation`, the
+/// furthest any point of the curve or the edge lies from the analytic curve.
+public struct RecognizedEdge: Hashable, Sendable {
+    public let edge: Int
+    public let kind: String
+    public let deviation: Double
+
+    public init(edge: Int, kind: String, deviation: Double) {
+        self.edge = edge
+        self.kind = kind
+        self.deviation = deviation
+    }
+}
+
+/// What `Brep.recognize` did, as plain data: the `tolerance` it fitted to, the `faces` given an analytic
+/// kind, the faces `refused` (left free-form) and why, the `edges` whose curve was given a kind
+/// (in edge order), how many edges were left free-form (`edgesLeft`), and the furthest any face
+/// or edge taken lies from its analytic form (`worstFace`, `worstEdge`; 0 when none was taken).
+public struct RecognizeReport: Hashable, Sendable {
+    public let tolerance: Double
+    public let faces: [RecognizedFace]
+    public let refused: [RecognizeRefusal]
+    public let edges: [RecognizedEdge]
+    public let edgesLeft: Int
+    public let worstFace: Double
+    public let worstEdge: Double
+
+    /// The flat rows of the recognition C ABI, decoded index for index as cadaclysm.py's
+    /// `_recognize_report`: counts 10 u32 (faces per kind, faces left, edges per kind, edges
+    /// left), sizes 3 f64 (tolerance, worst face, worst edge), each row two u32 and one f64.
+    init(counts: [UInt32], sizes: [Double], faceItems: [UInt32], faceSizes: [Double], refusedItems: [UInt32],
+         refusedSizes: [Double], edgeItems: [UInt32], edgeSizes: [Double]) {
+        faces = (0 ..< faceSizes.count).map { i in
+            RecognizedFace(face: Int(faceItems[2 * i]), kind: recognizeKind(recognizeFaceKinds, faceItems[2 * i + 1]),
+                           deviation: faceSizes[i])
+        }
+        refused = (0 ..< refusedSizes.count).map { i in
+            RecognizeRefusal(face: Int(refusedItems[2 * i]), why: recognizeKind(recognizeWhys, refusedItems[2 * i + 1]),
+                             closest: refusedSizes[i].isNaN ? nil : refusedSizes[i])
+        }
+        edges = (0 ..< edgeSizes.count).map { i in
+            RecognizedEdge(edge: Int(edgeItems[2 * i]), kind: recognizeKind(recognizeEdgeKinds, edgeItems[2 * i + 1]),
+                           deviation: edgeSizes[i])
+        }
+        tolerance = sizes[0]
+        edgesLeft = Int(counts[9])
+        worstFace = sizes[1]
+        worstEdge = sizes[2]
+    }
+}
+
+/// The recognised face kinds, by the C ABI's code.
+let recognizeFaceKinds = ["plane", "cylinder", "cone", "sphere", "torus"]
+/// The recognised edge kinds, by the C ABI's code.
+let recognizeEdgeKinds = ["line", "circle", "ellipse"]
+/// Why recognition left a face free-form, by the C ABI's code.
+let recognizeWhys = ["no_kind", "mixed_normals", "parameter_trims", "too_few_samples"]
+
+private func recognizeKind(_ names: [String], _ code: UInt32) -> String {
+    Int(code) < names.count ? names[Int(code)] : "unknown"
 }
 
 /// A node's triangles, in the node's own frame: what `Node.mesh` returns.
@@ -1026,7 +1125,7 @@ public struct Mesh: CustomStringConvertible {
     public let normals: NativeArray<Float>?
     /// Two floats a vertex, or nil: only readers asked for world-scale UVs (or a file that
     /// stores them) fill them. One unit of u or v is one world unit -- a tiling material, not a
-    /// lightmap.
+    /// lightmap. For a lightmap, see `Node.lightmapUvs`.
     public let uvs: NativeArray<Float>?
     /// Four floats (RGBA) a vertex, or nil -- the common case. Only a body painted in several
     /// colours, opened with `colors: true`, carries them.
@@ -1758,6 +1857,13 @@ private let taskKindWords = [
 ]
 private let linkKindWords = ["finish_start", "start_start", "finish_finish", "start_finish", "notdefined", "other"]
 private let phaseWords = ["unbuilt", "building", "built", "demolishing", "demolished"]
+// Calendars use the IFC words, as the core spells them.
+private let calendarKindWords = ["FIRSTSHIFT", "SECONDSHIFT", "THIRDSHIFT", "NOTDEFINED", "USERDEFINED"]
+private let recurrenceKindWords = [
+    "DAILY", "WEEKLY", "MONTHLY_BY_DAY_OF_MONTH", "MONTHLY_BY_POSITION", "BY_DAY_COUNT",
+    "BY_WEEKDAY_COUNT", "YEARLY_BY_DAY_OF_MONTH", "YEARLY_BY_POSITION",
+]
+private let durationKindWords = ["ELAPSEDTIME", "WORKTIME", "NOTDEFINED"]
 
 private func word(_ words: [String], _ code: UInt32, fallback: Int) -> String {
     Int(code) < words.count ? words[Int(code)] : words[fallback]
@@ -1778,6 +1884,10 @@ public struct ElementState {
 
 /// Every date pair a task gives, each seconds since 1970-01-01T00:00 (`Date(timeIntervalSince1970:)`
 /// reads them) or nil where the file gives none; `duration` is in seconds.
+///
+/// `durationKind` is `"ELAPSEDTIME"`, `"WORKTIME"` or `"NOTDEFINED"`, nil where the file gives
+/// none; `workDuration` is the duration in working time -- that many working days, then that
+/// many seconds of working time -- nil where there is none (an IFC2X3 task, or no duration).
 public struct TaskTime {
     public let scheduleStart: Double?
     public let scheduleFinish: Double?
@@ -1788,6 +1898,15 @@ public struct TaskTime {
     public let actualStart: Double?
     public let actualFinish: Double?
     public let duration: Double?
+    public let durationKind: String?
+    public let workDuration: WorkDuration?
+}
+
+/// A duration in working time: `days` working days, then `seconds` of working time. From
+/// `TaskTime.workDuration`.
+public struct WorkDuration: Equatable {
+    public let days: Double
+    public let seconds: Double
 }
 
 /// A sequence between two tasks of one schedule. From `WorkSchedule.links`.
@@ -1854,6 +1973,9 @@ public struct ScheduleTask: Hashable, CustomStringConvertible {
     public var time: TaskTime {
         var t = CadaclysmTaskTime()
         _ = cadaclysm_task_time(live(), scheduleRaw, raw, &t)
+        var days = 0.0, seconds = 0.0
+        let work = cadaclysm_task_work_duration(live(), scheduleRaw, raw, &days, &seconds)
+        let kind = Int(cadaclysm_task_duration_kind(live(), scheduleRaw, raw))
         return TaskTime(
             scheduleStart: t.has_schedule_start ? t.schedule_start : nil,
             scheduleFinish: t.has_schedule_finish ? t.schedule_finish : nil,
@@ -1863,7 +1985,22 @@ public struct ScheduleTask: Hashable, CustomStringConvertible {
             lateFinish: t.has_late_finish ? t.late_finish : nil,
             actualStart: t.has_actual_start ? t.actual_start : nil,
             actualFinish: t.has_actual_finish ? t.actual_finish : nil,
-            duration: t.has_duration ? t.duration : nil)
+            duration: t.has_duration ? t.duration : nil,
+            durationKind: kind < durationKindWords.count ? durationKindWords[kind] : nil,
+            workDuration: work ? WorkDuration(days: days, seconds: seconds) : nil)
+    }
+
+    /// The index of the work calendar this task works on (`scene.calendars[i]`), nil where it
+    /// has none.
+    public var calendarIndex: Int? {
+        var out: UInt32 = 0
+        return cadaclysm_task_calendar(live(), scheduleRaw, raw, &out) ? Int(out) : nil
+    }
+
+    /// The work calendar this task works on, nil where it has none.
+    public var calendar: WorkCalendar? {
+        guard let index = calendarIndex else { return nil }
+        return WorkCalendar(schedule.scene, index)
     }
 
     /// The nodes it builds or removes.
@@ -1890,6 +2027,173 @@ public struct ScheduleTask: Hashable, CustomStringConvertible {
     public var description: String { "ScheduleTask(index: \(index))" }
 }
 
+/// A (start, end) pair of seconds: `Recurrence.periods` are seconds after midnight,
+/// `WorkCalendar.workingPeriods` seconds since 1970-01-01T00:00.
+public struct WorkPeriod: Equatable {
+    public let start: Double
+    public let end: Double
+}
+
+/// A repeating set of days (and times of day) in a `WorkTime`'s pattern (`IfcRecurrencePattern`).
+public struct Recurrence {
+    /// `"DAILY"`, `"WEEKLY"`, `"MONTHLY_BY_DAY_OF_MONTH"`, `"MONTHLY_BY_POSITION"`,
+    /// `"BY_DAY_COUNT"`, `"BY_WEEKDAY_COUNT"`, `"YEARLY_BY_DAY_OF_MONTH"` or
+    /// `"YEARLY_BY_POSITION"`.
+    public let kind: String
+    /// Days of the month, 1...31, sorted.
+    public let days: [Int]
+    /// Weekdays, 1 = Monday ... 7 = Sunday, sorted.
+    public let weekdays: [Int]
+    /// Months, 1...12, sorted.
+    public let months: [Int]
+    public let position: Int?
+    public let interval: Int?
+    public let occurrences: Int?
+    /// Pairs of seconds after midnight; empty for all day.
+    public let periods: [WorkPeriod]
+}
+
+/// A repeating set of working (or, among a calendar's `exceptions`, non-working) periods, valid
+/// between two dates (`IfcWorkTime`). `start` and `finish` are midnight of their day, in seconds
+/// since 1970-01-01T00:00, nil for an open end; the finish day is included. `pattern` is nil for
+/// every day of the range, all day.
+public struct WorkTime {
+    public let name: String
+    public let start: Double?
+    public let finish: Double?
+    public let pattern: Recurrence?
+}
+
+/// When work happens (`IfcWorkCalendar`). From `Scene.calendars` or `ScheduleTask.calendar`.
+/// Borrows from the scene like `Node`.
+///
+/// Dates are seconds since 1970-01-01T00:00, no zone. The queries throw `CadaclysmError` with
+/// the library's message for a date that is not finite or a `from` after `to`.
+public struct WorkCalendar: Hashable, CustomStringConvertible {
+    /// The scene it belongs to.
+    public let scene: Scene
+    /// Its index in `Scene.calendars`.
+    public let index: Int
+
+    fileprivate init(_ scene: Scene, _ index: Int) {
+        self.scene = scene
+        self.index = index
+    }
+
+    private var raw: UInt32 { UInt32(index) }
+
+    /// Its name, else its identification, else `calendar #k` (k from 1, in file order).
+    public var name: String { borrowed(cadaclysm_calendar_name(scene.live("WorkCalendar"), raw)) }
+
+    /// Its identification, `""` where none.
+    public var identification: String { borrowed(cadaclysm_calendar_identification(scene.live("WorkCalendar"), raw)) }
+
+    /// `"FIRSTSHIFT"`, `"SECONDSHIFT"`, `"THIRDSHIFT"`, `"NOTDEFINED"` or `"USERDEFINED"`.
+    public var kind: String { word(calendarKindWords, cadaclysm_calendar_kind(scene.live("WorkCalendar"), raw), fallback: 3) }
+
+    /// The text of a user-defined kind (`kind == "USERDEFINED"`); `""` otherwise.
+    public var kindName: String { borrowed(cadaclysm_calendar_kind_name(scene.live("WorkCalendar"), raw)) }
+
+    /// Its working times, in file order.
+    public var working: [WorkTime] {
+        let handle = scene.live("WorkCalendar")
+        return workTimes(false, Int(cadaclysm_calendar_working_count(handle, raw)))
+    }
+
+    /// Its exception (non-working) times, in file order.
+    public var exceptions: [WorkTime] {
+        let handle = scene.live("WorkCalendar")
+        return workTimes(true, Int(cadaclysm_calendar_exception_count(handle, raw)))
+    }
+
+    private func workTimes(_ exception: Bool, _ count: Int) -> [WorkTime] {
+        let handle = scene.live("WorkCalendar")
+        // One of the pattern's sorted lists (days, weekdays or months), by the C call that reads it.
+        func numbers(_ w: UInt32, _ call: (OpaquePointer?, UInt32, Bool, UInt32, UnsafeMutablePointer<UInt8>?, UInt32) -> UInt32) -> [Int] {
+            let n = call(handle, raw, exception, w, nil, 0)
+            if n == 0 { return [] }
+            var buffer = [UInt8](repeating: 0, count: Int(n))
+            let written = call(handle, raw, exception, w, &buffer, n)
+            return buffer.prefix(Int(min(n, written))).map { Int($0) }
+        }
+        var out: [WorkTime] = []
+        for i in 0..<count {
+            let w = UInt32(i)
+            var t = CadaclysmWorkTime()
+            _ = cadaclysm_calendar_work_time(handle, raw, exception, w, &t)
+            var pattern: Recurrence? = nil
+            if t.has_pattern {
+                let n = Int(cadaclysm_calendar_work_time_periods(handle, raw, exception, w, nil, 0))
+                var flat = [Double](repeating: 0, count: 2 * n)
+                if n > 0 { _ = cadaclysm_calendar_work_time_periods(handle, raw, exception, w, &flat, UInt32(n)) }
+                pattern = Recurrence(
+                    kind: word(recurrenceKindWords, t.kind, fallback: 0),
+                    days: numbers(w, cadaclysm_calendar_work_time_days),
+                    weekdays: numbers(w, cadaclysm_calendar_work_time_weekdays),
+                    months: numbers(w, cadaclysm_calendar_work_time_months),
+                    position: t.has_position ? Int(t.position) : nil,
+                    interval: t.has_interval ? Int(t.interval) : nil,
+                    occurrences: t.has_occurrences ? Int(t.occurrences) : nil,
+                    periods: (0..<n).map { WorkPeriod(start: flat[2 * $0], end: flat[2 * $0 + 1]) })
+            }
+            out.append(WorkTime(
+                name: borrowed(cadaclysm_calendar_work_time_name(handle, raw, exception, w)),
+                start: t.has_start ? t.start : nil,
+                finish: t.has_finish ? t.finish : nil,
+                pattern: pattern))
+        }
+        return out
+    }
+
+    private func check(_ status: UInt32) throws {
+        if status != 0 { throw CadaclysmError(borrowed(cadaclysm_calendar_error_message(status))) }
+    }
+
+    /// The working periods overlapping `from`...`to`, clipped to it, sorted and merged: no two
+    /// touch or overlap.
+    public func workingPeriods(from: Double, to: Double) throws -> [WorkPeriod] {
+        let handle = try scene.liveOrThrow()
+        var count: UInt32 = 0
+        try check(cadaclysm_calendar_working_periods(handle, raw, from, to, nil, 0, &count))
+        let n = Int(count)
+        if n == 0 { return [] }
+        var flat = [Double](repeating: 0, count: 2 * n)
+        try check(cadaclysm_calendar_working_periods(handle, raw, from, to, &flat, count, &count))
+        return (0..<n).map { WorkPeriod(start: flat[2 * $0], end: flat[2 * $0 + 1]) }
+    }
+
+    /// The working seconds in `from`...`to`.
+    public func workingSeconds(from: Double, to: Double) throws -> Double {
+        let handle = try scene.liveOrThrow()
+        var out = 0.0
+        try check(cadaclysm_calendar_working_seconds(handle, raw, from, to, &out))
+        return out
+    }
+
+    /// The date `days` working days and then `seconds` of working time after `from` (before it,
+    /// when negative). A forward result landing at the start of a working day is the end of the
+    /// previous one. Throws when no working time lies within 100 years.
+    public func addWork(from: Double, days: Double, seconds: Double = 0) throws -> Double {
+        let handle = try scene.liveOrThrow()
+        var out = 0.0
+        try check(cadaclysm_calendar_add_work(handle, raw, from, days, seconds, &out))
+        return out
+    }
+
+    /// Same scene, same index.
+    public static func == (lhs: WorkCalendar, rhs: WorkCalendar) -> Bool {
+        lhs.scene === rhs.scene && lhs.index == rhs.index
+    }
+
+    /// Hashes the scene's identity and the index.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(scene))
+        hasher.combine(index)
+    }
+
+    /// `WorkCalendar(index: …)`.
+    public var description: String { "WorkCalendar(index: \(index))" }
+}
 /// A building's programme: an `IfcWorkSchedule` and the tasks it controls. From
 /// `Scene.schedules`. Borrows from the scene like `Node`.
 ///
@@ -2138,7 +2442,7 @@ public final class Brep {
     /// between the same two vertices that part by up to it; `vertex` is what decides which edges
     /// are candidates at all, and raising it is what could close a slot. Nothing moves. Throws
     /// once released, or with the library's reason.
-    public func sewed(tolerance: Double? = nil, vertex: Double? = nil) throws -> (Brep, SewReport) {
+    public func sew(tolerance: Double? = nil, vertex: Double? = nil) throws -> (Brep, SewReport) {
         guard let handle = handle else { throw CadaclysmError("brep: released") }
         var counts = [UInt32](repeating: 0, count: 4)
         var gaps = [Double](repeating: 0, count: 3)
@@ -2150,7 +2454,7 @@ public final class Brep {
 
     /// What is wrong with this brep, as a `HealthReport`: the free edges (the sides one face
     /// bounds) and the wires they chain into, with each edge's nearest partner and the gap to it;
-    /// the features below `tolerance`; the loose edges; and what `sewed` would join and leave.
+    /// the features below `tolerance`; the loose edges; and what `sew` would join and leave.
     /// `tolerance` is the length below which a feature is small and a gap closes -- nil, or a
     /// value that is not finite and positive, takes the default (the report shows what was
     /// used). `mesh: true` also meshes the brep and reports where the mesh cracks (`cracks`);
@@ -2190,7 +2494,7 @@ public final class Brep {
     /// refused as `"toggled"`. `tolerance` nil, or a value that is not finite and positive, takes
     /// the default (the report shows what was used). Throws once released, or with the library's
     /// reason.
-    public func healed(tolerance: Double? = nil, edges: Bool = true, faces: Bool = true,
+    public func heal(tolerance: Double? = nil, edges: Bool = true, faces: Bool = true,
                        holes: Bool = true) throws -> (Brep, HealReport) {
         guard let handle = handle else { throw CadaclysmError("brep: released") }
         guard let h = cadaclysm_brep_healed(handle, tolerance ?? .nan, healFlags(edges: edges, faces: faces, holes: holes)) else {
@@ -2209,6 +2513,39 @@ public final class Brep {
         let report = HealReport(counts: counts, sizes: sizes, fixItems: fixItems, fixSizes: fixSizes,
                                 refusedItems: refusedItems, refusedSizes: refusedSizes)
         guard let body = cadaclysm_brep_heal_body(h) else { throw CadaclysmError(lastErrorOr("healed")) }
+        return (Brep(handle: body), report)
+    }
+
+    /// This brep with its free-form surfaces and edge curves given their analytic kind, and what
+    /// was taken and left, as a new `Brep` and a `RecognizeReport`; this one is left as it was. A
+    /// surface that is a plane, cylinder, cone, sphere or torus within `tolerance` of every sample
+    /// of its faces and every point of their edges becomes exactly that, and an edge curve that is
+    /// a line, circle or ellipse within it likewise. Faces and edges keep their numbers.
+    /// `tolerance` nil, or a value that is not finite and positive, takes the default, `1e-6` of
+    /// the body's extent (the report shows what was used). Throws once released, or with the
+    /// library's reason.
+    public func recognize(tolerance: Double? = nil) throws -> (Brep, RecognizeReport) {
+        guard let handle = handle else { throw CadaclysmError("brep: released") }
+        guard let r = cadaclysm_brep_recognized(handle, tolerance ?? .nan) else {
+            throw CadaclysmError(lastErrorOr("recognized"))
+        }
+        defer { cadaclysm_brep_recognize_free(r) }
+        var counts = [UInt32](repeating: 0, count: 10)
+        var sizes = [Double](repeating: 0, count: 3)
+        guard cadaclysm_brep_recognize_summary(r, &counts, &sizes) else { throw CadaclysmError(lastErrorOr("recognized")) }
+        var n = Int(cadaclysm_brep_recognize_faces(r, nil, nil))
+        var faceItems = [UInt32](repeating: 0, count: 2 * n), faceSizes = [Double](repeating: 0, count: n)
+        if n > 0 { _ = cadaclysm_brep_recognize_faces(r, &faceItems, &faceSizes) }
+        n = Int(cadaclysm_brep_recognize_refused(r, nil, nil))
+        var refusedItems = [UInt32](repeating: 0, count: 2 * n), refusedSizes = [Double](repeating: 0, count: n)
+        if n > 0 { _ = cadaclysm_brep_recognize_refused(r, &refusedItems, &refusedSizes) }
+        n = Int(cadaclysm_brep_recognize_edges(r, nil, nil))
+        var edgeItems = [UInt32](repeating: 0, count: 2 * n), edgeSizes = [Double](repeating: 0, count: n)
+        if n > 0 { _ = cadaclysm_brep_recognize_edges(r, &edgeItems, &edgeSizes) }
+        let report = RecognizeReport(counts: counts, sizes: sizes, faceItems: faceItems, faceSizes: faceSizes,
+                                     refusedItems: refusedItems, refusedSizes: refusedSizes, edgeItems: edgeItems,
+                                     edgeSizes: edgeSizes)
+        guard let body = cadaclysm_brep_recognize_body(r) else { throw CadaclysmError(lastErrorOr("recognized")) }
         return (Brep(handle: body), report)
     }
 
@@ -2915,6 +3252,16 @@ public struct Node: Hashable, CustomStringConvertible {
     /// indices differ -- so upload the vertices once and switch level by drawing a different
     /// index range.
     public func meshLod(_ level: Int) -> Mesh { mesh(cadaclysm_node_mesh_lod(live(), raw, UInt32(level))) }
+
+    /// A second set of texture coordinates for `mesh`, two floats a vertex in its order, packed
+    /// into the unit square with no two triangles overlapping: what a baked lightmap needs. Nil
+    /// when not asked for at open, for a node with no B-rep, and for a body whose charts did not
+    /// fit. A view into the scene: reading it after `close()` traps.
+    public var lightmapUvs: NativeArray<Float>? {
+        var count: UInt32 = 0
+        guard let p = cadaclysm_node_mesh_lightmap_uvs(live(), raw, &count), count > 0 else { return nil }
+        return NativeArray(owner: scene, base: p, count: Int(count) * 2)
+    }
 
     private func mesh64(_ got: CadaclysmMesh64) -> Mesh64 {
         let n = Int(got.vertex_count)
@@ -3655,6 +4002,12 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
         return (0..<Int(cadaclysm_schedule_count(handle))).map { WorkSchedule(self, $0) }
     }
 
+    /// The file's work calendars -- `IfcWorkCalendar`, when work happens. Empty for a file that
+    /// records none.
+    public var calendars: [WorkCalendar] {
+        let handle = live()
+        return (0..<Int(cadaclysm_calendar_count(handle))).map { WorkCalendar(self, $0) }
+    }
     /// The link the file declares as the mechanism's base, or nil when it declares none
     /// (the default ground is then the link on the most joints; see `pose`).
     public var base: Link? {

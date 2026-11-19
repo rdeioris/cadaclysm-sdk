@@ -66,7 +66,7 @@ final class ReaderHealthTests: XCTestCase {
         XCTAssertTrue(close(report.tolerance, 1e-4 * report.extent, rel: 1e-12))
         XCTAssertEqual(report.looseEdges, 0)
         XCTAssertEqual(report.worstLoose, 0)
-        let (sewn, sew) = try body.sewed()
+        let (sewn, sew) = try body.sew()
         defer { sewn.release() }
         XCTAssertEqual(report.sewPairs, Int(sew.pairs))
         XCTAssertEqual(report.sewRefused, 4)
@@ -87,7 +87,7 @@ final class ReaderHealthTests: XCTestCase {
         let breps = try st203Breps()
         defer { breps.forEach { $0.release() } }
         let body = breps[1]
-        let (healed, report) = try body.healed(tolerance: 5)
+        let (healed, report) = try body.heal(tolerance: 5)
         defer { healed.release() }
         XCTAssertNotEqual(healed.pointer, body.pointer)
         XCTAssertEqual(report.tolerance, 5)
@@ -109,7 +109,7 @@ final class ReaderHealthTests: XCTestCase {
         XCTAssertEqual(try healed.edgeTolerance(41363), 0)
         XCTAssertNil(try body.edgeTolerance(0xFFFF_FFF0))
         // every kind switched off: nothing healed, every small feature refused as toggled
-        let (offBody, off) = try body.healed(tolerance: 5, edges: false, faces: false, holes: false)
+        let (offBody, off) = try body.heal(tolerance: 5, edges: false, faces: false, holes: false)
         offBody.release()
         XCTAssertTrue(off.fixes.isEmpty)
         XCTAssertEqual(off.refused.count, 96)
@@ -119,7 +119,7 @@ final class ReaderHealthTests: XCTestCase {
                        [64, 26, 6])
         // a released brep raises as the other released calls do
         body.release()
-        let calls: [() throws -> Void] = [{ _ = try body.healed() }, { _ = try body.health() }, { _ = try body.edgeTolerance(0) }]
+        let calls: [() throws -> Void] = [{ _ = try body.heal() }, { _ = try body.health() }, { _ = try body.edgeTolerance(0) }]
         for call in calls {
             XCTAssertThrowsError(try call()) { error in
                 XCTAssertEqual((error as? CadaclysmError)?.message, "brep: released")

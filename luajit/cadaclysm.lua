@@ -250,12 +250,15 @@ local ENTRY_POINTS = {
   "cadaclysm_brep_health_crack_edges", "cadaclysm_brep_healed", "cadaclysm_brep_heal_body", "cadaclysm_brep_heal_free",
   "cadaclysm_brep_heal_summary", "cadaclysm_brep_heal_fixes", "cadaclysm_brep_heal_refused",
   "cadaclysm_brep_edge_tolerance",
+  "cadaclysm_brep_recognized", "cadaclysm_brep_recognize_body", "cadaclysm_brep_recognize_free",
+  "cadaclysm_brep_recognize_summary", "cadaclysm_brep_recognize_faces", "cadaclysm_brep_recognize_refused",
+  "cadaclysm_brep_recognize_edges",
   "cadaclysm_mesh_format_count", "cadaclysm_mesh_format", "cadaclysm_mesh_format_extension",
   "cadaclysm_pick_file",
   "cadaclysm_mesh_format_label", "cadaclysm_format_count", "cadaclysm_format_name", "cadaclysm_format_extensions",
   "cadaclysm_pick_save", "cadaclysm_geometry_diagnostic_count", "cadaclysm_geometry_diagnostic",
   "cadaclysm_forget_meshes",
-  "cadaclysm_lod_levels", "cadaclysm_node_mesh_lod", "cadaclysm_node_lod_error",
+  "cadaclysm_lod_levels", "cadaclysm_node_mesh_lod", "cadaclysm_node_mesh_lightmap_uvs", "cadaclysm_node_lod_error",
   "cadaclysm_node_edge_beziers", "cadaclysm_node_curve_beziers", "cadaclysm_node_isocurve_beziers",
   "cadaclysm_node_edge_beziers64", "cadaclysm_node_curve_beziers64", "cadaclysm_node_isocurve_beziers64",
   "cadaclysm_node_collision", "cadaclysm_node_collision_hull",
@@ -1024,7 +1027,7 @@ function Brep_get.manifold(self)
   }, Manifold)
 end
 
---- What `Brep:sewed` did, as plain data: `pairs` (the edges it joined), `free_before`
+--- What `Brep:sew` did, as plain data: `pairs` (the edges it joined), `free_before`
 --- and `free_after` (the free edges), `refused` (how many groups of free edges between
 --- the same two vertices it left free: too far apart for the tolerance, or more than
 --- two), `worst_gap` (the widest gap it sewed), and the two tolerances it used,
@@ -1052,7 +1055,7 @@ M.SewReport = SewReport
 ---@param tolerance number|nil
 ---@param vertex number|nil
 ---@return Brep, SewReport
-function Brep:sewed(tolerance, vertex)
+function Brep:sew(tolerance, vertex)
   local counts = ffi.new("uint32_t[4]")
   local gaps = ffi.new("double[3]")
   local p = lib().cadaclysm_brep_sew(self.pointer, tolerance or 0 / 0, vertex or 0 / 0, counts, gaps)
@@ -1079,8 +1082,8 @@ end
 
 -- ---- health and healing ----------------------------------------------------------
 
--- In a block of its own: only the report classes, `Brep:health`, `Brep:healed` and
--- `Brep:edge_tolerance` (and the decoders, for the tests) leave it.
+-- In a block of its own: only the report classes, `Brep:health`, `Brep:heal`,
+-- `Brep:edge_tolerance` and `Brep:recognize` (and the decoders, for the tests) leave it.
 do
 
 --- One free edge (`HealthReport.free_edges`): a side only one face bounds, with its
@@ -1088,7 +1091,7 @@ do
 --- with no edge), `face` the face it bounds, `wire` its free wire (a number from zero
 --- into `wires`), `partner` the nearest free edge across the gap as a number from zero
 --- into `free_edges` (nil if there is none), `shared_ends` how many of its two ends it
---- shares with the partner (2 is what `Brep:sewed` joins), its `length` and the `gap`
+--- shares with the partner (2 is what `Brep:sew` joins), its `length` and the `gap`
 --- to the partner (`math.huge` without one).
 ---@class FreeEdge
 ---@field trim integer
@@ -1176,7 +1179,7 @@ function HealthReport:wire_edges(wire)
   return out
 end
 
---- One small feature `Brep:healed` removed: its `kind` (as `SmallFeature.kind`), its
+--- One small feature `Brep:heal` removed: its `kind` (as `SmallFeature.kind`), its
 --- `index` in the input (as `health` gave it), its `size`, and how far the vertices it
 --- merged `moved`.
 ---@class HealFix
@@ -1188,7 +1191,7 @@ local HealFix = {}
 HealFix.__index = HealFix
 M.HealFix = HealFix
 
---- One small feature `Brep:healed` left, and why: `kind` and `index` as in `HealFix`;
+--- One small feature `Brep:heal` left, and why: `kind` and `index` as in `HealFix`;
 --- `why` is "would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven",
 --- "non_manifold", "has_holes", "body_guard", "toggled" or "unsupported"; `figure` the
 --- chain's width or the neighbours' gap, else 0.
@@ -1201,7 +1204,7 @@ local HealRefusal = {}
 HealRefusal.__index = HealRefusal
 M.HealRefusal = HealRefusal
 
---- What `Brep:healed` did, as plain data: the `tolerance` it healed at, the furthest any
+--- What `Brep:heal` did, as plain data: the `tolerance` it healed at, the furthest any
 --- trim `moved`, whether the body guard refused fixes (`guarded`), the `fixes` made and the
 --- features `refused`; and the body's health before and after at that tolerance -- its
 --- small features, free edges, whether it is closed, and its non-manifold edges.
@@ -1324,7 +1327,7 @@ end
 
 --- What is wrong with this brep, as a `HealthReport`: the free edges (the sides one face
 --- bounds) and the wires they chain into, with each edge's nearest partner and the gap to
---- it; the features below `tolerance`; the loose edges; and what `sewed` would join and
+--- it; the features below `tolerance`; the loose edges; and what `sew` would join and
 --- leave. `tolerance` is the length below which a feature is "small" and a gap closes --
 --- nil, or a value that is not finite and positive, takes the default, `1e-4` times the
 --- diagonal (the report shows what was used). `mesh` true also meshes the brep and reports
@@ -1374,7 +1377,7 @@ end
 ---@param faces boolean|nil
 ---@param holes boolean|nil
 ---@return Brep, HealReport
-function Brep:healed(tolerance, edges, faces, holes)
+function Brep:heal(tolerance, edges, faces, holes)
   local pointer = self.pointer
   local L = lib()
   local flags = (edges ~= false and 1 or 0) + (faces ~= false and 2 or 0) + (holes ~= false and 4 or 0)
@@ -1414,6 +1417,138 @@ function Brep:edge_tolerance(edge)
   local t = lib().cadaclysm_brep_edge_tolerance(pointer, edge)
   if t ~= t then return nil end
   return t
+end
+
+-- ---- recognition -----------------------------------------------------------------
+
+--- One face `Brep:recognize` gave an analytic kind: its `face` number (unchanged), its
+--- `kind` ("plane", "cylinder", "cone", "sphere" or "torus"), and how far any sample of it
+--- lies from the analytic surface (`deviation`).
+---@class RecognizedFace
+---@field face integer
+---@field kind string
+---@field deviation number
+local RecognizedFace = {}
+RecognizedFace.__index = RecognizedFace
+M.RecognizedFace = RecognizedFace
+
+--- One face `Brep:recognize` left free-form, and why: "no_kind" (no kind fits within the
+--- tolerance; `closest` the nearest kind's deviation), "mixed_normals", "parameter_trims"
+--- (a parameter trim cannot be lifted) or "too_few_samples" (`closest` nil).
+---@class RecognizeRefusal
+---@field face integer
+---@field why string
+---@field closest number|nil
+local RecognizeRefusal = {}
+RecognizeRefusal.__index = RecognizeRefusal
+M.RecognizeRefusal = RecognizeRefusal
+
+--- One edge whose curve `Brep:recognize` gave an analytic kind: its brep `edge` id (as
+--- `edge_tolerance` takes one), its `kind` ("line", "circle" or "ellipse"), and how far any
+--- point of the curve or the edge lies from the analytic curve (`deviation`).
+---@class RecognizedEdge
+---@field edge integer
+---@field kind string
+---@field deviation number
+local RecognizedEdge = {}
+RecognizedEdge.__index = RecognizedEdge
+M.RecognizedEdge = RecognizedEdge
+
+--- What `Brep:recognize` did, as plain data: the `tolerance` it fitted to, the faces given
+--- an analytic kind and those `refused`, the edges given one, how many edges were left
+--- free-form (`edges_left`), and the worst deviation of a face and of an edge taken.
+---@class RecognizeReport
+---@field tolerance number
+---@field faces RecognizedFace[]
+---@field refused RecognizeRefusal[]
+---@field edges RecognizedEdge[]
+---@field edges_left integer
+---@field worst_face number
+---@field worst_edge number
+local RecognizeReport = {}
+RecognizeReport.__index = RecognizeReport
+M.RecognizeReport = RecognizeReport
+
+local FACE_KINDS = { [0] = "plane", "cylinder", "cone", "sphere", "torus" }
+local EDGE_KINDS = { [0] = "line", "circle", "ellipse" }
+local RECOGNIZE_WHYS = { [0] = "no_kind", "mixed_normals", "parameter_trims", "too_few_samples" }
+
+-- The flat rows of the recognition C ABI (Lua lists from one) as a `RecognizeReport`:
+-- Python's `_recognize_report`, index for index. counts 10 (faces per kind, faces left,
+-- edges per kind, edges left), sizes 3 (tolerance, worst face, worst edge), each row two
+-- items and one size.
+local function recognize_report(counts, sizes, face_items, face_sizes, refused_items, refused_sizes, edge_items,
+                                edge_sizes)
+  local faces = {}
+  for i = 0, #face_sizes - 1 do
+    faces[i + 1] = setmetatable({
+      face = face_items[2 * i + 1], kind = named(FACE_KINDS, face_items[2 * i + 2], "recognize"),
+      deviation = face_sizes[i + 1],
+    }, RecognizedFace)
+  end
+  local refused = {}
+  for i = 0, #refused_sizes - 1 do
+    local closest = refused_sizes[i + 1]
+    refused[i + 1] = setmetatable({
+      face = refused_items[2 * i + 1], why = named(RECOGNIZE_WHYS, refused_items[2 * i + 2], "recognize"),
+      closest = closest == closest and closest or nil,
+    }, RecognizeRefusal)
+  end
+  local edges = {}
+  for i = 0, #edge_sizes - 1 do
+    edges[i + 1] = setmetatable({
+      edge = edge_items[2 * i + 1], kind = named(EDGE_KINDS, edge_items[2 * i + 2], "recognize"),
+      deviation = edge_sizes[i + 1],
+    }, RecognizedEdge)
+  end
+  return setmetatable({
+    tolerance = sizes[1], faces = faces, refused = refused, edges = edges, edges_left = counts[10],
+    worst_face = sizes[2], worst_edge = sizes[3],
+  }, RecognizeReport)
+end
+M._recognize_report = recognize_report
+
+--- This brep with its free-form surfaces and edge curves given their analytic kind, and
+--- what was taken: a new `Brep` (yours to `release()`) and a `RecognizeReport`; this one is
+--- left as it was. A NURBS (or revolved, extruded or swept) surface that is a plane,
+--- cylinder, cone, sphere or torus within `tolerance` of every sample of its faces and every
+--- point of their edges becomes exactly that, and an edge curve that is a line, circle or
+--- ellipse within it likewise -- so a file that stored analytic faces as NURBS (a `.3dm`
+--- especially) comes back as they were made. Faces and edges keep their numbers.
+--- `tolerance` nil, or a value that is not finite and positive, takes the default, 1e-6 of
+--- the body's extent -- not the file's declared tolerance, at which a fillet's blend reads
+--- as a torus (the report shows what was used).
+---@param tolerance number|nil
+---@return Brep, RecognizeReport
+function Brep:recognize(tolerance)
+  local pointer = self.pointer
+  local L = lib()
+  local h = L.cadaclysm_brep_recognized(pointer, tolerance_of(tolerance, "recognize"))
+  if h == nil then refused_by("recognized") end
+  local ok, body, report = pcall(function()
+    local counts, sizes = ffi.new("uint32_t[10]"), ffi.new("double[3]")
+    if not L.cadaclysm_brep_recognize_summary(h, counts, sizes) then refused_by("recognized") end
+    local rows = {}
+    for _, read in ipairs({
+      function(items, figures) return L.cadaclysm_brep_recognize_faces(h, items, figures) end,
+      function(items, figures) return L.cadaclysm_brep_recognize_refused(h, items, figures) end,
+      function(items, figures) return L.cadaclysm_brep_recognize_edges(h, items, figures) end,
+    }) do
+      local n = tonumber(read(nil, nil))
+      local items, figures = ffi.new("uint32_t[?]", 2 * n + 1), ffi.new("double[?]", n + 1)
+      if n > 0 then read(items, figures) end
+      rows[#rows + 1] = listed(items, 2 * n)
+      rows[#rows + 1] = listed(figures, n)
+    end
+    local made = recognize_report(listed(counts, 10), listed(sizes, 3), rows[1], rows[2], rows[3], rows[4],
+      rows[5], rows[6])
+    local p = L.cadaclysm_brep_recognize_body(h)
+    if p == nil then refused_by("recognized") end
+    return setmetatable({ _ptr = ffi.gc(p, L.cadaclysm_brep_release) }, Brep), made
+  end)
+  L.cadaclysm_brep_recognize_free(h)
+  if not ok then error(body, 0) end
+  return body, report
 end
 
 end
@@ -2081,6 +2216,16 @@ function Node_get.bounds(self) return bounds(lib().cadaclysm_node_bounds(h(self)
 function Node_get.bounds64(self) return bounds64(lib().cadaclysm_node_bounds64(h(self), self.index)) end
 --- Its triangles, in their own frame, built now if they have not been.
 function Node_get.mesh(self) return mesh(self.scene, lib().cadaclysm_node_mesh(h(self), self.index)) end
+--- A second set of texture coordinates for `mesh`: `{ uvs = <float*>, vertex_count = n }`,
+--- two floats a vertex in its order, packed into the unit square with no two triangles
+--- overlapping -- what a baked lightmap needs. nil when not asked for at open, for a node with
+--- no B-rep, and for a body whose charts did not fit. A view into the scene.
+function Node_get.lightmap_uvs(self)
+  local count = ffi.new("uint32_t[1]")
+  local p = lib().cadaclysm_node_mesh_lightmap_uvs(h(self), self.index, count)
+  if p == nil or count[0] == 0 then return nil end
+  return { scene = self.scene, uvs = p, vertex_count = count[0] }
+end
 --- `mesh` in `double`: the document's own mesh, lent as it is -- see `Mesh64`.
 --- Invalidated by `scene:forget_meshes()`, unlike `mesh`.
 function Node_get.mesh64(self) return mesh64(self.scene, lib().cadaclysm_node_mesh64(h(self), self.index)) end
@@ -2702,6 +2847,8 @@ end
 ---@field actual_start number|nil
 ---@field actual_finish number|nil
 ---@field duration number|nil  seconds
+---@field duration_kind string|nil  `"ELAPSEDTIME"`, `"WORKTIME"` or `"NOTDEFINED"`; nil where the file gives none
+---@field work_duration table|nil  `{ days, seconds }`: that many working days, then that many seconds of working time; nil where there is none
 local TaskTime = {}
 TaskTime.__index = TaskTime
 M.TaskTime = TaskTime
@@ -2803,6 +2950,12 @@ function Task_get.time(self)
   for _, name in ipairs(TIME_FIELDS) do
     if raw[0]["has_" .. name] then out[name] = raw[0][name] end
   end
+  local L = lib()
+  local days, seconds = ffi.new("double[1]"), ffi.new("double[1]")
+  if L.cadaclysm_task_work_duration(handle, s, t, days, seconds) then
+    out.work_duration = { days = days[0], seconds = seconds[0] }
+  end
+  out.duration_kind = M._DURATION_KINDS[L.cadaclysm_task_duration_kind(handle, s, t)]
   return out
 end
 function Task_get.nodes(self)
@@ -2883,6 +3036,196 @@ function WorkSchedule:at(date, dates)
     }, ElementState)
   end
   return out
+end
+
+-- ---- work calendars --------------------------------------------------------------
+
+-- In a `do` block: the main chunk is at LuaJIT's limit of 200 locals. The classes are
+-- exported through `M`.
+do
+  local CALENDAR_KINDS = { [0] = "FIRSTSHIFT", "SECONDSHIFT", "THIRDSHIFT", "NOTDEFINED", "USERDEFINED" }
+  local RECURRENCE_KINDS = {
+    [0] = "DAILY", "WEEKLY", "MONTHLY_BY_DAY_OF_MONTH", "MONTHLY_BY_POSITION", "BY_DAY_COUNT",
+    "BY_WEEKDAY_COUNT", "YEARLY_BY_DAY_OF_MONTH", "YEARLY_BY_POSITION",
+  }
+  -- Indexed by the C value; 3 is "none given" (nil).
+  M._DURATION_KINDS = { [0] = "ELAPSEDTIME", "WORKTIME", "NOTDEFINED" }
+
+  --- A repeating set of days (and times of day) in a `WorkTime`'s pattern
+  --- (`IfcRecurrencePattern`). `kind` is `"DAILY"`, `"WEEKLY"`, `"MONTHLY_BY_DAY_OF_MONTH"`,
+  --- `"MONTHLY_BY_POSITION"`, `"BY_DAY_COUNT"`, `"BY_WEEKDAY_COUNT"`,
+  --- `"YEARLY_BY_DAY_OF_MONTH"` or `"YEARLY_BY_POSITION"`. `days` (1..31), `weekdays`
+  --- (1 = Monday .. 7 = Sunday) and `months` (1..12) are sorted arrays; `position`,
+  --- `interval` and `occurrences` are numbers or nil; `periods` are `{ start, end }` pairs
+  --- in seconds after midnight, empty for all day.
+  ---@class Recurrence
+  ---@field kind string
+  ---@field days integer[]
+  ---@field weekdays integer[]
+  ---@field months integer[]
+  ---@field position integer|nil
+  ---@field interval integer|nil
+  ---@field occurrences integer|nil
+  ---@field periods number[][]
+  local Recurrence = {}
+  Recurrence.__index = Recurrence
+  M.Recurrence = Recurrence
+
+  --- A repeating set of working (or, among a calendar's `exceptions`, non-working) periods,
+  --- valid between two dates (`IfcWorkTime`). `start` and `finish` are midnight of their
+  --- day, in seconds since 1970-01-01T00:00, or nil for an open end; the finish day is
+  --- included. `pattern` is a `Recurrence`, or nil for every day of the range, all day.
+  ---@class WorkTime
+  ---@field name string
+  ---@field start number|nil
+  ---@field finish number|nil
+  ---@field pattern Recurrence|nil
+  local WorkTime = {}
+  WorkTime.__index = WorkTime
+  M.WorkTime = WorkTime
+
+  local function check(status)
+    if status ~= 0 then fail(text(lib().cadaclysm_calendar_error_message(status)), 3) end
+  end
+
+  --- When work happens (`IfcWorkCalendar`). From `Scene.calendars` or `Task.calendar`.
+  ---
+  --- `kind` is `"FIRSTSHIFT"`, `"SECONDSHIFT"`, `"THIRDSHIFT"`, `"NOTDEFINED"` or
+  --- `"USERDEFINED"` (`kind_name` is a user-defined one's text, `""` otherwise). `working`
+  --- and `exceptions` are `WorkTime`s in file order. Dates are numbers, seconds since
+  --- 1970-01-01T00:00. The queries raise `CadaclysmError` with the library's message for a
+  --- date that is not finite or a `from` after `to`.
+  local WorkCalendar_get = {}
+  ---@class WorkCalendar
+  ---@field index integer  its position in the scene's calendars
+  ---@field name string  its name, else its identification, else `calendar #k`
+  ---@field identification string  `""` where none
+  ---@field kind string
+  ---@field kind_name string  the text of a user-defined kind (`kind == "USERDEFINED"`); `""` otherwise
+  ---@field working WorkTime[]  in file order
+  ---@field exceptions WorkTime[]  in file order
+  local WorkCalendar = class(WorkCalendar_get)
+  M.WorkCalendar = WorkCalendar
+  WorkCalendar.__tostring = function(self) return ("<WorkCalendar %d %s>"):format(self.index, self.name) end
+  WorkCalendar.__eq = function(a, b) return a._scene == b._scene and a.index == b.index end
+  function WorkCalendar.new(scene, index)
+    return setmetatable({ index = index, _scene = scene }, WorkCalendar)
+  end
+
+  function WorkCalendar_get.name(self)
+    return text(lib().cadaclysm_calendar_name(self._scene:handle(), self.index))
+  end
+  function WorkCalendar_get.identification(self)
+    return text(lib().cadaclysm_calendar_identification(self._scene:handle(), self.index))
+  end
+  function WorkCalendar_get.kind(self)
+    return CALENDAR_KINDS[lib().cadaclysm_calendar_kind(self._scene:handle(), self.index)] or "NOTDEFINED"
+  end
+  function WorkCalendar_get.kind_name(self)
+    return text(lib().cadaclysm_calendar_kind_name(self._scene:handle(), self.index))
+  end
+
+  local function work_times(self, exception, count)
+    local L, handle, c = lib(), self._scene:handle(), self.index
+    -- `which` is "days", "weekdays" or "months"; each call is written out so the parity gate sees it.
+    local function numbers(which, w, buf, n)
+      if which == "days" then return L.cadaclysm_calendar_work_time_days(handle, c, exception, w, buf, n) end
+      if which == "weekdays" then return L.cadaclysm_calendar_work_time_weekdays(handle, c, exception, w, buf, n) end
+      return L.cadaclysm_calendar_work_time_months(handle, c, exception, w, buf, n)
+    end
+    local function list(which, w)
+      local n = numbers(which, w, nil, 0)
+      local out = {}
+      if n == 0 then return out end
+      local buf = ffi.new("uint8_t[?]", n)
+      numbers(which, w, buf, n)
+      for i = 0, n - 1 do out[i + 1] = buf[i] end
+      return out
+    end
+    local out = {}
+    for w = 0, count - 1 do
+      local raw = ffi.new("CadaclysmWorkTime[1]")
+      L.cadaclysm_calendar_work_time(handle, c, exception, w, raw)
+      local r = raw[0]
+      local pattern
+      if r.has_pattern then
+        local n = L.cadaclysm_calendar_work_time_periods(handle, c, exception, w, nil, 0)
+        local periods = {}
+        if n > 0 then
+          local flat = ffi.new("double[?]", 2 * n)
+          L.cadaclysm_calendar_work_time_periods(handle, c, exception, w, flat, n)
+          for i = 0, n - 1 do periods[i + 1] = { flat[2 * i], flat[2 * i + 1] } end
+        end
+        pattern = setmetatable({
+          kind = RECURRENCE_KINDS[r.kind] or "DAILY",
+          days = list("days", w),
+          weekdays = list("weekdays", w),
+          months = list("months", w),
+          position = r.has_position and r.position or nil,
+          interval = r.has_interval and r.interval or nil,
+          occurrences = r.has_occurrences and r.occurrences or nil,
+          periods = periods,
+        }, Recurrence)
+      end
+      out[w + 1] = setmetatable({
+        name = text(L.cadaclysm_calendar_work_time_name(handle, c, exception, w)),
+        start = r.has_start and r.start or nil,
+        finish = r.has_finish and r.finish or nil,
+        pattern = pattern,
+      }, WorkTime)
+    end
+    return out
+  end
+  --- Its working times, in file order.
+  function WorkCalendar_get.working(self)
+    return work_times(self, false, lib().cadaclysm_calendar_working_count(self._scene:handle(), self.index))
+  end
+  --- Its exception (non-working) times, in file order.
+  function WorkCalendar_get.exceptions(self)
+    return work_times(self, true, lib().cadaclysm_calendar_exception_count(self._scene:handle(), self.index))
+  end
+
+  --- The working periods overlapping `from`..`to`, clipped to it, sorted and merged:
+  --- `{ start, end }` pairs, no two touching or overlapping.
+  function WorkCalendar:working_periods(from, to)
+    local L, handle = lib(), self._scene:handle()
+    local count = ffi.new("uint32_t[1]")
+    check(L.cadaclysm_calendar_working_periods(handle, self.index, from, to, nil, 0, count))
+    local n, out = count[0], {}
+    if n == 0 then return out end
+    local flat = ffi.new("double[?]", 2 * n)
+    check(L.cadaclysm_calendar_working_periods(handle, self.index, from, to, flat, n, count))
+    for i = 0, n - 1 do out[i + 1] = { flat[2 * i], flat[2 * i + 1] } end
+    return out
+  end
+  --- The working seconds in `from`..`to`.
+  function WorkCalendar:working_seconds(from, to)
+    local out = ffi.new("double[1]")
+    check(lib().cadaclysm_calendar_working_seconds(self._scene:handle(), self.index, from, to, out))
+    return out[0]
+  end
+  --- The date `days` working days and then `seconds` of working time after `from` (before it,
+  --- when negative). A forward result landing at the start of a working day is the end of
+  --- the previous one. Raises `CadaclysmError` when no working time lies within 100 years.
+  function WorkCalendar:add_work(from, days, seconds)
+    local out = ffi.new("double[1]")
+    check(lib().cadaclysm_calendar_add_work(self._scene:handle(), self.index, from, days, seconds or 0, out))
+    return out[0]
+  end
+
+  --- The index of the work calendar this task works on (`scene.calendars[i]`), nil where it has none.
+  function Task_get.calendar_index(self)
+    local out = ffi.new("uint32_t[1]")
+    local handle, s, t = task_args(self)
+    if not lib().cadaclysm_task_calendar(handle, s, t, out) then return nil end
+    return out[0]
+  end
+  --- The work calendar this task works on, nil where it has none.
+  function Task_get.calendar(self)
+    local index = Task_get.calendar_index(self)
+    if index == nil then return nil end
+    return WorkCalendar.new(self.schedule._scene, index)
+  end
 end
 
 -- ---- posing ----------------------------------------------------------------------
@@ -3111,6 +3454,12 @@ end
 function Scene_get.schedules(self)
   local L, handle, out = lib(), self:handle(), {}
   for i = 0, L.cadaclysm_schedule_count(handle) - 1 do out[#out + 1] = read_schedule(self, i) end
+  return out
+end
+--- The file's IFC work calendars (`IfcWorkCalendar`), in file order. Empty for a file that records none.
+function Scene_get.calendars(self)
+  local L, handle, out = lib(), self:handle(), {}
+  for i = 0, L.cadaclysm_calendar_count(handle) - 1 do out[#out + 1] = M.WorkCalendar.new(self, i) end
   return out
 end
 --- The link the file declares as the mechanism's base, or nil when it declares none
@@ -3383,7 +3732,7 @@ end
 -- can decide it is dead.
 local in_flight
 
-local function options(convention, schema, colors)
+local function options(convention, schema, colors, lightmap_resolution)
   local o = ffi.new("CadaclysmOpenOptions")
   lib().cadaclysm_open_options_init(o)
   if convention == nil then convention = Convention.NATIVE end
@@ -3392,6 +3741,11 @@ local function options(convention, schema, colors)
   o.file_units = bit.band(convention, M.FILE_UNITS) ~= 0
   o.uvs = bit.band(convention, M.UV_WORLD) ~= 0 and 1 or 0
   o.colors = colors and 1 or 0
+  local texels = lightmap_resolution or 0
+  if type(texels) ~= "number" or texels ~= math.floor(texels) or texels < 0 or texels > 0xFFFFFFFF then
+    fail("lightmap_resolution must be 0 (off) or a texel count in 32 bits, not " .. tostring(lightmap_resolution), 3)
+  end
+  o.lightmap_resolution = texels
   local held = {}
   if schema ~= nil then
     local path = tostring(schema)
@@ -3413,15 +3767,16 @@ end
 --- `schema`: an extra EXPRESS `.exp` (or a directory of them) beyond the built-in
 --- ones. `convention`: a `Convention` value, optionally OR'd with `FILE_UNITS` and
 --- `UV_WORLD`, or a name `Convention.parse` takes ("y-up", "unreal+file-units").
---- `colors`: per-vertex colours on multi-coloured bodies. Raises on failure.
-function M.open(path, schema, convention, colors)
+--- `colors`: per-vertex colours on multi-coloured bodies. `lightmap_resolution`: texels on a
+--- side of the lightmap to pack, 0 (the default) for none; see `node.lightmap_uvs`. Raises on failure.
+function M.open(path, schema, convention, colors, lightmap_resolution)
   path = tostring(path)
   if not exists(path) and not is_dir(path) then fail(path .. ": no such file", 2) end
   local L = lib()
   if schema ~= nil and is_dir(tostring(schema)) then
     -- A directory goes over whole: the library keys each schema by the name it declares.
     local o, packed
-    o, in_flight, packed = options(convention, schema, colors)
+    o, in_flight, packed = options(convention, schema, colors, lightmap_resolution)
     local pointer = L.cadaclysm_open(path, o)
     in_flight = nil
     if pointer ~= nil then return wrap(pointer, path, tostring(schema), packed) end
@@ -3431,7 +3786,7 @@ function M.open(path, schema, convention, colors)
   local candidates = (chosen ~= nil or #fallbacks == 0) and { chosen or false } or fallbacks
   for _, candidate in ipairs(candidates) do
     local o, packed
-    o, in_flight, packed = options(convention, candidate or nil, colors)
+    o, in_flight, packed = options(convention, candidate or nil, colors, lightmap_resolution)
     local pointer = L.cadaclysm_open(path, o)
     in_flight = nil
     if pointer ~= nil then return wrap(pointer, path, candidate or nil, packed) end
@@ -3442,10 +3797,10 @@ end
 --- Open a file already in memory. `data` is a Lua string; `format` names the kind as
 --- an extension would ("step", "ifc", "igs", "3dm", "brep", "scad"). `schema` must be
 --- a path here. `name` is what `path` and errors will say. Otherwise as `open`.
-function M.open_memory(data, format, schema, name, convention, colors)
+function M.open_memory(data, format, schema, name, convention, colors, lightmap_resolution)
   name = name or "<memory>"
   local o, packed
-  o, in_flight, packed = options(convention, schema, colors)
+  o, in_flight, packed = options(convention, schema, colors, lightmap_resolution)
   local pointer = lib().cadaclysm_open_memory(ffi.cast("const uint8_t *", data), #data, tostring(format), o)
   in_flight = nil
   if pointer == nil then fail(name .. ": " .. last_error(), 2) end

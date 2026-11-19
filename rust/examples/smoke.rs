@@ -305,6 +305,7 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
         blacksmith::license(license).map_err(|e| format!("blacksmith license: {e}"))?;
     }
     println!("blacksmith {} built {}", blacksmith::version().map_err(e)?, blacksmith::build_date().map_err(e)?);
+    println!("blacksmith build {}", blacksmith::build().map_err(e)?);
     println!("blacksmith license: {}", blacksmith::license_info().map_err(e)?);
     println!("blacksmith library: {}", blacksmith::library_path().map_err(e)?.display());
     check(
@@ -852,7 +853,7 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
         .ok_or("no placement of the read-back STEP has a brep")?;
     let read_brep = body.brep().ok_or("the brep went away")?;
     let read = read_brep.manifold().map_err(e)?;
-    let (_sewn, sew) = read_brep.sewed(None, None).map_err(e)?;
+    let (_sewn, sew) = read_brep.sew(None, None).map_err(e)?;
     check(
         sew.free_before == read.boundary_edges && read_brep.manifold().map_err(e)?.boundary_edges == read.boundary_edges,
         &format!("sewed reports {} free edges before, the brep has {}", sew.free_before, read.boundary_edges),
@@ -893,14 +894,14 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     )?;
 
     // Scaled: every length times factor, exactly; a non-positive or non-finite factor is refused.
-    let big = Solid::cuboid(1.0, 2.0, 3.0).map_err(e)?.scaled(2.0).map_err(e)?;
+    let big = Solid::cuboid(1.0, 2.0, 3.0).map_err(e)?.scale(2.0).map_err(e)?;
     let (lo, hi) = big.bounds().map_err(e)?;
     check(
         (hi[0] - lo[0] - 2.0).abs() < 1e-9 && (hi[2] - lo[2] - 6.0).abs() < 1e-9,
         "scaled bounds",
     )?;
     check(
-        big.scaled(0.0).unwrap_err().to_string().starts_with("scaled:"),
+        big.scale(0.0).unwrap_err().to_string().starts_with("scaled:"),
         "scaled(0) not refused",
     )?;
 
@@ -1705,10 +1706,10 @@ fn gears() -> Result<(), String> {
 "))
     };
     let before = no_stamp(&geared_up)?;
-    let posed = geared_up.posed(&[("drive", &[0.4])], None, None).map_err(e)?;
+    let posed = geared_up.pose(&[("drive", &[0.4])], None, None).map_err(e)?;
     check(posed.name() == "gears", "gears: posed drive alone is not named gears")?;
     let refused = geared_up
-        .posed(&[("drive", &[0.4]), ("driven", &[0.4])], None, None)
+        .pose(&[("drive", &[0.4]), ("driven", &[0.4])], None, None)
         .err()
         .map(|err| err.to_string())
         .unwrap_or_default();

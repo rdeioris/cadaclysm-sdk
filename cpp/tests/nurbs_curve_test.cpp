@@ -144,17 +144,26 @@ static Result<void> through_and_edits() {
     for (int t = 0; t < 200; ++t) wave.push_back(Vec3{t / 50.0, std::sin(t / 50.0), 0});
     NurbsCurve fit = must(NurbsCurve::fit(wave, 3, 1e-4), "fit");
     check(fit.fit_error().has_value() && *fit.fit_error() >= 0 && *fit.fit_error() <= 1e-4, "fit lands within its tolerance");
-    NurbsCurve back = must(c.reversed(), "reversed");
+    // the C ABI's own figure, read through the raw call: the wrapper must hand back the same
+    // nonzero error, not the zero it held before the call wrote it
+    std::vector<double> wave_xyz;
+    for (const Vec3& p : wave) wave_xyz.insert(wave_xyz.end(), p.begin(), p.end());
+    double raw_fit_error = 0.0;
+    CadaclysmBlacksmithNurbsCurve* raw_fit = ::cadaclysm_blacksmith_nurbs_curve_fit(wave_xyz.data(), wave.size(), 3, 1e-4, &raw_fit_error);
+    check(raw_fit != nullptr && raw_fit_error > 0, "the raw fit reports a nonzero error");
+    ::cadaclysm_blacksmith_nurbs_curve_free(raw_fit);
+    check(fit.fit_error().has_value() && *fit.fit_error() == raw_fit_error, "fit_error is the C ABI's own error");
+    NurbsCurve back = must(c.reverse(), "reversed");
     check(distance(must(back.point(dom.first), "reversed start"), must(c.point(dom.second), "end")) < 1e-12, "reversed starts where it ended");
     double mid = 0.5 * (dom.first + dom.second);
-    check(must(must(c.trimmed(dom.first, mid), "trimmed").domain(), "trimmed domain") == std::make_pair(dom.first, mid), "trimmed to the first half");
-    NurbsCurve longer = must(c.extended(0.5), "extended");
+    check(must(must(c.trim(dom.first, mid), "trimmed").domain(), "trimmed domain") == std::make_pair(dom.first, mid), "trimmed to the first half");
+    NurbsCurve longer = must(c.extend(0.5), "extended");
     check(must(longer.domain(), "extended domain").second > dom.second &&
               distance(must(longer.point(dom.second), "kept point"), must(c.point(dom.second), "old point")) < 1e-9,
           "extended keeps every old parameter");
-    NurbsCurve before = must(c.extended(0.5, true), "extended at the start");
+    NurbsCurve before = must(c.extend(0.5, true), "extended at the start");
     check(must(before.domain(), "start-extended domain").first < dom.first, "extended at the start grows downward");
-    check(must(c.elevated(2), "elevated").degree() == 5, "elevated by 2");
+    check(must(c.elevate(2), "elevated").degree() == 5, "elevated by 2");
     return {};
 }
 
@@ -165,9 +174,9 @@ static Result<void> joined() {
     NurbsCurve tail = must(NurbsCurve::make({{0, 2, 0}, {-1, 2.5, 0}, {-2, 2, 1}, {-3, 3, 0}, {-4, 2, 0}, {-5, 2, 2}}, 5), "tail");
     std::vector<NurbsCurve> parts;
     parts.push_back(lead);
-    parts.push_back(must(arc.reversed(), "arc reversed"));
+    parts.push_back(must(arc.reverse(), "arc reversed"));
     parts.push_back(tail);
-    NurbsCurve j = must(NurbsCurve::joined(parts), "joined");
+    NurbsCurve j = must(NurbsCurve::join(parts), "joined");
     check(j.degree() == 5 && must(j.domain(), "joined domain") == std::make_pair(0.0, 3.0), "joined is a quintic over 0..3");
     const std::pair<double, Vec3> joints[] = {{0, {2, -3, 0}}, {1, {2, 0, 0}}, {2, {0, 2, 0}}, {3, {-5, 2, 2}}};
     for (const std::pair<double, Vec3>& want : joints) {
@@ -182,12 +191,12 @@ static Result<void> joined() {
     check(on_tail, "the last third is the tail");
     std::vector<NurbsCurve> one;
     one.push_back(arc);
-    check(must(NurbsCurve::joined(one), "joined one").control_points().value() == arc.control_points().value(), "one curve gives a copy");
+    check(must(NurbsCurve::join(one), "joined one").control_points().value() == arc.control_points().value(), "one curve gives a copy");
     std::vector<NurbsCurve> gap;
     gap.push_back(lead);
     gap.push_back(tail);
-    refused(NurbsCurve::joined(gap), "nurbs_curve_joined: curve 1 ", "curve 0", "a gap");
-    refused(NurbsCurve::joined(std::vector<NurbsCurve>()), "nurbs_curve_joined: ", "", "no curves");
+    refused(NurbsCurve::join(gap), "nurbs_curve_joined: curve 1 ", "curve 0", "a gap");
+    refused(NurbsCurve::join(std::vector<NurbsCurve>()), "nurbs_curve_joined: ", "", "no curves");
     return {};
 }
 
@@ -257,12 +266,12 @@ static Result<void> edge_faces_planes_blend_comb() {
     }
     bs::Solid sphere = must(bs::Solid::sphere(3), "sphere");
     NurbsCurve line = must(NurbsCurve::make({{-2, 0.5, 10}, {2, -0.5, 10}}, 1), "line");
-    NurbsCurve on = must(line.projected_to_face(sphere, 0, Vec3{0, 0, -1}, 1e-4), "projected_to_face");
+    NurbsCurve on = must(line.project_to_face(sphere, 0, Vec3{0, 0, -1}, 1e-4), "projected_to_face");
     check(on.fit_error().has_value() && *on.fit_error() <= 1e-4, "the projection reports its fit error");
     std::pair<double, double> dom = must(on.domain(), "projected domain");
     check(std::fabs(distance(must(on.point(0.5 * (dom.first + dom.second)), "projected mid"), Vec3{0, 0, 0}) - 3) < 1e-4,
           "the projection lies on the sphere");
-    NurbsCurve pulled = must(line.pulled_to_face(sphere, 0, 1e-4), "pulled_to_face");
+    NurbsCurve pulled = must(line.pull_to_face(sphere, 0, 1e-4), "pulled_to_face");
     check(pulled.fit_error().has_value(), "the pull reports its fit error");
     check(std::fabs(distance(must(pulled.point(must(pulled.domain(), "pulled domain").first), "pulled start"), Vec3{0, 0, 0}) - 3) < 1e-4,
           "the pull lies on the sphere");
@@ -271,7 +280,7 @@ static Result<void> edge_faces_planes_blend_comb() {
     check(hits.size() == 2 && std::fabs(hits[0].point[0] + std::sqrt(7.0)) < 1e-6, "the line crosses the sphere twice");
     std::vector<At> crossing = must(through.plane_hits(Vec3{0, 0, 0}, Vec3{1, 0, 0}), "plane_hits");
     check(crossing.size() == 1 && distance(crossing[0].point, Vec3{0, 1, 1}) < 1e-12, "the line crosses the plane once");
-    NurbsCurve flat = must(line.projected_to_plane(Vec3{0, 0, 1}, Vec3{0, 0, 1}), "projected_to_plane");
+    NurbsCurve flat = must(line.project_to_plane(Vec3{0, 0, 1}, Vec3{0, 0, 1}), "projected_to_plane");
     check(must(flat.point(0), "flat start") == Vec3({-2, 0.5, 1}), "projected onto the plane z = 1");
     NurbsCurve blend = must(NurbsCurve::blend(quarter_circle(), true, through, false, 2), "blend");
     check(blend.degree() == 5 && std::fabs(must(blend.curvature(0), "blend curvature").kappa - 0.5) < 1e-9, "a quintic matching the curvature");
@@ -293,11 +302,13 @@ static Result<void> refusals() {
     refused(NurbsCurve::through({{0, 0, 0}, {1, 0, 0}}, 3), "nurbs_curve_through: ", "", "through: too few points");
     refused(NurbsCurve::fit({{0, 0, 0}, {1, 0, 0}}, 1, -1.0), "nurbs_curve_fit: ", "", "a negative fit tolerance");
     refused(NurbsCurve::from_edge(box, 999u), "nurbs_curve_from_edge: ", "", "edge 999");
-    refused(NurbsCurve::isocurve(box, 0, true, 0.5), "nurbs_curve_from_face_isocurve: ", "", "an isocurve of a plane");
+    Result<NurbsCurve> plane_iso = NurbsCurve::isocurve(box, 0, true, 0.5);
+    check(plane_iso.ok(), "an isocurve of a plane face: " + (plane_iso.ok() ? std::string() : plane_iso.error().message));
+    refused(NurbsCurve::isocurve(box, 99, true, 0.5), "nurbs_curve_from_face_isocurve: ", "", "an isocurve of face 99");
     refused(NurbsCurve::blend(q, true, q, true, 3), "nurbs_curve_blend: ", "", "continuity 3");
-    refused(q.projected_to_plane(Vec3{0, 0, 0}, Vec3{0, 0, 1}, Vec3{1, 0, 0}), "nurbs_curve_projected_to_plane: ", "", "a direction in the plane");
-    refused(q.trimmed(0.5, 0.2), "nurbs_curve_trimmed: ", "", "t0 after t1");
-    refused(q.extended(0), "nurbs_curve_extended: ", "", "no length");
+    refused(q.project_to_plane(Vec3{0, 0, 0}, Vec3{0, 0, 1}, Vec3{1, 0, 0}), "nurbs_curve_projected_to_plane: ", "", "a direction in the plane");
+    refused(q.trim(0.5, 0.2), "nurbs_curve_trimmed: ", "", "t0 after t1");
+    refused(q.extend(0), "nurbs_curve_extended: ", "", "no length");
     refused(q.point(2), "nurbs_curve_point: ", "", "a point past the domain");
     refused(q.derivatives(0.5, 9), "nurbs_curve_derivatives: ", "", "order 9");
     refused(q.divide_by_count(0), "nurbs_curve_divide_by_count: ", "", "divide into 0");
@@ -308,12 +319,12 @@ static Result<void> refusals() {
 // 7
 static Result<void> maps_and_values() {
     NurbsCurve c = must(NurbsCurve::make({{0, 0, 0}, {1, 1, 1}, {2, 0, 0}}, 2, std::vector<double>{1, 0.5, 1}), "weighted");
-    NurbsCurve moved = must(c.transformed(must(bs::Transform::translation(Vec3{1, 2, 3}), "translation")), "transformed");
+    NurbsCurve moved = must(c.transform(must(bs::Transform::translation(Vec3{1, 2, 3}), "translation")), "transformed");
     Vec3 was = must(c.point(0.5), "point"), now = must(moved.point(0.5), "moved point");
     check(distance(now, Vec3{was[0] + 1, was[1] + 2, was[2] + 3}) < 1e-12, "the point moves with the map");
     check(must(moved.weights(), "moved weights") == must(c.weights(), "weights"), "the weights are kept");
     check(must(moved.knots(), "moved knots") == must(c.knots(), "knots"), "the knots are kept");
-    NurbsCurve by_rows = must(c.transformed(must(bs::Transform::translation(Vec3{1, 2, 3}), "translation").rows()), "transformed by rows");
+    NurbsCurve by_rows = must(c.transform(must(bs::Transform::translation(Vec3{1, 2, 3}), "translation").rows()), "transformed by rows");
     check(distance(must(by_rows.point(0.5), "rows point"), now) < 1e-12, "sixteen numbers do the same");
 
     bs::Line line = must(bs::Line::make(Vec3{0, 0, 0}, Vec3{2, 0, 0}), "line value");

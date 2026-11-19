@@ -49,7 +49,12 @@ local M = {}
 -- 1.22: snapping -- cadaclysm_view_set_snap, _request_snap_in, _snap_result, _clear_snap, _set_work_plane, _clear_work_plane.
 -- 1.23: cadaclysm_view_set_line_colour, _line_colour (View:set_edge_colour, :edge_colour and the curve and
 -- isocurve pairs) and _set_item_line_colour (Item:set_edge_colour, :set_curve_colour, :set_isocurve_colour).
-local ABI_MAJOR, ABI_MINOR = 1, 25   -- 1.24: overlays (show_overlay, show_overlay_image, move_overlay, screen text); 1.25: stats
+-- 1.24: overlays (show_overlay, show_overlay_image, move_overlay, screen text); 1.25: stats.
+-- 1.26: cadaclysm_view_next_event and cadaclysm_view_close (View:next_event, :events, :close_window, :run(on_event)).
+-- 1.27: animations -- cadaclysm_view_play_animation, _timeline_remove, _set_item_visible, _set_node_ghosts and the
+-- "timeline" event (View:play_animation, :remove_track, Item:set_visible, Item:set_node_ghosts).
+-- 1.28: the drafting styles and the pick's viewport_label.
+local ABI_MAJOR, ABI_MINOR = 1, 28
 local NAVIGATION_FLY = 1   -- CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0)
 local OPEN, CLOSED = 1, 2
 local INPUT_CLOSE, NONE_COMING = 1, 0xFFFFFFFF
@@ -317,10 +322,15 @@ local ENTRY_POINTS = {
   "cadaclysm_view_timeline_play", "cadaclysm_view_timeline_pause", "cadaclysm_view_timeline_seek",
   "cadaclysm_view_timeline_set_loop", "cadaclysm_view_timeline_time", "cadaclysm_view_timeline_duration",
   "cadaclysm_view_timeline_playing", "cadaclysm_view_timeline_status",
+  "cadaclysm_view_play_animation", "cadaclysm_view_timeline_remove", "cadaclysm_view_set_item_visible",
+  "cadaclysm_view_set_node_ghosts",
   "cadaclysm_view_parse_colour", "cadaclysm_view_load_font", "cadaclysm_view_show_text", "cadaclysm_view_set_text",
   "cadaclysm_view_set_double_click_frames", "cadaclysm_view_focus", "cadaclysm_view_navigation",
   "cadaclysm_view_set_lighting", "cadaclysm_view_lighting",
   "cadaclysm_view_set_occluded_style", "cadaclysm_view_occluded_style",
+  "cadaclysm_view_set_line_style", "cadaclysm_view_set_point_style", "cadaclysm_view_set_point_states",
+  "cadaclysm_view_set_point_state_colours", "cadaclysm_view_set_viewport_label", "cadaclysm_view_set_viewport_border",
+  "cadaclysm_view_set_on_top",
   "cadaclysm_view_set_line_colour", "cadaclysm_view_line_colour", "cadaclysm_view_set_item_line_colour",
   "cadaclysm_view_viewport_camera", "cadaclysm_view_set_viewport_camera", "cadaclysm_view_set_viewport_rects",
   "cadaclysm_view_aim", "cadaclysm_view_set_pivot", "cadaclysm_view_set_tap", "cadaclysm_view_orbit_in",
@@ -329,7 +339,7 @@ local ENTRY_POINTS = {
   "cadaclysm_view_set_snap", "cadaclysm_view_request_snap_in", "cadaclysm_view_snap_result",
   "cadaclysm_view_clear_snap", "cadaclysm_view_set_work_plane", "cadaclysm_view_clear_work_plane",
   "cadaclysm_view_show_overlay", "cadaclysm_view_show_overlay_image", "cadaclysm_view_move_overlay",
-  "cadaclysm_view_stats",
+  "cadaclysm_view_stats", "cadaclysm_view_next_event", "cadaclysm_view_close",
 }
 
 local open_views = {}   -- windows of a view's own on the wgpu library, in the order made
@@ -613,7 +623,7 @@ function View:show_node(node)
   while at do table.insert(chain, 1, at); at = at.parent end
   local level = node.scene.roots
   for _, on in ipairs(chain) do
-    for _, other in ipairs(level) do if other.index ~= on.index then item:node_visible(other.index, false) end end
+    for _, other in ipairs(level) do if other.index ~= on.index then item:set_node_visible(other.index, false) end end
     level = on.children
   end
   return item
@@ -764,7 +774,7 @@ function View:dolly(ratio, viewport)
   end
   void_ok(self)
 end
-function View:orthographic(on)
+function View:set_orthographic(on)
   self._lib.C.cadaclysm_view_set_orthographic(self:_live("cadaclysm_view_set_orthographic"), on ~= false)
   void_ok(self)
 end
@@ -862,7 +872,7 @@ function View:set_camera(viewport, t)
 end
 
 --- Moves the viewports: one { x, y, w, h } (physical pixels) per viewport set, their cameras kept.
-function View:viewport_rects(rects)
+function View:set_viewport_rects(rects)
   table_of(rects, "viewport_rects")
   local flat = {}
   for i, r in ipairs(rects) do
@@ -884,14 +894,14 @@ function View:aim(viewport, direction, up)
 end
 
 --- The point (world) Alt and the left button orbit viewport `viewport` about; nil: its own target again.
-function View:pivot(viewport, point)
+function View:set_pivot(viewport, point)
   uint(viewport, "pivot viewport")
   local p = point ~= nil and vector(point, 3, "pivot point") or nil
   ok(self, self._lib.C.cadaclysm_view_set_pivot(self:_live("cadaclysm_view_set_pivot"), viewport, p))
 end
 
 --- A click's most travel (`px`, physical pixels) and longest press (`ms`; 0: no limit) for `input` to pick.
-function View:tap(px, ms)
+function View:set_tap(px, ms)
   number(px, "tap px"); number(ms, "tap ms")
   ok(self, self._lib.C.cadaclysm_view_set_tap(self:_live("cadaclysm_view_set_tap"), px, ms))
 end
@@ -899,7 +909,7 @@ end
 --- { { rect = {x, y, w, h}, view = 16, projection = 16, eye = 3, grid = "none"|"top"|"front"|"right",
 --- layer_mask = the user layers drawn, bit n for layer n (Item:user_layer; every layer when absent) }, ... },
 --- matrices column-major. An empty list clears them (the view draws one pane again), as Python's does.
-function View:viewports(list)
+function View:set_viewports(list)
   table_of(list, "viewports")
   local p = self:_live("cadaclysm_view_set_viewports")
   if #list == 0 then
@@ -925,13 +935,13 @@ function View:viewports(list)
   end
   ok(self, self._lib.C.cadaclysm_view_set_viewports(p, raw, #list))
 end
-function View:layer(name, on)
+function View:set_layer(name, on)
   local which = name_of(LAYERS, name, "layer")
   ok(self, self._lib.C.cadaclysm_view_set_layer(self:_live("cadaclysm_view_set_layer"), which, on ~= false))
 end
 --- User layer `layer`, 0..31, on or off in every viewport (all start on); see Item:user_layer.
 --- A layer past 31 is refused.
-function View:user_layer(layer, on)
+function View:set_user_layer(layer, on)
   number(layer, "user_layer layer")
   ok(self, self._lib.C.cadaclysm_view_set_user_layer(self:_live("cadaclysm_view_set_user_layer"), layer, on ~= false))
 end
@@ -1005,9 +1015,11 @@ do
   --- the right edge for the right one; y down from the top for the top row and up from the bottom
   --- for the bottom one). `shape`: a blacksmith Profile, a list of them (one overlay, filled
   --- together by the even-odd rule), or Beziers (sixteen numbers each, a profile's `beziers()`).
-  --- `opts`: fill (a colour, or "none"), stroke (a colour), stroke_width (1), order (0). The fill:
-  --- `fill` where given, else the profile's own colour, else white -- unless a stroke is given,
-  --- when an uncoloured profile is not filled. A click on it picks it (`pick.overlay`), nothing beneath.
+  --- `opts`: fill (a colour, or "none"), stroke (a colour, or "none"), stroke_width (1), order (0).
+  --- A profile is a sketch, so it draws as its outline by default: the stroke is `stroke` where
+  --- given, else the profile's own colour, else white; the fill only where `fill` is given -- a
+  --- panel needs one. Fill only is a `fill` and `stroke = "none"`; neither a fill nor a stroke is
+  --- refused. A click on it picks it (`pick.overlay`), nothing beneath.
   function View:show_overlay(shape, anchor, x, y, opts)
     opts = opts or {}
     local lib = self._lib
@@ -1024,17 +1036,22 @@ do
     end
     local b, n = carray("float", flat, "show_overlay")
     if n == 0 or n % 16 ~= 0 then fail(("show_overlay: 16 numbers a curve, at least one, not %d"):format(n), 2) end
-    local stroke = rgba4(opts.stroke, "show_overlay stroke", lib)
-    local fill
-    if type(opts.fill) == "string" and opts.fill:lower():match("^%s*none%s*$") then
-      fill = nil
-    elseif opts.fill ~= nil then
-      fill = rgba4(opts.fill, "show_overlay fill", lib)
+    local function none(c) return type(c) == "string" and c:lower():match("^%s*none%s*$") ~= nil end
+    local stroke
+    if none(opts.stroke) then
+      stroke = nil
+    elseif opts.stroke ~= nil then
+      stroke = rgba4(opts.stroke, "show_overlay stroke", lib)
     elseif own ~= nil then
-      fill = ffi.new("float[4]", own[1], own[2], own[3], 1)
-    elseif stroke == nil then
-      fill = ffi.new("float[4]", 1, 1, 1, 1)
+      stroke = ffi.new("float[4]", own[1], own[2], own[3], 1)
+    else
+      stroke = ffi.new("float[4]", 1, 1, 1, 1)
     end
+    local fill
+    if opts.fill ~= nil and not none(opts.fill) then
+      fill = rgba4(opts.fill, "show_overlay fill", lib)
+    end
+    if fill == nil and stroke == nil then fail("show_overlay: neither a fill nor a stroke", 2) end
     local width = opts.stroke_width == nil and 1 or number(opts.stroke_width, "show_overlay stroke_width")
     local order = opts.order == nil and 0 or number(opts.order, "show_overlay order")
     local o = ffi.new("CadaclysmViewOverlay")
@@ -1124,45 +1141,42 @@ do
 end
 
 --- The clear colour: text ("#rgb", "#rrggbb", a CSS colour name) or three numbers in 0..1.
-function View:background(rgb)
+function View:set_background(rgb)
   if rgb == nil then fail("background: 3 numbers, not nil", 2) end
   local c = floats3(rgb, "background", self._lib)
   self._lib.C.cadaclysm_view_set_background(self:_live("cadaclysm_view_set_background"), c)
   void_ok(self)
 end
---- "exact" or "triangles": how surfaces are drawn. With an argument, sets it.
-function View:surfaces(name)
-  if name == nil then
-    return self._lib.C.cadaclysm_view_surfaces(self:_live("cadaclysm_view_surfaces")) == 1 and "triangles" or "exact"
-  end
+--- "exact" or "triangles": how surfaces are drawn (`set_surfaces` sets it).
+function View:surfaces()
+  return self._lib.C.cadaclysm_view_surfaces(self:_live("cadaclysm_view_surfaces")) == 1 and "triangles" or "exact"
+end
+--- Sets how surfaces are drawn: "exact" or "triangles".
+function View:set_surfaces(name)
   ok(self, self._lib.C.cadaclysm_view_set_surfaces(self:_live("cadaclysm_view_set_surfaces"), name_of(SURFACES, name, "surfaces")))
 end
 --- "headlight" or "studio": how plain parts are lit, as Python's View.lighting -- the headlight
 --- (the default) brightens whatever faces the camera; studio is a key light fixed above the scene
---- with an ambient and a camera fill. With an argument, sets it; another name is refused before C.
-function View:lighting(name)
-  if name == nil then
-    return self._lib.C.cadaclysm_view_lighting(self:_live("cadaclysm_view_lighting")) == 1 and "studio" or "headlight"
-  end
+--- with an ambient and a camera fill. `set_lighting` sets it.
+function View:lighting()
+  return self._lib.C.cadaclysm_view_lighting(self:_live("cadaclysm_view_lighting")) == 1 and "studio" or "headlight"
+end
+--- Sets how plain parts are lit: "headlight" or "studio"; another name is refused before C.
+function View:set_lighting(name)
   ok(self, self._lib.C.cadaclysm_view_set_lighting(self:_live("cadaclysm_view_set_lighting"), name_of(LIGHTING, name, "lighting")))
 end
 --- How every "dashed" item's hidden lines and points look, view-wide: `t.dash` and `t.gap`
 --- in points (6, 4), `t.dim` the coverage kept (0.5), `t.colour` one colour for all of them
 --- (text or three numbers; nil: each line's own). Every key is optional. `false` sets the
---- default back; no argument reads the style back: { dash, gap, dim, colour = nil | {r, g, b} }.
-function View:occluded_style(t)
+--- default back. `occluded_style()` reads the style back: { dash, gap, dim, colour = nil | {r, g, b} }.
+function View:set_occluded_style(t)
   local C = self._lib.C
-  if t == nil then
-    local out = ffi.new("CadaclysmViewOccludedStyle", { size = ffi.sizeof("CadaclysmViewOccludedStyle") })
-    ok(self, C.cadaclysm_view_occluded_style(self:_live("cadaclysm_view_occluded_style"), out))
-    local colour = out.has_colour ~= 0 and { out.colour[0], out.colour[1], out.colour[2] } or nil
-    return { dash = out.dash, gap = out.gap, dim = out.dim, colour = colour }
-  end
+  if t == nil then fail("set_occluded_style: a table or false", 2) end
   if t == false then
     ok(self, C.cadaclysm_view_set_occluded_style(self:_live("cadaclysm_view_set_occluded_style"), nil))
     return
   end
-  if type(t) ~= "table" then fail("occluded_style: a table, false, or nothing", 2) end
+  if type(t) ~= "table" then fail("set_occluded_style: a table or false", 2) end
   local s = ffi.new("CadaclysmViewOccludedStyle", { size = ffi.sizeof("CadaclysmViewOccludedStyle"),
     dash = t.dash or 6, gap = t.gap or 4, dim = t.dim or 0.5, has_colour = t.colour ~= nil and 1 or 0 })
   if t.colour ~= nil then
@@ -1170,6 +1184,14 @@ function View:occluded_style(t)
     s.colour[0], s.colour[1], s.colour[2] = rgb[0], rgb[1], rgb[2]
   end
   ok(self, C.cadaclysm_view_set_occluded_style(self:_live("cadaclysm_view_set_occluded_style"), s))
+end
+--- How every "dashed" item's hidden lines and points look now: { dash, gap, dim, colour = nil | {r, g, b} }.
+function View:occluded_style()
+  local C = self._lib.C
+  local out = ffi.new("CadaclysmViewOccludedStyle", { size = ffi.sizeof("CadaclysmViewOccludedStyle") })
+  ok(self, C.cadaclysm_view_occluded_style(self:_live("cadaclysm_view_occluded_style"), out))
+  local colour = out.has_colour ~= 0 and { out.colour[0], out.colour[1], out.colour[2] } or nil
+  return { dash = out.dash, gap = out.gap, dim = out.dim, colour = colour }
 end
 -- The colour every line on `layer` (CADACLYSM_VIEW_LAYER_EDGES, _CURVES or _ISOCURVES) draws
 -- in: `rgb` (text or three numbers in 0..1), or with `from_part` each part's own colour.
@@ -1216,14 +1238,23 @@ end
 -- coordinates the items were shown in -- or nil where the library read no depth (no hit to
 -- place, a machining stock, the terminal library), and `overlay` (1.24): true where the item is
 -- an overlay, over the pixel, so nothing of the scene beneath it was picked. Nil for no item.
-local function pick_of(raw)
-  if raw.item == 0 then return nil end
+-- `label`: the viewport whose label was hit (a raw -1 is none). Omit it only for a 44-byte
+-- CadaclysmViewPick (its own field is read); the event's 40-byte pick has none, so the event
+-- path must pass its `pick_viewport_label`.
+local function pick_of(raw, label)
+  if label == nil then label = raw.viewport_label end
+  if raw.item == 0 and label < 0 then return nil end
   return { item = raw.item, node = raw.node, face = raw.face, clicks = raw.clicks,
     point = raw.has_point ~= 0 and { raw.point[0], raw.point[1], raw.point[2] } or nil,
-    overlay = raw.overlay ~= 0 }
+    overlay = raw.overlay ~= 0, viewport_label = label >= 0 and label or nil }
+end
+-- A pick buffer for the library to fill: its size set, "no label hit" until it writes one.
+function View._new_pick()
+  return ffi.new("CadaclysmViewPick", { size = ffi.sizeof("CadaclysmViewPick"), viewport_label = -1 })
 end
 
---- What is under pixel (x, y) of `viewport` (default 0): { item, node, face, clicks, point }, or nil for nothing.
+--- What is under pixel (x, y) of `viewport` (default 0): { item, node, face, clicks, point, overlay, viewport_label }, or nil for nothing.
+--- `viewport_label` (1.28) is the viewport whose label (set_viewport_label) was hit -- `item` is then 0 -- else nil.
 --- A view never drawn is drawn first: the library answers a pick from the frame it has drawn.
 --- A failure other than "no answer yet" raises at once with the library's own message.
 function View:pick(x, y, viewport)
@@ -1237,7 +1268,7 @@ function View:pick(x, y, viewport)
     self._lib.C.cadaclysm_view_request_pick_in(p, viewport, x, y)
   end
   void_ok(self)
-  local out = ffi.new("CadaclysmViewPick", { size = ffi.sizeof("CadaclysmViewPick") })
+  local out = View._new_pick()
   local waiting = ""
   for _ = 1, 200 do
     self:draw()
@@ -1252,12 +1283,12 @@ end
 --- The newest pick answer that has landed, without asking or waiting (Python's `last_pick`): a
 --- click or tap in the view's own window (`pump` lands them as it draws), a double click's
 --- (`clicks` 2), or one an `input` asked for, landed by the draws after it. nil while none has;
---- false for a click on nothing; else { item, node, face, clicks, point }. Each answer is read
+--- false for a click on nothing; else { item, node, face, clicks, point, overlay, viewport_label }. Each answer is read
 --- once, and a newer one replaces one not read yet. A failure other than "no answer yet" raises
 --- the library's own message.
 function View:last_pick()
   local p = self:_live("cadaclysm_view_pick_result")
-  local out = ffi.new("CadaclysmViewPick", { size = ffi.sizeof("CadaclysmViewPick") })
+  local out = View._new_pick()
   if self._lib.C.cadaclysm_view_pick_result(p, out) then return pick_of(out) or false end
   local waiting = last_error(self._lib)
   if waiting ~= "" and waiting:sub(-14) ~= "no pick result" then fail(waiting, 2) end
@@ -1284,6 +1315,7 @@ do
       tangent = { raw.tangent[0], raw.tangent[1], raw.tangent[2] }, axis = { raw.axis[0], raw.axis[1], raw.axis[2] },
       radius = raw.radius, distance_px = raw.distance_px, clicks = raw.clicks }
   end
+  View._snap_of = snap_of   -- the input events' block reads a SNAP event's snap with it
 
   --- What a snap may land on (Python's `set_snap`): "all" (or no argument), one kind's name, a
   --- list of names, or false to switch snapping off -- "vertex", "midpoint", "centre" (a circular
@@ -1392,13 +1424,137 @@ local function camera_of(cam, pick, y_up)
     elevation = elevation, pick = pick_of(pick) }
 end
 
---- Blocks until the window is closed; the camera it ended on and the last pick.
-function View:run()
-  local cam = ffi.new("CadaclysmViewCamera", { size = ffi.sizeof("CadaclysmViewCamera") })
-  local pick = ffi.new("CadaclysmViewPick", { size = ffi.sizeof("CadaclysmViewPick") })
-  ok(self, self._lib.C.cadaclysm_view_run(self:_live("cadaclysm_view_run"), cam, pick))
+-- ---- input events (view ABI 1.26) -----------------------------------------------------------
+-- A block of its own: it adds no local to the main chunk (LuaJIT allows 200).
+do
+  -- CADACLYSM_VIEW_INPUT_EVENT_* by number: the `type` next_event reports.
+  local INPUT_EVENTS = { [1] = "pointer_down", [2] = "pointer_move", [3] = "pointer_up", [4] = "wheel",
+    [5] = "key_down", [6] = "key_up", [7] = "resize", [8] = "pick", [9] = "snap", [10] = "close", [11] = "timeline" }
+  -- CADACLYSM_VIEW_MOD_* by the names an event's modifier fields carry.
+  local MODS = { shift = 1, ctrl = 2, alt = 4, meta = 8 }
+  M._INPUT_EVENTS, M._MODS = INPUT_EVENTS, MODS   -- the tests hold them to the header
+
+  local function mods(t, raw)
+    for name, b in pairs(MODS) do t[name] = bit.band(raw.modifiers, b) ~= 0 end
+    return t
+  end
+
+  -- A CadaclysmViewInputEvent as the table next_event returns (Python's `_event_dict`).
+  local function event_of(raw, y_up)
+    local kind = INPUT_EVENTS[tonumber(raw.kind)] or tostring(raw.kind)
+    local e = { type = kind, time_ms = tonumber(raw.time_ms), dropped = tonumber(raw.dropped) }
+    if kind == "pointer_down" or kind == "pointer_move" or kind == "pointer_up" then
+      e.x, e.y, e.button, e.pointer_id = raw.x, raw.y, tonumber(raw.button), tonumber(raw.pointer_id)
+      e.pointer = POINTERS._list[tonumber(raw.pointer) + 1] or tostring(raw.pointer)
+      mods(e, raw)
+    elseif kind == "wheel" then
+      e.x, e.y, e.wheel_y = raw.x, raw.y, raw.wheel_y
+      mods(e, raw)
+    elseif kind == "key_down" or kind == "key_up" then
+      e.key, e.key_down = ffi.string(raw.key), kind == "key_down"
+      e["repeat"] = raw["repeat"] ~= 0   -- `repeat` is a Lua keyword: e["repeat"] reads it
+      mods(e, raw)
+    elseif kind == "resize" then
+      e.width, e.height = tonumber(raw.width), tonumber(raw.height)
+    elseif kind == "pick" then
+      e.pick = pick_of(raw.pick, raw.pick_viewport_label)
+    elseif kind == "snap" then
+      e.snap = View._snap_of(raw.snap)
+    elseif kind == "close" then
+      e.camera = camera_of(raw.camera, View._new_pick(), y_up)
+    end
+    return e
+  end
+
+--- The oldest input event the view's own window handled and has not handed out yet, without
+--- waiting; nil while there is none. The window still orbits, zooms and closes on its own -- the
+--- events report what it handled, they do not stop it. Each is a table with `type`, `time_ms` (the
+--- library's clock) and `dropped` (events a full queue dropped before it), and:
+--- "pointer_down", "pointer_move", "pointer_up": `x`, `y` (physical pixels), `button` (0 left,
+--- 1 middle, 2 right), `pointer` ("mouse", "touch", "pen"), `pointer_id`; "wheel": `x`, `y`,
+--- `wheel_y` (a DOM deltaY: negative forward); "key_down", "key_up": `key` (the DOM code: "KeyR",
+--- "Digit1", "Space", "Escape", "ArrowUp"...), `key_down`, `repeat`; the pointer, wheel and key
+--- events also `shift`, `ctrl`, `alt`, `meta`; "resize": `width`, `height`; "pick": `pick` -- a
+--- click's answer as `last_pick` also returns it (nil for nothing); "snap": `snap` -- a hover's or
+--- click's snap with snapping on (nil for nothing); "close": `camera` -- the window closed, the
+--- camera it closed on as `run` returns it; "timeline": nothing more (the timeline clock moved in a
+--- drawn frame: read it with `time`). A view in a host's window, or offscreen, queues
+--- nothing. Still read after the window closed. A failure other than "no event" raises the
+--- library's own message.
+function View:next_event()
+  local p = rawget(self, "_ptr")
+  if p == nil then fail("cadaclysm_view_next_event: the view is closed", 2) end
+  local raw = ffi.new("CadaclysmViewInputEvent")
+  raw.size = ffi.sizeof("CadaclysmViewInputEvent")
+  raw.pick_viewport_label = -1   -- "no label hit", until the library writes one
+  if self._lib.C.cadaclysm_view_next_event(p, raw) then return event_of(raw, self._y_up) end
+  local waiting = last_error(self._lib)
+  if waiting ~= "" and waiting:sub(-8) ~= "no event" then fail(waiting, 2) end
+  return nil
+end
+
+--- Every event waiting now, oldest first (`next_event` until nil): `for e in v:events() do ... end`
+--- between pumps.
+function View:events()
+  return function() return self:next_event() end
+end
+
+--- Closes the view's own window as its close button does: `closed()` turns true, a "close" event
+--- is queued, a loop around `pump` ends; the view lives on until `close()`. Nothing for a window
+--- already closed. A view in a host's window or offscreen has none: the library refuses it.
+function View:close_window()
+  if rawget(self, "_ptr") ~= nil and self._window_closed then return end
+  ok(self, self._lib.C.cadaclysm_view_close(self:_live("cadaclysm_view_close")))
   self:_mark_closed()
-  return camera_of(cam, pick, self._y_up)
+end
+
+--- Blocks until the window is closed; the camera it ended on and the last pick.
+---
+--- With `on_event`, a function, each input event (`next_event`'s tables) is handed to it on this
+--- thread as the window handles it, between pumps -- it may change the scene or the camera.
+--- Returning false closes the window and ends the run; anything else (nil too) goes on. The
+--- "close" event is handed over last, whatever closed the window.
+function View:run(on_event)
+  local C = self._lib.C
+  if on_event == nil then
+    local cam = ffi.new("CadaclysmViewCamera", { size = ffi.sizeof("CadaclysmViewCamera") })
+    local pick = View._new_pick()
+    ok(self, C.cadaclysm_view_run(self:_live("cadaclysm_view_run"), cam, pick))
+    self:_mark_closed()
+    return camera_of(cam, pick, self._y_up)
+  end
+  if type(on_event) ~= "function" then fail("run: a function to hand each event to, not " .. describe(on_event), 2) end
+  local p = rawget(self, "_ptr")
+  if p == nil then fail("cadaclysm_view_pump: the view is closed", 2) end
+  local picked, camera, stopping = nil, nil, false
+  while camera == nil do
+    local state = CLOSED
+    if not self._window_closed then
+      state = C.cadaclysm_view_pump(p, 16)
+      if state ~= OPEN and state ~= CLOSED then failure(self._lib, 2) end
+    end
+    for e in self:events() do
+      if e.type == "pick" then picked = e.pick end
+      if e.type == "close" then
+        camera = e.camera
+        if not stopping then on_event(e) end
+        break
+      end
+      if not stopping and on_event(e) == false then
+        stopping = true
+        self:close_window()
+      end
+    end
+    if state == CLOSED and camera == nil then fail("run: the window closed with no close event", 2) end
+  end
+  -- The answer the last click left for `last_pick`, taken as the blocking run takes it; else the
+  -- last pick event's.
+  local out = View._new_pick()
+  if C.cadaclysm_view_pick_result(p, out) then picked = pick_of(out) end
+  self:_mark_closed()
+  camera.pick = picked
+  return camera
+end
 end
 
 --- One frame read back: { width, height, rgba = uint8_t cdata (0-based) }, rows from the top.
@@ -1500,7 +1656,7 @@ end
 --- levels, built in the background after each show; a moving frame draws as `motion` says --
 --- "detailed" (the default) or "smooth" (refines once the camera rests, see `wake_ms`).
 --- `motion` false turns levels off.
-function View:lod(motion, min_triangles)
+function View:set_lod(motion, min_triangles)
   if motion == false then
     ok(self, self._lib.C.cadaclysm_view_set_lod(self:_live("cadaclysm_view_set_lod"), nil))
     return
@@ -1597,6 +1753,84 @@ end
 
 local function item_ok(item, done) if not done then failure(item.view._lib, 3) end end
 
+-- The 1.28 drafting styles. A block of its own: it adds no local to the main chunk (LuaJIT allows 200).
+do
+  -- CADACLYSM_VIEW_POINT_* and CADACLYSM_VIEW_POINT_STATE_* by name.
+  local SHAPES = { disc = 0, ring = 1, square = 2, diamond = 3 }
+  local STATES = { normal = 0, hover = 1, selected = 2, first = 3 }
+  M._POINT_SHAPES, M._POINT_STATES = SHAPES, STATES   -- the tests hold them to the header
+
+  -- A colour as three floats, or nil for none (nil restores a default).
+  local function rgb_or_nil(c, what, lib) return c ~= nil and floats3(c, what, lib) or nil end
+
+  --- Draws the item's lines dashed: `dash` points on, `gap` off; no arguments (or a dash of 0)
+  --- is solid. The library refuses a dash with no gap.
+  function Item:set_line_style(dash, gap)
+    local view = self.view
+    item_ok(self, view._lib.C.cadaclysm_view_set_line_style(view:_live("cadaclysm_view_set_line_style"), self.id, dash or 0, gap or 0))
+  end
+
+  --- A points item's marker: "disc" (the default), "ring", "square" or "diamond", filled or `hollow`.
+  function Item:set_point_style(shape, hollow)
+    local s = SHAPES[shape == nil and "disc" or shape]
+    if type(s) ~= "number" then
+      error(("point style: '%s' is not 'disc', 'ring', 'square' or 'diamond'"):format(tostring(shape)), 2)
+    end
+    local view = self.view
+    item_ok(self, view._lib.C.cadaclysm_view_set_point_style(view:_live("cadaclysm_view_set_point_style"), self.id, s, hollow and true or false))
+  end
+
+  --- One state a point, in the order shown: "normal", "hover", "selected" or "first" (or 0..3).
+  function Item:set_point_states(states)
+    if type(states) ~= "table" then fail("point states: a table, not " .. describe(states), 2) end
+    local n = #states
+    local raw = ffi.new("uint8_t[?]", math.max(1, n))
+    for i = 1, n do
+      local s = states[i]
+      local c = type(s) == "number" and s or STATES[s]
+      if type(c) ~= "number" or c < 0 or c > 3 or c ~= math.floor(c) then
+        error(("point states: '%s' is not 'normal', 'hover', 'selected' or 'first'"):format(tostring(s)), 2)
+      end
+      raw[i - 1] = c
+    end
+    local view = self.view
+    item_ok(self, view._lib.C.cadaclysm_view_set_point_states(view:_live("cadaclysm_view_set_point_states"), self.id, raw, n))
+  end
+
+  --- Draws the item after every other, depth testing off. False for overlays, text, images,
+  --- exact-surface items and show_curves items.
+  function Item:set_on_top(on)
+    local view = self.view
+    item_ok(self, view._lib.C.cadaclysm_view_set_on_top(view:_live("cadaclysm_view_set_on_top"), self.id, on ~= false))
+  end
+
+  --- The colours hover, selected and first points draw in; nil restores that state's default.
+  function View:set_point_state_colours(c)
+    c = c or {}
+    local h = rgb_or_nil(c.hover, "point state hover", self._lib)
+    local s = rgb_or_nil(c.selected, "point state selected", self._lib)
+    local f = rgb_or_nil(c.first, "point state first", self._lib)
+    self._lib.C.cadaclysm_view_set_point_state_colours(self:_live("cadaclysm_view_set_point_state_colours"), h, s, f)
+    void_ok(self)
+  end
+
+  --- Names viewport `index`: `text` top left inside it in `colour` (white by default); nil clears it.
+  --- A NUL in the text is refused, not cut. A pick on the label answers `viewport_label`.
+  function View:set_viewport_label(index, text, colour)
+    local raw = text ~= nil and text_of(text) or nil
+    local i = uint(index, "viewport")
+    ok(self, self._lib.C.cadaclysm_view_set_viewport_label(self:_live("cadaclysm_view_set_viewport_label"), i, raw,
+      rgb_or_nil(colour, "viewport label colour", self._lib)))
+  end
+
+  --- Frames viewport `index` in `colour`, one point wide inside its edge; nil clears it.
+  function View:set_viewport_border(index, colour)
+    local i = uint(index, "viewport")
+    ok(self, self._lib.C.cadaclysm_view_set_viewport_border(self:_live("cadaclysm_view_set_viewport_border"), i,
+      rgb_or_nil(colour, "viewport border colour", self._lib)))
+  end
+end
+
 function Item:remove()
   item_ok(self, self.view._lib.C.cadaclysm_view_remove(self.view:_live("cadaclysm_view_remove"), self.id))
   self.view._items[self.id] = nil
@@ -1607,7 +1841,7 @@ end
 --- `Pose:raw_transform`'s layout -- every node of the scene, in index order), drawn in place of
 --- each node's rest transform. nil restores the rest pose; an empty list is not that: it is a
 --- count the library refuses.
-function Item:node_transforms(transforms)
+function Item:set_node_transforms(transforms)
   if transforms == nil then
     item_ok(self, self.view._lib.C.cadaclysm_view_set_node_transforms(self.view:_live("cadaclysm_view_set_node_transforms"), self.id, nil, 0))
     return
@@ -1626,7 +1860,7 @@ function Item:node_transforms(transforms)
   item_ok(self, self.view._lib.C.cadaclysm_view_set_node_transforms(self.view:_live("cadaclysm_view_set_node_transforms"), self.id, flat, #transforms))
 end
 --- Recolours the item: text ("#rgb", "#rrggbb", a CSS colour name, any case) or three numbers in 0..1.
-function Item:colour(rgb)
+function Item:set_colour(rgb)
   if rgb == nil then fail("colour: 3 numbers, not nil", 2) end
   local c = floats3(rgb, "colour", self.view._lib)
   item_ok(self, self.view._lib.C.cadaclysm_view_set_colour(self.view:_live("cadaclysm_view_set_colour"), self.id, c))
@@ -1637,14 +1871,14 @@ function Item:set_text(text)
   item_ok(self, view._lib.C.cadaclysm_view_set_text(view:_live("cadaclysm_view_set_text"), self.id, text_of(text)))
 end
 --- Sixteen numbers, column-major; nil puts it back.
-function Item:placement(m)
+function Item:set_placement(m)
   local raw = exactly("double", m, 16, "placement")
   item_ok(self, self.view._lib.C.cadaclysm_view_set_placement(self.view:_live("cadaclysm_view_set_placement"), self.id, raw))
 end
 --- `faces` (pick numbers) coloured by `rgba`: four numbers a face, flat, or one colour a face --
 --- colour text (alpha 1) or a { r, g, b, a } table; `faces` nil clears every face's colour; an
 --- empty list colours none, which clears them too (Python's).
-function Item:face_colours(faces, rgba)
+function Item:set_face_colours(faces, rgba)
   local view = self.view
   if faces == nil then
     item_ok(self, view._lib.C.cadaclysm_view_set_face_colours(view:_live("cadaclysm_view_set_face_colours"), self.id, nil, nil, 0))
@@ -1663,10 +1897,10 @@ function Item:face_colours(faces, rgba)
   item_ok(self, view._lib.C.cadaclysm_view_set_face_colours(view:_live("cadaclysm_view_set_face_colours"), self.id, f, c, n))
 end
 function Item:frame() item_ok(self, self.view._lib.C.cadaclysm_view_frame(self.view:_live("cadaclysm_view_frame"), self.id)) end
-function Item:xray(on)
+function Item:set_xray(on)
   item_ok(self, self.view._lib.C.cadaclysm_view_set_xray(self.view:_live("cadaclysm_view_set_xray"), self.id, on ~= false))
 end
-function Item:occluded(mode)
+function Item:set_occluded(mode)
   local m = mode ~= nil and OCCLUDED[mode] or nil
   if type(m) ~= "number" then error(("occluded: '%s' is not 'off', 'solid' or 'dashed'"):format(tostring(mode)), 2) end
   item_ok(self, self.view._lib.C.cadaclysm_view_set_occluded(self.view:_live("cadaclysm_view_set_occluded"), self.id, m))
@@ -1675,7 +1909,7 @@ end
 -- lighting a clear coat mirroring the room, silver at a grazing angle -- "satin" (a weaker,
 -- blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads the scene again,
 -- as a show does: set it as each item is shown rather than over a finished scene item by item.
-function Item:finish(finish)
+function Item:set_finish(finish)
   local f = finish ~= nil and FINISH[finish] or nil
   if type(f) ~= "number" then error(("finish: '%s' is not 'gloss', 'satin' or 'matte'"):format(tostring(finish)), 2) end
   item_ok(self, self.view._lib.C.cadaclysm_view_set_finish(self.view:_live("cadaclysm_view_set_finish"), self.id, f))
@@ -1697,22 +1931,22 @@ function Item:set_isocurve_colour(rgb) self:_line_colour(3, rgb, "set_isocurve_c
 -- The user layer the item is on, 0..31 (every item starts on 0): it draws while the layer is
 -- on (View:user_layer) and in the viewports whose layer_mask has its bit. A layer past 31 is
 -- refused.
-function Item:user_layer(layer)
+function Item:set_user_layer(layer)
   number(layer, "user_layer layer")
   item_ok(self, self.view._lib.C.cadaclysm_view_set_item_layer(self.view:_live("cadaclysm_view_set_item_layer"), self.id, layer))
 end
-function Item:node_visible(node, on)
+function Item:set_node_visible(node, on)
   local index = node_index(node, "node_visible node")
   item_ok(self, self.view._lib.C.cadaclysm_view_set_node_visible(self.view:_live("cadaclysm_view_set_node_visible"), self.id, index, on ~= false))
 end
 --- Colours `node` and its subtree: text (alpha 1) or three or four numbers; nil clears.
-function Item:node_colour(node, rgba)
+function Item:set_node_colour(node, rgba)
   local index = node_index(node, "node_colour node")
   local c = rgba4(rgba, "node_colour", self.view._lib)
   item_ok(self, self.view._lib.C.cadaclysm_view_set_node_color(self.view:_live("cadaclysm_view_set_node_color"), self.id, index, c))
 end
 --- Tint `node` toward rgba's colour by its alpha (text: alpha 1, the colour itself); nil clears.
-function Item:node_highlight(node, rgba)
+function Item:set_node_highlight(node, rgba)
   local index = node_index(node, "node_highlight node")
   local c = rgba4(rgba, "node_highlight", self.view._lib)
   item_ok(self, self.view._lib.C.cadaclysm_view_set_node_highlight(self.view:_live("cadaclysm_view_set_node_highlight"), self.id, index, c))
@@ -1720,6 +1954,90 @@ end
 function Item:frame_node(node)
   local index = node_index(node, "frame_node node")
   item_ok(self, self.view._lib.C.cadaclysm_view_frame_node(self.view:_live("cadaclysm_view_frame_node"), self.id, index))
+end
+
+-- ---- animations (view ABI 1.27) --------------------------------------------------------------
+-- A block of its own: it adds no local to the main chunk (LuaJIT allows 200).
+do
+  local ALL_NODES = 4294967295   -- CADACLYSM_VIEW_ALL_NODES
+
+  --- A binding of the animation's target `target` to `item` (an Item or its id), or to one of its
+  --- `node`s (a node or its index; nil is the whole item). `play_animation` takes these, or plain
+  --- tables of the same fields, or arrays `{ target, item [, node] }`.
+  function M.AnimationBinding(target, item, node)
+    return { target = target, item = item, node = node }
+  end
+
+  -- An item or an item's id as the id, refusing anything else, before the library.
+  local function item_id(item, what)
+    if type(item) == "table" then
+      if item.id == nil then fail(what .. ": an item (or its id), not a table without an id", 4) end
+      item = item.id
+    end
+    return uint(item, what, 2)
+  end
+
+  --- Plays `animation` (the kernel's `Animation`) on this view's timeline against `bindings`, a
+  --- list of `AnimationBinding`s (or tables `{ target = , item = , node = }`, or arrays
+  --- `{ target, item [, node] }`); returns the new track's id (1 or more). The view plays its own
+  --- copy, so the animation may be closed at once. A nil animation or a refusal (no such item or
+  --- node, a target bound twice...) raises the library's own message.
+  function View:play_animation(animation, bindings)
+    local h = nil
+    if animation ~= nil then
+      if type(animation) ~= "table" or animation._h == nil then
+        fail("play_animation: an Animation, not " .. describe(animation), 2)
+      end
+      h = animation:_h()
+    end
+    if type(bindings) ~= "table" then fail("play_animation: a list of bindings, not " .. describe(bindings), 2) end
+    local n = #bindings
+    local raw = ffi.new("CadaclysmViewAnimationBinding[?]", math.max(n, 1))
+    local keep = {}   -- the C strings, held until the call returns
+    for k = 1, n do
+      local b = bindings[k]
+      if type(b) ~= "table" then fail(("binding %d: a binding, not %s"):format(k, describe(b)), 2) end
+      local target, item, node = b.target, b.item, b.node
+      if target == nil and item == nil then target, item, node = b[1], b[2], b[3] end
+      if type(target) ~= "string" then fail(("binding %d: the target is a string, not %s"):format(k, describe(target)), 2) end
+      if target:find("\0", 1, true) then fail(("binding %d: the target %q holds a NUL character"):format(k, target), 2) end
+      if item == nil then fail(("binding %d: an item (or its id), not nil"):format(k), 2) end
+      keep[k] = ffi.new("char[?]", #target + 1, target)
+      raw[k - 1].target = keep[k]
+      raw[k - 1].item = item_id(item, ("binding %d item"):format(k))
+      raw[k - 1].node = node == nil and ALL_NODES or node_index(node, ("binding %d node"):format(k))
+    end
+    local id = tonumber(self._lib.C.cadaclysm_view_play_animation(self:_live("cadaclysm_view_play_animation"), h,
+      n > 0 and raw or nil, n))
+    if id == 0 then failure(self._lib, 2) end
+    return id
+  end
+
+  --- Removes the track `track` (as `play_animation` returned it): what it animated goes back to
+  --- the rest state. An unknown track raises the library's message.
+  function View:remove_track(track)
+    uint(track, "remove_track track")
+    ok(self, self._lib.C.cadaclysm_view_timeline_remove(self:_live("cadaclysm_view_timeline_remove"), track))
+  end
+
+  --- Shows (nil or true) or hides (false) the item: a hidden item draws nothing, is not picked or
+  --- snapped and is left out of what `frame` fits.
+  function Item:set_visible(on)
+    item_ok(self, self.view._lib.C.cadaclysm_view_set_item_visible(self.view:_live("cadaclysm_view_set_item_visible"), self.id, on ~= false))
+  end
+
+  --- Draws `nodes` (a list of nodes or indices) of the item x-ray, replacing its earlier ghosts;
+  --- nil (or an empty list) clears them.
+  function Item:set_node_ghosts(nodes)
+    local a, n = nil, 0
+    if nodes ~= nil then
+      table_of(nodes, "set_node_ghosts nodes")
+      n = #nodes
+      a = ffi.new("uint32_t[?]", math.max(n, 1))
+      for i = 1, n do a[i - 1] = node_index(nodes[i], ("set_node_ghosts node %d"):format(i)) end
+    end
+    item_ok(self, self.view._lib.C.cadaclysm_view_set_node_ghosts(self.view:_live("cadaclysm_view_set_node_ghosts"), self.id, a, n))
+  end
 end
 
 -- ---- Machining and the timeline (1.7) ----------------------------------------------------
@@ -1834,7 +2152,7 @@ function Machining:seek_move(move)
   item_ok(self, self.view._lib.C.cadaclysm_view_machining_seek(self.view:_live("cadaclysm_view_machining_seek"), self.id, move))
 end
 --- "height", "tool" or "deviation" (the last needs a part).
-function Machining:colour_by(mode)
+function Machining:set_colour_by(mode)
   local m = type(mode) == "string" and COLOUR_BY[mode]
   if type(m) ~= "number" then
     fail(("mode '%s': one of %s"):format(tostring(mode), table.concat(COLOUR_BY._list, ", ")), 2)
@@ -1842,7 +2160,7 @@ function Machining:colour_by(mode)
   item_ok(self, self.view._lib.C.cadaclysm_view_machining_colour_by(self.view:_live("cadaclysm_view_machining_colour_by"), self.id, m))
 end
 --- The toolpath and the tool, on or off (nil is on).
-function Machining:overlays(path, tool)
+function Machining:set_overlays(path, tool)
   item_ok(self, self.view._lib.C.cadaclysm_view_machining_overlays(self.view:_live("cadaclysm_view_machining_overlays"), self.id, path ~= false, tool ~= false))
 end
 --- `moves`, `move` (done, as of the last draw), the heights' grid (`nx`, `ny`, `cell`, `min`) and the
@@ -1875,7 +2193,7 @@ function View:seek(seconds)
   ok(self, self._lib.C.cadaclysm_view_timeline_seek(self:_live("cadaclysm_view_timeline_seek"), finite(seconds, "seek seconds")))
 end
 --- Loops the timeline (nil is on; false is off).
-function View:loop(on) ok(self, self._lib.C.cadaclysm_view_timeline_set_loop(self:_live("cadaclysm_view_timeline_set_loop"), on ~= false)) end
+function View:set_loop(on) ok(self, self._lib.C.cadaclysm_view_timeline_set_loop(self:_live("cadaclysm_view_timeline_set_loop"), on ~= false)) end
 function View:time() return tonumber(self._lib.C.cadaclysm_view_timeline_time(self:_live("cadaclysm_view_timeline_time"))) end
 function View:duration() return tonumber(self._lib.C.cadaclysm_view_timeline_duration(self:_live("cadaclysm_view_timeline_duration"))) end
 function View:playing() return self._lib.C.cadaclysm_view_timeline_playing(self:_live("cadaclysm_view_timeline_playing")) == true end
@@ -1977,8 +2295,8 @@ function M._present(obj, opts, orbit, transforms)
   local result
   local done, err = pcall(function()
     local item = v:show(obj, opts.rgb, tolerance)
-    if transforms ~= nil then item:node_transforms(transforms) end
-    v:layer("edges", o.edges)
+    if transforms ~= nil then item:set_node_transforms(transforms) end
+    v:set_layer("edges", o.edges)
     aim(v, o, kind == "node" and function() item:frame_node(obj.index) end or function() end)
     if not orbit and lib.kind ~= "wgpu" then v:draw() return end
     result = v:run()

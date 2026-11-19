@@ -114,24 +114,24 @@ final class NurbsCurveTests: XCTestCase {
         let error = try XCTUnwrap(fit.fitError)
         XCTAssertTrue(error >= 0 && error <= 1e-4, "fit error \(error)")
 
-        XCTAssertLessThan(distance(try c.reversed().point(lo), try c.point(hi)), 1e-12)
+        XCTAssertLessThan(distance(try c.reverse().point(lo), try c.point(hi)), 1e-12)
         let mid = 0.5 * (lo + hi)
-        let trimmed = try c.trimmed(lo, mid).domain
+        let trimmed = try c.trim(lo, mid).domain
         XCTAssertEqual(trimmed.lo, lo)
         XCTAssertEqual(trimmed.hi, mid)
-        let longer = try c.extended(0.5)
+        let longer = try c.extend(0.5)
         XCTAssertGreaterThan(try longer.domain.hi, hi)
         XCTAssertLessThan(distance(try longer.point(hi), try c.point(hi)), 1e-9)
-        let before = try c.extended(0.5, atStart: true)
+        let before = try c.extend(0.5, atStart: true)
         XCTAssertLessThan(try before.domain.lo, lo)
-        XCTAssertEqual(try c.elevated(2).degree, 5)
+        XCTAssertEqual(try c.elevate(2).degree, 5)
     }
 
     func testCurvesJoinEndToEnd() throws {
         let lead = try NurbsCurve([P(2, -3, 0), P(2, 0, 0)], degree: 1)
         let arc = try quarterCircle()
         let tail = try NurbsCurve([P(0, 2, 0), P(-1, 2.5, 0), P(-2, 2, 1), P(-3, 3, 0), P(-4, 2, 0), P(-5, 2, 2)], degree: 5)
-        let j = try NurbsCurve.joined([lead, try arc.reversed(), tail])
+        let j = try NurbsCurve.join([lead, try arc.reverse(), tail])
         XCTAssertEqual(j.degree, 5)
         let domain = try j.domain
         XCTAssertEqual(domain.lo, 0)
@@ -144,10 +144,10 @@ final class NurbsCurveTests: XCTestCase {
             XCTAssertEqual(distance(try j.point(1 + s), P(0, 0, 0)), 2, accuracy: 1e-12)
             XCTAssertLessThan(distance(try j.point(2 + s), try tail.point(s)), 1e-12)
         }
-        XCTAssertEqual(try NurbsCurve.joined([arc]).controlPoints, try arc.controlPoints)
-        let gap = try XCTUnwrap(refusal { _ = try NurbsCurve.joined([lead, tail]) })
+        XCTAssertEqual(try NurbsCurve.join([arc]).controlPoints, try arc.controlPoints)
+        let gap = try XCTUnwrap(refusal { _ = try NurbsCurve.join([lead, tail]) })
         XCTAssertTrue(gap.hasPrefix("nurbs_curve_joined: curve 1 ") && gap.contains("curve 0"), gap)
-        let none = try XCTUnwrap(refusal { _ = try NurbsCurve.joined([]) })
+        let none = try XCTUnwrap(refusal { _ = try NurbsCurve.join([]) })
         XCTAssertTrue(none.hasPrefix("nurbs_curve_joined: "), none)
     }
 
@@ -223,11 +223,11 @@ final class NurbsCurveTests: XCTestCase {
 
         let sphere = try Solid.sphere(3)
         let line = try NurbsCurve([P(-2, 0.5, 10), P(2, -0.5, 10)], degree: 1)
-        let on = try line.projectedToFace(sphere, 0, direction: P(0, 0, -1), tolerance: 1e-4)
+        let on = try line.projectToFace(sphere, 0, direction: P(0, 0, -1), tolerance: 1e-4)
         XCTAssertLessThanOrEqual(try XCTUnwrap(on.fitError), 1e-4)
         let (lo, hi) = try on.domain
         XCTAssertEqual(distance(try on.point(0.5 * (lo + hi)), P(0, 0, 0)), 3, accuracy: 1e-4)
-        let pulled = try line.pulledToFace(sphere, 0, tolerance: 1e-4)
+        let pulled = try line.pullToFace(sphere, 0, tolerance: 1e-4)
         XCTAssertNotNil(pulled.fitError)
         XCTAssertEqual(distance(try pulled.point(try pulled.domain.lo), P(0, 0, 0)), 3, accuracy: 1e-4)
 
@@ -238,7 +238,7 @@ final class NurbsCurveTests: XCTestCase {
         let crossing = try through.planeHits(P(0, 0, 0), P(1, 0, 0))
         XCTAssertEqual(crossing.count, 1)
         XCTAssertLessThan(distance(crossing[0].point, P(0, 1, 1)), 1e-12)
-        let flat = try line.projectedToPlane(P(0, 0, 1), P(0, 0, 1))
+        let flat = try line.projectToPlane(P(0, 0, 1), P(0, 0, 1))
         XCTAssertEqual(try flat.point(0), P(-2, 0.5, 1))
 
         let blend = try NurbsCurve.blend(try quarterCircle(), true, through, false, continuity: 2)
@@ -258,11 +258,11 @@ final class NurbsCurveTests: XCTestCase {
             ("nurbs_curve_through", { _ = try NurbsCurve.through([P(0, 0, 0), P(1, 0, 0)], degree: 3) }),
             ("nurbs_curve_fit", { _ = try NurbsCurve.fit([P(0, 0, 0), P(1, 0, 0)], degree: 1, tolerance: -1) }),
             ("nurbs_curve_from_edge", { _ = try NurbsCurve.fromEdge(cube, 999) }),
-            ("nurbs_curve_from_face_isocurve", { _ = try NurbsCurve.isocurve(cube, 0, alongU: true, at: 0.5) }),
+            ("nurbs_curve_from_face_isocurve", { _ = try NurbsCurve.isocurve(cube, 99, alongU: true, at: 0.5) }),
             ("nurbs_curve_blend", { _ = try NurbsCurve.blend(q, true, q, true, continuity: 3) }),
-            ("nurbs_curve_projected_to_plane", { _ = try q.projectedToPlane(P(0, 0, 0), P(0, 0, 1), direction: P(1, 0, 0)) }),
-            ("nurbs_curve_trimmed", { _ = try q.trimmed(0.5, 0.2) }),
-            ("nurbs_curve_extended", { _ = try q.extended(0) }),
+            ("nurbs_curve_projected_to_plane", { _ = try q.projectToPlane(P(0, 0, 0), P(0, 0, 1), direction: P(1, 0, 0)) }),
+            ("nurbs_curve_trimmed", { _ = try q.trim(0.5, 0.2) }),
+            ("nurbs_curve_extended", { _ = try q.extend(0) }),
             ("nurbs_curve_point", { _ = try q.point(2) }),
             ("nurbs_curve_derivatives", { _ = try q.derivatives(0.5, 9) }),
             ("nurbs_curve_divide_by_count", { _ = try q.divideByCount(0) }),
@@ -272,16 +272,18 @@ final class NurbsCurveTests: XCTestCase {
             let message = try XCTUnwrap(refusal(body), "\(name) did not refuse")
             XCTAssertTrue(message.hasPrefix("\(name): "), message)
         }
+        // Any face kind has an isocurve now, a plane's too.
+        XCTAssertNotNil(try NurbsCurve.isocurve(cube, 0, alongU: true, at: 0.5))
         let weights = try XCTUnwrap(refusal { _ = try NurbsCurve([P(0, 0, 0), P(1, 0, 0)], degree: 1, weights: [1]) })
         XCTAssertEqual(weights, "nurbs_curve_new: 1 weights for 2 points; give one per point")
     }
 
     func testACurveMapsByItsControlPointsAndValuesBecomeCurves() throws {
         let c = try NurbsCurve([P(0, 0, 0), P(1, 1, 1), P(2, 0, 0)], degree: 2, weights: [1, 0.5, 1])
-        let moved = try c.transformed(try Transform.translation(P(1, 2, 3)))
+        let moved = try c.transform(try Transform.translation(P(1, 2, 3)))
         XCTAssertLessThan(distance(try moved.point(0.5), try c.point(0.5) + P(1, 2, 3)), 1e-12)
         XCTAssertEqual(try moved.weights, try c.weights)
-        let again = try c.transformed(try Transform.translation(P(1, 2, 3)).rows)
+        let again = try c.transform(try Transform.translation(P(1, 2, 3)).rows)
         XCTAssertEqual(try again.controlPoints, try moved.controlPoints)
 
         let line = try Line(P(0, 0, 0), P(2, 0, 0)).toNurbs()

@@ -389,7 +389,7 @@ static void assembly_first_is_at_the_posed_frames() {
     double si = std::sin(1.5);
     bs::Solid arm = must(must(bs::Solid::cuboid(3, 0.2, 0.2), "cuboid").translate(1.5, 0, 0), "translate");
     bs::Frame turned = must(bs::Frame::make({0, 0, 0}, {co, si, 0}, {-si, co, 0}, {0, 0, 1}), "Frame::make");
-    bs::Box want = must(must(arm.bounds_box(TOL), "bounds_box").moved(turned), "Box::moved");
+    bs::Box want = must(must(arm.bounds_box(TOL), "bounds_box").move(turned), "Box::moved");
     for (int k = 0; k < 3; ++k) {
         check(want.lo[k] - 1e-6 <= got.lo[k] && got.hi[k] <= want.hi[k] + 1e-6,
               "axis " + std::to_string(k) + ": the overlap's box [" + std::to_string(got.lo[k]) + ", " + std::to_string(got.hi[k]) +
@@ -401,8 +401,8 @@ static void assembly_first_is_at_the_posed_frames() {
 }
 
 // 10. Joined: a pin on the arm's link inside a bore on the ground link, the hinge joining them;
-// no row by default, (0, 1, 0.0) with `joined`, none again with the pair allowed. Catches
-// `joined` dropped on its way to the kernel.
+// no row by default, (0, 1, 0.0) with `join`, none again with the pair allowed. Catches
+// `join` dropped on its way to the kernel.
 static void assembly_tests_joined_links_only_when_asked() {
     bs::Assembly pinned = must(bs::Assembly::create("pinned"), "Assembly::create");
     must(pinned.place_solid(must(bs::Solid::cuboid(0.6, 0.6, 0.6), "cuboid"), at3(0, 0, 0), "bore"), "place bore");

@@ -3,11 +3,13 @@
 // by its item), image() inside its silhouette, pick, save, a real pose and the rest pose, a
 // nested node and a root drawing less than their scene, Scene.close() releasing its items,
 // another thread's calls refused, colour text drawing its numbers' pixels and refused text
-// refused in the library's words, the loader's ABI 1.25, text (labels shown, changed, picked
+// refused in the library's words, the loader's ABI 1.28, text (labels shown, changed, picked
 // by line, coloured on their box; fonts loaded; refusals) -- and the wgpu library's table
 // rigged: show()/view()'s title and up axis, run()'s camera, pump's waits and count, input,
 // void-call refusals; ABI 1.8's pick (clicks, point), set_double_click_frames, focus and
-// navigation, rigged and on the GPU (a double click through input); 1.22's snapping (rigged, and the square's corner on the GPU). The
+// navigation, rigged and on the GPU (a double click through input); 1.22's snapping (rigged, and the square's corner on the GPU); 1.26's input events (rigged:
+// nextEvent, closeWindow, run(onEvent); and on the GPU under the testing hook); 1.28's drafting
+// styles (on the GPU, and the pick's viewport label rigged). The
 // GPU half skips without cadaclysm_view or an adapter unless CADACLYSM_REQUIRE_WGPU is set.
 @testable import CadaclysmView
 @testable import Blacksmith
@@ -34,6 +36,7 @@ private var spyInputAnswer: UInt32 = 0
 private var spyCreateFails = false
 private var spyRealNodeVisible = CvlTable().set_node_visible
 private var spyHidden: [UInt32] = []
+private var spyAnimation: [String] = []
 private var spyRealFrameNode = CvlTable().frame_node
 private var spyFramed: [UInt32] = []
 private var spyRealNodeTransforms = CvlTable().set_node_transforms
@@ -62,7 +65,9 @@ private func rig(_ t: UnsafeMutablePointer<CvlTable>) {
         camera!.pointee.target = (0, 0, 0)
         camera!.pointee.up = spyUp
         camera!.pointee.orthographic = 0
+        spyLabelsIn.append(pick!.pointee.viewport_label)
         pick!.pointee.item = 0
+        pick!.pointee.viewport_label = -1
         return true
     }
     t.pointee.last_error = { spySaid }
@@ -112,7 +117,15 @@ private func rigPoints(_ t: UnsafeMutablePointer<CvlTable>) {
 
 // ---- view ABI 1.8, rigged: the pick's clicks and point, set_double_click_frames, focus, navigation
 
-private var spyPicked = CadaclysmViewPick()
+/// A pick of nothing, as a library writes one: `viewport_label` -1 (1.28: no label hit).
+private func noPick() -> CadaclysmViewPick {
+    var p = CadaclysmViewPick()
+    p.viewport_label = -1
+    return p
+}
+private var spyPicked = noPick()
+// The viewport_label each pick buffer handed to pick_result or run held on the way in.
+private var spyLabelsIn: [Int32] = []
 // pick_result answers spyPicked while spyLanded, else false (spySaid says why).
 private var spyLanded = true
 private var spyCalls: [String] = []
@@ -124,6 +137,7 @@ private func rig17(_ t: UnsafeMutablePointer<CvlTable>) {
     t.pointee.request_pick_in = { _, _, _, _ in }
     // spyPicked, up to the caller's size as the library writes it.
     t.pointee.pick_result = { _, out in
+        spyLabelsIn.append(out!.pointee.viewport_label)
         if !spyLanded { return false }
         var answer = spyPicked
         answer.size = out!.pointee.size
@@ -136,6 +150,7 @@ private func rig17(_ t: UnsafeMutablePointer<CvlTable>) {
         camera!.pointee.target = (0, 0, 0)
         camera!.pointee.up = (0, 0, 1)
         camera!.pointee.orthographic = 0
+        spyLabelsIn.append(pick!.pointee.viewport_label)
         pick!.pointee = spyPicked
         return true
     }
@@ -187,6 +202,77 @@ private func rigSnap(_ t: UnsafeMutablePointer<CvlTable>) {
     }
     t.pointee.clear_work_plane = { _ in
         spySnapCalls.append("ground plane")
+        return true
+    }
+}
+
+// ---- view ABI 1.26, rigged: the event queue, close and the pump run(onEvent) drives ----------
+
+// next_event pops spyEvents (empty: false, "no event"); close queues a CLOSE on (1, 2, 3); a pump
+// answering CLOSED (spyPumpAnswers, past the list: open) queues a CLOSE on spyEye first;
+// pick_result answers spyPicked while spyLanded.
+private var spyEvents: [CadaclysmViewInputEvent] = []
+private var spyEventSizes: [UInt32] = []
+private var spyClosedWindows = 0
+private let noEvent = cstr("cadaclysm_view_next_event: no event")
+private let noPickResult = cstr("cadaclysm_view_pick_result: no pick result")
+
+/// A raw event of `kind` -- a number the test writes out from the header, never the module's.
+private func rawEvent(_ kind: UInt32, _ fill: (inout CadaclysmViewInputEvent) -> Void = { _ in }) -> CadaclysmViewInputEvent {
+    var e = CadaclysmViewInputEvent()
+    e.kind = kind
+    e.pick_viewport_label = -1  // 1.28: no label hit, as a library writes it
+    fill(&e)
+    return e
+}
+
+private func setKey(_ e: inout CadaclysmViewInputEvent, _ key: String) {
+    withUnsafeMutableBytes(of: &e.key) { b in for (i, c) in key.utf8.enumerated() { b[i] = c } }
+}
+
+private func closeEvent(_ eye: (Float, Float, Float)) -> CadaclysmViewInputEvent {
+    rawEvent(10) { e in
+        e.camera.eye = eye
+        e.camera.target = (0, 0, 0)
+        e.camera.up = (0, 0, 1)
+    }
+}
+
+private func rigEvents(_ t: UnsafeMutablePointer<CvlTable>) {
+    t.pointee.last_error = { spySaid }
+    t.pointee.next_event = { _, out in
+        spyEventSizes.append(out!.pointee.size)
+        if spyEvents.isEmpty {
+            spySaid = noEvent
+            return false
+        }
+        var e = spyEvents.removeFirst()
+        e.size = out!.pointee.size
+        out!.pointee = e
+        spySaid = nil
+        return true
+    }
+    t.pointee.close = { _ in
+        spyClosedWindows += 1
+        spyEvents.append(closeEvent((1, 2, 3)))
+        return true
+    }
+    t.pointee.pump = { _, ms in
+        let call = spyPumpMs.count
+        spyPumpMs.append(ms)
+        let answer = call < spyPumpAnswers.count ? spyPumpAnswers[call] : UInt32(CADACLYSM_VIEW_OPEN)
+        if answer == UInt32(CADACLYSM_VIEW_CLOSED) { spyEvents.append(closeEvent(spyEye)) }
+        return answer
+    }
+    t.pointee.pick_result = { _, out in
+        spyLabelsIn.append(out!.pointee.viewport_label)
+        if !spyLanded {
+            spySaid = noPickResult
+            return false
+        }
+        var answer = spyPicked
+        answer.size = out!.pointee.size
+        out!.pointee = answer
         return true
     }
 }
@@ -570,14 +656,14 @@ final class ViewTests: XCTestCase {
         // 1.16's user layers: the sphere on layer 3, the layer off (the centre no longer the
         // sphere's) and on again (the sphere's again); layer 32 refused, for an item and the view.
         if let item {
-            try item.userLayer(3)
-            try view.userLayer(3, false)
+            try item.setUserLayer(3)
+            try view.setUserLayer(3, false)
             XCTAssertNotEqual(pixel(try view.image(), 160, 120), pixel(drawn, 160, 120), "an item on a layer switched off drew")
-            try view.userLayer(3, true)
+            try view.setUserLayer(3, true)
             XCTAssertEqual(pixel(try view.image(), 160, 120), pixel(drawn, 160, 120), "an item on a layer switched on again did not draw")
-            XCTAssertTrue(message { try item.userLayer(32) }.contains("past 31"), message { try item.userLayer(32) })
-            XCTAssertTrue(message { try view.userLayer(32, false) }.contains("past 31"), message { try view.userLayer(32, false) })
-            try item.userLayer(0)
+            XCTAssertTrue(message { try item.setUserLayer(32) }.contains("past 31"), message { try item.setUserLayer(32) })
+            XCTAssertTrue(message { try view.setUserLayer(32, false) }.contains("past 31"), message { try view.setUserLayer(32, false) })
+            try item.setUserLayer(0)
         }
         XCTAssertEqual(View.Viewport(rect: SIMD4(0, 0, 1, 1), view: [], projection: [], eye: SIMD3(0, 0, 0)).layerMask, 0xFFFF_FFFF)
         let png = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).png")
@@ -587,11 +673,11 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(Array(bytes.prefix(8)), [137, 80, 78, 71, 13, 10, 26, 10])
 
         // Master's three: levels on and off, the wake answer; node transforms refused on a solid.
-        try view.lod("smooth")
+        try view.setLod("smooth")
         _ = try view.wakeMs()
-        try view.lod(nil)
-        XCTAssertTrue(message { try view.lod("sharp") }.contains("one of detailed, smooth"))
-        XCTAssertFalse(message { try item?.nodeTransforms([]) } == "<accepted>", "node transforms on a solid were accepted")
+        try view.setLod(nil)
+        XCTAssertTrue(message { try view.setLod("sharp") }.contains("one of detailed, smooth"))
+        XCTAssertFalse(message { try item?.setNodeTransforms([]) } == "<accepted>", "node transforms on a solid were accepted")
         // 1.9's lighting: the headlight by default, studio set and read back, another name
         // refused before C (the lighting unchanged), and the headlight again.
         XCTAssertEqual(try view.lighting, "headlight")
@@ -616,11 +702,11 @@ final class ViewTests: XCTestCase {
                        "show_image: 2 x 2 pixels need 16 bytes (rgba), not 15")
         XCTAssertTrue(message { _ = try view.showImage(corners: corners, rgba: [0, 0, 0, 0], width: .max, height: .max) }.contains("too large"))
         XCTAssertEqual(message { _ = try view.showImage(corners: [0], rgba: [0, 0, 0, 0], width: 1, height: 1) }, "12 numbers, not 1")
-        XCTAssertEqual(message { try item?.placement([1, 0]) }, "16 numbers, not 2")
-        XCTAssertEqual(message { try item?.nodeTransforms([[1]]) }, "transform 0: 16 numbers, not 1")
-        XCTAssertEqual(message { try item?.faceColours([1, 2], [SIMD4<Float>(1, 0, 0, 1)]) }, "8 numbers (rgba, 4 a face), not 4")
+        XCTAssertEqual(message { try item?.setPlacement([1, 0]) }, "16 numbers, not 2")
+        XCTAssertEqual(message { try item?.setNodeTransforms([[1]]) }, "transform 0: 16 numbers, not 1")
+        XCTAssertEqual(message { try item?.setFaceColours([1, 2], [SIMD4<Float>(1, 0, 0, 1)]) }, "8 numbers (rgba, 4 a face), not 4")
         // An empty list clears: it reaches the library as an empty array, not "none".
-        try item?.faceColours([], [])
+        try item?.setFaceColours([], [])
         // Empty lines and curves are accepted (a non-NULL empty array); a mesh and an image draw.
         try view.showLines([]).remove()
         try view.showCurves([]).remove()
@@ -630,8 +716,8 @@ final class ViewTests: XCTestCase {
         let twoPoints = try view.showPoints([0, 0, 0, 1, 1, 1], rgb: "red")
         XCTAssertNotEqual(twoPoints.id, 0, "two points: no item")
         try twoPoints.remove()
-        try item?.placement([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
-        try item?.placement(nil)
+        try item?.setPlacement([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+        try item?.setPlacement(nil)
         // A host's event on a view that is not a window of its own leaves it open.
         _ = try view.input(kind: UInt32(CADACLYSM_VIEW_EVENT_KEY), key: "Escape")
         XCTAssertFalse(view.isClosed, "Escape closed an offscreen view")
@@ -645,7 +731,7 @@ final class ViewTests: XCTestCase {
         try view.close()  // idempotent
         XCTAssertTrue(view.isClosed)
         XCTAssertEqual(message { _ = try view.showLines([0, 0, 0, 1, 1, 1]) }, "cadaclysm_view_show_lines: the view is closed")
-        XCTAssertEqual(message { try late.colour(SIMD3<Float>(1, 0, 0)) }, "cadaclysm_view_set_colour: the view is closed")
+        XCTAssertEqual(message { try late.setColour(SIMD3<Float>(1, 0, 0)) }, "cadaclysm_view_set_colour: the view is closed")
         XCTAssertEqual(message { _ = try view.needsDraw() }, "cadaclysm_view_needs_draw: the view is closed")
         XCTAssertEqual(message { _ = try view.input(kind: 1) }, "cadaclysm_view_input: the view is closed")
     }
@@ -664,12 +750,12 @@ final class ViewTests: XCTestCase {
         XCTAssertGreaterThan(changed(rest, blank), 0, "the scene drew nothing")
         let state = try XCTUnwrap(scene.states.first, "mechanism-solid.stp records no state")
         let pose = try scene.poseState(state)
-        try shown.nodeTransforms(scene.nodes.map { pose.rawTransform($0) })
+        try shown.setNodeTransforms(scene.nodes.map { pose.rawTransform($0) })
         XCTAssertGreaterThan(changed(rest, try view.image()), 0, "the pose moved nothing on screen")
-        try shown.nodeTransforms(nil)
+        try shown.setNodeTransforms(nil)
         let back = changed(rest, try view.image())
         XCTAssertLessThan(back, 320 * 240 / 1000, "nil did not put the rest pose back: \(back) pixels")
-        let none = message { try shown.nodeTransforms([]) }
+        let none = message { try shown.setNodeTransforms([]) }
         XCTAssertTrue(none.contains("0 transforms were given"), "an empty transform list: \(none)")
         try shown.remove()
     }
@@ -757,8 +843,8 @@ final class ViewTests: XCTestCase {
         doc.close()
         XCTAssertTrue(doc.closed, "the scene stayed open")
         try view.draw()
-        XCTAssertNotEqual(message { try all.colour(SIMD3<Float>(1, 0, 0)) }, "<accepted>", "an item of a closed scene is still shown")
-        XCTAssertNotEqual(message { try part.colour(SIMD3<Float>(1, 0, 0)) }, "<accepted>", "a node item of a closed scene is still shown")
+        XCTAssertNotEqual(message { try all.setColour(SIMD3<Float>(1, 0, 0)) }, "<accepted>", "an item of a closed scene is still shown")
+        XCTAssertNotEqual(message { try part.setColour(SIMD3<Float>(1, 0, 0)) }, "<accepted>", "a node item of a closed scene is still shown")
         XCTAssertEqual(message { _ = try view.showScene(doc) }, "mechanism-solid.stp: the scene is closed")
 
         // ... and stays open while a view of another thread shows it.
@@ -833,8 +919,8 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(message { try view.zoom(1) }, "boom from the library")
         XCTAssertEqual(message { try view.look(1, 1) }, "boom from the library")
         XCTAssertEqual(message { try view.dolly(1) }, "boom from the library")
-        XCTAssertEqual(message { try view.orthographic(false) }, "boom from the library")
-        XCTAssertEqual(message { try view.background(SIMD3<Float>(0, 0, 0)) }, "boom from the library")
+        XCTAssertEqual(message { try view.setOrthographic(false) }, "boom from the library")
+        XCTAssertEqual(message { try view.setBackground(SIMD3<Float>(0, 0, 0)) }, "boom from the library")
         spySaid = nil
         try view.orbit(0, 0)
         let realFrame = t.pointee.frame
@@ -886,8 +972,10 @@ final class ViewTests: XCTestCase {
         // answers the camera it was left at.
         let cube = try Solid.cuboid(5, 5, 5)
         spyRuns = 0
+        spyLabelsIn = []
         try cube.show()
         XCTAssertEqual(spyRuns, 1)
+        XCTAssertEqual(spyLabelsIn, [-1], "show()'s pick buffer reaches run with viewport_label -1")
         XCTAssertEqual(spyTitle, "Solid")
         XCTAssertEqual(spyYUp, 0)
         let camera = try cube.view()
@@ -1058,16 +1146,18 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(try greens(), 0, "nil: the view's colour again")
     }
 
-    /// The loader binds 104 calls of cadaclysm_view.h 1.25 (all but 1.14's analysis calls,
-    /// 1.19's KMS pair and 1.12's texture targets): a 1.24 library (no stats) is refused
-    /// before any call is bound, in Python's words; 1.25 and later 1.x are taken.
-    func testTheLoaderNeedsViewABI125() throws {
-        try checkABIForTest(version: 0x10019, path: "lib")
-        try checkABIForTest(version: 0x1001A, path: "lib")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x10018, path: "lib") },
-                       "lib: view ABI 1.24, this SDK needs 1.25 or a later 1.x")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x20019, path: "lib") },
-                       "lib: view ABI 2.25, this SDK needs 1.25 or a later 1.x")
+    /// The loader binds 117 calls of cadaclysm_view.h 1.28 (all but 1.14's analysis calls,
+    /// 1.19's KMS pair and 1.12's texture targets): a 1.27 library (no drafting styles) is refused
+    /// before any call is bound, in Python's words; 1.28 and later 1.x are taken.
+    func testTheLoaderNeedsViewABI128() throws {
+        try checkABIForTest(version: 0x1001C, path: "lib")
+        try checkABIForTest(version: 0x1001D, path: "lib")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x1001B, path: "lib") },
+                       "lib: view ABI 1.27, this SDK needs 1.28 or a later 1.x")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x10019, path: "lib") },
+                       "lib: view ABI 1.25, this SDK needs 1.28 or a later 1.x")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x2001C, path: "lib") },
+                       "lib: view ABI 2.28, this SDK needs 1.28 or a later 1.x")
     }
 
     /// 1.25's stats on wgpu offscreen: the struct's layout; an offscreen view's frames are its
@@ -1107,7 +1197,7 @@ final class ViewTests: XCTestCase {
                                 UInt32(CADACLYSM_VIEW_ALIGN_BOTTOM_RIGHT)]
         let ours: [Anchor] = [.topLeft, .top, .topRight, .left, .centre, .right, .bottomLeft, .bottom, .bottomRight]
         XCTAssertEqual(ours.map { $0.rawValue }, header)
-        XCTAssertEqual(MemoryLayout<CadaclysmViewPick>.size, 40)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewPick>.size, 44)
         XCTAssertEqual(MemoryLayout<CadaclysmViewOverlay>.size, 80)
         XCTAssertEqual(MemoryLayout<CadaclysmViewOverlayImage>.size, 48)
     }
@@ -1118,7 +1208,7 @@ final class ViewTests: XCTestCase {
     func testOverlaysDrawPickAndMove() throws {
         let ov = try offscreen(200, 120)
         defer { try? ov.close() }
-        try ov.background("black")
+        try ov.setBackground("black")
         let under = try ov.showSolid(try Solid.cuboid(80, 80, 20), tolerance: 0.05, rgb: "#808080")
         try ov.standard("top")
         try ov.frame()
@@ -1130,9 +1220,9 @@ final class ViewTests: XCTestCase {
             let p = px(img, x, y)
             return abs(p[0] - r) < 40 && abs(p[1] - g) < 40 && abs(p[2] - b) < 40
         }
-        // A rounded panel with a round hole, red by its own colour, at the window's centre.
+        // A rounded panel with a round hole, filled red (an outline by default), at the window's centre.
         let shape = try Profile.rect(60, 40).round(6).withHole(try Profile.circle(8)).coloured("red")
-        let panel = try ov.showOverlay(shape, anchor: .centre, x: 0, y: 0)
+        let panel = try ov.showOverlay(shape, anchor: .centre, x: 0, y: 0, style: OverlayStyle(fill: "red"))
         var img = try ov.image()
         XCTAssertTrue(isAt(img, 120, 60, 255, 0, 0), "the panel red right of its hole: \(px(img, 120, 60))")
         XCTAssertFalse(isAt(img, 100, 60, 255, 0, 0), "the hole is filled")
@@ -1194,6 +1284,53 @@ final class ViewTests: XCTestCase {
                         .hasPrefix("show_overlay_image: 3 x 2 pixels need 24 bytes"))
     }
 
+    /// A profile is a sketch: with no style it is stroked -- in its own colour, else white -- and
+    /// not filled; a fill draws only where given; fill only is a fill and stroke "none"; neither
+    /// is refused.
+    func testAnOverlayProfileDrawsAsItsOutlineByDefault() throws {
+        let ov = try offscreen(120, 80)
+        defer { try? ov.close() }
+        try ov.setBackground("black")
+        let square = try Profile.rect(40, 40)   // x 40..80, y 20..60 at the window's centre
+        func px(_ img: ViewImage, _ x: Int) -> [Int] {
+            let i = (40 * Int(img.width) + x) * 4
+            return [Int(img.rgba[i]), Int(img.rgba[i + 1]), Int(img.rgba[i + 2])]
+        }
+        // Any pixel of row 40 from x0 to x1 passing ok: a 1 px stroke on the right edge (x 80)
+        // may fall across two columns.
+        func edge(_ img: ViewImage, _ x0: Int, _ x1: Int, _ ok: ([Int]) -> Bool) -> Bool { (x0...x1).contains { ok(px(img, $0)) } }
+        let white: ([Int]) -> Bool = { $0.allSatisfy { $0 > 100 } }
+        let red: ([Int]) -> Bool = { $0[0] > 100 && $0[1] < 60 && $0[2] < 60 }
+        let dark: ([Int]) -> Bool = { $0.allSatisfy { $0 < 40 } }
+        // (a) No style: a white edge, an unfilled inside.
+        var o = try ov.showOverlay(square, anchor: .centre, x: 0, y: 0)
+        var img = try ov.image()
+        XCTAssertTrue(edge(img, 78, 82, white), "no style: the edge is stroked white: \(px(img, 79)) \(px(img, 80))")
+        XCTAssertTrue(dark(px(img, 60)), "no style: the inside is not filled: \(px(img, 60))")
+        try o.remove()
+        // (b) A coloured profile: stroked in its colour, still not filled.
+        o = try ov.showOverlay(try square.coloured("red"), anchor: .centre, x: 0, y: 0)
+        img = try ov.image()
+        XCTAssertTrue(edge(img, 78, 82, red) && !edge(img, 78, 82, white), "a coloured profile strokes in its colour: \(px(img, 79)) \(px(img, 80))")
+        XCTAssertTrue(dark(px(img, 60)), "a coloured profile is not filled: \(px(img, 60))")
+        try o.remove()
+        // (c) Fill only: a fill and stroke "none".
+        o = try ov.showOverlay(square, anchor: .centre, x: 0, y: 0, style: OverlayStyle(fill: "lime", stroke: "none"))
+        img = try ov.image()
+        let inside = px(img, 60)
+        XCTAssertTrue(inside[1] > 200 && inside[0] < 60 && inside[2] < 60, "fill only: the inside is lime: \(inside)")
+        XCTAssertFalse(edge(img, 76, 84) { $0[0] > 60 || $0[2] > 60 }, "fill only: no stroke on the edge")
+        try o.remove()
+        // Raw Beziers have no colour of their own: white.
+        o = try ov.showOverlay(curves: try square.beziers().map { Float($0) }, anchor: .centre, x: 0, y: 0)
+        img = try ov.image()
+        XCTAssertTrue(edge(img, 78, 82, white) && dark(px(img, 60)), "raw Beziers: stroked white, not filled")
+        try o.remove()
+        // (d) Neither a fill nor a stroke: refused.
+        XCTAssertEqual(message { _ = try ov.showOverlay(square, anchor: .centre, x: 0, y: 0, style: OverlayStyle(fill: "none", stroke: "none")) },
+                       "show_overlay: neither a fill nor a stroke")
+    }
+
     /// show_points (view ABI 1.11), through the table rigged: the points, their count, the colour
     /// and the size reach the library as given and an item comes back; no colour and no size are
     /// rgb NULL and 8; four numbers and a two-number colour are refused before the library.
@@ -1232,28 +1369,28 @@ final class ViewTests: XCTestCase {
     private func coloursDrawn(text: Bool, scene: Scene?) throws -> ViewImage {
         let view = try offscreen(160, 120)
         func pick(_ words: String, _ numbers: any Colour) -> any Colour { text ? words : numbers }
-        try view.layer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
-        if text { try view.background("#ff0") } else { try view.background(SIMD3<Float>(1, 1, 0)) }
+        try view.setLayer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
+        if text { try view.setBackground("#ff0") } else { try view.setBackground(SIMD3<Float>(1, 1, 0)) }
         let square: [Float] = [-4, -1, 0, -2, -1, 0, -2, 1, 0, -4, 1, 0]
         let triangles: [UInt32] = [0, 1, 2, 0, 2, 3]
         _ = try view.showMesh(positions: square, indices: triangles, rgb: pick("Red", SIMD3<Float>(1, 0, 0)))
         var lifted = square
         for i in stride(from: 1, to: lifted.count, by: 3) { lifted[i] += 2.5 }
-        try view.showMesh(positions: lifted, indices: triangles).colour(pick("#00f", SIMD3<Float>(0, 0, 1)))
+        try view.showMesh(positions: lifted, indices: triangles).setColour(pick("#00f", SIMD3<Float>(0, 0, 1)))
         let cube = try Solid.cuboid(2, 2, 2)
         let solid = try view.showSolid(cube, rgb: pick("LIME", SIMD3<Float>(0, 1, 0)))
         if text {
-            try solid.faceColours([0, 1], ["00ff80", "black"])
+            try solid.setFaceColours([0, 1], ["00ff80", "black"])
         } else {
-            try solid.faceColours([0, 1], [SIMD4<Float>(0, 1, 128 / 255, 1), SIMD4<Float>(0, 0, 0, 1)])
+            try solid.setFaceColours([0, 1], [SIMD4<Float>(0, 1, 128 / 255, 1), SIMD4<Float>(0, 0, 0, 1)])
         }
         _ = try view.showLines([3, 0, 0, 5, 2, 2], rgb: pick("#ffffff", SIMD3<Float>(1, 1, 1)))
         _ = try view.showCurves([3, -2, 0, 1, 4, -1, 0, 1, 5, -2, 1, 1, 6, -1, 0, 1],
                                 rgb: pick("purple", SIMD3<Float>(128 / 255, 0, 128 / 255)))
         if let scene {
             let whole = try view.showScene(scene)
-            try whole.nodeColour(0, pick("white", SIMD4<Float>(1, 1, 1, 1)))
-            try whole.nodeHighlight(0, pick("#f00", SIMD4<Float>(1, 0, 0, 1)))
+            try whole.setNodeColour(0, pick("white", SIMD4<Float>(1, 1, 1, 1)))
+            try whole.setNodeHighlight(0, pick("#f00", SIMD4<Float>(1, 0, 0, 1)))
         }
         try view.standard("iso")
         try view.frame()
@@ -1283,25 +1420,25 @@ final class ViewTests: XCTestCase {
         try view.frame()
         let before = try view.image()
         for bad in ["blurple", "transparent", "rgb(1, 2, 3)", "#f00a", ""] {
-            XCTAssertEqual(message { try square.colour(bad) },
+            XCTAssertEqual(message { try square.setColour(bad) },
                            "cadaclysm_view_parse_colour: colour: \"#rgb\", \"#rrggbb\" or a CSS colour name, not '\(bad)'")
         }
         let cube = try Solid.cuboid(1, 1, 1)
         let refusals: [(String, () throws -> Void)] = [
-            ("background", { try view.background("nope") }),
+            ("background", { try view.setBackground("nope") }),
             ("showLines", { _ = try view.showLines([0, 0, 0, 1, 1, 1], rgb: "nope") }),
             ("showCurves", { _ = try view.showCurves([Float](repeating: 0, count: 16), rgb: "nope") }),
             ("showMesh", { _ = try view.showMesh(positions: [Float](repeating: 0, count: 9), indices: [0, 1, 2], rgb: "nope") }),
             ("showSolid", { _ = try view.showSolid(cube, rgb: "nope") }),
-            ("faceColours", { try square.faceColours([0], ["nope"]) }),
-            ("nodeColour", { try square.nodeColour(0, "nope") }),
-            ("nodeHighlight", { try square.nodeHighlight(0, "nope") }),
+            ("faceColours", { try square.setFaceColours([0], ["nope"]) }),
+            ("nodeColour", { try square.setNodeColour(0, "nope") }),
+            ("nodeHighlight", { try square.setNodeHighlight(0, "nope") }),
         ]
         for (what, call) in refusals {
             XCTAssertTrue(message(call).hasSuffix("not 'nope'"), "\(what): \(message(call))")
         }
         // Not a colour the module reads: refused in its own words.
-        XCTAssertEqual(message { try square.colour([Float](repeating: 0, count: 2)) }, "colour: 3 or 4 numbers, not 2")
+        XCTAssertEqual(message { try square.setColour([Float](repeating: 0, count: 2)) }, "colour: 3 or 4 numbers, not 2")
         XCTAssertEqual(changed(before, try view.image()), 0, "a refused colour reached the view")
     }
 
@@ -1313,7 +1450,7 @@ final class ViewTests: XCTestCase {
     func testTextShowsChangesAndPicksItsLine() throws {
         let view = try offscreen(96, 96)
         defer { try? view.close() }
-        try view.layer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
+        try view.setLayer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
         let origin = SIMD3<Float>(0, 0, 0)
         let twenty: Float = 20
         let blank = try view.image()
@@ -1330,9 +1467,9 @@ final class ViewTests: XCTestCase {
         XCTAssertGreaterThan(changed(oneLine, twoLines), 0, "setText changed nothing on screen")
 
         // The text layer: off, the picture is the blank one; on, the text again.
-        try view.layer(UInt32(CADACLYSM_VIEW_LAYER_TEXT), false)
+        try view.setLayer(UInt32(CADACLYSM_VIEW_LAYER_TEXT), false)
         XCTAssertEqual(changed(try view.image(), blank), 0, "the text layer off still draws text")
-        try view.layer(UInt32(CADACLYSM_VIEW_LAYER_TEXT), true)
+        try view.setLayer(UInt32(CADACLYSM_VIEW_LAYER_TEXT), true)
         XCTAssertEqual(changed(try view.image(), twoLines), 0, "the text layer on did not draw the text again")
 
         // The bundled font's own bytes, from the repository (an SDK layout has no crates/).
@@ -1391,8 +1528,8 @@ final class ViewTests: XCTestCase {
         func counts(_ box: (any Colour)?) throws -> (red: Int, lime: Int) {
             let view = try offscreen(64, 64)
             defer { try? view.close() }
-            try view.layer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
-            try view.background("black")
+            try view.setLayer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
+            try view.setBackground("black")
             _ = try view.showText("HH", at: origin, size: size, colour: "lime", align: "centre", box: box, onTop: true)
             let img = try view.image()
             var red = 0, lime = 0
@@ -1418,6 +1555,119 @@ final class ViewTests: XCTestCase {
 
     // ---- view ABI 1.8: the pick's clicks and point, the double-click opt-in, focus, navigation
 
+    /// 1.28's drafting styles on wgpu offscreen: a dashed line on top, hollow diamond points
+    /// with states, the state colours, a viewport's border and its label, which picks as
+    /// viewport 0 with item 0; the refusals.
+    func testDraftingStyles() throws {
+        let v = try offscreen(64, 48)
+        defer { try? v.close() }
+        let line = try v.showLines([-1, 0, 0, 1, 0, 0])
+        try line.setLineStyle(dash: 6, gap: 4)
+        XCTAssertThrowsError(try line.setLineStyle(dash: 6, gap: 0))
+        try line.setOnTop()
+        let pts = try v.showPoints([0, 0, 0, 1, 0, 0], sizePx: 9)
+        try pts.setPointStyle(.diamond, hollow: true)
+        try pts.setPointStates([.first, .hover])
+        XCTAssertThrowsError(try pts.setPointStates([.hover]))
+        try v.setPointStateColours(hover: SIMD3<Float>(1, 0, 0), selected: "red", first: "#378add")
+        try v.setViewportBorder(0, colour: SIMD3<Float>(1, 0, 0))
+        try v.setViewportLabel(0, text: "FRONT", colour: "red")
+        var found = false
+        for (x, y) in [(8, 8), (10, 10), (12, 8), (9, 12), (14, 10), (7, 6)] as [(UInt32, UInt32)] where !found {
+            if let p = try v.pick(x: x, y: y), p.viewportLabel == 0, p.item == 0 { found = true }
+        }
+        XCTAssertTrue(found, "the label picks as viewport 0")
+        // The enums' raw values against the header's own constants.
+        XCTAssertEqual(PointShape.allCases.map(\.rawValue), [CADACLYSM_VIEW_POINT_DISC, CADACLYSM_VIEW_POINT_RING, CADACLYSM_VIEW_POINT_SQUARE, CADACLYSM_VIEW_POINT_DIAMOND].map { UInt32($0) })
+        XCTAssertEqual(PointState.allCases.map(\.rawValue), [CADACLYSM_VIEW_POINT_STATE_NORMAL, CADACLYSM_VIEW_POINT_STATE_HOVER, CADACLYSM_VIEW_POINT_STATE_SELECTED, CADACLYSM_VIEW_POINT_STATE_FIRST].map { UInt8($0) })
+        XCTAssertThrowsError(try v.setViewportBorder(3, colour: SIMD3<Float>(1, 0, 0)))
+        // Text colours are taken (the library's own parser), and a name it does not know refused.
+        try v.setViewportBorder(0, colour: "red")
+        XCTAssertThrowsError(try v.setViewportLabel(0, text: "FRONT", colour: "notacolour"))
+        // Cleared again: nil text and nil colour are taken.
+        try v.setViewportLabel(0, text: nil)
+        try v.setViewportBorder(0, colour: nil)
+        try v.setPointStateColours()
+        try line.setOnTop(false)
+        try line.setLineStyle()
+        // A colour of the wrong length is refused before the library reads past it.
+        XCTAssertEqual(message { try v.setViewportBorder(0, colour: [Float]([1, 0])) }, "colour: 3 or 4 numbers, not 2")
+    }
+
+    /// The point enums' raw values are the header's CADACLYSM_VIEW_POINT_* numbers (no GPU).
+    func testThePointEnumsAreTheHeaders() {
+        XCTAssertEqual(PointShape.allCases.map(\.rawValue),
+                       [CADACLYSM_VIEW_POINT_DISC, CADACLYSM_VIEW_POINT_RING, CADACLYSM_VIEW_POINT_SQUARE,
+                        CADACLYSM_VIEW_POINT_DIAMOND].map { UInt32($0) })
+        XCTAssertEqual(PointState.allCases.map(\.rawValue),
+                       [CADACLYSM_VIEW_POINT_STATE_NORMAL, CADACLYSM_VIEW_POINT_STATE_HOVER,
+                        CADACLYSM_VIEW_POINT_STATE_SELECTED, CADACLYSM_VIEW_POINT_STATE_FIRST].map { UInt8($0) })
+    }
+
+    /// 1.28's viewport_label, rigged: every pick buffer handed to the library holds -1 on the
+    /// way in; a label hit (item 0) answers viewportLabel from pick, lastPick, run and a pick
+    /// event's pick_viewport_label; -1 answers nil (a miss with no label is no pick). A label
+    /// with a NUL is refused before the library is called.
+    func testTheViewportLabelRidesEveryPickRigged() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        let t = view.library.table
+        let saved = t.pointee
+        defer {
+            t.pointee = saved; spySaid = nil; spyPicked = noPick(); spyLanded = true; spyLabelsIn = []; spyEvents = []
+            spyCalls = []
+        }
+        rig17(t)
+        spyLabelsIn = []
+        spyLanded = true
+        spyPicked = noPick()
+        spyPicked.viewport_label = 2
+        spyPicked.clicks = 1
+        let hit = try XCTUnwrap(try view.pick(x: 1, y: 1), "a label hit is a pick")
+        XCTAssertEqual(hit.item, 0)
+        XCTAssertEqual(hit.viewportLabel, 2, "pick")
+        XCTAssertEqual(try view.lastPick().pick?.viewportLabel, 2, "lastPick")
+        let own = try View.offscreen(width: 32, height: 32)
+        let cam = try own.run()
+        try own.close()
+        XCTAssertEqual(cam.pick?.viewportLabel, 2, "run")
+        XCTAssertFalse(spyLabelsIn.isEmpty)
+        XCTAssertEqual(Set(spyLabelsIn), [-1], "every pick buffer handed over holds viewport_label -1")
+        spyPicked = noPick()
+        XCTAssertNil(try view.pick(x: 1, y: 1), "-1 and item 0: nothing")
+        let miss = try view.lastPick()
+        XCTAssertTrue(miss.landed)
+        XCTAssertNil(miss.pick, "-1 and item 0: nothing landed on")
+        spyPicked.item = 4
+        XCTAssertNil(try XCTUnwrap(try view.pick(x: 1, y: 1)).viewportLabel, "an item hit: no label")
+
+        rigEvents(t)
+        spyEvents = [
+            rawEvent(8) { $0.pick_viewport_label = 1; $0.pick.clicks = 1 },
+            rawEvent(8),
+            rawEvent(8) { $0.pick.item = 3 },
+        ]
+        let got = try view.events()
+        XCTAssertEqual(got.count, 3)
+        guard got.count == 3 else { return }
+        guard case .pick(let labelled) = got[0].kind else { return XCTFail("pick: \(got[0].kind)") }
+        XCTAssertEqual(labelled?.item, 0)
+        XCTAssertEqual(labelled?.viewportLabel, 1, "the event's own pick_viewport_label")
+        guard case .pick(let nothing) = got[1].kind else { return XCTFail("pick: \(got[1].kind)") }
+        XCTAssertNil(nothing, "-1: no pick")
+        guard case .pick(let item) = got[2].kind else { return XCTFail("pick: \(got[2].kind)") }
+        XCTAssertEqual(item?.item, 3)
+        XCTAssertNil(item?.viewportLabel, "an item hit: no label")
+
+        t.pointee.set_viewport_label = { _, _, _, _ in spyCalls.append("label"); return true }
+        spyCalls = []
+        XCTAssertEqual(message { try view.setViewportLabel(0, text: "A\0B") },
+                       "text 'A\\x00B': a NUL character cannot be shown (the C string ends there)")
+        XCTAssertEqual(spyCalls, [], "refused before the library is called")
+        try view.setViewportLabel(0, text: "AB")
+        XCTAssertEqual(spyCalls, ["label"])
+    }
+
     /// A pick and run's pick carry clicks, and the point only where the library set one;
     /// setDoubleClickFrames, focus and navigation reach the library with their arguments.
     func testThePicksClicksAndPointAndThe17CallsRigged() throws {
@@ -1425,10 +1675,10 @@ final class ViewTests: XCTestCase {
         defer { try? view.close() }
         let t = view.library.table
         let saved = t.pointee
-        defer { t.pointee = saved; spySaid = nil; spyPicked = CadaclysmViewPick(); spyNavigation = 0; spyLanded = true }
+        defer { t.pointee = saved; spySaid = nil; spyPicked = noPick(); spyNavigation = 0; spyLanded = true }
         rig17(t)
 
-        spyPicked = CadaclysmViewPick()
+        spyPicked = noPick()
         spyPicked.item = 3
         spyPicked.node = 4
         spyPicked.face = 5
@@ -1571,7 +1821,7 @@ final class ViewTests: XCTestCase {
     func testASnapFindsTheSquaresCorner() throws {
         let view = try offscreen(64, 48)
         defer { try? view.close() }
-        try view.layer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
+        try view.setLayer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
         let square: [Float] = [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]
         // The square's four sides as segments, written out: Swift 6.1 gives up type-checking
         // the nested flatMap this was ("unable to type-check this expression in reasonable time").
@@ -1611,7 +1861,7 @@ final class ViewTests: XCTestCase {
     /// A red square seen from the top, zoomed out so a framing visibly changes the picture.
     private func framedSquare() throws -> (View, UInt32) {
         let view = try offscreen(64, 48)
-        try view.layer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
+        try view.setLayer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
         let square: [Float] = [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]
         let triangles: [UInt32] = [0, 1, 2, 0, 2, 3]
         let item = try view.showMesh(positions: square, indices: triangles, rgb: SIMD3<Float>(1, 0, 0))
@@ -1857,12 +2107,12 @@ final class ViewTests: XCTestCase {
         defer { t.pointee = saved; resetMachiningSpies(); try? view.close() }
         spyMachLog = []
         try item.seekMove(7)
-        try item.colourBy("height")
-        try item.colourBy("tool")
-        try item.colourBy("deviation")
-        try item.overlays()
-        try item.overlays(path: false, tool: true)
-        try item.overlays(path: true, tool: false)
+        try item.setColourBy("height")
+        try item.setColourBy("tool")
+        try item.setColourBy("deviation")
+        try item.setOverlays()
+        try item.setOverlays(path: false, tool: true)
+        try item.setOverlays(path: true, tool: false)
         XCTAssertEqual(spyMachLog, [
             "seek 17 7",
             "colour 17 \(CADACLYSM_VIEW_COLOUR_BY_HEIGHT)", "colour 17 \(CADACLYSM_VIEW_COLOUR_BY_TOOL)",
@@ -1897,18 +2147,18 @@ final class ViewTests: XCTestCase {
         let (view, item, saved, t) = try machiningRig()
         defer { t.pointee = saved; resetMachiningSpies(); try? view.close() }
         spyMachLog = []
-        XCTAssertEqual(message { try item.colourBy("rainbow") }, "mode 'rainbow': one of height, tool, deviation")
+        XCTAssertEqual(message { try item.setColourBy("rainbow") }, "mode 'rainbow': one of height, tool, deviation")
         XCTAssertEqual(spyMachLog, [], "a refused mode reached the library")
         spyColourRefused = true
-        XCTAssertEqual(message { try item.colourBy("deviation") }, "cadaclysm_view_machining_colour_by: deviation needs a part")
+        XCTAssertEqual(message { try item.setColourBy("deviation") }, "cadaclysm_view_machining_colour_by: deviation needs a part")
         try view.close()
         XCTAssertEqual(message { try item.seekMove(1) }, "cadaclysm_view_machining_seek: the view is closed")
-        XCTAssertEqual(message { try item.colourBy("tool") }, "cadaclysm_view_machining_colour_by: the view is closed")
-        XCTAssertEqual(message { try item.overlays() }, "cadaclysm_view_machining_overlays: the view is closed")
+        XCTAssertEqual(message { try item.setColourBy("tool") }, "cadaclysm_view_machining_colour_by: the view is closed")
+        XCTAssertEqual(message { try item.setOverlays() }, "cadaclysm_view_machining_overlays: the view is closed")
         XCTAssertEqual(message { _ = try item.info() }, "cadaclysm_view_machining_info: the view is closed")
         XCTAssertEqual(message { _ = try item.heights() }, "cadaclysm_view_machining_info: the view is closed")
         XCTAssertEqual(message { try item.remove() }, "cadaclysm_view_remove: the view is closed")
-        XCTAssertEqual(message { try item.colourBy("rainbow") }, "mode 'rainbow': one of height, tool, deviation")
+        XCTAssertEqual(message { try item.setColourBy("rainbow") }, "mode 'rainbow': one of height, tool, deviation")
     }
 
     /// F5: the transport reaches the library with its arguments and answers its numbers; a
@@ -1921,8 +2171,8 @@ final class ViewTests: XCTestCase {
         try view.play(speed: 2.5)
         try view.pause()
         try view.seek(10.25)
-        try view.loop()
-        try view.loop(false)
+        try view.setLoop()
+        try view.setLoop(false)
         XCTAssertEqual(spyMachLog, ["play 1.0", "play 2.5", "pause", "seekTime 10.25", "loop true", "loop false"])
         spyTime = 3.5
         spyDuration = 893.25
@@ -1941,7 +2191,7 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(message { try view.play() }, "cadaclysm_view_timeline_play: the view is closed")
         XCTAssertEqual(message { try view.pause() }, "cadaclysm_view_timeline_pause: the view is closed")
         XCTAssertEqual(message { try view.seek(1) }, "cadaclysm_view_timeline_seek: the view is closed")
-        XCTAssertEqual(message { try view.loop() }, "cadaclysm_view_timeline_set_loop: the view is closed")
+        XCTAssertEqual(message { try view.setLoop() }, "cadaclysm_view_timeline_set_loop: the view is closed")
         XCTAssertEqual(message { _ = try view.time }, "cadaclysm_view_timeline_time: the view is closed")
         XCTAssertEqual(message { _ = try view.duration }, "cadaclysm_view_timeline_duration: the view is closed")
         XCTAssertEqual(message { _ = try view.playing }, "cadaclysm_view_timeline_playing: the view is closed")
@@ -2020,15 +2270,15 @@ final class ViewTests: XCTestCase {
         try view.seek(duration + 100)
         try view.draw()
         XCTAssertEqual(try view.time, duration, accuracy: 1e-6, "seek past the end clamps")
-        try view.loop(true)
-        try view.loop(false)
+        try view.setLoop(true)
+        try view.setLoop(false)
         XCTAssertFalse(try view.status().isEmpty, "a status line")
-        try item.colourBy("tool")
-        try item.colourBy("height")
-        let refused = message { try item.colourBy("deviation") }
+        try item.setColourBy("tool")
+        try item.setColourBy("height")
+        let refused = message { try item.setColourBy("deviation") }
         XCTAssertTrue(refused.contains("cadaclysm_view_machining_colour_by"), "deviation with no part: \(refused)")
-        try item.overlays(path: false, tool: false)
-        try item.overlays()
+        try item.setOverlays(path: false, tool: false)
+        try item.setOverlays()
         try view.draw()
         try item.seekMove(0)
         XCTAssertEqual(try item.info().moves > 0, true)
@@ -2036,8 +2286,470 @@ final class ViewTests: XCTestCase {
         // With a part, colouring by deviation works.
         let part = MachiningPart(positions: [-42, -27, 14, 42, -27, 14, 0, 27, 14], indices: [0, 1, 2])
         let withPart = try view.showMachining(job.programs, stock: boxStock, part: part, options: job.options)
-        try withPart.colourBy("deviation")
+        try withPart.setColourBy("deviation")
         try view.draw()
         try withPart.remove()
+    }
+
+    // ---- view ABI 1.26: input events
+
+    /// CadaclysmViewInputEvent is the header's 272 bytes with no implicit padding; the kinds,
+    /// modifier bits and pointer kinds are the header's numbers, written out here.
+    func testTheInputEventIsTheHeaders126Layout() {
+        typealias E = CadaclysmViewInputEvent
+        XCTAssertEqual(MemoryLayout<E>.size, 272)
+        let offsets: [Int?] = [
+            MemoryLayout<E>.offset(of: \E.size), MemoryLayout<E>.offset(of: \E.kind), MemoryLayout<E>.offset(of: \E.time_ms),
+            MemoryLayout<E>.offset(of: \E.x), MemoryLayout<E>.offset(of: \E.y), MemoryLayout<E>.offset(of: \E.wheel_y),
+            MemoryLayout<E>.offset(of: \E.button), MemoryLayout<E>.offset(of: \E.modifiers), MemoryLayout<E>.offset(of: \E.pointer),
+            MemoryLayout<E>.offset(of: \E.pointer_id), MemoryLayout<E>.offset(of: \E.width), MemoryLayout<E>.offset(of: \E.height),
+            MemoryLayout<E>.offset(of: \E.`repeat`), MemoryLayout<E>.offset(of: \E.dropped), MemoryLayout<E>.offset(of: \E.pad0),
+            MemoryLayout<E>.offset(of: \E.key), MemoryLayout<E>.offset(of: \E.pick), MemoryLayout<E>.offset(of: \E.snap),
+            MemoryLayout<E>.offset(of: \E.camera), MemoryLayout<E>.offset(of: \E.pick_viewport_label),
+        ]
+        XCTAssertEqual(offsets, [0, 4, 8, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 96, 136, 224, 268])
+        XCTAssertEqual(MemoryLayout<CadaclysmViewEventPick>.size, 40)
+        let kinds = [CADACLYSM_VIEW_INPUT_EVENT_POINTER_DOWN, CADACLYSM_VIEW_INPUT_EVENT_POINTER_MOVE,
+                     CADACLYSM_VIEW_INPUT_EVENT_POINTER_UP, CADACLYSM_VIEW_INPUT_EVENT_WHEEL,
+                     CADACLYSM_VIEW_INPUT_EVENT_KEY_DOWN, CADACLYSM_VIEW_INPUT_EVENT_KEY_UP,
+                     CADACLYSM_VIEW_INPUT_EVENT_RESIZE, CADACLYSM_VIEW_INPUT_EVENT_PICK,
+                     CADACLYSM_VIEW_INPUT_EVENT_SNAP, CADACLYSM_VIEW_INPUT_EVENT_CLOSE].map { UInt32($0) }
+        XCTAssertEqual(kinds, Array(1...10))
+        XCTAssertEqual([Modifiers.shift, .ctrl, .alt, .meta].map { $0.rawValue }, [1, 2, 4, 8])
+        XCTAssertEqual(PointerKind.allCases.map { $0.rawValue }, [0, 1, 2])
+    }
+
+    /// nextEvent through the table rigged: each kind read by the header's numbers, the
+    /// modifier bits by the header's, nil once none is left, any other failure the library's.
+    func testNextEventReadsEachKindRigged() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        let t = view.library.table
+        let saved = t.pointee
+        defer { t.pointee = saved; spySaid = nil; spyEvents = []; spyEventSizes = [] }
+        rigEvents(t)
+
+        spyEvents = [
+            rawEvent(1) { $0.x = 10; $0.y = 20; $0.button = 2; $0.modifiers = 1 | 4; $0.time_ms = 5 },
+            rawEvent(2) { $0.x = 11; $0.y = 21; $0.pointer = 1; $0.pointer_id = 3 },
+            rawEvent(4) { $0.x = 1; $0.y = 2; $0.wheel_y = -100; $0.modifiers = 2 },
+            rawEvent(5) { setKey(&$0, "KeyR"); $0.`repeat` = 1; $0.modifiers = 8; $0.dropped = 4 },
+            rawEvent(6) { setKey(&$0, "KeyR") },
+            rawEvent(7) { $0.width = 640; $0.height = 480 },
+            rawEvent(8) { $0.pick.item = 3; $0.pick.node = 1; $0.pick.face = 2; $0.pick.clicks = 2; $0.pick.has_point = 1; $0.pick.point = (1, 2, 3) },
+            rawEvent(8),
+            rawEvent(9) { $0.snap.kind = 1; $0.snap.item = 3; $0.snap.edge = 4; $0.snap.clicks = 1 },
+            rawEvent(3) { $0.pointer = 2 },
+            rawEvent(10) { $0.camera.eye = (0, -5, 0); $0.camera.up = (0, 0, 1) },
+            rawEvent(99),
+        ]
+        let got = try view.events()
+        XCTAssertEqual(got.count, 12)
+        guard got.count == 12 else { return }
+        guard case .pointerDown(let down) = got[0].kind else { return XCTFail("pointer down: \(got[0].kind)") }
+        XCTAssertEqual(down, PointerInput(x: 10, y: 20, button: 2, pointer: .mouse, pointerID: 0, modifiers: [.shift, .alt]),
+                       "SHIFT 1, ALT 4")
+        XCTAssertEqual(got[0].timeMs, 5)
+        guard case .pointerMove(let move) = got[1].kind else { return XCTFail("pointer move: \(got[1].kind)") }
+        XCTAssertEqual([move.pointer], [.touch])
+        XCTAssertEqual(move.pointerID, 3)
+        guard case .wheel(let wheel) = got[2].kind else { return XCTFail("wheel: \(got[2].kind)") }
+        XCTAssertEqual(wheel, WheelInput(x: 1, y: 2, wheelY: -100, modifiers: .ctrl), "CTRL 2")
+        guard case .keyDown(let key) = got[3].kind else { return XCTFail("key down: \(got[3].kind)") }
+        XCTAssertEqual(key, KeyInput(key: "KeyR", isRepeat: true, modifiers: .meta), "META 8")
+        XCTAssertEqual(got[3].dropped, 4)
+        guard case .keyUp(let up) = got[4].kind else { return XCTFail("key up: \(got[4].kind)") }
+        XCTAssertEqual(up, KeyInput(key: "KeyR", isRepeat: false, modifiers: []))
+        guard case .resize(let width, let height) = got[5].kind else { return XCTFail("resize: \(got[5].kind)") }
+        XCTAssertEqual([width, height], [640, 480])
+        guard case .pick(let hit) = got[6].kind else { return XCTFail("pick: \(got[6].kind)") }
+        XCTAssertEqual(hit, ViewPick(item: 3, node: 1, face: 2, clicks: 2, point: SIMD3(1, 2, 3), overlay: false))
+        guard case .pick(let miss) = got[7].kind else { return XCTFail("pick: \(got[7].kind)") }
+        XCTAssertNil(miss, "a click on nothing")
+        guard case .snap(let snap) = got[8].kind else { return XCTFail("snap: \(got[8].kind)") }
+        XCTAssertEqual(snap?.kind, .vertex)
+        XCTAssertEqual(snap?.edge, 4)
+        guard case .pointerUp(let pen) = got[9].kind else { return XCTFail("pointer up: \(got[9].kind)") }
+        XCTAssertEqual(pen.pointer, .pen)
+        guard case .close(let cam) = got[10].kind else { return XCTFail("close: \(got[10].kind)") }
+        XCTAssertEqual(cam.eye, SIMD3<Float>(0, -5, 0))
+        XCTAssertEqual(cam.azimuth, -90, accuracy: 1e-9)
+        XCTAssertNil(cam.pick)
+        guard case .other(let unknown) = got[11].kind else { return XCTFail("other: \(got[11].kind)") }
+        XCTAssertEqual(unknown, 99, "a later kind is kept, not dropped")
+        XCTAssertNil(try view.nextEvent())
+        XCTAssertTrue(spyEventSizes.allSatisfy { $0 == 272 }, "the 1.26 struct's size: \(spyEventSizes)")
+
+        t.pointee.next_event = { _, _ in
+            spySaid = cstr("cadaclysm_view_next_event: CadaclysmViewInputEvent.size is 8; this library needs at least 272")
+            return false
+        }
+        XCTAssertEqual(message { _ = try view.nextEvent() },
+                       "cadaclysm_view_next_event: CadaclysmViewInputEvent.size is 8; this library needs at least 272")
+        try view.close()
+        XCTAssertEqual(message { _ = try view.nextEvent() }, "cadaclysm_view_next_event: the view is closed")
+    }
+
+    /// closeWindow, rigged: the library's close, then closed as when pump answers CLOSED; a
+    /// closed window is not closed again; its close event is still read.
+    func testCloseWindowRigged() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        let t = view.library.table
+        let saved = t.pointee
+        defer { t.pointee = saved; spySaid = nil; spyEvents = []; spyClosedWindows = 0 }
+        rigEvents(t)
+        spyClosedWindows = 0
+        try view.closeWindow()
+        XCTAssertTrue(view.isClosed)
+        try view.closeWindow()
+        XCTAssertEqual(spyClosedWindows, 1, "a closed window is not closed again")
+        let e = try XCTUnwrap(try view.nextEvent(), "the close event, read on a closed window")
+        guard case .close(let cam) = e.kind else { return XCTFail("close: \(e.kind)") }
+        XCTAssertEqual(cam.eye, SIMD3<Float>(1, 2, 3))
+    }
+
+    /// run(onEvent), rigged: every event handed over until the callback answers false, which
+    /// closes the window; the key up after it is not handed over; the camera is the close
+    /// event's, the pick the last pick event's (none being left for pick_result).
+    func testRunWithACallbackStopsOnFalseRigged() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        let t = view.library.table
+        let saved = t.pointee
+        defer {
+            t.pointee = saved; spySaid = nil; spyEvents = []; spyClosedWindows = 0; spyPumpMs = []; spyPumpAnswers = []
+            spyLanded = true; spyPicked = noPick()
+        }
+        rigEvents(t)
+        spyClosedWindows = 0
+        spyPumpMs = []
+        spyPumpAnswers = []
+        spyLanded = false
+        spyEvents = [
+            rawEvent(5) { setKey(&$0, "KeyR") },
+            rawEvent(8) { $0.pick.item = 3; $0.pick.node = 1; $0.pick.face = 2; $0.pick.clicks = 1 },
+            rawEvent(5) { setKey(&$0, "KeyQ") },
+            rawEvent(6) { setKey(&$0, "KeyQ") },
+        ]
+        var seen: [String] = []
+        let cam = try view.run { e in
+            switch e.kind {
+            case .keyDown(let k):
+                seen.append("keyDown:\(k.key)")
+                if k.key == "KeyR" { try view.draw() }  // the callback may call the view
+                return k.key != "KeyQ"
+            case .keyUp(let k): seen.append("keyUp:\(k.key)")
+            case .pick: seen.append("pick")
+            case .close: seen.append("close")
+            default: seen.append("other")
+            }
+            return true
+        }
+        XCTAssertEqual(seen, ["keyDown:KeyR", "pick", "keyDown:KeyQ"], "false stops: neither the key up nor the close is handed over")
+        XCTAssertEqual(spyClosedWindows, 1)
+        XCTAssertTrue(view.isClosed)
+        XCTAssertEqual(cam.eye, SIMD3<Float>(1, 2, 3), "the camera the close event carried")
+        XCTAssertEqual(cam.pick?.item, 3, "the last pick event's, none being left for pick_result")
+        XCTAssertEqual(spyPumpMs.first, 16, "pumped 16 ms at a time")
+    }
+
+    /// run(onEvent), rigged: the window closing by itself ends it, the close event handed over
+    /// last; the pick is what pick_result answers then, as run() takes it.
+    func testRunWithACallbackEndsOnTheWindowsOwnCloseRigged() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        let t = view.library.table
+        let saved = t.pointee
+        defer {
+            t.pointee = saved; spySaid = nil; spyEvents = []; spyClosedWindows = 0; spyPumpMs = []; spyPumpAnswers = []
+            spyEye = (10, 0, 0); spyPicked = noPick()
+        }
+        rigEvents(t)
+        spyClosedWindows = 0
+        spyPumpMs = []
+        spyPumpAnswers = [UInt32(CADACLYSM_VIEW_OPEN), UInt32(CADACLYSM_VIEW_CLOSED)]
+        spyEye = (0, -5, 0)
+        spyLanded = true
+        spyPicked = noPick()
+        spyPicked.item = 7
+        spyPicked.clicks = 1
+        spyEvents = [rawEvent(7) { $0.width = 5; $0.height = 6 }]
+        var seen: [String] = []
+        let cam = try view.run { e in
+            if case .resize = e.kind { seen.append("resize") }
+            if case .close = e.kind { seen.append("close") }
+            return true
+        }
+        XCTAssertEqual(seen, ["resize", "close"])
+        XCTAssertEqual(cam.eye, SIMD3<Float>(0, -5, 0))
+        XCTAssertEqual(cam.azimuth, -90, accuracy: 1e-9)
+        XCTAssertEqual(cam.pick?.item, 7, "pick_result's answer, taken as run() takes it")
+        XCTAssertTrue(view.isClosed)
+        XCTAssertEqual(spyClosedWindows, 0, "closed by itself: never closed by the wrapper")
+        XCTAssertEqual(spyPumpMs, [16, 16])
+    }
+
+    /// On the real library an offscreen view queues nothing and has no window to close.
+    func testAnOffscreenViewQueuesNoEventAndHasNoWindowToClose() throws {
+        let view = try offscreen(32, 24)
+        defer { try? view.close() }
+        XCTAssertNil(try view.nextEvent())
+        XCTAssertEqual(message { try view.closeWindow() }, "cadaclysm_view_close: only a view with a window of its own is closed")
+    }
+
+    /// CADACLYSM_VIEW_TEST_QUEUE_INPUT=1 when the view is made: an offscreen view queues what
+    /// input() hands it, as an own window queues its own input -- read back by nextEvent with
+    /// the real library's kinds, names and modifier bits; a click's pick lands with the draw.
+    func testTheTestingHookQueuesAnOffscreenViewsInput() throws {
+        cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", "1")
+        let made: View
+        do {
+            defer { cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", nil) }
+            made = try offscreen(64, 48)
+        }
+        let view = made
+        defer { try? view.close() }
+        let item = try view.showMesh(positions: [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], indices: [0, 1, 2, 0, 2, 3],
+                                     rgb: SIMD3<Float>(1, 0, 0))
+        try view.standard("top")
+        try view.frame()
+        try view.draw()
+        let down = UInt32(CADACLYSM_VIEW_EVENT_DOWN), up = UInt32(CADACLYSM_VIEW_EVENT_UP)
+        _ = try view.input(kind: UInt32(CADACLYSM_VIEW_EVENT_KEY), key: "KeyZ", keyDown: true)
+        _ = try view.input(kind: down, x: 32, y: 24, button: 2, shift: true, timeMS: 1000)
+        _ = try view.input(kind: up, x: 32, y: 24, button: 2, timeMS: 1010)
+        _ = try view.input(kind: down, x: 32, y: 24, timeMS: 2000)
+        _ = try view.input(kind: up, x: 32, y: 24, timeMS: 2010)
+        try view.draw()
+        _ = try view.input(kind: UInt32(CADACLYSM_VIEW_EVENT_WHEEL), x: 3, y: 4, wheelY: -100)
+        let got = try view.events()
+        let names = got.map { e -> String in
+            switch e.kind {
+            case .keyDown: return "keyDown"
+            case .pointerDown: return "pointerDown"
+            case .pointerUp: return "pointerUp"
+            case .pick: return "pick"
+            case .wheel: return "wheel"
+            default: return "\(e.kind)"
+            }
+        }
+        XCTAssertEqual(names, ["keyDown", "pointerDown", "pointerUp", "pointerDown", "pointerUp", "pick", "wheel"])
+        guard names.count == 7 else { return }
+        if case .keyDown(let k) = got[0].kind { XCTAssertEqual(k, KeyInput(key: "KeyZ", isRepeat: false, modifiers: [])) }
+        if case .pointerDown(let p) = got[1].kind {
+            XCTAssertEqual(p.button, 2)
+            XCTAssertEqual(p.modifiers, .shift, "a shifted right press")
+            XCTAssertEqual(p.pointer, .mouse)
+        }
+        if case .pointerDown(let p) = got[3].kind { XCTAssertEqual([p.button, p.modifiers.rawValue], [0, 0]) }
+        if case .wheel(let w) = got[6].kind { XCTAssertEqual(w, WheelInput(x: 3, y: 4, wheelY: -100, modifiers: [])) }
+        guard case .pick(let hit) = got[5].kind, let hit else { return XCTFail("the click's pick: \(got[5].kind)") }
+        XCTAssertEqual([hit.item, hit.clicks], [item.id, 1], "the click's pick: the square")
+        let last = try view.lastPick()
+        XCTAssertTrue(last.landed)
+        XCTAssertEqual(last.pick?.item, hit.item, "lastPick still has it")
+        XCTAssertNil(try view.nextEvent(), "all read")
+    }
+
+    // ---- view ABI 1.27: kernel animations ----
+
+    /// A 4 x 2 x 1 kernel box shown and framed from the top, as the C ABI's turntable test does.
+    private func shownBox(_ view: View) throws -> Item {
+        let item = try view.showSolid(try Solid.cuboid(4, 2, 1))
+        try view.standard("top")
+        try item.frame()
+        return item
+    }
+
+    private func frameDrawn(_ view: View) throws -> ViewImage {
+        try view.draw()
+        return try view.image()
+    }
+
+    private func turntable(_ target: String = "spin", degrees: Double = 30) throws -> Animation {
+        let anim = try Animation()
+        try anim.rotate(target, [(time: 0, value: 0), (time: 1, value: degrees)])
+        return anim
+    }
+
+    /// The header's numbers: the event kind, the all-nodes value and the binding's size.
+    func testTheAnimationBindingIsTheHeaders127Layout() {
+        XCTAssertEqual(UInt32(CADACLYSM_VIEW_INPUT_EVENT_TIMELINE), 11)
+        XCTAssertEqual(UInt32(CADACLYSM_VIEW_ALL_NODES), 0xFFFF_FFFF)
+        typealias B = CadaclysmViewAnimationBinding
+        let wide = MemoryLayout<UnsafeRawPointer>.size == 8
+        XCTAssertEqual(MemoryLayout<B>.size, wide ? 16 : 12)
+        XCTAssertEqual([MemoryLayout<B>.offset(of: \B.item), MemoryLayout<B>.offset(of: \B.node)], wide ? [8, 12] : [4, 8])
+    }
+
+    /// The table rigged: each binding's target, item and node reach the library as given (nil
+    /// node: CADACLYSM_VIEW_ALL_NODES), no binding is a NULL array with count 0, a refusal
+    /// comes before the library, the ghosts' NULL and empty arrays differ.
+    func testAnimationCallsReachTheLibraryRigged() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        let t = view.library.table
+        let saved = t.pointee
+        defer { t.pointee = saved; spyAnimation = []; spySaid = nil }
+        spyAnimation = []
+        t.pointee.last_error = { spySaid }
+        t.pointee.play_animation = { _, animation, bindings, count in
+            var line = "play \(Int(bitPattern: animation)) count \(count) \(bindings == nil ? "NULL" : "array")"
+            for k in 0..<Int(count) {
+                let b = bindings![k]
+                line += " (\(String(cString: b.target)),\(b.item),\(b.node))"
+            }
+            spyAnimation.append(line)
+            spySaid = nil
+            return UInt32(spyAnimation.count)
+        }
+        t.pointee.timeline_remove = { _, track in
+            spyAnimation.append("remove \(track)")
+            if track == 2 { spySaid = cstr("timeline_remove: no track 2"); return false }
+            spySaid = nil
+            return true
+        }
+        t.pointee.set_item_visible = { _, item, on in spyAnimation.append("visible \(item) \(on)"); spySaid = nil; return true }
+        t.pointee.set_node_ghosts = { _, item, nodes, count in
+            spyAnimation.append("ghosts \(item) \(nodes == nil ? "NULL" : "array") \(count) \((0..<Int(count)).map { nodes![$0] })")
+            spySaid = nil
+            return true
+        }
+        let all = UInt32.max
+        let item = Item(view: view, id: 41)
+        let other = Item(view: view, id: 42)
+        let h = OpaquePointer(bitPattern: 77)
+        XCTAssertEqual(try view.playAnimationHandle(h, [AnimationBinding(target: "lid", item: item, node: 3),
+                                                        AnimationBinding(target: "spin", item: other.id),
+                                                        AnimationBinding(target: "arm", item: item, node: 5)]), 1)
+        XCTAssertEqual(spyAnimation.last, "play 77 count 3 array (lid,41,3) (spin,42,\(all)) (arm,41,5)",
+                       "node nil is CADACLYSM_VIEW_ALL_NODES")
+        XCTAssertEqual(try view.playAnimationHandle(h, []), 2)
+        XCTAssertEqual(spyAnimation.last, "play 77 count 0 NULL", "no bindings: a NULL array, count 0")
+        XCTAssertEqual(message { _ = try view.playAnimationHandle(h, [AnimationBinding(target: "a\u{0}b", item: 1)]) },
+                       "binding 0: target 'a\\x00b' holds a NUL character")
+        XCTAssertEqual(spyAnimation.count, 2, "the refusal came before the library")
+        try view.removeTrack(1)
+        XCTAssertEqual(spyAnimation.last, "remove 1")
+        XCTAssertEqual(message { try view.removeTrack(2) }, "timeline_remove: no track 2")
+        try item.setVisible(false)
+        try other.setVisible(true)
+        XCTAssertEqual(Array(spyAnimation.suffix(2)), ["visible 41 false", "visible 42 true"])
+        try item.setNodeGhosts([2, 0])
+        XCTAssertEqual(spyAnimation.last, "ghosts 41 array 2 [2, 0]")
+        try item.setNodeGhosts(nil)
+        XCTAssertEqual(spyAnimation.last, "ghosts 41 NULL 0 []", "nil clears: a NULL array")
+        try item.setNodeGhosts([])
+        XCTAssertTrue(spyAnimation.last?.hasPrefix("ghosts 41 array 0") ?? false, "[]: a non-NULL empty array")
+        try view.close()
+        XCTAssertEqual(message { try view.removeTrack(1) }, "cadaclysm_view_timeline_remove: the view is closed")
+    }
+
+    /// Kind 11 is "timeline", and the stamp is all it carries (the other fields are not read).
+    func testATimelineEventIsItsStampAloneRigged() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        let t = view.library.table
+        let saved = t.pointee
+        defer { t.pointee = saved; spySaid = nil; spyEvents = []; spyEventSizes = [] }
+        rigEvents(t)
+        spyEvents = [rawEvent(11) { $0.time_ms = 9.5; $0.x = 3; $0.width = 7; $0.dropped = 2 }]
+        let got = try view.events()
+        XCTAssertEqual(got.count, 1)
+        guard got.count == 1, case .timeline = got[0].kind else { return XCTFail("timeline: \(got.map { $0.kind })") }
+        XCTAssertEqual(got[0].timeMs, 9.5)
+        XCTAssertEqual(got[0].dropped, 2)
+    }
+
+    func testATurntablePlaysOnTheRealLibraryAndRemovingItRestoresTheRest() throws {
+        let view = try offscreen(64, 48)
+        defer { try? view.close() }
+        let item = try shownBox(view)
+        let rest = try frameDrawn(view)
+        let anim = try turntable()
+        let track = try view.playAnimation(anim, [AnimationBinding(target: "spin", item: item)])
+        XCTAssertEqual(track, 1, "the first track")
+        anim.close()   // the view plays its own copy
+        try view.seek(1)
+        XCTAssertGreaterThan(changed(try frameDrawn(view), rest), 0, "turned 30 degrees, the box draws elsewhere")
+        try view.removeTrack(track)
+        XCTAssertEqual(changed(try frameDrawn(view), rest), 0, "removed: the rest pose again, pixel for pixel")
+        XCTAssertEqual(message { try view.removeTrack(track) }, "timeline_remove: no track 1")
+    }
+
+    func testABindingToAnUnknownItemOrNodeIsRefusedWithTheLibrarysText() throws {
+        let view = try offscreen(64, 48)
+        defer { try? view.close() }
+        let item = try shownBox(view)
+        let anim = try turntable()
+        XCTAssertEqual(message { _ = try view.playAnimation(anim, [AnimationBinding(target: "spin", item: 9999)]) },
+                       "play_animation: no item 9999")
+        XCTAssertEqual(message { _ = try view.playAnimation(anim, [AnimationBinding(target: "spin", item: item, node: 1)]) },
+                       "play_animation: item \(item.id) has no node 1 (it has 1)", "a solid is one node")
+        XCTAssertEqual(message { _ = try view.playAnimation(anim, [AnimationBinding(target: "spin", item: item),
+                                                                    AnimationBinding(target: "spin", item: item)]) },
+                       "play_animation: target \"spin\" is bound twice to item \(item.id)")
+        XCTAssertEqual(message { _ = try view.playAnimationHandle(nil, [AnimationBinding(target: "spin", item: item)]) },
+                       "play_animation: the animation is null")
+    }
+
+    func testSetVisibleHidesTheItemAndShowsItAgainOnTheRealLibrary() throws {
+        let view = try offscreen(64, 48)
+        defer { try? view.close() }
+        let item = try shownBox(view)
+        let rest = try frameDrawn(view)
+        try item.setVisible(false)
+        XCTAssertGreaterThan(changed(try frameDrawn(view), rest), 0, "hidden: the box is gone")
+        try item.setVisible(true)
+        XCTAssertEqual(changed(try frameDrawn(view), rest), 0, "shown again")
+        XCTAssertEqual(message { try Item(view: view, id: 9999).setVisible(false) }, "set_item_visible: no item 9999")
+    }
+
+    func testSetNodeGhostsSetsThenClearsOnTheRealLibrary() throws {
+        do { try ViewLibrary.useWgpu() } catch { try skipOrFail(error) }
+        // Triangles: the exact surfaces draw an x-ray item as they draw it opaque, alone in the picture.
+        let view: View
+        do { view = try View.offscreen(width: 64, height: 48, triangles: true) } catch { try skipOrFail(error) }
+        defer { try? view.close() }
+        let item = try shownBox(view)
+        let rest = try frameDrawn(view)
+        try item.setXray(true)
+        let xray = try frameDrawn(view)
+        try item.setXray(false)
+        try item.setNodeGhosts([0])
+        let ghosted = try frameDrawn(view)
+        XCTAssertGreaterThan(changed(ghosted, rest), 0, "node 0 drawn x-ray")
+        XCTAssertEqual(changed(ghosted, xray), 0, "a solid's one node ghosted is the item x-ray")
+        try item.setNodeGhosts(nil)
+        XCTAssertEqual(changed(try frameDrawn(view), rest), 0, "cleared")
+        XCTAssertEqual(message { try item.setNodeGhosts([1]) }, "set_node_ghosts: item \(item.id) has no node 1 (it has 1)")
+        XCTAssertEqual(message { try Item(view: view, id: 9999).setNodeGhosts(nil) }, "set_node_ghosts: no item 9999")
+    }
+
+    /// CADACLYSM_VIEW_TEST_QUEUE_INPUT=1: an offscreen view queues as an own window does -- one
+    /// timeline event for a draw after a seek moved the clock, none for a draw after that.
+    func testASeekAndADrawQueueOneTimelineEventUnderTheTestingHook() throws {
+        cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", "1")
+        let made: View
+        do {
+            defer { cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", nil) }
+            made = try offscreen(64, 48)
+        }
+        let view = made
+        defer { try? view.close() }
+        let item = try shownBox(view)
+        let anim = try turntable()
+        try view.playAnimation(anim, [AnimationBinding(target: "spin", item: item)])
+        anim.close()
+        try view.draw()
+        _ = try view.events()
+        try view.seek(0.5)
+        try view.draw()
+        let got = try view.events().filter { if case .timeline = $0.kind { return true } else { return false } }
+        XCTAssertEqual(got.count, 1, "\(got)")
+        try view.draw()
+        XCTAssertTrue(try view.events().allSatisfy { if case .timeline = $0.kind { return false } else { return true } },
+                      "the clock still: none")
     }
 }

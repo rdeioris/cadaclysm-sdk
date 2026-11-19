@@ -42,6 +42,40 @@ return function(t)
     t.ok(type(cadaclysm.pick_save) == "function")
   end)
 
+  t.test("lightmap uvs arrive when asked and not otherwise", function()
+    local path = t.fixture("crates/cadaclysm-acis/tests/fixtures/fusion/rhino-fillet-mixed-radii.stp")
+    if not path then return end
+    local plain = cadaclysm.open(path)
+    for n in plain:walk() do t.eq(n.lightmap_uvs, nil, "unasked is off") end
+    plain:close()
+    local lit = cadaclysm.open(path, nil, nil, nil, 256)
+    local count = 0
+    for n in lit:walk() do
+      local got = n.lightmap_uvs
+      if got then
+        local mesh = n.mesh
+        t.eq(got.vertex_count, mesh.vertex_count, "one pair a vertex")
+        t.eq(got.scene, lit, "the table keeps its scene alive")
+        for i = 0, got.vertex_count * 2 - 1 do
+          t.ok(got.uvs[i] >= 0 and got.uvs[i] <= 1, "inside the unit square")
+        end
+        t.eq(mesh.uvs, nil, "no material uvs were asked")
+        count = count + 1
+      end
+    end
+    t.ok(count > 0, "a faced STEP comes back lit")
+    lit:close()
+  end)
+
+  t.test("a lightmap resolution outside 32 unsigned bits is refused", function()
+    local path = t.fixture("crates/cadaclysm-acis/tests/fixtures/fusion/rhino-fillet-mixed-radii.stp")
+    if not path then return end
+    for _, bad in ipairs({ -1, 0x100000000, 1.5 }) do
+      t.raises(function() cadaclysm.open(path, nil, nil, nil, bad) end, "lightmap_resolution")
+    end
+    t.raises(function() cadaclysm.open_memory("x", "step", nil, nil, nil, nil, -1) end, "lightmap_resolution")
+  end)
+
   t.test("geometry diagnostics and forget_meshes", function()
     local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
     t.eq(#scene.geometry_diagnostics, 0)
@@ -323,7 +357,7 @@ return function(t)
     t.eq(man.is_manifold, true)
     t.eq(man.is_closed, true)
     t.eq(man.boundary_edges, 0)
-    local sewn, report = brep:sewed()
+    local sewn, report = brep:sew()
     t.eq(report.free_before, man.boundary_edges)
     t.eq(brep.manifold.boundary_edges, man.boundary_edges)
     sewn:release()
@@ -390,7 +424,7 @@ return function(t)
         t.eq(e, report.free_edges[i])
         t.eq(e.wire, 0)
       end
-      local _, sew = body:sewed()
+      local _, sew = body:sew()
       t.eq(report.sew_pairs, sew.pairs)
       t.ok(report.tolerance > 0)
       t.eq(report.cracks, nil)
@@ -439,7 +473,7 @@ return function(t)
       local scene = cadaclysm.open(path)
       local breps = breps_of(scene)
       local body = breps[2]   -- the 188-free-edge body; the first takes minutes to diagnose
-      local same, report = body:healed()
+      local same, report = body:heal()
       t.eq(getmetatable(same), cadaclysm.Brep)
       t.eq(getmetatable(report), cadaclysm.HealReport)
       t.ok(same.pointer ~= body.pointer, "a new brep")
@@ -449,7 +483,7 @@ return function(t)
       rel(report.tolerance, 1e-4 * body:health().extent, 1e-12, "default tolerance")
       same:release()
       -- at a tolerance of 5: 96 small features, 28 healed, the rest refused as uneven slivers
-      local healed, r = body:healed(5)
+      local healed, r = body:heal(5)
       t.eq(r.tolerance, 5)
       t.eq(("%d %d %d %d %d"):format(r.small_before, #r.fixes, r.small_after, r.free_before, r.free_after),
         "96 28 8 188 88")
@@ -479,7 +513,7 @@ return function(t)
       t.eq(healed:edge_tolerance(0xFFFFFFF0), nil)
       healed:release()
       -- every kind switched off: nothing healed, every small feature refused as toggled
-      local _, off = body:healed(5, false, false, false)
+      local _, off = body:heal(5, false, false, false)
       t.eq(#off.fixes, 0)
       t.eq(#off.refused, 96)
       t.eq(off.free_after, off.free_before)
@@ -491,14 +525,14 @@ return function(t)
       end
       t.eq(("%d %d %d"):format(per.short_edge, per.sliver_face, per.tiny_face), "64 26 6")
       -- one kind on: the others are refused as toggled, and only it heals
-      local _, edges_only = body:healed(5, true, false, false)
+      local _, edges_only = body:heal(5, true, false, false)
       for _, x in ipairs(edges_only.refused) do
         if x.kind ~= "short_edge" then t.eq(x.why, "toggled") end
       end
       for _, f in ipairs(edges_only.fixes) do t.ok(f.kind == "short_edge" or f.kind == "collapsed_edge", f.kind) end
       for _, b in ipairs(breps) do b:release() end
       scene:close()
-      t.raises(function() body:healed() end, "released")
+      t.raises(function() body:heal() end, "released")
       t.raises(function() body:health() end, "released")
       t.raises(function() body:edge_tolerance(0) end, "released")
     end)
@@ -555,6 +589,76 @@ return function(t)
       end
       t.eq(table.concat(whys, " "), "would_empty_loop closed seam chain neighbours_part uneven non_manifold "
         .. "has_holes body_guard toggled unsupported")
+    end)
+
+    -- ---- recognition (Python's test_brep_recognize_* and its decoder test)
+
+    t.test("brep recognize takes a 3dm ball back to a sphere and leaves the original", function()
+      -- box-union-sphere.3dm: a box unioned with a ball, every face stored as NURBS.
+      local path = t.fixture("crates/cadaclysm-acis/tests/fixtures/rhino/box-union-sphere.3dm")
+      if not path then return end
+      local scene = cadaclysm.open(path)
+      local body = breps_of(scene)[1]
+      local back, report = body:recognize()
+      t.eq(getmetatable(back), cadaclysm.Brep)
+      t.eq(getmetatable(report), cadaclysm.RecognizeReport)
+      t.ok(back.pointer ~= body.pointer, "a new brep")
+      local kinds, seen, worst = {}, {}, -1
+      for _, f in ipairs(report.faces) do
+        t.eq(getmetatable(f), cadaclysm.RecognizedFace)
+        kinds[f.kind] = true
+        t.eq(seen[f.face], nil, "face " .. f.face .. " once")
+        seen[f.face] = true
+        t.ok(f.deviation <= report.tolerance, "face deviation within the tolerance")
+        if f.deviation > worst then worst = f.deviation end
+      end
+      t.ok(kinds.sphere and kinds.plane, "a sphere and a plane among the faces")
+      t.eq(report.worst_face, worst, "worst_face the largest face deviation")
+      for _, e in ipairs(report.edges) do
+        t.eq(getmetatable(e), cadaclysm.RecognizedEdge)
+        t.ok(e.deviation <= report.tolerance, "edge deviation within the tolerance")
+        -- the edges named as the brep names them
+        t.ok(back:edge_tolerance(e.edge) ~= nil, "edge " .. e.edge .. " on the result")
+      end
+      back:release()
+      local again, quarter = body:recognize(0.25)
+      t.eq(quarter.tolerance, 0.25)
+      again:release()
+      scene:close()
+    end)
+
+    t.test("the recognize decoder reads every column of distinct rows", function()
+      -- counts 10 (faces per kind, faces left, edges per kind, edges left), sizes 3
+      -- (tolerance, worst face, worst edge), each row two items and one size. Every figure
+      -- different, so a swapped column cannot read back.
+      local r = cadaclysm._recognize_report({ 1, 2, 3, 4, 5, 6, 7, 8, 9, 11 }, { 0.5, 0.25, 0.125 },
+        { 10, 4, 12, 0 }, { 1.5, 2.5 }, { 20, 0, 21, 3 }, { 7.5, 0 / 0 },
+        { 30, 2, 31, 1, 32, 0 }, { 0.75, 0.0625, 0.03125 })
+      t.eq(("%g %g %g %d"):format(r.tolerance, r.worst_face, r.worst_edge, r.edges_left), "0.5 0.25 0.125 11")
+      local faces = {}
+      for i, f in ipairs(r.faces) do faces[i] = ("%d %s %g"):format(f.face, f.kind, f.deviation) end
+      t.eq(table.concat(faces, ", "), "10 torus 1.5, 12 plane 2.5")
+      local refused = {}
+      for i, x in ipairs(r.refused) do
+        t.eq(getmetatable(x), cadaclysm.RecognizeRefusal)
+        refused[i] = ("%d %s %s"):format(x.face, x.why, tostring(x.closest))
+      end
+      t.eq(table.concat(refused, ", "), "20 no_kind 7.5, 21 too_few_samples nil")
+      local edges = {}
+      for i, e in ipairs(r.edges) do edges[i] = ("%d %s %g"):format(e.edge, e.kind, e.deviation) end
+      t.eq(table.concat(edges, ", "), "30 ellipse 0.75, 31 circle 0.0625, 32 line 0.03125")
+      local kinds = {}
+      for kind = 0, 4 do
+        kinds[#kinds + 1] = cadaclysm._recognize_report({ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, { 0, 0, 0 },
+          { 0, kind }, { 0 }, {}, {}, {}, {}).faces[1].kind
+      end
+      t.eq(table.concat(kinds, " "), "plane cylinder cone sphere torus")
+      local whys = {}
+      for why = 0, 3 do
+        whys[#whys + 1] = cadaclysm._recognize_report({ 0, 0, 0, 0, 0, 1, 0, 0, 0, 0 }, { 0, 0, 0 }, {}, {},
+          { 0, why }, { 0 }, {}, {}).refused[1].why
+      end
+      t.eq(table.concat(whys, " "), "no_kind mixed_normals parameter_trims too_few_samples")
     end)
   end
 
@@ -1162,7 +1266,7 @@ return function(t)
   end)
 
   t.test("ffi types are the header's", function()
-    t.eq(ffi.sizeof("CadaclysmOpenOptions"), ffi.abi("64bit") and 96 or ffi.sizeof("CadaclysmOpenOptions"))
+    t.eq(ffi.sizeof("CadaclysmOpenOptions"), ffi.abi("64bit") and 104 or ffi.sizeof("CadaclysmOpenOptions"))
     t.eq(ffi.sizeof("CadaclysmMesh"), ffi.abi("64bit") and 48 or ffi.sizeof("CadaclysmMesh"))
   end)
 
@@ -1432,6 +1536,76 @@ return function(t)
     scene:close()
   end)
 
+  t.test("a file reads its work calendar", function()
+    local MONDAY = 1772409600
+    local scene = cadaclysm.open(t.fixture("samples/schedule-calendar.ifc"))
+    local calendars = scene.calendars
+    t.eq(#calendars, 1)
+    local cal = calendars[1]
+    t.eq(cal.name, "Site calendar")
+    t.eq(cal.identification, "CAL-1")
+    t.eq(cal.kind, "FIRSTSHIFT")
+    t.eq(cal.kind_name, "")
+    t.eq(#cal.working, 1)
+    local weekdays = cal.working[1]
+    t.eq(weekdays.name, "Weekdays")
+    t.eq(weekdays.start, MONDAY - 60 * D)
+    t.eq(weekdays.finish, nil)
+    local p = weekdays.pattern
+    t.eq(p.kind, "WEEKLY")
+    t.eq(table.concat(p.days, ","), "")
+    t.eq(table.concat(p.weekdays, ","), "1,2,3,4,5")
+    t.eq(table.concat(p.months, ","), "")
+    t.eq(p.position, nil)
+    t.eq(p.interval, nil)
+    t.eq(p.occurrences, nil)
+    t.eq(#p.periods, 2)
+    t.eq(p.periods[1][1], 28800)
+    t.eq(p.periods[1][2], 43200)
+    t.eq(p.periods[2][1], 46800)
+    t.eq(p.periods[2][2], 61200)
+    t.eq(#cal.exceptions, 1)
+    local easter = cal.exceptions[1]
+    t.eq(easter.name, "Easter Monday")
+    t.eq(easter.start, nil)
+    t.eq(easter.finish, nil)
+    t.eq(easter.pattern.kind, "YEARLY_BY_DAY_OF_MONTH")
+    t.eq(table.concat(easter.pattern.days, ","), "6")
+    t.eq(table.concat(easter.pattern.months, ","), "4")
+    t.eq(#easter.pattern.periods, 0)
+
+    local slab = scene.schedules[1].tasks[1]
+    t.eq(slab.calendar_index, 0)
+    t.eq(slab.calendar.index, cal.index)
+    t.eq(slab.time.duration_kind, "WORKTIME")
+    t.eq(slab.time.work_duration.days, 10)
+    t.eq(slab.time.work_duration.seconds, 0)
+
+    local week = cal:working_periods(MONDAY, MONDAY + 7 * D)
+    t.eq(#week, 10)
+    t.eq(week[1][1], 1772438400)
+    t.eq(week[1][2], 1772452800)
+    t.eq(cal:working_seconds(MONDAY, MONDAY + 7 * D), 10 * 4 * 3600)
+    t.eq(#cal:working_periods(1775433600, 1775520000), 0) -- Easter Monday 2026-04-06
+    t.eq(cal:add_work(1772438400, 10), 1773421200)
+
+    local e = t.raises(function() cal:working_periods(1, 0) end)
+    t.eq(e.message, "from must not be after to")
+    e = t.raises(function() cal:working_seconds(0 / 0, 0) end)
+    t.eq(e.message, "from and to must be finite")
+    e = t.raises(function() cal:add_work(T0, math.huge) end)
+    t.eq(e.message, "from and to must be finite")
+    scene:close()
+  end)
+
+  t.test("a file without a work calendar has none", function()
+    local scene = cadaclysm.open(t.fixture("samples/schedule.ifc"))
+    t.eq(#scene.calendars, 0)
+    local slab = scene.schedules[1].tasks[1]
+    t.eq(slab.calendar_index, nil)
+    t.eq(slab.calendar, nil)
+    scene:close()
+  end)
   t.test("a file without a schedule has none", function()
     local cube = cadaclysm.open(t.fixture("samples/cube.scad"))
     t.eq(#cube.schedules, 0)

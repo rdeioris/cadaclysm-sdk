@@ -142,6 +142,7 @@ koffi.opaque('CadaclysmFemMesh');
 koffi.opaque('CadaclysmPose');
 koffi.opaque('CadaclysmHealth');
 koffi.opaque('CadaclysmHeal');
+koffi.opaque('CadaclysmRecognize');
 const CadaclysmWindow = koffi.struct('CadaclysmWindow', {
   kind: 'uint32_t',
   handle: 'void *',
@@ -179,6 +180,7 @@ const CadaclysmOpenOptions = koffi.struct('CadaclysmOpenOptions', {
   schema_length: 'size_t',
   pick: 'CadaclysmPick *',
   pick_user: 'void *',
+  lightmap_resolution: 'uint32_t',
 });
 const CadaclysmBounds = koffi.struct('CadaclysmBounds', {
   min: koffi.array('float', 3),
@@ -385,6 +387,21 @@ const CadaclysmTaskTime = koffi.struct('CadaclysmTaskTime', {
   has_duration: 'bool',
   duration: 'double',
 });
+// One work time of a calendar (`cadaclysm_calendar_work_time`): each `has_*` says its value is given.
+const CadaclysmWorkTime = koffi.struct('CadaclysmWorkTime', {
+  has_start: 'bool',
+  start: 'double',
+  has_finish: 'bool',
+  finish: 'double',
+  has_pattern: 'bool',
+  kind: 'uint32_t',
+  has_position: 'bool',
+  position: 'int32_t',
+  has_interval: 'bool',
+  interval: 'uint32_t',
+  has_occurrences: 'bool',
+  occurrences: 'uint32_t',
+});
 // One element's state on a date: `cadaclysm_schedule_at`'s rows.
 const CadaclysmElementState = koffi.struct('CadaclysmElementState', {
   node: 'uint32_t',
@@ -470,6 +487,13 @@ function _lib() {
     brep_heal_summary: f('bool cadaclysm_brep_heal_summary(const CadaclysmHeal *h, _Out_ uint32_t *counts, _Out_ double *sizes)'),
     brep_heal_fixes: f('uint32_t cadaclysm_brep_heal_fixes(const CadaclysmHeal *h, _Out_ uint32_t *items, _Out_ double *sizes)'),
     brep_heal_refused: f('uint32_t cadaclysm_brep_heal_refused(const CadaclysmHeal *h, _Out_ uint32_t *items, _Out_ double *sizes)'),
+    brep_recognized: f('CadaclysmRecognize *cadaclysm_brep_recognized(const CadaclysmBrep *brep, double tolerance)'),
+    brep_recognize_body: f('const CadaclysmBrep *cadaclysm_brep_recognize_body(const CadaclysmRecognize *r)'),
+    brep_recognize_free: f('void cadaclysm_brep_recognize_free(CadaclysmRecognize *r)'),
+    brep_recognize_summary: f('bool cadaclysm_brep_recognize_summary(const CadaclysmRecognize *r, _Out_ uint32_t *counts, _Out_ double *sizes)'),
+    brep_recognize_faces: f('uint32_t cadaclysm_brep_recognize_faces(const CadaclysmRecognize *r, _Out_ uint32_t *items, _Out_ double *sizes)'),
+    brep_recognize_refused: f('uint32_t cadaclysm_brep_recognize_refused(const CadaclysmRecognize *r, _Out_ uint32_t *items, _Out_ double *sizes)'),
+    brep_recognize_edges: f('uint32_t cadaclysm_brep_recognize_edges(const CadaclysmRecognize *r, _Out_ uint32_t *items, _Out_ double *sizes)'),
     brep_edge_tolerance: f('double cadaclysm_brep_edge_tolerance(const CadaclysmBrep *brep, uint32_t edge)'),
     node_count: f('uint32_t cadaclysm_node_count(const CadaclysmScene *scene)'),
     root_count: f('uint32_t cadaclysm_root_count(const CadaclysmScene *scene)'),
@@ -523,6 +547,7 @@ function _lib() {
     node_generator: f('const char *cadaclysm_node_generator(const CadaclysmScene *scene, uint32_t node)'),
     lod_levels: f('uint32_t cadaclysm_lod_levels(void)'),
     node_mesh_lod: f('CadaclysmMesh cadaclysm_node_mesh_lod(const CadaclysmScene *scene, uint32_t node, uint32_t level)'),
+    node_mesh_lightmap_uvs: f('const float *cadaclysm_node_mesh_lightmap_uvs(const CadaclysmScene *scene, uint32_t node, _Out_ uint32_t *count)'),
     node_lod_error: f('float cadaclysm_node_lod_error(const CadaclysmScene *scene, uint32_t node, uint32_t level)'),
     diagnostic_count: f('uint32_t cadaclysm_diagnostic_count(const CadaclysmScene *scene)'),
     diagnostic: f('const char *cadaclysm_diagnostic(const CadaclysmScene *scene, uint32_t index)'),
@@ -640,6 +665,28 @@ function _lib() {
     task_link: f('bool cadaclysm_task_link(const CadaclysmScene *scene, uint32_t s, uint32_t l, _Out_ uint32_t *from, _Out_ uint32_t *to, _Out_ uint32_t *kind, _Out_ double *lag, _Out_ bool *has_lag)'),
     task_link_kind_name: f('const char *cadaclysm_task_link_kind_name(const CadaclysmScene *scene, uint32_t s, uint32_t l)'),
     schedule_at: f('int64_t cadaclysm_schedule_at(const CadaclysmScene *scene, uint32_t s, double date, uint32_t dates, CadaclysmElementState *out, uint32_t capacity)'),
+    // IFC work calendars: when work happens, each a list of working and exception work times,
+    // and the queries over them. The queries return a status; `calendar_error_message` is its text.
+    calendar_count: f('uint32_t cadaclysm_calendar_count(const CadaclysmScene *scene)'),
+    calendar_name: f('const char *cadaclysm_calendar_name(const CadaclysmScene *scene, uint32_t c)'),
+    calendar_identification: f('const char *cadaclysm_calendar_identification(const CadaclysmScene *scene, uint32_t c)'),
+    calendar_kind: f('uint32_t cadaclysm_calendar_kind(const CadaclysmScene *scene, uint32_t c)'),
+    calendar_kind_name: f('const char *cadaclysm_calendar_kind_name(const CadaclysmScene *scene, uint32_t c)'),
+    calendar_working_count: f('uint32_t cadaclysm_calendar_working_count(const CadaclysmScene *scene, uint32_t c)'),
+    calendar_exception_count: f('uint32_t cadaclysm_calendar_exception_count(const CadaclysmScene *scene, uint32_t c)'),
+    calendar_work_time: f('bool cadaclysm_calendar_work_time(const CadaclysmScene *scene, uint32_t c, bool exception, uint32_t w, _Out_ CadaclysmWorkTime *out)'),
+    calendar_work_time_name: f('const char *cadaclysm_calendar_work_time_name(const CadaclysmScene *scene, uint32_t c, bool exception, uint32_t w)'),
+    calendar_work_time_days: f('uint32_t cadaclysm_calendar_work_time_days(const CadaclysmScene *scene, uint32_t c, bool exception, uint32_t w, _Out_ uint8_t *out, uint32_t capacity)'),
+    calendar_work_time_weekdays: f('uint32_t cadaclysm_calendar_work_time_weekdays(const CadaclysmScene *scene, uint32_t c, bool exception, uint32_t w, _Out_ uint8_t *out, uint32_t capacity)'),
+    calendar_work_time_months: f('uint32_t cadaclysm_calendar_work_time_months(const CadaclysmScene *scene, uint32_t c, bool exception, uint32_t w, _Out_ uint8_t *out, uint32_t capacity)'),
+    calendar_work_time_periods: f('uint32_t cadaclysm_calendar_work_time_periods(const CadaclysmScene *scene, uint32_t c, bool exception, uint32_t w, _Out_ double *out, uint32_t capacity)'),
+    task_calendar: f('bool cadaclysm_task_calendar(const CadaclysmScene *scene, uint32_t s, uint32_t t, _Out_ uint32_t *out)'),
+    task_duration_kind: f('uint32_t cadaclysm_task_duration_kind(const CadaclysmScene *scene, uint32_t s, uint32_t t)'),
+    task_work_duration: f('bool cadaclysm_task_work_duration(const CadaclysmScene *scene, uint32_t s, uint32_t t, _Out_ double *days, _Out_ double *seconds)'),
+    calendar_working_periods: f('uint32_t cadaclysm_calendar_working_periods(const CadaclysmScene *scene, uint32_t c, double from, double to, _Out_ double *out, uint32_t capacity, _Out_ uint32_t *count)'),
+    calendar_working_seconds: f('uint32_t cadaclysm_calendar_working_seconds(const CadaclysmScene *scene, uint32_t c, double from, double to, _Out_ double *out)'),
+    calendar_add_work: f('uint32_t cadaclysm_calendar_add_work(const CadaclysmScene *scene, uint32_t c, double from, double days, double seconds, _Out_ double *out)'),
+    calendar_error_message: f('const char *cadaclysm_calendar_error_message(uint32_t status)'),
     pose_sequence: f('CadaclysmPose *cadaclysm_pose_sequence(const CadaclysmScene *scene, uint32_t sequence, double t, uint32_t ground)'),
     pose_free: f('void cadaclysm_pose_free(CadaclysmPose *pose)'),
     pose_ground: f('uint32_t cadaclysm_pose_ground(const CadaclysmPose *pose)'),
@@ -1173,7 +1220,7 @@ class Brep {
    * tolerance, or more than two), the widest gap sewed, and the two
    * tolerances used. Omitted or `undefined` takes the default.
    */
-  sewed({ tolerance, vertex } = {}) {
+  sew({ tolerance, vertex } = {}) {
     const counts = new Uint32Array(4);
     const gaps = new Float64Array(3);
     const p = _lib().brep_sew(this.pointer, tolerance ?? NaN, vertex ?? NaN, counts, gaps);
@@ -1189,7 +1236,7 @@ class Brep {
   /**
    * What is wrong with this brep, as a `HealthReport`: the free edges (the sides one face
    * bounds) and the wires they chain into, each with its nearest partner and the gap to it;
-   * the features below `tolerance`; the loose edges; and what `sewed` would join and leave.
+   * the features below `tolerance`; the loose edges; and what `sew` would join and leave.
    * Nothing moves. `tolerance` is an absolute length, by default `1e-4` times the diagonal;
    * omitted, NaN, infinite, zero or negative takes the default, and the report shows what was
    * used. `mesh: true` also meshes the brep and reports where the mesh cracks (`cracks`);
@@ -1226,13 +1273,13 @@ class Brep {
    * the default, as `health`'s). `edges`, `faces` and `holes` (each true by default) switch
    * each kind of fix; a kind switched off is refused as `toggled`.
    */
-  healed({ tolerance, edges = true, faces = true, holes = true } = {}) {
+  heal({ tolerance, edges = true, faces = true, holes = true } = {}) {
     const l = _lib();
     const h = l.brep_healed(this.pointer, tolerance ?? NaN, _healFlags({ edges, faces, holes }));
-    if (h === null) throw new CadaclysmError(_lastError() || 'healed');
+    if (h === null) throw new CadaclysmError(_lastError() || 'heal');
     try {
       const counts = new Uint32Array(11), sizes = new Float64Array(2);
-      if (!l.brep_heal_summary(h, counts, sizes)) throw new CadaclysmError(_lastError() || 'healed');
+      if (!l.brep_heal_summary(h, counts, sizes)) throw new CadaclysmError(_lastError() || 'heal');
       let n = l.brep_heal_fixes(h, null, null);
       const fixItems = new Uint32Array(2 * n), fixSizes = new Float64Array(2 * n);
       if (n) l.brep_heal_fixes(h, fixItems, fixSizes);
@@ -1241,10 +1288,42 @@ class Brep {
       if (n) l.brep_heal_refused(h, refusedItems, refusedSizes);
       const report = _healReport(counts, sizes, fixItems, fixSizes, refusedItems, refusedSizes);
       const body = l.brep_heal_body(h);
-      if (body === null) throw new CadaclysmError(_lastError() || 'healed');
+      if (body === null) throw new CadaclysmError(_lastError() || 'heal');
       return { brep: new Brep(body), report };
     } finally {
       l.brep_heal_free(h);
+    }
+  }
+  /**
+   * This brep with its free-form surfaces and edge curves given their analytic kind, and what
+   * was taken: `{ brep, report }`, the brep a new one (release it), the report a
+   * `RecognizeReport`; this one is left as it was. A NURBS (or revolved, extruded or swept)
+   * surface that is a plane, cylinder, cone, sphere or torus within `tolerance` of every sample
+   * of its faces and every point of their edges becomes exactly that, and an edge curve that is
+   * a line, circle or ellipse within it likewise. Faces and edges keep their numbers.
+   * `tolerance` omitted, or not finite and positive, takes the default, 1e-6 of the body's
+   * extent (the report shows what was used).
+   */
+  recognize({ tolerance } = {}) {
+    const l = _lib();
+    const h = l.brep_recognized(this.pointer, tolerance ?? NaN);
+    if (h === null) throw new CadaclysmError(_lastError() || 'recognized');
+    try {
+      const counts = new Uint32Array(10), sizes = new Float64Array(3);
+      if (!l.brep_recognize_summary(h, counts, sizes)) throw new CadaclysmError(_lastError() || 'recognized');
+      const rows = [];
+      for (const read of [l.brep_recognize_faces, l.brep_recognize_refused, l.brep_recognize_edges]) {
+        const n = read(h, null, null);
+        const items = new Uint32Array(2 * n), figures = new Float64Array(n);
+        if (n) read(h, items, figures);
+        rows.push(items, figures);
+      }
+      const report = _recognizeReport(counts, sizes, ...rows);
+      const body = l.brep_recognize_body(h);
+      if (body === null) throw new CadaclysmError(_lastError() || 'recognized');
+      return { brep: new Brep(body), report };
+    } finally {
+      l.brep_recognize_free(h);
     }
   }
   /**
@@ -1322,13 +1401,13 @@ class HealthReport {
   }
 }
 
-/** One small feature `healed` removed: its `kind` (as `SmallFeature.kind`), its `index` in the input, its `size`, and how far the vertices it merged `moved`. */
+/** One small feature `heal` removed: its `kind` (as `SmallFeature.kind`), its `index` in the input, its `size`, and how far the vertices it merged `moved`. */
 class HealFix {
   constructor(kind, index, size, moved) { this.kind = kind; this.index = index; this.size = size; this.moved = moved; }
 }
 
 /**
- * One small feature `healed` left, and why: `kind` and `index` as `HealFix`'s; `why` is
+ * One small feature `heal` left, and why: `kind` and `index` as `HealFix`'s; `why` is
  * 'would_empty_loop', 'closed', 'seam', 'chain', 'neighbours_part', 'uneven', 'non_manifold',
  * 'has_holes', 'body_guard', 'toggled' or 'unsupported'; `figure` the chain's width or the
  * neighbours' gap, else 0.
@@ -1338,7 +1417,7 @@ class HealRefusal {
 }
 
 /**
- * What `healed` did, as plain data: the `tolerance` it healed at, the furthest any trim `moved`,
+ * What `heal` did, as plain data: the `tolerance` it healed at, the furthest any trim `moved`,
  * whether the body guard refused fixes (`guarded`), the `fixes` made and the features `refused`;
  * and the body's health before and after -- its small features, free edges, whether it is
  * closed, and its non-manifold edges.
@@ -1394,22 +1473,82 @@ function _healthReport(counts, sizes, freeIds, freeSizes, wireRuns, wireSizes, s
 function _healReport(counts, sizes, fixItems, fixSizes, refusedItems, refusedSizes) {
   const fixes = [];
   for (let i = 0; i < fixItems.length / 2; i++) {
-    fixes.push(new HealFix(_named(_HEALTH_KINDS, fixItems[2 * i], 'healed'), Number(fixItems[2 * i + 1]),
+    fixes.push(new HealFix(_named(_HEALTH_KINDS, fixItems[2 * i], 'heal'), Number(fixItems[2 * i + 1]),
       Number(fixSizes[2 * i]), Number(fixSizes[2 * i + 1])));
   }
   const refused = [];
   for (let i = 0; i < refusedSizes.length; i++) {
-    refused.push(new HealRefusal(_named(_HEALTH_KINDS, refusedItems[3 * i], 'healed'), Number(refusedItems[3 * i + 1]),
-      _named(_HEAL_WHYS, refusedItems[3 * i + 2], 'healed'), Number(refusedSizes[i])));
+    refused.push(new HealRefusal(_named(_HEALTH_KINDS, refusedItems[3 * i], 'heal'), Number(refusedItems[3 * i + 1]),
+      _named(_HEAL_WHYS, refusedItems[3 * i + 2], 'heal'), Number(refusedSizes[i])));
   }
   return new HealReport(Number(sizes[0]), Number(sizes[1]), counts[2] !== 0, fixes, refused,
     Number(counts[3]), Number(counts[4]), Number(counts[5]), Number(counts[6]),
     counts[7] !== 0, counts[8] !== 0, Number(counts[9]), Number(counts[10]));
 }
 
-/** `healed`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes; each on unless `false`. */
+/** `heal`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes; each on unless `false`. */
 function _healFlags({ edges = true, faces = true, holes = true } = {}) {
   return (edges ? 1 : 0) | (faces ? 2 : 0) | (holes ? 4 : 0);
+}
+
+// ---- recognition --------------------------------------------------------------
+
+/** One face `recognize` gave an analytic kind: its `face` number (unchanged), its `kind` ('plane', 'cylinder', 'cone', 'sphere' or 'torus'), and how far any sample of it lies from the analytic surface (`deviation`). */
+class RecognizedFace {
+  constructor(face, kind, deviation) { this.face = face; this.kind = kind; this.deviation = deviation; }
+}
+
+/**
+ * One face `recognize` left free-form, and why: 'no_kind' (no kind fits within the tolerance;
+ * `closest` the nearest kind's deviation), 'mixed_normals', 'parameter_trims' (a parameter trim
+ * cannot be lifted) or 'too_few_samples' (`closest` null).
+ */
+class RecognizeRefusal {
+  constructor(face, why, closest) { this.face = face; this.why = why; this.closest = closest; }
+}
+
+/** One edge whose curve `recognize` gave an analytic kind: its brep `edge` id (as `edgeTolerance` takes one), its `kind` ('line', 'circle' or 'ellipse'), and how far any point of the curve or the edge lies from the analytic curve (`deviation`). */
+class RecognizedEdge {
+  constructor(edge, kind, deviation) { this.edge = edge; this.kind = kind; this.deviation = deviation; }
+}
+
+/**
+ * What `recognize` did, as plain data: the `tolerance` it fitted to, the `faces` given an
+ * analytic kind and those `refused`, the `edges` given one, how many edges were left free-form
+ * (`edgesLeft`), and the worst deviation of a face and of an edge taken (`worstFace`, `worstEdge`).
+ */
+class RecognizeReport {
+  constructor(tolerance, faces, refused, edges, edgesLeft, worstFace, worstEdge) {
+    this.tolerance = tolerance; this.faces = faces; this.refused = refused; this.edges = edges;
+    this.edgesLeft = edgesLeft; this.worstFace = worstFace; this.worstEdge = worstEdge;
+  }
+}
+
+const _RECOGNIZE_FACE_KINDS = ['plane', 'cylinder', 'cone', 'sphere', 'torus'];
+const _RECOGNIZE_EDGE_KINDS = ['line', 'circle', 'ellipse'];
+const _RECOGNIZE_WHYS = ['no_kind', 'mixed_normals', 'parameter_trims', 'too_few_samples'];
+
+/**
+ * The flat rows of the recognition C ABI (or the wasm object) as a `RecognizeReport`; any
+ * array-likes: counts 10 u32 (faces per kind, faces left, edges per kind, edges left), sizes 3
+ * f64 (tolerance, worst face, worst edge), each row two u32 and one f64.
+ */
+function _recognizeReport(counts, sizes, faceItems, faceSizes, refusedItems, refusedSizes, edgeItems, edgeSizes) {
+  const faces = [];
+  for (let i = 0; i < faceSizes.length; i++) {
+    faces.push(new RecognizedFace(Number(faceItems[2 * i]), _named(_RECOGNIZE_FACE_KINDS, faceItems[2 * i + 1], 'recognized'), Number(faceSizes[i])));
+  }
+  const refused = [];
+  for (let i = 0; i < refusedSizes.length; i++) {
+    const closest = Number(refusedSizes[i]);
+    refused.push(new RecognizeRefusal(Number(refusedItems[2 * i]), _named(_RECOGNIZE_WHYS, refusedItems[2 * i + 1], 'recognized'),
+      Number.isNaN(closest) ? null : closest));
+  }
+  const edges = [];
+  for (let i = 0; i < edgeSizes.length; i++) {
+    edges.push(new RecognizedEdge(Number(edgeItems[2 * i]), _named(_RECOGNIZE_EDGE_KINDS, edgeItems[2 * i + 1], 'recognized'), Number(edgeSizes[i])));
+  }
+  return new RecognizeReport(Number(sizes[0]), faces, refused, edges, Number(counts[9]), Number(sizes[1]), Number(sizes[2]));
 }
 
 // ---- placements -------------------------------------------------------------
@@ -1639,6 +1778,13 @@ const _TASK_KINDS = [
 const _LINK_KINDS = ['finish_start', 'start_start', 'finish_finish', 'start_finish', 'notdefined', 'other'];
 const _DATES = { scheduled: 0, actual: 1 };
 const _PHASES = ['unbuilt', 'building', 'built', 'demolishing', 'demolished'];
+// Calendars use the IFC words, as the core spells them.
+const _CALENDAR_KINDS = ['FIRSTSHIFT', 'SECONDSHIFT', 'THIRDSHIFT', 'NOTDEFINED', 'USERDEFINED'];
+const _RECURRENCE_KINDS = [
+  'DAILY', 'WEEKLY', 'MONTHLY_BY_DAY_OF_MONTH', 'MONTHLY_BY_POSITION', 'BY_DAY_COUNT',
+  'BY_WEEKDAY_COUNT', 'YEARLY_BY_DAY_OF_MONTH', 'YEARLY_BY_POSITION',
+];
+const _DURATION_KINDS = ['ELAPSEDTIME', 'WORKTIME', 'NOTDEFINED', null];
 
 /**
  * What one element is doing on a date: `WorkSchedule.at()`'s rows. `phase` is `'unbuilt'`,
@@ -1653,10 +1799,15 @@ class ElementState {
 /**
  * Every date pair a task gives, each a number (seconds since 1970-01-01T00:00, no zone:
  * `new Date(seconds * 1000)`, read with `toISOString()` or the `getUTC*` accessors) or null
- * where the file gives none. `duration` is in seconds.
+ * where the file gives none. `duration` is in seconds. `durationKind` is `'ELAPSEDTIME'`,
+ * `'WORKTIME'` or `'NOTDEFINED'`, null where the file gives none; `workDuration` is the
+ * duration in working time, `{ days, seconds }`: that many working days, then that many
+ * seconds of working time; null where there is none (an IFC2X3 task, or no duration).
  */
 class TaskTime {
-  constructor(raw) {
+  constructor(raw, durationKind = null, workDuration = null) {
+    this.durationKind = durationKind;
+    this.workDuration = workDuration;
     const given = (name) => (raw['has_' + name] ? raw[name] : null);
     this.scheduleStart = given('schedule_start');
     this.scheduleFinish = given('schedule_finish');
@@ -1711,8 +1862,22 @@ class Task {
   }
   get time() {
     const raw = {};
-    _lib().task_time(this.schedule._scene._handle, this.schedule.index, this.index, raw);
-    return new TaskTime(raw);
+    const l = _lib(); const h = this.schedule._scene._handle; const s = this.schedule.index;
+    l.task_time(h, s, this.index, raw);
+    const days = new Float64Array(1); const seconds = new Float64Array(1);
+    const work = l.task_work_duration(h, s, this.index, days, seconds);
+    return new TaskTime(raw, _DURATION_KINDS[l.task_duration_kind(h, s, this.index)] ?? null,
+      work ? { days: days[0], seconds: seconds[0] } : null);
+  }
+  /** The index of the work calendar this task works on (`scene.calendars()[i]`), null where it has none. */
+  get calendarIndex() {
+    const out = new Uint32Array(1);
+    return _lib().task_calendar(this.schedule._scene._handle, this.schedule.index, this.index, out) ? out[0] : null;
+  }
+  /** The work calendar this task works on, null where it has none. */
+  get calendar() {
+    const index = this.calendarIndex;
+    return index === null ? null : new WorkCalendar(this.schedule._scene, index);
   }
   get nodes() {
     const l = _lib(); const h = this.schedule._scene._handle; const s = this.schedule.index;
@@ -1776,6 +1941,127 @@ class WorkSchedule {
     l.schedule_at(h, this.index, Number(date), which, buffer, count);
     const rows = koffi.decode(buffer, 'CadaclysmElementState', count);
     return rows.map((r) => new ElementState(new Node(this._scene, r.node), _PHASES[r.phase] ?? 'unbuilt', r.progress, r.has_variance ? r.variance : null));
+  }
+}
+
+/**
+ * A repeating set of days (and times of day) in a `WorkTime`'s pattern (`IfcRecurrencePattern`).
+ * `kind` is `'DAILY'`, `'WEEKLY'`, `'MONTHLY_BY_DAY_OF_MONTH'`, `'MONTHLY_BY_POSITION'`,
+ * `'BY_DAY_COUNT'`, `'BY_WEEKDAY_COUNT'`, `'YEARLY_BY_DAY_OF_MONTH'` or `'YEARLY_BY_POSITION'`.
+ * `days` (1..31), `weekdays` (1 = Monday .. 7 = Sunday) and `months` (1..12) are sorted arrays;
+ * `position`, `interval` and `occurrences` are numbers or null; `periods` are `[start, end]`
+ * pairs in seconds after midnight, empty for all day.
+ */
+class Recurrence {
+  constructor(kind, days, weekdays, months, position, interval, occurrences, periods) {
+    this.kind = kind; this.days = days; this.weekdays = weekdays; this.months = months;
+    this.position = position; this.interval = interval; this.occurrences = occurrences; this.periods = periods;
+  }
+}
+
+/**
+ * A repeating set of working (or, among a calendar's `exceptions`, non-working) periods,
+ * valid between two dates (`IfcWorkTime`). `start` and `finish` are midnight of their day, in
+ * seconds since 1970-01-01T00:00, or null for an open end; the finish day is included.
+ * `pattern` is a `Recurrence`, or null for every day of the range, all day.
+ */
+class WorkTime {
+  constructor(name, start, finish, pattern) {
+    this.name = name; this.start = start; this.finish = finish; this.pattern = pattern;
+  }
+}
+
+function _calendarCheck(status) {
+  if (status !== 0) throw new CadaclysmError(_text(_lib().calendar_error_message(status)));
+}
+
+/**
+ * When work happens (`IfcWorkCalendar`). From `Scene.calendars()` or `Task.calendar`.
+ *
+ * `kind` is `'FIRSTSHIFT'`, `'SECONDSHIFT'`, `'THIRDSHIFT'`, `'NOTDEFINED'` or `'USERDEFINED'`
+ * (`kindName` is a user-defined one's text, `''` otherwise). `working` and `exceptions` are
+ * `WorkTime`s in file order. Dates are numbers, seconds since 1970-01-01T00:00. The queries
+ * throw `CadaclysmError` with the library's message for a date that is not finite or a `from`
+ * after `to`.
+ */
+class WorkCalendar {
+  constructor(scene, index) { this._scene = scene; this.index = index; }
+  equals(other) { return other instanceof WorkCalendar && other.index === this.index && other._scene === this._scene; }
+  /** Its name, else its identification, else `calendar #k` (k from 1, in file order). */
+  get name() { return _text(_lib().calendar_name(this._scene._handle, this.index)); }
+  /** Its identification, `''` where none. */
+  get identification() { return _text(_lib().calendar_identification(this._scene._handle, this.index)); }
+  get kind() { return _CALENDAR_KINDS[_lib().calendar_kind(this._scene._handle, this.index)] ?? 'NOTDEFINED'; }
+  /** The text of a user-defined kind (`kind === 'USERDEFINED'`); `''` otherwise. */
+  get kindName() { return _text(_lib().calendar_kind_name(this._scene._handle, this.index)); }
+  _workTimes(exception, count) {
+    const l = _lib(); const h = this._scene._handle; const c = this.index;
+    const numbers = (call, w) => {
+      const n = call(h, c, exception, w, null, 0);
+      const buffer = new Uint8Array(n);
+      if (n > 0) call(h, c, exception, w, buffer, n);
+      return Array.from(buffer);
+    };
+    const out = [];
+    for (let w = 0; w < count; w++) {
+      const raw = {};
+      l.calendar_work_time(h, c, exception, w, raw);
+      let pattern = null;
+      if (raw.has_pattern) {
+        const n = l.calendar_work_time_periods(h, c, exception, w, null, 0);
+        const flat = new Float64Array(2 * n);
+        if (n > 0) l.calendar_work_time_periods(h, c, exception, w, flat, n);
+        const periods = [];
+        for (let i = 0; i < n; i++) periods.push([flat[2 * i], flat[2 * i + 1]]);
+        pattern = new Recurrence(
+          _RECURRENCE_KINDS[raw.kind] ?? 'DAILY',
+          numbers(l.calendar_work_time_days, w),
+          numbers(l.calendar_work_time_weekdays, w),
+          numbers(l.calendar_work_time_months, w),
+          raw.has_position ? raw.position : null,
+          raw.has_interval ? raw.interval : null,
+          raw.has_occurrences ? raw.occurrences : null,
+          periods);
+      }
+      out.push(new WorkTime(_text(l.calendar_work_time_name(h, c, exception, w)),
+        raw.has_start ? raw.start : null, raw.has_finish ? raw.finish : null, pattern));
+    }
+    return out;
+  }
+  /** Its working times, in file order. */
+  get working() { return this._workTimes(false, _lib().calendar_working_count(this._scene._handle, this.index)); }
+  /** Its exception (non-working) times, in file order. */
+  get exceptions() { return this._workTimes(true, _lib().calendar_exception_count(this._scene._handle, this.index)); }
+  /**
+   * The working periods overlapping `from`..`to`, clipped to it, sorted and merged:
+   * `[start, end]` pairs, no two touching or overlapping.
+   */
+  workingPeriods(from, to) {
+    const l = _lib(); const h = this._scene._handle;
+    const count = new Uint32Array(1);
+    _calendarCheck(l.calendar_working_periods(h, this.index, Number(from), Number(to), null, 0, count));
+    const n = count[0];
+    const flat = new Float64Array(2 * n);
+    if (n > 0) _calendarCheck(l.calendar_working_periods(h, this.index, Number(from), Number(to), flat, n, count));
+    const out = [];
+    for (let i = 0; i < n; i++) out.push([flat[2 * i], flat[2 * i + 1]]);
+    return out;
+  }
+  /** The working seconds in `from`..`to`. */
+  workingSeconds(from, to) {
+    const out = new Float64Array(1);
+    _calendarCheck(_lib().calendar_working_seconds(this._scene._handle, this.index, Number(from), Number(to), out));
+    return out[0];
+  }
+  /**
+   * The date `days` working days and then `seconds` of working time after `from` (before it,
+   * when negative). A forward result landing at the start of a working day is the end of the
+   * previous one. Throws `CadaclysmError` when no working time lies within 100 years.
+   */
+  addWork(from, days, seconds = 0) {
+    const out = new Float64Array(1);
+    _calendarCheck(_lib().calendar_add_work(this._scene._handle, this.index, Number(from), Number(days), Number(seconds), out));
+    return out[0];
   }
 }
 
@@ -1941,6 +2227,17 @@ class Node {
   }
   /** Level 0 is `mesh()`; 1..`lodLevels()` share its vertices and use fewer of its indices. */
   meshLod(level) { return _meshOf(_lib().node_mesh_lod(this.scene._handle, this.index, level)); }
+  /**
+   * A second set of texture coordinates for `mesh()`, two floats a vertex in its order, packed
+   * into the unit square with no two triangles overlapping: what a baked lightmap needs. null
+   * when not asked for at open, for a node with no B-rep, and for a body whose charts did not
+   * fit. A copy, so it outlives the scene.
+   */
+  get lightmapUvs() {
+    const count = new Uint32Array(1);
+    const ptr = _lib().node_mesh_lightmap_uvs(this.scene._handle, this.index, count);
+    return ptr == null || count[0] === 0 ? null : _floats(ptr, count[0] * 2);
+  }
   /** How far a level moved the surface, in the scene's units; what to pick levels by. */
   lodError(level) { return _lib().node_lod_error(this.scene._handle, this.index, level); }
   /**
@@ -2262,6 +2559,12 @@ class Scene {
   schedules() {
     const out = [];
     for (let i = 0, n = _lib().schedule_count(this._handle); i < n; i++) out.push(new WorkSchedule(this, i));
+    return out;
+  }
+  /** The file's IFC work calendars, in file order. Empty for a file that records none. */
+  calendars() {
+    const out = [];
+    for (let i = 0, n = _lib().calendar_count(this._handle); i < n; i++) out.push(new WorkCalendar(this, i));
     return out;
   }
   /** The link the file declares as the mechanism's base, or null when it declares
@@ -2859,8 +3162,12 @@ function resolveSchema(model, schema) {
   return { chosen: null, fallbacks: available };
 }
 
-/** A `CadaclysmOpenOptions` object from `{ schema, convention, colors, sourceMetersPerUnit }`. */
-function _options({ schema = null, convention = Convention.NATIVE, colors = false, sourceMetersPerUnit = 0 } = {}) {
+/** A `CadaclysmOpenOptions` object from `{ schema, convention, colors, sourceMetersPerUnit, lightmapResolution }`. */
+function _options({ schema = null, convention = Convention.NATIVE, colors = false, sourceMetersPerUnit = 0, lightmapResolution = 0 } = {}) {
+  const texels = Number(lightmapResolution);
+  if (!Number.isInteger(texels) || texels < 0 || texels > 0xFFFFFFFF) {
+    throw new RangeError(`lightmapResolution must be 0 (off) or a texel count in 32 bits, not ${lightmapResolution}`);
+  }
   const o = {};
   _lib().open_options_init(o);
   const packed = Number(convention);
@@ -2869,6 +3176,7 @@ function _options({ schema = null, convention = Convention.NATIVE, colors = fals
   o.uvs = packed & Convention.UV_WORLD ? 1 : 0;
   o.colors = colors ? 1 : 0;
   o.source_meters_per_unit = Number(sourceMetersPerUnit);
+  o.lightmap_resolution = texels;
   if (schema != null) { o.schemas = [String(schema)]; o.schema_count = 1; }
   return o;
 }
@@ -2896,7 +3204,8 @@ function _openRaw(filePath, options = {}) {
 /**
  * Open a CAD file. `options`: `schema` (an `.exp` file or a directory of them,
  * matched against what the file declares), `convention` (a `Convention`,
- * OR'd with `FILE_UNITS`/`UV_WORLD`), `colors`, `sourceMetersPerUnit`.
+ * OR'd with `FILE_UNITS`/`UV_WORLD`), `colors`, `sourceMetersPerUnit`,
+ * `lightmapResolution` (0 = off; else read `Node.lightmapUvs`).
  * Throws `CadaclysmError` with the library's reason; never returns null.
  */
 function open(filePath, options = {}) {
@@ -2963,7 +3272,7 @@ module.exports = {
   svgOptionsDefaults,
   _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage, _libraryNames: libraryNames,
   Bounds, Bounds64, Attribute, Brep, HealthReport, FreeEdge, FreeWire, SmallFeature, Cracks, HealReport, HealFix, HealRefusal,
-  _healthReport, _healReport, _healFlags, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Segment, Sequence, ElementState, TaskTime, TaskLink, Task, WorkSchedule, Pose, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
+  _healthReport, _healReport, _healFlags, RecognizeReport, RecognizedFace, RecognizeRefusal, RecognizedEdge, _recognizeReport, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Segment, Sequence, ElementState, TaskTime, TaskLink, Task, WorkSchedule, Recurrence, WorkTime, WorkCalendar, Pose, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
   Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
   FemMesh, FemEdge, FemVertex,
   _meshOf, _mesh64Of, _polylinesOf, _beziersOf, _beziers64Of, _surfacesOf, _svgOptions,

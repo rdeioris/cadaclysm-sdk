@@ -294,7 +294,7 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(manifold.vertices, 10)
         XCTAssertTrue(manifold.isManifold)
         XCTAssertTrue(manifold.isClosed)
-        let (sewn, report) = try brep.sewed()
+        let (sewn, report) = try brep.sew()
         defer { sewn.release() }
         XCTAssertEqual(Int(report.freeBefore), manifold.boundaryEdges)
         XCTAssertEqual(try brep.manifold, manifold)
@@ -1038,6 +1038,86 @@ final class ReaderTests: XCTestCase {
         XCTAssertTrue(scene.schedules.isEmpty)
     }
 
+    /// The work-calendar facts, identical in every language: samples/schedule-calendar.ifc holds
+    /// one calendar, `Site calendar`. `monday` is 2026-03-02T00:00:00.
+    func testAFileReadsItsWorkCalendar() throws {
+        let day = 86400.0
+        let monday = 1772409600.0
+        let scene = try Cadaclysm.open(try sample("samples/schedule-calendar.ifc"))
+        defer { scene.close() }
+        XCTAssertEqual(scene.calendars.count, 1)
+        let cal = scene.calendars[0]
+        XCTAssertEqual(cal.name, "Site calendar")
+        XCTAssertEqual(cal.identification, "CAL-1")
+        XCTAssertEqual(cal.kind, "FIRSTSHIFT")
+        XCTAssertEqual(cal.kindName, "")
+        XCTAssertEqual(cal.working.count, 1)
+        let weekdays = cal.working[0]
+        XCTAssertEqual(weekdays.name, "Weekdays")
+        XCTAssertEqual(weekdays.start, monday - 60 * day)
+        XCTAssertNil(weekdays.finish)
+        let p = try XCTUnwrap(weekdays.pattern)
+        XCTAssertEqual(p.kind, "WEEKLY")
+        XCTAssertEqual(p.days, [])
+        XCTAssertEqual(p.weekdays, [1, 2, 3, 4, 5])
+        XCTAssertEqual(p.months, [])
+        XCTAssertNil(p.position)
+        XCTAssertNil(p.interval)
+        XCTAssertNil(p.occurrences)
+        XCTAssertEqual(p.periods.map { [$0.start, $0.end] }, [[28800, 43200], [46800, 61200]])
+        XCTAssertEqual(cal.exceptions.count, 1)
+        let easter = cal.exceptions[0]
+        XCTAssertEqual(easter.name, "Easter Monday")
+        XCTAssertNil(easter.start)
+        XCTAssertNil(easter.finish)
+        let ep = try XCTUnwrap(easter.pattern)
+        XCTAssertEqual(ep.kind, "YEARLY_BY_DAY_OF_MONTH")
+        XCTAssertEqual(ep.days, [6])
+        XCTAssertEqual(ep.months, [4])
+        XCTAssertEqual(ep.periods.count, 0)
+
+        let slab = scene.schedules[0].tasks[0]
+        XCTAssertEqual(slab.calendarIndex, 0)
+        XCTAssertEqual(slab.calendar, cal)
+        XCTAssertEqual(slab.time.durationKind, "WORKTIME")
+        XCTAssertEqual(slab.time.workDuration?.days, 10)
+        XCTAssertEqual(slab.time.workDuration?.seconds, 0)
+
+        let week = try cal.workingPeriods(from: monday, to: monday + 7 * day)
+        XCTAssertEqual(week.count, 10)
+        XCTAssertEqual(week[0].start, 1772438400.0)
+        XCTAssertEqual(week[0].end, 1772452800.0)
+        XCTAssertEqual(try cal.workingSeconds(from: monday, to: monday + 7 * day), 10 * 4 * 3600.0)
+        XCTAssertEqual(try cal.workingPeriods(from: 1775433600, to: 1775520000).count, 0) // Easter Monday 2026-04-06
+        XCTAssertEqual(try cal.addWork(from: 1772438400, days: 10), 1773421200.0)
+    }
+
+    func testAWorkCalendarRefusesWithTheVerbatimMessages() throws {
+        let scene = try Cadaclysm.open(try sample("samples/schedule-calendar.ifc"))
+        defer { scene.close() }
+        let cal = scene.calendars[0]
+        XCTAssertThrowsError(try cal.workingPeriods(from: 1, to: 0)) { error in
+            guard let error = error as? CadaclysmError else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.message.contains("from must not be after to"), error.message)
+        }
+        XCTAssertThrowsError(try cal.workingSeconds(from: Double.nan, to: 0)) { error in
+            guard let error = error as? CadaclysmError else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.message.contains("from and to must be finite"), error.message)
+        }
+        XCTAssertThrowsError(try cal.addWork(from: 1772438400, days: Double.infinity)) { error in
+            guard let error = error as? CadaclysmError else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.message.contains("from and to must be finite"), error.message)
+        }
+    }
+
+    func testAFileWithoutACalendarHasNone() throws {
+        let scene = try Cadaclysm.open(try sample("samples/schedule.ifc"))
+        defer { scene.close() }
+        XCTAssertTrue(scene.calendars.isEmpty)
+        let slab = scene.schedules[0].tasks[0]
+        XCTAssertNil(slab.calendarIndex)
+        XCTAssertNil(slab.calendar)
+    }
     func testCubeHasNoLinksOrJoints() throws {
         let scene = try Cadaclysm.open(try sample(cube))
         defer { scene.close() }

@@ -145,7 +145,7 @@ let view = View::offscreen(900, 600)?;         // or View::new(&ViewOptions { ..
 let curve = [[0.0, 0.0, 0.0, 1.0], [1.0, 2.0, 0.0, 1.0], [3.0, -1.0, 0.0, 1.0], [4.0, 1.0, 0.0, 1.0]];
 view.show_curves(&[curve], Some([0.9, 0.3, 0.1]))?;
 let item = view.show_solid(&cube, 0.05, None)?;
-item.colour("steelblue")?;                     // or [0.2, 0.5, 0.9]: text or numbers
+item.set_colour("steelblue")?;                 // or [0.2, 0.5, 0.9]: text or numbers
 view.standard(Standard::Iso)?;
 view.frame()?;
 view.save("view.png")?;                        // or view.image()? for the pixels; view.run()? for a window
@@ -166,6 +166,12 @@ view.save("view.png")?;                        // or view.image()? for the pixel
   `Machining`, an `Item` (through `Deref`) with `seek_move`, `colour_by(ColourBy)`, `overlays`,
   `info` and `heights`. The view's timeline: `play(speed)`, `pause`, `seek`, `set_loop`
   (`loop` is a Rust keyword), `time`, `duration`, `playing`, `status`.
+- **Animations.** `play_animation(&animation, &[AnimationBinding { target, item, node }])` plays a
+  kernel `Animation` on the same timeline, each target bound to a shown item (`node: None`) or to
+  a node of it and its subtree; it answers the track's id, and `remove_track(id)` takes it off,
+  putting back what it drove. The view plays its own copy. `Item::set_visible(bool)` hides an
+  item whole; `Item::set_node_ghosts(Some(&[..]))` draws those nodes x-ray (`None` clears). Each
+  frame whose clock moved queues an `EventKind::Timeline`. Since view ABI 1.27.
 - **Colours.** Every colour takes text -- `"#rgb"`, `"#rrggbb"` or a CSS colour name, read
   by the view library's own parser -- or numbers in 0..1: `colour` and `background` take
   `impl Into<Colour>`, the `show_*` calls' `rgb` an `impl Into<view::Rgb>` (`None`,
@@ -274,7 +280,10 @@ each `show()` has a window of its own.
 What a browser can't do refuses, naming the call: `View::new`, `offscreen`,
 `offscreen_with`, `in_window`, `pump`, `image`, `save`, `png`, `pixel`, `input`, `pick`,
 `last_pick`, `viewports`, `lod`, the viewport cameras, `show_image`, `show_scene`/`show_node`
-and the node calls, `finish`, machining, the timeline and `use_library`.
+and the node calls, `finish`, machining and `use_library`. The timeline (`play`, `pause`,
+`seek`, `set_loop`, `time`, `duration`, `playing`, `EventKind::Timeline` in `run_with`) and the
+animation calls (`play_animation`, `remove_track`, `set_visible`, `set_node_ghosts`) work as on
+the desktop; the web package's `kernel-view` build plays kernel animations.
 `snap` is `async` in the browser (await it); `set_snap`, `last_snap`, `clear_snap` and
 `set_work_plane` are as on the desktop, and `last_snap` reads only the answers to your own `snap`s.
 
@@ -293,7 +302,7 @@ Serve the folder holding `index.html`, `app/` and the package's `pkg/` over HTTP
 version of the `wasm-bindgen` crate in your `Cargo.lock`. Your app's wasm is small beside
 the package's: an app that builds and draws one part is about 0.4 MB, the package 15.7 MB.
 
-Not in the browser yet: reading files (the reader), `heal`, `health`, a solid's history,
+Not in the browser yet: reading files (the reader), `health`, a solid's history,
 `n_sided_patch` and the FEM mesh, which fail saying so; calls that write a file, such as
 `Solid::sat`, fail too -- use their text or bytes form (`sat_text`) and save the result
 from the page. Checked with plain `wasm-bindgen --target web` in Chrome; Trunk and bundlers

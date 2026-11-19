@@ -42,7 +42,13 @@ const ABI_MAJOR = 1;
 // 1.24: overlays -- cadaclysm_view_show_overlay, _show_overlay_image, _move_overlay and screen text (View.showOverlay,
 // showOverlayText, showOverlayImage, Overlay.moveTo), and the pick's `overlay` flag.
 // 1.25: cadaclysm_view_stats (View.stats: frames drawn, the last frame's CPU and GPU time, triangles, draw calls).
-const ABI_MINOR = 25;
+// 1.26: cadaclysm_view_next_event and cadaclysm_view_close (View.nextEvent, View.closeWindow, View.run(onEvent):
+// the own window's input events).
+// 1.27: animations -- cadaclysm_view_play_animation, _timeline_remove, _set_item_visible, _set_node_ghosts
+// (View.playAnimation, View.removeTrack, Item.setVisible, Item.setNodeGhosts) and the timeline input event.
+// 1.28: the drafting styles and the pick's viewport label.
+const ABI_MINOR = 28;
+const ALL_NODES = 0xFFFFFFFF;   // CADACLYSM_VIEW_ALL_NODES: a binding to the item itself, not one of its nodes
 const OPEN = 1;
 const CLOSED = 2;
 const SURFACES = Object.freeze({ exact: 0, triangles: 1 });
@@ -50,6 +56,8 @@ const TOOL_SHAPES = Object.freeze({ flat: 0, ball: 1, drill: 2, vbit: 3, bullnos
 const COLOUR_BY = Object.freeze({ height: 0, tool: 1, deviation: 2 });
 const LIGHTING = Object.freeze({ headlight: 0, studio: 1 });
 const OCCLUDED = Object.freeze({ off: 0, solid: 1, dashed: 2 });
+const POINT_SHAPES = ['disc', 'ring', 'square', 'diamond'];
+const POINT_STATES = ['normal', 'hover', 'selected', 'first'];
 // CADACLYSM_VIEW_LAYER_EDGES, _CURVES and _ISOCURVES: the layers the line colours take.
 const LINE_LAYERS = Object.freeze({ edges: 1, curves: 2, isocurves: 3 });
 const FINISH = Object.freeze({ gloss: 0, satin: 1, matte: 2 });
@@ -70,6 +78,11 @@ const NAVIGATION_FLY = 1;       // CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0)
 const INPUT_CLOSE = 1;
 const NONE_COMING = 0xFFFFFFFF;   // cadaclysm_view_wake_ms: no wake is coming
 const POINTER = Object.freeze({ mouse: 0, touch: 1, pen: 2 });
+// CADACLYSM_VIEW_INPUT_EVENT_* (1.26) by the `type` nextEvent reports.
+const INPUT_EVENTS = Object.freeze({ 1: 'pointer_down', 2: 'pointer_move', 3: 'pointer_up', 4: 'wheel', 5: 'key_down', 6: 'key_up',
+  7: 'resize', 8: 'pick', 9: 'snap', 10: 'close', 11: 'timeline' });
+// CADACLYSM_VIEW_MOD_* (1.26).
+const MODS = Object.freeze({ shift: 1, ctrl: 2, alt: 4, meta: 8 });
 const WINDOW = Object.freeze({ win32: 1, xlib: 2, xcb: 3, wayland: 4, appkit: 5 });
 const VIEWS = Object.freeze({ front: [-90, 0], back: [90, 0], left: [180, 0], right: [0, 0], top: [-90, 90], bottom: [-90, -90], iso: [-50, 28] });
 const ORBIT_PER_PIXEL = 0.01;   // cadaclysm_view::view::ORBIT_PER_PIXEL
@@ -118,6 +131,7 @@ koffi.struct('CadaclysmViewPick', {
   has_point: 'uint32_t',
   point: koffi.array('float', 3),
   overlay: 'uint32_t',
+  viewport_label: 'int32_t',
 });
 koffi.struct('CadaclysmViewLod', {
   size: 'uint32_t',
@@ -304,6 +318,47 @@ koffi.struct('CadaclysmViewStats', {
   draw_calls: 'uint32_t',
   pad1: 'uint32_t',
 });
+// CadaclysmViewAnimationBinding, 1.27: a target name bound to an item (or one node of it).
+koffi.struct('CadaclysmViewAnimationBinding', {
+  target: 'const char *',
+  item: 'uint32_t',
+  node: 'uint32_t',
+});
+// CadaclysmViewEventPick: the pick inside an input event, CadaclysmViewPick as 1.26 laid the event
+// out (40 bytes); the 1.28 label hit is the event's own pick_viewport_label.
+koffi.struct('CadaclysmViewEventPick', {
+  size: 'uint32_t',
+  item: 'uint32_t',
+  node: 'uint32_t',
+  face: 'uint32_t',
+  clicks: 'uint32_t',
+  has_point: 'uint32_t',
+  point: koffi.array('float', 3),
+  overlay: 'uint32_t',
+});
+// CadaclysmViewInputEvent, 1.26: 272 bytes, padded explicitly; the pick, snap and camera nested whole.
+koffi.struct('CadaclysmViewInputEvent', {
+  size: 'uint32_t',
+  kind: 'uint32_t',
+  time_ms: 'double',
+  x: 'float',
+  y: 'float',
+  wheel_y: 'float',
+  button: 'uint32_t',
+  modifiers: 'uint32_t',
+  pointer: 'uint32_t',
+  pointer_id: 'uint32_t',
+  width: 'uint32_t',
+  height: 'uint32_t',
+  repeat: 'uint32_t',
+  dropped: 'uint32_t',
+  pad0: 'uint32_t',
+  key: koffi.array('char', 32),
+  pick: 'CadaclysmViewEventPick',
+  snap: 'CadaclysmViewSnap',
+  camera: 'CadaclysmViewCamera',
+  pick_viewport_label: 'int32_t',
+});
 const SIZE = (name) => koffi.sizeof(name);
 
 // ---- the function table: every call of the header ------------------------------------
@@ -375,6 +430,8 @@ function _bind(l) {
     show_overlay_image: f('uint32_t cadaclysm_view_show_overlay_image(CadaclysmView *view, const CadaclysmViewOverlayImage *image)'),
     move_overlay: f('bool cadaclysm_view_move_overlay(CadaclysmView *view, uint32_t item, uint32_t anchor, float x, float y)'),
     stats: f('bool cadaclysm_view_stats(CadaclysmView *view, _Inout_ CadaclysmViewStats *out)'),
+    next_event: f('bool cadaclysm_view_next_event(CadaclysmView *view, _Inout_ CadaclysmViewInputEvent *out)'),
+    close: f('bool cadaclysm_view_close(CadaclysmView *view)'),
     viewport_camera: f('bool cadaclysm_view_viewport_camera(const CadaclysmView *view, uint32_t viewport, _Inout_ CadaclysmViewViewportCamera *out)'),
     set_viewport_camera: f('bool cadaclysm_view_set_viewport_camera(CadaclysmView *view, uint32_t viewport, const CadaclysmViewViewportCamera *camera)'),
     set_viewport_rects: f('bool cadaclysm_view_set_viewport_rects(CadaclysmView *view, const uint32_t *rects, uint32_t count)'),
@@ -410,6 +467,17 @@ function _bind(l) {
     timeline_duration: f('double cadaclysm_view_timeline_duration(const CadaclysmView *view)'),
     timeline_playing: f('bool cadaclysm_view_timeline_playing(const CadaclysmView *view)'),
     timeline_status: f('size_t cadaclysm_view_timeline_status(const CadaclysmView *view, _Out_ uint8_t *text, size_t capacity)'),
+    play_animation: f('uint32_t cadaclysm_view_play_animation(CadaclysmView *view, const void *animation, const CadaclysmViewAnimationBinding *bindings, uint32_t count)'),
+    timeline_remove: f('bool cadaclysm_view_timeline_remove(CadaclysmView *view, uint32_t track)'),
+    set_item_visible: f('bool cadaclysm_view_set_item_visible(CadaclysmView *view, uint32_t item, bool visible)'),
+    set_node_ghosts: f('bool cadaclysm_view_set_node_ghosts(CadaclysmView *view, uint32_t item, const uint32_t *nodes, uint32_t count)'),
+    set_line_style: f('bool cadaclysm_view_set_line_style(CadaclysmView *view, uint32_t item, float dash_pt, float gap_pt)'),
+    set_point_style: f('bool cadaclysm_view_set_point_style(CadaclysmView *view, uint32_t item, uint32_t shape, bool hollow)'),
+    set_point_states: f('bool cadaclysm_view_set_point_states(CadaclysmView *view, uint32_t item, const uint8_t *states, size_t count)'),
+    set_point_state_colours: f('void cadaclysm_view_set_point_state_colours(CadaclysmView *view, const float *hover, const float *selected, const float *first)'),
+    set_viewport_label: f('bool cadaclysm_view_set_viewport_label(CadaclysmView *view, uint32_t viewport, const char *text, const float *colour)'),
+    set_viewport_border: f('bool cadaclysm_view_set_viewport_border(CadaclysmView *view, uint32_t viewport, const float *colour)'),
+    set_on_top: f('bool cadaclysm_view_set_on_top(CadaclysmView *view, uint32_t item, bool on)'),
     show_solid: f('uint32_t cadaclysm_view_show_solid(CadaclysmView *view, const void *solid, double tolerance, const float *rgb)'),
     show_solid_faces: f('uint32_t cadaclysm_view_show_solid_faces(CadaclysmView *view, const void *solid, double tolerance, const float *rgb, uint32_t material, float opacity, const uint32_t *faces, uint32_t face_count)'),
     image: f('bool cadaclysm_view_image(CadaclysmView *view, uint8_t *rgba, size_t capacity)'),
@@ -663,6 +731,20 @@ function _doubles(a, n, what) {
   if (v.length !== n) throw new ViewError(`${what}: ${n} numbers, not ${v.length}`);
   return Float64Array.from(v);
 }
+/** A u32 argument: a whole number in 0..4294967295, or a ViewError naming `what`. */
+function _u32Of(n, what) {
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > 0xFFFFFFFF) throw new ViewError(`${what}: ${typeof n === 'number' ? n : typeof n} is not a u32`);
+  return n;
+}
+/** One AnimationBinding as koffi's struct: `{ target, item, node }` or `[target, item, node?]`; item an Item or id, node a Node or index. */
+function _binding(b, k) {
+  const [target, item, node] = Array.isArray(b) ? b : [b?.target, b?.item, b?.node];
+  const at = `binding ${k}`;
+  if (b == null || typeof b !== 'object' || (Array.isArray(b) && (b.length < 2 || b.length > 3))) throw new ViewError(`${at}: { target, item, node? } or [target, item, node?]`);
+  if (typeof target !== 'string') throw new ViewError(`${at}: target is a string, not ${typeof target}`);
+  if (target.includes('\0')) throw new ViewError(`${at}: target holds a NUL`);
+  return { target, item: _u32Of(item?.id ?? item, `${at}: item`), node: node == null ? ALL_NODES : _u32Of(node.index ?? node, `${at}: node`) };
+}
 /**
  * koffi hands an empty typed array to C as NULL, which the library reads as "none" (no
  * transforms: the rest pose; no segments: refused). Python hands it an empty array, so an empty
@@ -785,37 +867,37 @@ class Item {
    * `Pose.rawTransform`'s layout -- every node of the scene, in index order), drawn in place
    * of each node's rest transform. null restores the rest pose.
    */
-  nodeTransforms(transforms) {
-    if (transforms == null) { this._ok(this.view._lib.fn.set_node_transforms(this.view._live('cadaclysm_view_set_node_transforms'), this.id, null, 0), 'nodeTransforms'); return; }
+  setNodeTransforms(transforms) {
+    if (transforms == null) { this._ok(this.view._lib.fn.set_node_transforms(this.view._live('cadaclysm_view_set_node_transforms'), this.id, null, 0), 'setNodeTransforms'); return; }
     const list = Array.from(transforms);
     const flat = new Float64Array(16 * list.length);
     list.forEach((m, k) => {
       if (m.length !== 16) throw new ViewError(`transform ${k}: 16 numbers, not ${m.length}`);
       flat.set(m, 16 * k);
     });
-    this._ok(this.view._lib.fn.set_node_transforms(this.view._live('cadaclysm_view_set_node_transforms'), this.id, _nonNull(flat), list.length), 'nodeTransforms');
+    this._ok(this.view._lib.fn.set_node_transforms(this.view._live('cadaclysm_view_set_node_transforms'), this.id, _nonNull(flat), list.length), 'setNodeTransforms');
   }
-  colour(rgb) {
-    const c = _rgb(rgb, 'colour', this.view._lib);
-    if (!c) throw new ViewError('colour: 3 numbers, not none');
-    this._ok(this.view._lib.fn.set_colour(this.view._live('cadaclysm_view_set_colour'), this.id, c), 'colour');
+  setColour(rgb) {
+    const c = _rgb(rgb, 'setColour', this.view._lib);
+    if (!c) throw new ViewError('setColour: 3 numbers, not none');
+    this._ok(this.view._lib.fn.set_colour(this.view._live('cadaclysm_view_set_colour'), this.id, c), 'setColour');
   }
   /** Sixteen numbers, column-major, or null to put it back. */
-  placement(matrix) {
-    this._ok(this.view._lib.fn.set_placement(this.view._live('cadaclysm_view_set_placement'), this.id, _doubles(matrix, 16, 'placement')), 'placement');
+  setPlacement(matrix) {
+    this._ok(this.view._lib.fn.set_placement(this.view._live('cadaclysm_view_set_placement'), this.id, _doubles(matrix, 16, 'setPlacement')), 'setPlacement');
   }
   /**
    * `faces` (pick numbers) coloured by `rgba`: one colour a face -- text, or 3 or 4 numbers (the
    * alpha is not drawn; text and 3 numbers mean alpha 1) -- or four numbers a face, flat; `faces`
    * null clears every one.
    */
-  faceColours(faces, rgba) {
+  setFaceColours(faces, rgba) {
     const f = _u32(faces);
-    if (f == null) { this._ok(this.view._lib.fn.set_face_colours(this.view._live('cadaclysm_view_set_face_colours'), this.id, null, null, 0), 'faceColours'); return; }
+    if (f == null) { this._ok(this.view._lib.fn.set_face_colours(this.view._live('cadaclysm_view_set_face_colours'), this.id, null, null, 0), 'setFaceColours'); return; }
     const lib = this.view._lib;
-    const c = _f32(Array.from(rgba ?? []).flatMap((e) => (typeof e === 'number' ? [e] : Array.from(_rgba(e, 'faceColours', lib)))));
-    if (c.length !== 4 * f.length) throw new ViewError(`faceColours: ${4 * f.length} numbers (rgba, 4 a face), not ${c.length}`);
-    this._ok(this.view._lib.fn.set_face_colours(this.view._live('cadaclysm_view_set_face_colours'), this.id, _nonNull(f), _nonNull(c), f.length), 'faceColours');
+    const c = _f32(Array.from(rgba ?? []).flatMap((e) => (typeof e === 'number' ? [e] : Array.from(_rgba(e, 'setFaceColours', lib)))));
+    if (c.length !== 4 * f.length) throw new ViewError(`setFaceColours: ${4 * f.length} numbers (rgba, 4 a face), not ${c.length}`);
+    this._ok(this.view._lib.fn.set_face_colours(this.view._live('cadaclysm_view_set_face_colours'), this.id, _nonNull(f), _nonNull(c), f.length), 'setFaceColours');
   }
   /** The text item's string replaced, nothing else changed (cadaclysm_view_set_text). */
   setText(text) {
@@ -823,11 +905,36 @@ class Item {
     this._ok(this.view._lib.fn.set_text(this.view._live('cadaclysm_view_set_text'), this.id, t), 'setText');
   }
   frame() { this._ok(this.view._lib.fn.frame(this.view._live('cadaclysm_view_frame'), this.id), 'frame'); }
-  xray(on) { this._ok(this.view._lib.fn.set_xray(this.view._live('cadaclysm_view_set_xray'), this.id, Boolean(on)), 'xray'); }
+  setXray(on) { this._ok(this.view._lib.fn.set_xray(this.view._live('cadaclysm_view_set_xray'), this.id, Boolean(on)), 'setXray'); }
+  /** Draws the item's lines in its own dash, in points; `null` (or a dash of 0) is solid. */
+  setLineStyle(style) {
+    const dash = style == null ? 0 : Number(style.dash);
+    const gap = style == null ? 0 : Number(style.gap);
+    this._ok(this.view._lib.fn.set_line_style(this.view._live('cadaclysm_view_set_line_style'), this.id, dash, gap), 'setLineStyle');
+  }
+  /** A points item's marker: `{shape: 'disc'|'ring'|'square'|'diamond', hollow}`. */
+  setPointStyle({ shape = 'disc', hollow = false } = {}) {
+    const s = POINT_SHAPES.indexOf(shape);
+    if (s < 0) throw new TypeError(`setPointStyle: '${shape}' is not 'disc', 'ring', 'square' or 'diamond'`);
+    this._ok(this.view._lib.fn.set_point_style(this.view._live('cadaclysm_view_set_point_style'), this.id, s, Boolean(hollow)), 'setPointStyle');
+  }
+  /** One state a point: names ('normal', 'hover', 'selected', 'first') or numbers 0..3. */
+  setPointStates(states) {
+    const codes = Uint8Array.from(Array.from(states, (s) => {
+      const c = typeof s === 'number' ? s : POINT_STATES.indexOf(s);
+      if (!(c >= 0 && c <= 3)) throw new TypeError(`setPointStates: '${s}' is not 'normal', 'hover', 'selected' or 'first'`);
+      return c;
+    }));
+    this._ok(this.view._lib.fn.set_point_states(this.view._live('cadaclysm_view_set_point_states'), this.id, _nonNull(codes), codes.length), 'setPointStates');
+  }
+  /** Draws the item after every other, depth testing off; picked ahead of what is under it. */
+  setOnTop(on = true) {
+    this._ok(this.view._lib.fn.set_on_top(this.view._live('cadaclysm_view_set_on_top'), this.id, Boolean(on)), 'setOnTop');
+  }
   /** How its lines and points draw where a surface hides them: 'off' (an item shows with it until set), 'solid' or 'dashed'. */
-  occluded(mode) {
-    if (typeof mode !== 'string' || !Object.hasOwn(OCCLUDED, mode)) throw new TypeError(`occluded: '${mode}' is not 'off', 'solid' or 'dashed'`);
-    this._ok(this.view._lib.fn.set_occluded(this.view._live('cadaclysm_view_set_occluded'), this.id, OCCLUDED[mode]), 'occluded');
+  setOccluded(mode) {
+    if (typeof mode !== 'string' || !Object.hasOwn(OCCLUDED, mode)) throw new TypeError(`setOccluded: '${mode}' is not 'off', 'solid' or 'dashed'`);
+    this._ok(this.view._lib.fn.set_occluded(this.view._live('cadaclysm_view_set_occluded'), this.id, OCCLUDED[mode]), 'setOccluded');
   }
   /**
    * The item's finish: 'gloss' (an item shows with this until it is set) -- under the showroom
@@ -835,9 +942,9 @@ class Item {
    * blurred coat) or 'matte' (no mirror, a faint sheen: rubber, cloth). Uploads the scene again,
    * as a show does: set it as each item is shown rather than over a finished scene item by item.
    */
-  finish(finish) {
-    if (typeof finish !== 'string' || !Object.hasOwn(FINISH, finish)) throw new TypeError(`finish: '${finish}' is not 'gloss', 'satin' or 'matte'`);
-    this._ok(this.view._lib.fn.set_finish(this.view._live('cadaclysm_view_set_finish'), this.id, FINISH[finish]), 'finish');
+  setFinish(finish) {
+    if (typeof finish !== 'string' || !Object.hasOwn(FINISH, finish)) throw new TypeError(`setFinish: '${finish}' is not 'gloss', 'satin' or 'matte'`);
+    this._ok(this.view._lib.fn.set_finish(this.view._live('cadaclysm_view_set_finish'), this.id, FINISH[finish]), 'setFinish');
   }
   /**
    * Draws its edges in `rgb` (text, or three numbers in 0..1), over the view's `setEdgeColour`,
@@ -853,21 +960,33 @@ class Item {
   }
   /**
    * The user layer it is on, 0..31 (every item starts on 0): it draws while the layer is on
-   * (`View.userLayer`) and in the viewports whose `layerMask` has its bit. A layer past 31 is refused.
+   * (`View.setUserLayer`) and in the viewports whose `layerMask` has its bit. A layer past 31 is refused.
    */
-  userLayer(layer) { this._ok(this.view._lib.fn.set_item_layer(this.view._live('cadaclysm_view_set_item_layer'), this.id, layer), 'userLayer'); }
-  nodeVisible(node, on) { this._ok(this.view._lib.fn.set_node_visible(this.view._live('cadaclysm_view_set_node_visible'), this.id, node, Boolean(on)), 'nodeVisible'); }
-  nodeColour(node, rgba) { this._ok(this.view._lib.fn.set_node_color(this.view._live('cadaclysm_view_set_node_color'), this.id, node, _rgba(rgba, 'nodeColour', this.view._lib)), 'nodeColour'); }
+  setUserLayer(layer) { this._ok(this.view._lib.fn.set_item_layer(this.view._live('cadaclysm_view_set_item_layer'), this.id, layer), 'setUserLayer'); }
+  /** Shown or hidden (view ABI 1.27): a hidden item draws nothing, is never picked or snapped and is left out of `frame`; it shows only while its layer is on too. */
+  setVisible(visible) { this._ok(this.view._lib.fn.set_item_visible(this.view._live('cadaclysm_view_set_item_visible'), this.id, Boolean(visible)), 'setVisible'); }
+  /**
+   * The nodes drawn as ghosts (x-ray), each a node index or a Node (view ABI 1.27); the set replaces the
+   * item's previous ghosts, and null or an empty list clears them.
+   */
+  setNodeGhosts(nodes) {
+    const list = nodes == null ? null : Array.from(nodes, (n, k) => _u32Of(n?.index ?? n, `setNodeGhosts: node ${k}`));
+    this._ok(this.view._lib.fn.set_node_ghosts(this.view._live('cadaclysm_view_set_node_ghosts'), this.id, list === null || list.length === 0 ? null : Uint32Array.from(list), list === null ? 0 : list.length), 'setNodeGhosts');
+  }
+  setNodeVisible(node, on) { this._ok(this.view._lib.fn.set_node_visible(this.view._live('cadaclysm_view_set_node_visible'), this.id, node, Boolean(on)), 'setNodeVisible'); }
+  setNodeColour(node, rgba) { this._ok(this.view._lib.fn.set_node_color(this.view._live('cadaclysm_view_set_node_color'), this.id, node, _rgba(rgba, 'setNodeColour', this.view._lib)), 'setNodeColour'); }
   /** Tint `node` toward `rgba`'s colour by its alpha; null clears. */
-  nodeHighlight(node, rgba) { this._ok(this.view._lib.fn.set_node_highlight(this.view._live('cadaclysm_view_set_node_highlight'), this.id, node, _rgba(rgba, 'nodeHighlight', this.view._lib)), 'nodeHighlight'); }
+  setNodeHighlight(node, rgba) { this._ok(this.view._lib.fn.set_node_highlight(this.view._live('cadaclysm_view_set_node_highlight'), this.id, node, _rgba(rgba, 'setNodeHighlight', this.view._lib)), 'setNodeHighlight'); }
   frameNode(node) { this._ok(this.view._lib.fn.frame_node(this.view._live('cadaclysm_view_frame_node'), this.id, node), 'frameNode'); }
 }
 
 /**
  * An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the window
  * ('top-left', 'top', 'top-right', 'left', 'centre', 'right', 'bottom-left', 'bottom' or
- * 'bottom-right'), drawn over everything, untouched by the camera. `remove`, `userLayer` and (text)
- * `setText` work as on any item.
+ * 'bottom-right'), drawn over everything, untouched by the camera. `remove`, `setUserLayer` and, for
+ * text, `setText` and `setColour` work as on any item; the item calls that mean nothing for an
+ * overlay (`setColour` on a shape or an image, `setPlacement`, `setXray`, `frame`, ...) throw, saying it is
+ * an overlay.
  */
 class Overlay extends Item {
   constructor(v, id, shown, anchor) { super(v, id, shown); this.anchor = anchor; }
@@ -889,12 +1008,12 @@ class Machining extends Item {
     if (!Number.isInteger(move) || move < 0) throw new ViewError(`seekMove: a whole number of moves, 0 or more, not ${_kind(move)}`);
     this._ok(this.view._lib.fn.machining_seek(this.view._live('cadaclysm_view_machining_seek'), this.id, move), 'seekMove');
   }
-  colourBy(mode) {
+  setColourBy(mode) {
     if (!Object.hasOwn(COLOUR_BY, mode)) throw new ViewError(`mode '${mode}': one of ${Object.keys(COLOUR_BY).join(', ')}`);
-    this._ok(this.view._lib.fn.machining_colour_by(this.view._live('cadaclysm_view_machining_colour_by'), this.id, COLOUR_BY[mode]), 'colourBy');
+    this._ok(this.view._lib.fn.machining_colour_by(this.view._live('cadaclysm_view_machining_colour_by'), this.id, COLOUR_BY[mode]), 'setColourBy');
   }
-  overlays(path = true, tool = true) {
-    this._ok(this.view._lib.fn.machining_overlays(this.view._live('cadaclysm_view_machining_overlays'), this.id, Boolean(path), Boolean(tool)), 'overlays');
+  setOverlays(path = true, tool = true) {
+    this._ok(this.view._lib.fn.machining_overlays(this.view._live('cadaclysm_view_machining_overlays'), this.id, Boolean(path), Boolean(tool)), 'setOverlays');
   }
   /** `{ moves, move, nx, ny, cell, min: [x, y], cycleTime }`. */
   info() {
@@ -1029,7 +1148,7 @@ class View {
     for (let at = node; at; at = at.parent) chain.unshift(at);
     let level = node.scene.roots();
     for (const on of chain) {
-      for (const other of level) if (other.index !== on.index) item.nodeVisible(other.index, false);
+      for (const other of level) if (other.index !== on.index) item.setNodeVisible(other.index, false);
       level = on.children();
     }
     return item;
@@ -1126,7 +1245,7 @@ class View {
   standard(name) { this._ok(this._lib.fn.standard(this._live('cadaclysm_view_standard'), _name(STANDARD, name, 'standard view')), 'standard'); }
   /** Fit the camera to everything shown. */
   frame() { this._ok(this._lib.fn.frame(this._live('cadaclysm_view_frame'), 0), 'frame'); }
-  orthographic(on) { this._void('set_orthographic', Boolean(on)); }
+  setOrthographic(on) { this._void('set_orthographic', Boolean(on)); }
   /**
    * Whether a double click frames what it hit (off by default: it is a pick answered with
    * `clicks` 2 and the camera stays). Applies where the view takes the pick itself (its own
@@ -1152,18 +1271,32 @@ class View {
   get navigation() { return this._lib.fn.navigation(this._live('cadaclysm_view_navigation')) === NAVIGATION_FLY ? 'fly' : 'orbit'; }
   /**
    * `[{ rect: [x, y, w, h], view: 16, projection: 16, eye: 3, grid: 'none'|'top'|'front'|'right', layerMask }]`,
-   * matrices column-major; `layerMask` the user layers drawn, bit n for layer n (`Item.userLayer`), every one when absent.
+   * matrices column-major; `layerMask` the user layers drawn, bit n for layer n (`Item.setUserLayer`), every one when absent.
    */
-  viewports(list) {
+  setViewports(list) {
     const exact = (a, n, what) => { const v = Array.from(a ?? []); if (v.length !== n) throw new ViewError(`viewport ${what}: ${n} numbers, not ${v.length}`); return v; };
     const raw = list.map((v) => ({ size: SIZE('CadaclysmViewViewport'), rect: exact(v.rect, 4, 'rect'), view: exact(v.view, 16, 'view'), projection: exact(v.projection, 16, 'projection'), eye: exact(v.eye, 3, 'eye'), grid: _name(GRID, v.grid ?? 'none', 'grid'), layer_mask: v.layerMask ?? 0xFFFFFFFF }));
-    this._ok(this._lib.fn.set_viewports(this._live('cadaclysm_view_set_viewports'), raw, raw.length), 'viewports');
+    this._ok(this._lib.fn.set_viewports(this._live('cadaclysm_view_set_viewports'), raw, raw.length), 'setViewports');
   }
-  layer(name, on) { this._ok(this._lib.fn.set_layer(this._live('cadaclysm_view_set_layer'), _name(LAYER, name, 'layer'), Boolean(on)), 'layer'); }
-  /** User layer `layer`, 0..31, on or off in every viewport (all start on); see `Item.userLayer`. A layer past 31 is refused. */
-  userLayer(layer, on) { this._ok(this._lib.fn.set_user_layer(this._live('cadaclysm_view_set_user_layer'), layer, Boolean(on)), 'userLayer'); }
+  /** The colours hover, selected and first points draw in; a missing one restores its default. */
+  setPointStateColours({ hover = null, selected = null, first = null } = {}) {
+    const rgb = (c) => _rgb(c, 'setPointStateColours', this._lib);
+    this._void('set_point_state_colours', rgb(hover), rgb(selected), rgb(first));
+  }
+  /** Names viewport `i` top left inside it; `null` clears it. A pick on it answers `viewportLabel`. */
+  setViewportLabel(i, text, { colour = null } = {}) {
+    const t = text == null ? null : _textOf(text, 'setViewportLabel');
+    this._ok(this._lib.fn.set_viewport_label(this._live('cadaclysm_view_set_viewport_label'), i, t, _rgb(colour, 'setViewportLabel', this._lib)), 'setViewportLabel');
+  }
+  /** Frames viewport `i` one point inside its edge; `null` clears it. */
+  setViewportBorder(i, colour) {
+    this._ok(this._lib.fn.set_viewport_border(this._live('cadaclysm_view_set_viewport_border'), i, _rgb(colour, 'setViewportBorder', this._lib)), 'setViewportBorder');
+  }
+  setLayer(name, on) { this._ok(this._lib.fn.set_layer(this._live('cadaclysm_view_set_layer'), _name(LAYER, name, 'layer'), Boolean(on)), 'setLayer'); }
+  /** User layer `layer`, 0..31, on or off in every viewport (all start on); see `Item.setUserLayer`. A layer past 31 is refused. */
+  setUserLayer(layer, on) { this._ok(this._lib.fn.set_user_layer(this._live('cadaclysm_view_set_user_layer'), layer, Boolean(on)), 'setUserLayer'); }
   /** The clear colour: text ('#rgb', '#rrggbb', a CSS name) or three numbers in 0..1. */
-  background(rgb) { this._void('set_background', _rgb(rgb ?? [], 'background', this._lib)); }
+  setBackground(rgb) { this._void('set_background', _rgb(rgb ?? [], 'setBackground', this._lib)); }
   get surfaces() { return this._lib.fn.surfaces(this._live('cadaclysm_view_surfaces')) === 1 ? 'triangles' : 'exact'; }
   set surfaces(name) { this._ok(this._lib.fn.set_surfaces(this._live('cadaclysm_view_set_surfaces'), _name(SURFACES, name, 'surfaces')), 'surfaces'); }
   /**
@@ -1207,12 +1340,27 @@ class View {
   get lighting() { return this._lib.fn.lighting(this._live('cadaclysm_view_lighting')) === 1 ? 'studio' : 'headlight'; }
   set lighting(name) { this._ok(this._lib.fn.set_lighting(this._live('cadaclysm_view_set_lighting'), _name(LIGHTING, name, 'lighting')), 'lighting'); }
   // -- the timeline --
-  /** Play at `speed` times real time; it stops at its end unless `loop()` is on; at the end it starts again from 0. */
+  /** Play at `speed` times real time; it stops at its end unless `setLoop()` is on; at the end it starts again from 0. */
   play(speed = 1) { this._ok(this._lib.fn.timeline_play(this._live('cadaclysm_view_timeline_play'), Number(speed)), 'play'); }
   pause() { this._ok(this._lib.fn.timeline_pause(this._live('cadaclysm_view_timeline_pause')), 'pause'); }
   /** Set the clock, clamped to [0, duration]. */
   seek(seconds) { this._ok(this._lib.fn.timeline_seek(this._live('cadaclysm_view_timeline_seek'), Number(seconds)), 'seek'); }
-  loop(on = true) { this._ok(this._lib.fn.timeline_set_loop(this._live('cadaclysm_view_timeline_set_loop'), Boolean(on)), 'loop'); }
+  setLoop(on = true) { this._ok(this._lib.fn.timeline_set_loop(this._live('cadaclysm_view_timeline_set_loop'), Boolean(on)), 'setLoop'); }
+  /**
+   * Plays the kernel `animation` (a blacksmith Animation) on this view's timeline (view ABI 1.27) and
+   * returns the track's id (1 or more). Each binding names an animation target and what it moves:
+   * `{ target, item, node }` or `[target, item, node?]`, `item` an Item or its id, `node` a Node or its
+   * index (none: the item itself). The view plays its own copy, so the animation may be closed at once.
+   */
+  playAnimation(animation, bindings) {
+    const list = Array.from(bindings ?? [], (b, k) => _binding(b, k));
+    const raw = animation == null ? null : animation._handle;
+    const id = this._lib.fn.play_animation(this._live('cadaclysm_view_play_animation'), raw, list.length ? list : null, list.length);
+    if (!id) throw this._lib.failure('playAnimation');
+    return id;
+  }
+  /** Removes the animation track `track` (from `playAnimation`) and restores what it moved (view ABI 1.27). */
+  removeTrack(track) { this._ok(this._lib.fn.timeline_remove(this._live('cadaclysm_view_timeline_remove'), _u32Of(track, 'removeTrack: track')), 'removeTrack'); }
   get time() { return this._lib.fn.timeline_time(this._live('cadaclysm_view_timeline_time')); }
   get duration() { return this._lib.fn.timeline_duration(this._live('cadaclysm_view_timeline_duration')); }
   get playing() { return Boolean(this._lib.fn.timeline_playing(this._live('cadaclysm_view_timeline_playing'))); }
@@ -1253,7 +1401,7 @@ class View {
     let waiting = '';
     for (let i = 0; i < 200; i++) {
       this.draw();
-      if (this._lib.fn.pick_result(p, out)) return out.item ? _pick(out) : null;
+      if (this._lib.fn.pick_result(p, out)) return _hit(out) ? _pick(out) : null;
       waiting = this._lib.lastError();
       if (waiting && !waiting.endsWith('no pick result')) throw new ViewError(waiting);
       _sleep(10);
@@ -1270,7 +1418,7 @@ class View {
    */
   lastPick() {
     const out = _rawPick();
-    if (this._lib.fn.pick_result(this._live('cadaclysm_view_pick_result'), out)) return out.item ? _pick(out) : null;
+    if (this._lib.fn.pick_result(this._live('cadaclysm_view_pick_result'), out)) return _hit(out) ? _pick(out) : null;
     const waiting = this._lib.lastError();
     if (waiting && !waiting.endsWith('no pick result')) throw new ViewError(waiting);
     return undefined;
@@ -1346,13 +1494,89 @@ class View {
     this._ok(this._lib.fn.set_work_plane(this._live('cadaclysm_view_set_work_plane'), o, x, n, _finite(step, 'setWorkPlane step')), 'setWorkPlane');
   }
   draw() { this._ok(this._lib.fn.draw(this._live('cadaclysm_view_draw')), 'draw'); this._drawn = true; }
-  /** Blocks until the window is closed; the camera it ended on and the last pick. */
-  run() {
+  /**
+   * The oldest input event the view's own window handled and has not handed out yet (view ABI 1.26),
+   * without waiting; null while none waits. The window still orbits, zooms and closes by itself -- the
+   * events report, they do not intercept. Each is `{ type, timeMs, dropped, ... }`: `timeMs` the
+   * library's own clock (only differences mean anything), `dropped` how many events a full queue (1024)
+   * dropped just before this one, and by `type`:
+   * - 'pointer_down', 'pointer_move', 'pointer_up': `x`, `y` (physical pixels), `button` (0 left,
+   *   1 middle, 2 right; 0 for a move), `pointer` ('mouse', 'touch', 'pen'), `pointerId`;
+   * - 'wheel': `x`, `y`, `wheelY` (a DOM deltaY: negative forward, about 100 a notch);
+   * - 'key_down', 'key_up': `key` (the DOM code: 'KeyR', 'Digit1', 'Space', 'Escape', 'ArrowUp'...), `repeat`;
+   * - the pointer, wheel and key events also `shift`, `ctrl`, `alt`, `meta`;
+   * - 'resize': `width`, `height`;
+   * - 'pick': `pick` -- a click's answer, as `lastPick` also gives it (null for nothing);
+   * - 'snap': `snap` -- a hover's or click's snap with snapping on (null for none);
+   * - 'close': `camera` -- the window closed; the camera it closed on, as `run` returns it.
+   * A view in a host's window, or offscreen, queues nothing. Still read after the window has closed.
+   * A failure other than "no event" throws the library's own message.
+   */
+  nextEvent() {
+    // Not _live(): the queue is read after the window has closed (its 'close' event last).
+    if (this._pointer === null) throw new ViewError('cadaclysm_view_next_event: the view is closed');
+    const out = { size: SIZE('CadaclysmViewInputEvent'), pick_viewport_label: -1 };
+    if (this._lib.fn.next_event(this._pointer, out)) return _event(out, this._yUp);
+    const why = this._lib.lastError();
+    if (why && !why.endsWith('no event')) throw new ViewError(why);
+    return null;
+  }
+  /**
+   * Closes the view's own window as its close button does (view ABI 1.26): `closed` turns true, a
+   * 'close' event is queued and a loop around `pump` ends; `close()` still owes the destroy. Nothing for
+   * a window already closed; a view in a host's window, or offscreen, has none to close (refused).
+   */
+  closeWindow() {
+    if (this._pointer !== null && this._windowClosed) return;
+    this._ok(this._lib.fn.close(this._live('cadaclysm_view_close')), 'closeWindow');
+    this._markClosed();
+  }
+  /**
+   * Blocks until the window is closed; the camera it ended on and the last pick.
+   *
+   * With `onEvent` (view ABI 1.26), each input event (`nextEvent`'s objects) is handed to it on this
+   * thread as the window handles it, between pumps -- it may change the scene or the camera. Returning
+   * `false` closes the window and ends the run; anything else (undefined too) goes on. The 'close' event
+   * is handed over last when the window closes by itself (Escape, its close button).
+   */
+  run(onEvent) {
+    if (onEvent != null) return this._runWith(onEvent);
     const cam = { size: SIZE('CadaclysmViewCamera'), eye: [0, 0, 0], target: [0, 0, 0], up: [0, 0, 0], orthographic: 0 };
     const pick = _rawPick();
     this._ok(this._lib.fn.run(this._live('cadaclysm_view_run'), cam, pick), 'run');
     this._markClosed();
     return _camera(cam, pick, this._yUp);
+  }
+  /** `run(onEvent)`: pump 16 ms, hand over what queued, until the 'close' event. */
+  _runWith(onEvent) {
+    if (typeof onEvent !== 'function') throw new ViewError(`run: onEvent is a function, not ${typeof onEvent}`);
+    let closedOn = null, picked = null, stopping = false;
+    while (closedOn === null) {
+      const state = this._windowClosed ? CLOSED : this._lib.fn.pump(this._live('cadaclysm_view_pump'), 16);
+      if (state !== OPEN && state !== CLOSED) throw this._lib.failure('pump');
+      for (let e = this.nextEvent(); e !== null; e = closedOn === null ? this.nextEvent() : null) {
+        if (e.type === 'pick') picked = e.pick;
+        if (e.type === 'close') {
+          closedOn = e.camera;
+          if (!stopping) onEvent(e);
+        } else if (!stopping && onEvent(e) === false) {
+          stopping = true;
+          // As closeWindow, but the view kept to drain: the shared window's _markClosed destroys it.
+          this._ok(this._lib.fn.close(this._live('cadaclysm_view_close')), 'closeWindow');
+          this._windowClosed = true;
+          _open.delete(this);
+        }
+      }
+      if (state === CLOSED && closedOn === null) {
+        this._markClosed();
+        throw new ViewError('run: the window closed with no close event');
+      }
+    }
+    // The answer the last click left for lastPick, taken as run() takes it; else the last pick event's.
+    const out = _rawPick();
+    if (this._lib.fn.pick_result(this._pointer, out)) picked = _hit(out) ? _pick(out) : null;
+    this._markClosed();
+    return { ...closedOn, pick: picked };
   }
   /**
    * Text shown as one item: a label (pixels, anchored to `at`) or world text (`mode: 'world'`,
@@ -1389,12 +1613,12 @@ class View {
    * A 2D shape over the window: `shape` -- a blacksmith Profile, an array of them (one overlay, their
    * fills together by the even-odd rule: a crosshair's two strokes, a frame's two loops), or rational
    * cubic Beziers, sixteen numbers each (a profile's `beziers()`) -- in pixels (one profile unit a
-   * pixel, y up), its origin hung `x`, `y` pixels inward from `anchor`. Closed loops are filled (holes
-   * cut), every loop stroked where a stroke is set. `style.fill`: a colour, or 'none'; unset, the
-   * first coloured profile's own colour, else white -- unless a stroke is set, when an uncoloured
-   * shape is not filled. `style.stroke` a colour, `style.strokeWidth` pixels (1), `style.order`
-   * (lower draws first; shapes, text and images share it). A click on it picks it (`pick.overlay`)
-   * and nothing beneath.
+   * pixel, y up), its origin hung `x`, `y` pixels inward from `anchor`. A profile is a sketch, so it
+   * draws as its outline by default: `style.stroke` a colour, or 'none'; unset, the first coloured
+   * profile's own colour, else white; `style.strokeWidth` pixels (1). `style.fill` only where given (a
+   * colour, or 'none'): closed loops filled, holes cut -- a panel needs one. Fill only is a `fill` and
+   * `stroke: 'none'`; neither a fill nor a stroke is refused. `style.order` (lower draws first;
+   * shapes, text and images share it). A click on it picks it (`pick.overlay`) and nothing beneath.
    */
   showOverlay(shape, anchor, x, y, style = {}) {
     const s = style ?? {};
@@ -1411,10 +1635,11 @@ class View {
     }
     if (beziers.length === 0 || beziers.length % 16) throw new ViewError(`showOverlay: 16 numbers a curve, at least one, not ${beziers.length}`);
     const code = _name(ALIGN, anchor, 'anchor');
-    const stroke = _rgba(s.stroke, 'showOverlay stroke', this._lib);
-    let fill;
-    if (typeof s.fill === 'string' && s.fill.trim().toLowerCase() === 'none') fill = null;
-    else fill = _rgba(s.fill, 'showOverlay fill', this._lib) ?? own ?? (stroke == null ? Float32Array.from([1, 1, 1, 1]) : null);
+    const none = (c) => typeof c === 'string' && c.trim().toLowerCase() === 'none';
+    const stroke = none(s.stroke) ? null
+      : _rgba(s.stroke, 'showOverlay stroke', this._lib) ?? own ?? Float32Array.from([1, 1, 1, 1]);
+    const fill = none(s.fill) ? null : _rgba(s.fill, 'showOverlay fill', this._lib);
+    if (fill == null && stroke == null) throw new ViewError('showOverlay: neither a fill nor a stroke');
     const raw = {
       size: SIZE('CadaclysmViewOverlay'), anchor: code, beziers, curve_count: beziers.length / 16,
       order: Math.trunc(_finite(s.order ?? 0, 'showOverlay order')),
@@ -1516,11 +1741,11 @@ class View {
    * 'detailed' keeps every frame whole but for levels within half a pixel, 'smooth' holds the
    * frame rate and refines once the camera rests (see `wakeMs`). `motion` null turns levels off.
    */
-  lod(motion = 'detailed', minTriangles = 0) {
-    if (motion == null) { this._ok(this._lib.fn.set_lod(this._live('cadaclysm_view_set_lod'), null), 'lod'); return; }
-    if (!Number.isInteger(minTriangles) || minTriangles < 0 || minTriangles > 0xFFFFFFFF) throw new ViewError(`lod: minTriangles is a count from 0 to 4294967295, not ${minTriangles}`);
+  setLod(motion = 'detailed', minTriangles = 0) {
+    if (motion == null) { this._ok(this._lib.fn.set_lod(this._live('cadaclysm_view_set_lod'), null), 'setLod'); return; }
+    if (!Number.isInteger(minTriangles) || minTriangles < 0 || minTriangles > 0xFFFFFFFF) throw new ViewError(`setLod: minTriangles is a count from 0 to 4294967295, not ${minTriangles}`);
     const raw = { size: SIZE('CadaclysmViewLod'), min_triangles: minTriangles, motion: _name(LOD_MOTION, motion, 'motion') };
-    this._ok(this._lib.fn.set_lod(this._live('cadaclysm_view_set_lod'), raw), 'lod');
+    this._ok(this._lib.fn.set_lod(this._live('cadaclysm_view_set_lod'), raw), 'setLod');
   }
   /** Milliseconds until `needsDraw` turns true by itself; 0 when a draw is owed now, null when none is coming. */
   get wakeMs() { const ms = this._lib.fn.wake_ms(this._live('cadaclysm_view_wake_ms')); return ms === NONE_COMING ? null : ms; }
@@ -1564,12 +1789,49 @@ function _camera(cam, pick, yUp) {
   } else azimuth = Math.atan2(d[1], d[0]) * deg;
   const elevation = Math.asin(Math.max(-1, Math.min(1, d[2]))) * deg;
   return { eye, target, up, orthographic: Boolean(cam.orthographic), azimuth, elevation,
-    pick: pick.item ? _pick(pick) : null };
+    pick: _hit(pick) ? _pick(pick) : null };
+}
+
+/** A CadaclysmViewInputEvent as the object `View.nextEvent` returns (see there); cadaclysm_view.py's `_event_dict`. */
+function _event(e, yUp) {
+  const type = INPUT_EVENTS[e.kind] ?? String(e.kind);
+  const out = { type, timeMs: e.time_ms ?? 0, dropped: e.dropped ?? 0 };
+  const m = e.modifiers ?? 0;
+  const mods = { shift: Boolean(m & MODS.shift), ctrl: Boolean(m & MODS.ctrl), alt: Boolean(m & MODS.alt), meta: Boolean(m & MODS.meta) };
+  if (type.startsWith('pointer_')) {
+    const pointer = Object.keys(POINTER).find((k) => POINTER[k] === (e.pointer ?? 0)) ?? String(e.pointer);
+    Object.assign(out, { x: e.x ?? 0, y: e.y ?? 0, button: e.button ?? 0, pointer, pointerId: e.pointer_id ?? 0, ...mods });
+  } else if (type === 'wheel') {
+    Object.assign(out, { x: e.x ?? 0, y: e.y ?? 0, wheelY: e.wheel_y ?? 0, ...mods });
+  } else if (type === 'key_down' || type === 'key_up') {
+    Object.assign(out, { key: _keyName(e.key), repeat: Boolean(e.repeat), ...mods });
+  } else if (type === 'resize') {
+    Object.assign(out, { width: e.width ?? 0, height: e.height ?? 0 });
+  } else if (type === 'pick') {
+    out.pick = _hit(e.pick, e.pick_viewport_label) ? _pick(e.pick, e.pick_viewport_label) : null;
+  } else if (type === 'snap') {
+    out.snap = e.snap?.kind ? _snap(e.snap) : null;
+  } else if (type === 'timeline') {
+    // no fields beyond the stamp: the clock is View.time
+  } else if (type === 'close') {
+    const cam = e.camera ?? { eye: [0, 0, 0], target: [0, 0, 0], up: [0, 0, 0], orthographic: 0 };
+    out.camera = _camera(cam, { item: 0, viewport_label: -1 }, yUp);
+  } else throw new ViewError(`nextEvent: kind ${e.kind} is not a CADACLYSM_VIEW_INPUT_EVENT_* this SDK knows`);
+  return out;
+}
+
+/** A `char key[32]` as koffi hands it (text, or its bytes): the name up to its NUL. */
+function _keyName(key) {
+  if (key == null) return '';
+  if (typeof key === 'string') { const nul = key.indexOf('\0'); return nul < 0 ? key : key.slice(0, nul); }
+  const bytes = Uint8Array.from(key, (b) => b & 0xFF);
+  const nul = bytes.indexOf(0);
+  return Buffer.from(nul < 0 ? bytes : bytes.subarray(0, nul)).toString('utf8');
 }
 
 /** A CadaclysmViewPick for the library to fill: `size` set, every other field zero. */
 function _rawPick() {
-  return { size: SIZE('CadaclysmViewPick'), item: 0, node: 0, face: 0, clicks: 0, has_point: 0, point: [0, 0, 0], overlay: 0 };
+  return { size: SIZE('CadaclysmViewPick'), item: 0, node: 0, face: 0, clicks: 0, has_point: 0, point: [0, 0, 0], overlay: 0, viewport_label: -1 };
 }
 
 /**
@@ -1580,9 +1842,14 @@ function _rawPick() {
  * overlay: it was over the pixel, so nothing of the scene beneath it was picked (`face` is a text
  * overlay's line, else 0).
  */
-function _pick(raw) {
+function _pick(raw, label = raw.viewport_label) {
   return { item: raw.item, node: raw.node, face: raw.face, clicks: raw.clicks,
-    point: raw.has_point ? Array.from(raw.point) : null, overlay: Boolean(raw.overlay) };
+    point: raw.has_point ? Array.from(raw.point) : null, overlay: Boolean(raw.overlay), viewportLabel: label };
+}
+
+/** Whether a pick answer hit something: an item, or (1.28) a viewport's label (`viewport_label` -1 is none). */
+function _hit(raw, label = raw?.viewport_label) {
+  return Boolean(raw?.item) || label >= 0;
 }
 
 /** A CadaclysmViewSnap for the library to fill: `size` set, every other field zero. */
@@ -1682,8 +1949,8 @@ function _present(obj, options = {}, mode = 'show', transforms = null) {
   } else v = new View(viewOptions);
   try {
     const item = v.show(obj, o.rgb ?? null, o.tolerance);
-    if (transforms) item.nodeTransforms(transforms);
-    v.layer('edges', o.edges);
+    if (transforms) item.setNodeTransforms(transforms);
+    v.setLayer('edges', o.edges);
     const isNode = obj?.constructor?.name === 'Node';
     _aim(v, o, isNode ? () => item.frameNode(obj.index) : () => {});
     if (mode === 'show') { v.draw(); return undefined; }
@@ -1693,5 +1960,6 @@ function _present(obj, options = {}, mode = 'show', transforms = null) {
 
 module.exports = {
   ViewError, View, Item, Overlay, Machining, Library, useTerminal, useWgpu, use, current, pump, loadFont,
-  OPEN, CLOSED, VIEWS, _find, _camera, _pick, _png, _reset, _open, _release, _views, _present, _aim, _shared,
+  OPEN, CLOSED, VIEWS, _find, _camera, _pick, _event, _png, _reset, _open, _release, _views, _present, _aim, _shared,
+  _sizeOf: SIZE, _POINT_SHAPES: POINT_SHAPES, _POINT_STATES: POINT_STATES,
 };

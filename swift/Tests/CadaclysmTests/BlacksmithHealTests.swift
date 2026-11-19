@@ -89,7 +89,7 @@ final class BlacksmithHealTests: XCTestCase {
 
     func testHealedCuboidHealsToItselfAsANewSolid() throws {
         let box = try Solid.cuboid(10, 10, 10)
-        let (healed, report) = try box.healed()
+        let (healed, report) = try box.heal()
         XCTAssertFalse(healed === box)
         XCTAssertNotEqual(try healed.h(), try box.h())
         XCTAssertTrue(report.fixes.isEmpty)
@@ -104,21 +104,21 @@ final class BlacksmithHealTests: XCTestCase {
         XCTAssertEqual(try healed.faces, 6)
         let mass: Mass = try healed.mass()
         XCTAssertEqual(mass.volume, 1000, accuracy: 1e-6)
-        XCTAssertEqual(try box.healed(tolerance: 0.5).1.tolerance, 0.5)
+        XCTAssertEqual(try box.heal(tolerance: 0.5).1.tolerance, 0.5)
         XCTAssertEqual(try (0..<12).map { try healed.edgeTolerance($0) }, Array(repeating: 0.0, count: 12))
         XCTAssertNil(try healed.edgeTolerance(0xFFFF_FFF0))
     }
 
     func testHealedWithEveryKindOffRefusesEachSmallFeatureAsToggled() throws {
         let plate = try Solid.cuboid(10, 10, 0.001)
-        let (_, report) = try plate.healed(tolerance: 0.01, edges: false, faces: false, holes: false)
+        let (_, report) = try plate.heal(tolerance: 0.01, edges: false, faces: false, holes: false)
         XCTAssertTrue(report.fixes.isEmpty)
         XCTAssertEqual(report.smallBefore, 8)
         XCTAssertEqual(report.smallAfter, 8)
         XCTAssertEqual(report.refused,
                        [8, 9, 10, 11].map { HealRefusal(kind: "short_edge", index: $0, why: "toggled", figure: 0) }
                            + [2, 3, 4, 5].map { HealRefusal(kind: "sliver_face", index: $0, why: "toggled", figure: 0) })
-        let (_, on) = try plate.healed(tolerance: 0.01)
+        let (_, on) = try plate.heal(tolerance: 0.01)
         XCTAssertEqual(on.smallBefore, 8)
         XCTAssertTrue(on.refused.allSatisfy { $0.why != "toggled" })
         XCTAssertTrue(!on.guarded || on.refused.allSatisfy { $0.why == "body_guard" })
@@ -128,7 +128,7 @@ final class BlacksmithHealTests: XCTestCase {
         let box = try Solid.cuboid(1, 1, 1)
         box.close()
         XCTAssertEqual(refusal { _ = try box.health() }, "solid: closed")
-        XCTAssertEqual(refusal { _ = try box.healed() }, "solid: closed")
+        XCTAssertEqual(refusal { _ = try box.heal() }, "solid: closed")
         XCTAssertEqual(refusal { _ = try box.edgeTolerance(0) }, "solid: closed")
     }
 

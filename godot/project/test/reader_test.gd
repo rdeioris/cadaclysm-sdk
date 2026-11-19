@@ -251,7 +251,7 @@ func test_brep_health_reports_the_free_edges_of_st203_bapl():
 	rel(h["tolerance"], 1e-4 * h["extent"], 1e-12, "tolerance")
 	eq(h["cracks"], null)
 	eq([h["loose_edges"], h["worst_loose"]], [0, 0.0])
-	# 56 is `sewed()`'s pairs, as Python's test compares them: this binding has no `sewed`.
+	# 56 is `sew()`'s pairs, as Python's test compares them: this binding has no `sew`.
 	eq([h["sew_pairs"], h["sew_refused"]], [56, 4])
 	ok(h["sew_worst_gap"] > 0.0)
 	var c: Dictionary = body.health(0.0, true)["cracks"]
@@ -266,7 +266,7 @@ func test_brep_healed_heals_st203_bapl_and_leaves_the_original():
 	var body := st203_body()
 	if body == null:
 		return
-	var pair := body.healed(5.0)
+	var pair := body.heal(5.0)
 	var healed: CadaclysmBrep = pair["body"]
 	var r: Dictionary = pair["report"]
 	eq(r["tolerance"], 5.0)
@@ -289,7 +289,7 @@ func test_brep_healed_heals_st203_bapl_and_leaves_the_original():
 	ok(is_nan(healed.edge_tolerance(41550)), "a removed edge has no tolerance")
 	eq(healed.edge_tolerance(41363), 0.0)
 	ok(is_nan(healed.edge_tolerance(0xFFFFFFF0)), "no such edge")
-	var off: Dictionary = body.healed(5.0, false, false, false)["report"]
+	var off: Dictionary = body.heal(5.0, false, false, false)["report"]
 	eq([off["fixes"].size(), off["refused"].size()], [0, 96])
 	ok(off["refused"].all(func(x): return x["why"] == "toggled" and x["figure"] == 0.0), "every refusal toggled")
 	var per_kind := []
@@ -299,10 +299,52 @@ func test_brep_healed_heals_st203_bapl_and_leaves_the_original():
 	healed.release()
 	eq(healed.health(), {})
 	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
-	eq(healed.healed(), {})
+	eq(healed.heal(), {})
 	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
 	ok(is_nan(healed.edge_tolerance(0)))
 	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
+
+# ---- canonical recognition (recognition in the other wrappers, 2026-11-16) ----------
+# Python's test_brep_recognize_* in test_cadaclysm.py, on the repository's own Rhino fixture.
+
+const BOX_UNION_SPHERE := "crates/cadaclysm-acis/tests/fixtures/rhino/box-union-sphere.3dm"
+
+func test_brep_recognize_takes_a_3dm_ball_back_to_a_sphere_and_leaves_the_original():
+	# box-union-sphere.3dm: a box unioned with a ball, every face stored as NURBS.
+	var path := fixture(BOX_UNION_SPHERE)
+	if path == "":
+		return
+	var scene := CadaclysmScene.open_with(path, {"convention": "native"})
+	var body: CadaclysmBrep = null
+	for n in scene.nodes:
+		if n.brep != null:
+			body = n.brep
+			break
+	ok(body != null, "a brep body")
+	var pair := body.recognize()
+	var back: CadaclysmBrep = pair["body"]
+	var r: Dictionary = pair["report"]
+	ok(back != null and back.pointer() != body.pointer(), "a new brep")
+	var kinds := []
+	var faces := {}
+	for f in r["faces"]:
+		kinds.append(f["kind"])
+		faces[f["face"]] = true
+	ok("sphere" in kinds and "plane" in kinds, str(kinds))
+	eq(faces.size(), r["faces"].size(), "every face once")
+	ok(r["faces"].all(func(f): return f["deviation"] <= r["tolerance"]), "faces within the tolerance")
+	ok(r["edges"].all(func(e): return e["deviation"] <= r["tolerance"]), "edges within the tolerance")
+	var worst := 0.0
+	for f in r["faces"]:
+		worst = maxf(worst, f["deviation"])
+	eq(r["worst_face"], worst)
+	# the edges named as the brep names them
+	ok(r["edges"].all(func(e): return not is_nan(back.edge_tolerance(e["edge"]))), "every edge has a tolerance")
+	back.release()
+	eq(back.recognize(), {})
+	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
+	eq(body.recognize(0.25)["report"]["tolerance"], 0.25)
+	scene.close()
 
 func test_query():
 	var scene := native()
@@ -771,6 +813,83 @@ func test_a_file_without_a_schedule_has_none():
 	if scene == null:
 		return
 	eq(scene.schedules.size(), 0)
+	scene.close()
+
+# Work calendars: `samples/schedule-calendar.ifc` is schedule.ifc with one calendar every task works on.
+const MONDAY := 1772409600.0
+
+func calendar_scene() -> CadaclysmScene:
+	var path := fixture("samples/schedule-calendar.ifc")
+	if path == "":
+		return null
+	var scene := CadaclysmScene.open(path)
+	ok(scene != null, Cadaclysm.last_error())
+	return scene
+
+func test_a_file_reads_its_work_calendar():
+	var scene := calendar_scene()
+	if scene == null:
+		return
+	var calendars: Array = scene.calendars
+	eq(calendars.size(), 1)
+	var cal: CadaclysmWorkCalendar = calendars[0]
+	eq(cal.index, 0)
+	eq(cal.name, "Site calendar")
+	eq(cal.identification, "CAL-1")
+	eq(cal.kind, "FIRSTSHIFT")
+	eq(cal.kind_name, "")
+	eq(cal.working.size(), 1)
+	var weekdays: CadaclysmWorkTime = cal.working[0]
+	eq(weekdays.name, "Weekdays")
+	eq(weekdays.start, MONDAY - 60.0 * DAY)
+	ok(is_nan(weekdays.finish), "no finish")
+	var p: CadaclysmRecurrence = weekdays.pattern
+	eq(p.kind, "WEEKLY")
+	eq(p.days, [])
+	eq(p.weekdays, [1, 2, 3, 4, 5])
+	eq(p.months, [])
+	eq(p.position, null)
+	eq(p.interval, null)
+	eq(p.occurrences, null)
+	eq(p.periods, [[28800.0, 43200.0], [46800.0, 61200.0]])
+	eq(cal.exceptions.size(), 1)
+	var easter: CadaclysmWorkTime = cal.exceptions[0]
+	eq(easter.name, "Easter Monday")
+	ok(is_nan(easter.start) and is_nan(easter.finish), "an open range")
+	eq(easter.pattern.kind, "YEARLY_BY_DAY_OF_MONTH")
+	eq(easter.pattern.days, [6])
+	eq(easter.pattern.months, [4])
+	eq(easter.pattern.periods, [])
+
+	var slab: CadaclysmTask = scene.schedules[0].tasks[0]
+	eq(slab.calendar_index, 0)
+	eq(slab.calendar.index, cal.index)
+	eq(slab.time.duration_kind, "WORKTIME")
+	eq(slab.time.work_duration, {"days": 10.0, "seconds": 0.0})
+
+	var week: Array = cal.working_periods(MONDAY, MONDAY + 7.0 * DAY)
+	eq(week.size(), 10)
+	eq(week[0], [1772438400.0, 1772452800.0])
+	eq(cal.working_seconds(MONDAY, MONDAY + 7.0 * DAY), 10.0 * 4.0 * 3600.0)
+	eq(cal.working_periods(1775433600.0, 1775520000.0), [])  # Easter Monday 2026-04-06
+	eq(cal.add_work(1772438400.0, 10.0), 1773421200.0)
+
+	eq(cal.working_periods(1.0, 0.0), null)
+	eq(Cadaclysm.last_error(), "from must not be after to")
+	eq(cal.working_seconds(NAN, 0.0), null)
+	eq(Cadaclysm.last_error(), "from and to must be finite")
+	eq(cal.add_work(T0, INF), null)
+	eq(Cadaclysm.last_error(), "from and to must be finite")
+	scene.close()
+
+func test_a_file_without_a_work_calendar_has_none():
+	var scene := schedule_scene()
+	if scene == null:
+		return
+	eq(scene.calendars.size(), 0)
+	var slab: CadaclysmTask = scene.schedules[0].tasks[0]
+	eq(slab.calendar_index, null)
+	eq(slab.calendar, null)
 	scene.close()
 
 # The pose facts (posing plan 2, wrapper brief facts 1-6), on the same file and the same
@@ -1346,3 +1465,27 @@ func test_fem_a_brep_body_carries_topology_and_the_default_tolerance_is_the_libr
 	ok(Cadaclysm.last_error().contains("max_size"), Cadaclysm.last_error())
 	mesh.release()
 	scene.close()
+
+const FACED := "crates/cadaclysm-acis/tests/fixtures/fusion/rhino-fillet-mixed-radii.stp"  # mechanism.stp has no faces
+
+func test_lightmap_uvs_arrive_when_asked_and_not_otherwise() -> void:
+	var path := fixture(FACED)
+	if path == "":
+		return
+	var plain := CadaclysmScene.open_with(path, {"convention": "native"})
+	for node in plain.walk():
+		eq(node.lightmap_uvs.size(), 0)
+	var lit := CadaclysmScene.open_with(path, {"convention": "native", "lightmap_resolution": 256})
+	var count := 0
+	for node in lit.walk():
+		var uvs: PackedVector2Array = node.lightmap_uvs
+		if uvs.is_empty():
+			continue
+		eq(uvs.size(), node.mesh.positions.size())
+		for uv in uvs:
+			ok(uv.x >= 0.0 and uv.x <= 1.0 and uv.y >= 0.0 and uv.y <= 1.0, "inside the unit square")
+		eq(node.mesh.uvs.size(), 0)
+		count += 1
+	ok(count > 0, "a faced STEP comes back lit")
+	fails(func(): CadaclysmScene.open_with(path, {"lightmap_resolution": -1}), "lightmap_resolution")
+	fails(func(): CadaclysmScene.open_with(path, {"lightmap_resolution": 4294967296}), "lightmap_resolution")

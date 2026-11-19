@@ -21,7 +21,7 @@ private func refusal(_ body: () throws -> Void) -> String? {
 /// A 10-cube centred on the origin and a pin through it (radius 2, along z, z -10..10), both
 /// tracked -- the kernel's oracle 2 cut.
 private func blockAndPin() throws -> (Solid, Solid) {
-    (try Solid.cuboid(10, 10, 10).tracked(), try Solid.cylinder(2, 20).translate(0, 0, -10).tracked())
+    (try Solid.cuboid(10, 10, 10).track(), try Solid.cylinder(2, 20).translate(0, 0, -10).track())
 }
 
 /// Face `f`'s outward normal's z, off its reference.
@@ -34,9 +34,9 @@ final class BlacksmithIdentityTests: XCTestCase {
         XCTAssertNil(try plain.faceId(0))
         XCTAssertNil(try plain.edgeId(0))
         XCTAssertEqual(try plain.faceOrigins(0), [])
-        let t = try plain.tracked()
+        let t = try plain.track()
         XCTAssertTrue(try t.isTracked)
-        XCTAssertEqual(try t.tracked().faceId(5), 6)
+        XCTAssertEqual(try t.track().faceId(5), 6)
         XCTAssertEqual(try (0..<6).map { try t.faceId($0) }, [1, 2, 3, 4, 5, 6])
         XCTAssertEqual(try (0..<12).map { try t.edgeId($0) }, (1...12).map { UInt64($0) })
         XCTAssertEqual(try t.faceWithId(4), 3)
@@ -72,9 +72,10 @@ final class BlacksmithIdentityTests: XCTestCase {
         XCTAssertEqual(h, try cut.history(block, pin), "a history compares by value")
         let e = try cut.edgeHistory(block, pin)
         XCTAssertEqual(e.kept.count, 12)
-        XCTAssertEqual(e.deleted, [Origin(1, 1), Origin(1, 2), Origin(1, 3)])
-        XCTAssertEqual(e.generated.count, 3)
-        XCTAssertEqual(e.modified, [])
+        // The pin's two rims gone, the bore's two new, the pin's seam cut down to the bore's (re-pinned 2026-11-16: the exact route keeps the pin's seam).
+        XCTAssertEqual(e.deleted, [Origin(1, 1), Origin(1, 3)])
+        XCTAssertEqual(e.generated.count, 2)
+        XCTAssertEqual(e.modified, [History.Modified(Origin(1, 2), [15])])
         XCTAssertEqual(refusal { _ = try cut.history(block, try Solid.cuboid(1, 1, 1)) }, "history: input 1 is not tracked")
         let one = refusal { _ = try cut.history(block) } ?? ""
         XCTAssertTrue(one.hasPrefix("history: face ") && one.contains(" names operand 1"), one)
@@ -82,8 +83,8 @@ final class BlacksmithIdentityTests: XCTestCase {
     }
 
     func testAUnionRenumbersTheSecondOperandsClashingIds() throws {
-        let a = try Solid.cuboid(10, 10, 10).tracked()
-        let b = try Solid.cuboid(10, 10, 10).translate(5, 5, 5).tracked()
+        let a = try Solid.cuboid(10, 10, 10).track()
+        let b = try Solid.cuboid(10, 10, 10).translate(5, 5, 5).track()
         let joined = try a.join(b)
         XCTAssertEqual(try joined.faces, 12)
         var firsts = Set<UInt64>(), seconds: [(UInt64, UInt64)] = []
@@ -103,7 +104,7 @@ final class BlacksmithIdentityTests: XCTestCase {
     }
 
     func testASplitHalvesTheSidesAndItsBodiesKeepTheSplitsOrigins() throws {
-        let block = try Solid.cuboid(2, 4, 6).tracked()
+        let block = try Solid.cuboid(2, 4, 6).track()
         let pieces = try block.splitByPlane(try Frame.xy())
         XCTAssertEqual(pieces.count, 2)
         let sides = Set(try (0..<6).filter { abs(try nz(block, $0)) < 0.5 }.map { try XCTUnwrap(try block.faceId($0)) })
@@ -140,7 +141,7 @@ final class BlacksmithIdentityTests: XCTestCase {
     }
 
     func testAFilletsRoundIsGenerated() throws {
-        let block = try Solid.cuboid(10, 10, 10).tracked()
+        let block = try Solid.cuboid(10, 10, 10).track()
         let rounded = try block.fillet([0], 1.0)
         XCTAssertEqual(try rounded.faces, 7)
         let round = try (0..<rounded.faces).first { try rounded.faceKind($0) != "plane" }!
@@ -153,8 +154,8 @@ final class BlacksmithIdentityTests: XCTestCase {
     }
 
     func testAFlushJoinMergedNamesOneOriginPerInput() throws {
-        let a = try Solid.cuboid(10, 10, 10).tracked()
-        let b = try Solid.cuboid(4, 10, 10).translate(7, 0, 0).tracked()
+        let a = try Solid.cuboid(10, 10, 10).track()
+        let b = try Solid.cuboid(4, 10, 10).translate(7, 0, 0).track()
         let merged = try a.join(b, merge: true)
         XCTAssertEqual(try merged.faces, 6)
         var two = 0

@@ -9,6 +9,7 @@
 #include <stdint.h>
 typedef struct CadaclysmScene CadaclysmScene;
 typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
+typedef struct CadaclysmBlacksmithAnimation CadaclysmBlacksmithAnimation;
 
 #define CADACLYSM_VIEW_ABI_MAJOR 1
 
@@ -63,8 +64,17 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
  * 1.25 appended `cadaclysm_view_stats` and `CadaclysmViewStats`: the frames a view has
  * drawn and the last one's CPU and GPU time, triangles and draw calls -- an FPS counter that
  * stays right while the scene is still.
+ * 1.26 appended `cadaclysm_view_next_event`, `cadaclysm_view_close`,
+ * `CadaclysmViewInputEvent`, the `CADACLYSM_VIEW_INPUT_EVENT_*` kinds and the
+ * `CADACLYSM_VIEW_MOD_*` bits: the input a view's own window handled -- pointer, wheel, key,
+ * resize, pick, snap and close -- queued for the host to read one at a time.
+ * 1.27 appended `cadaclysm_view_play_animation`, `_timeline_remove`, `_set_item_visible` and
+ * `_set_node_ghosts`, `CadaclysmViewAnimationBinding`, `CADACLYSM_VIEW_ALL_NODES` and
+ * `CADACLYSM_VIEW_INPUT_EVENT_TIMELINE`: a kernel animation played on the view's timeline,
+ * bound to shown items and nodes; an item hidden and shown whole; nodes drawn x-ray.
+ * 1.28 appended cadaclysm_view_set_line_style, _set_point_style, _set_point_states, _set_point_state_colours, _set_viewport_label, _set_viewport_border and _set_on_top, the CADACLYSM_VIEW_POINT_* shapes and states, and CadaclysmViewPick.viewport_label: the View's 2D drafting styles.
  */
-#define CADACLYSM_VIEW_ABI_MINOR 25
+#define CADACLYSM_VIEW_ABI_MINOR 28
 
 #define CADACLYSM_VIEW_WINDOW_WIN32 1
 
@@ -315,6 +325,29 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
 #define CADACLYSM_VIEW_OCCLUDED_DASHED 2
 
 /**
+ * 1.28: a points item's marker (`cadaclysm_view_set_point_style`).
+ */
+#define CADACLYSM_VIEW_POINT_DISC 0
+
+#define CADACLYSM_VIEW_POINT_RING 1
+
+#define CADACLYSM_VIEW_POINT_SQUARE 2
+
+#define CADACLYSM_VIEW_POINT_DIAMOND 3
+
+/**
+ * 1.28: one point's state (`cadaclysm_view_set_point_states`): hover and selected recolour
+ * it (`cadaclysm_view_set_point_state_colours`), first rings it.
+ */
+#define CADACLYSM_VIEW_POINT_STATE_NORMAL 0
+
+#define CADACLYSM_VIEW_POINT_STATE_HOVER 1
+
+#define CADACLYSM_VIEW_POINT_STATE_SELECTED 2
+
+#define CADACLYSM_VIEW_POINT_STATE_FIRST 3
+
+/**
  * Text alignment: which point of the text's box sits at `at` (labels: at the anchor plus
  * `offset`). The baseline is not a choice: "bottom" is the box's bottom.
  */
@@ -469,6 +502,93 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
  * cell -- on target, material left, a gouge. Only for a machining shown with a part.
  */
 #define CADACLYSM_VIEW_COLOUR_BY_DEVIATION 2
+
+/**
+ * `CadaclysmViewInputEvent.kind` (1.26): a button went down -- `x`, `y`, `button`,
+ * `modifiers`, `pointer`, `pointer_id`.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_POINTER_DOWN 1
+
+/**
+ * The pointer moved -- `x`, `y`, `modifiers`, `pointer`, `pointer_id`. Consecutive moves of
+ * one pointer with the same modifiers are coalesced into the latest.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_POINTER_MOVE 2
+
+/**
+ * A button went up -- as `POINTER_DOWN`.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_POINTER_UP 3
+
+/**
+ * The wheel turned -- `wheel_y` (as `CadaclysmViewEvent.wheel_y`: a DOM `deltaY`, negative
+ * forward), `x`, `y` (the pointer), `modifiers`.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_WHEEL 4
+
+/**
+ * A key went down -- `key`, `modifiers`, `repeat` (1 for the system's auto-repeat).
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_KEY_DOWN 5
+
+/**
+ * A key went up -- `key`, `modifiers`.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_KEY_UP 6
+
+/**
+ * The window's drawing area changed size -- `width`, `height`, physical pixels.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_RESIZE 7
+
+/**
+ * A pick a click asked has landed -- `pick`, the answer `cadaclysm_view_pick_result` gives too.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_PICK 8
+
+/**
+ * A snap the window's input asked (a hover, `clicks` 0, or a click) has landed -- `snap`, the
+ * answer `cadaclysm_view_snap_result` gives too.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_SNAP 9
+
+/**
+ * The window closed (Escape, its close button, `cadaclysm_view_close`) -- `camera`, the camera
+ * it closed on: the last event.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_CLOSE 10
+
+/**
+ * The view's timeline clock moved this frame (1.27): it played, or the host sought, played or
+ * paused it since the last frame. At most one a drawn frame, with no fields beyond
+ * `time_ms`; the host reads `cadaclysm_view_timeline_time`.
+ */
+#define CADACLYSM_VIEW_INPUT_EVENT_TIMELINE 11
+
+/**
+ * `CadaclysmViewInputEvent.modifiers` (1.26): Shift was held.
+ */
+#define CADACLYSM_VIEW_MOD_SHIFT 1
+
+/**
+ * Ctrl was held.
+ */
+#define CADACLYSM_VIEW_MOD_CTRL 2
+
+/**
+ * Alt (Option) was held.
+ */
+#define CADACLYSM_VIEW_MOD_ALT 4
+
+/**
+ * The Windows, Command or Super key was held.
+ */
+#define CADACLYSM_VIEW_MOD_META 8
+
+/**
+ * `CadaclysmViewAnimationBinding.node` (1.27): the binding is the item itself, not a node of it.
+ */
+#define CADACLYSM_VIEW_ALL_NODES UINT32_MAX
 
 /**
  * How many user layers an item can be put on (1.16): 0 to 31.
@@ -654,7 +774,8 @@ typedef struct CadaclysmViewPick {
   /**
    * `sizeof` the struct as the caller built it: the 1.0 struct's (16 bytes: `size` through
    * `face`) or the whole 1.8 struct. Fields past it are not written, so a size ending inside
-   * `point` gets only part of the point.
+   * `point` gets only part of the point. 1.24 grew it to 40 bytes and 1.28 to 44; a 40-byte
+   * struct gets no `viewport_label`.
    */
   uint32_t size;
   /**
@@ -689,6 +810,11 @@ typedef struct CadaclysmViewPick {
    * `face` a text overlay's line, else 0).
    */
   uint32_t overlay;
+  /**
+   * 1.28: the viewport whose label (`cadaclysm_view_set_viewport_label`) was over the pixel
+   * -- `item` is 0 and nothing beneath it was picked -- else -1.
+   */
+  int32_t viewport_label;
 } CadaclysmViewPick;
 
 /**
@@ -1066,6 +1192,26 @@ typedef struct CadaclysmViewMachiningInfo {
    */
   double cycle_time;
 } CadaclysmViewMachiningInfo;
+
+/**
+ * One target of a kernel animation bound to a shown item, or to a node of it and the node's
+ * whole subtree (`cadaclysm_view_play_animation`, 1.27). 16 bytes on a 64-bit target.
+ */
+typedef struct CadaclysmViewAnimationBinding {
+  /**
+   * The animation's target name, NUL-terminated UTF-8; read during the call only.
+   */
+  const char *target;
+  /**
+   * The item's id, as a `cadaclysm_view_show*` call returned it.
+   */
+  uint32_t item;
+  /**
+   * The node's index (the reader's node index, as `cadaclysm_view_set_node_visible`
+   * takes it), or `CADACLYSM_VIEW_ALL_NODES` for the item itself.
+   */
+  uint32_t node;
+} CadaclysmViewAnimationBinding;
 
 /**
  * One text item (1.6): a label in screen pixels anchored to a point, or text lying in a
@@ -1687,6 +1833,114 @@ typedef struct CadaclysmViewStats {
   uint32_t pad1;
 } CadaclysmViewStats;
 
+/**
+ * The pick inside a [`CadaclysmViewInputEvent`]: `CadaclysmViewPick` as it was when 1.26 laid
+ * the event out (40 bytes), so the event's later fields stay where 1.26 put them. The 1.28
+ * label hit is the event's own `pick_viewport_label`.
+ */
+typedef struct CadaclysmViewEventPick {
+  uint32_t size;
+  uint32_t item;
+  uint32_t node;
+  uint32_t face;
+  uint32_t clicks;
+  uint32_t has_point;
+  float point[3];
+  uint32_t overlay;
+} CadaclysmViewEventPick;
+
+/**
+ * One input event a view's own window handled (`cadaclysm_view_next_event`, 1.26). Laid out
+ * with no implicit padding: 272 bytes, every field at its natural alignment. The fields a
+ * kind does not use are zero.
+ */
+typedef struct CadaclysmViewInputEvent {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.26 struct's.
+   */
+  uint32_t size;
+  /**
+   * `CADACLYSM_VIEW_INPUT_EVENT_*`.
+   */
+  uint32_t kind;
+  /**
+   * When the library handled it: milliseconds on its own monotonic clock (the one its
+   * clicks are timed by); only differences mean anything.
+   */
+  double time_ms;
+  /**
+   * The pointer and wheel events': physical pixels from the window's top left, as
+   * `cadaclysm_view_input` takes them.
+   */
+  float x;
+  float y;
+  /**
+   * A wheel event's: as `CadaclysmViewEvent.wheel_y`, a DOM `deltaY` -- negative forward,
+   * about 100 a notch.
+   */
+  float wheel_y;
+  /**
+   * A pointer event's: `CADACLYSM_VIEW_BUTTON_*` (a touch is `LEFT`); 0 for a move.
+   */
+  uint32_t button;
+  /**
+   * The pointer, wheel and key events': the `CADACLYSM_VIEW_MOD_*` bits held.
+   */
+  uint32_t modifiers;
+  /**
+   * A pointer event's: `CADACLYSM_VIEW_POINTER_*`.
+   */
+  uint32_t pointer;
+  /**
+   * A pointer event's: 0 for the mouse, the touch's id for a touch.
+   */
+  uint32_t pointer_id;
+  /**
+   * A resize's: the drawing area's new size, physical pixels.
+   */
+  uint32_t width;
+  uint32_t height;
+  /**
+   * A key down's: 1 for the system's auto-repeat of a held key.
+   */
+  uint32_t repeat;
+  /**
+   * How many events the full queue dropped just before this one (oldest moves first).
+   */
+  uint32_t dropped;
+  /**
+   * Zero; keeps `key` on its 8 bytes.
+   */
+  uint32_t pad0;
+  /**
+   * A key event's: the key's `KeyboardEvent.code` name -- "KeyR", "Digit1", "Space",
+   * "Escape", "ArrowUp", "ShiftLeft", "F5" -- UTF-8, NUL-terminated.
+   */
+  char key[32];
+  /**
+   * A pick event's answer, the 1.26 layout (its `size` 40); the 1.28 label hit is
+   * `pick_viewport_label`.
+   */
+  struct CadaclysmViewEventPick pick;
+  /**
+   * A snap event's answer, as `cadaclysm_view_snap_result` fills it (its `size` the struct's).
+   */
+  struct CadaclysmViewSnap snap;
+  /**
+   * A close event's: the camera the window closed on, as `cadaclysm_view_run` fills its
+   * `camera_out` (its `size` the struct's).
+   */
+  struct CadaclysmViewCamera camera;
+  /**
+   * 1.28: a pick event's `CadaclysmViewPick.viewport_label` -- the viewport whose label was
+   * hit, else -1 (always -1 on events that are not picks). Was `pad1`, zero, before 1.28.
+   * A host built against 1.28 that loads an older library reads 0 here -- viewport 0, not
+   * "none" -- because the older library writes zero padding: check that
+   * `cadaclysm_view_abi_version()`'s minor is at least 28 before reading it.
+   */
+  int32_t pick_viewport_label;
+} CadaclysmViewInputEvent;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -1930,6 +2184,7 @@ uint32_t cadaclysm_view_show(struct CadaclysmView *view, const CadaclysmScene *s
 /**
  * Takes an item away. False where it is not shown, or where uploading what remains failed
  * (the item is gone all the same). A machining (1.7) goes with its track off the timeline.
+ * An overlay (1.24) goes with no upload.
  *
  * `view` must be NULL or a live view.
  */
@@ -1981,7 +2236,8 @@ void cadaclysm_view_zoom(struct CadaclysmView *view, float steps);
 
 /**
  * Fits the camera to `item`, or to everything shown for 0. False where the item is not
- * shown, or there is nothing to fit.
+ * shown, is an overlay (it is in screen space: there is nothing of it to fit; "everything
+ * shown" leaves the overlays out too), or there is nothing to fit.
  * Viewport 0's: with viewports set, its camera moves (a fixed one does not).
  *
  * `view` must be NULL or a live view.
@@ -2023,6 +2279,9 @@ bool cadaclysm_view_set_layer(struct CadaclysmView *view, uint32_t layer, bool o
  * those whose `layer_mask` has bit `layer`. False for an item not shown or a layer past 31.
  * The terminal library accepts it too: with its one viewport, a mask lacking the item's
  * layer hides it.
+ *
+ * An overlay too (1.24): it draws while its layer is on, in every viewport -- an overlay is
+ * the window's, drawn once over them all, so no viewport's `layer_mask` applies to it.
  *
  * `view` must be NULL or a live view.
  */
@@ -2151,6 +2410,19 @@ bool cadaclysm_view_line_colour(const struct CadaclysmView *view,
                                 uint32_t *out_from_part);
 
 /**
+ * The view-wide point state colours (1.28), three floats 0..1 each: what a HOVER, SELECTED and
+ * FIRST point draws in (`cadaclysm_view_set_point_states`). NULL restores that state's
+ * default (hover #9CD3FF, selected and first #378ADD). A colour with a value not finite
+ * leaves every state as it was and sets the last error.
+ *
+ * `view` must be NULL or a live view; each colour NULL or three readable floats.
+ */
+void cadaclysm_view_set_point_state_colours(struct CadaclysmView *view,
+                                            const float *hover,
+                                            const float *selected,
+                                            const float *first);
+
+/**
  * The view's level-of-detail policy, for the device the host runs on (1.4). NULL -- the
  * default -- builds no levels and draws every frame whole. Otherwise the view builds coarser
  * levels for every part of `lod->min_triangles` or more, in the background after each show,
@@ -2183,7 +2455,9 @@ uint32_t cadaclysm_view_wake_ms(const struct CadaclysmView *view);
 
 /**
  * Shows or hides `node` (the reader's node index) of `item` and its whole subtree. False
- * where the item is not shown or the node is out of range.
+ * where the item is not shown or the node is out of range; an overlay, which has no nodes,
+ * is refused by name, as by `cadaclysm_view_set_node_color`, `_set_node_highlight` and
+ * `_frame_node`.
  *
  * `view` must be NULL or a live view.
  */
@@ -2250,8 +2524,9 @@ void cadaclysm_view_request_pick(struct CadaclysmView *view,
  * left (the window's while no viewports are set, viewport 0 then being the built-in
  * camera). The answer comes on a later call to `cadaclysm_view_pick_result`, after a draw;
  * `cadaclysm_view_needs_draw` is true until it has. A pick requested before the view's
- * first draw, or naming a viewport past those set, answers nothing (`item` 0). A new
- * request replaces one still pending. A device loss during a draw drops the pick (its
+ * first draw is asked by that draw, once it has drawn the scene: it answers what that first
+ * frame shows under the pixel. One naming a viewport past those set answers nothing (`item`
+ * 0). A new request replaces one still pending. A device loss during a draw drops the pick (its
  * readback lived on the lost device); the host asks again.
  *
  * `view` must be NULL or a live view.
@@ -2273,6 +2548,9 @@ void cadaclysm_view_request_pick_in(struct CadaclysmView *view,
  * 1.8: `clicks` is 2 for a double click's pick, 1 for a click's or the host's own;
  * `has_point` 1 and `point` the point hit, in the coordinates the items were shown in, for a
  * hit -- 0 for no hit, a machining stock, and on the terminal library, which reads no depth.
+ *
+ * 1.28: `viewport_label` is the viewport whose label (`cadaclysm_view_set_viewport_label`) was
+ * under the pixel (`item` 0), else -1; a struct whose `size` ends before it does not get it.
  *
  * Until this call takes a landed answer, `cadaclysm_view_needs_draw` stays true, so a host
  * that forwards input must call it after its draws once an input returned PICKED, even
@@ -2467,6 +2745,10 @@ uint32_t cadaclysm_view_show_image(struct CadaclysmView *view,
  * Recolours an item in place (no upload): `rgb` three floats in 0..1. False where the item
  * is not shown or `rgb` is NULL or not finite.
  *
+ * Overlay text (`CADACLYSM_VIEW_TEXT_SCREEN`) takes the colour too, its glyphs recoloured in
+ * place (its box keeps its own). An overlay shape or image is refused, the reason naming it:
+ * a shape's fill and stroke are given when it is shown, an image draws its own pixels.
+ *
  * `view` must be NULL or a live view; `rgb` NULL or three floats.
  */
 bool cadaclysm_view_set_colour(struct CadaclysmView *view, uint32_t item, const float *rgb);
@@ -2476,7 +2758,8 @@ bool cadaclysm_view_set_colour(struct CadaclysmView *view, uint32_t item, const 
  * an overlay shows through the parts in front of it (`on` true) -- or normally again (false).
  * Kept across uploads, removes of other items and surface switches. Exact surfaces and pick
  * treat the item as ordinary geometry. The terminal accepts it and draws the item as ordinary
- * geometry. False where the item is not shown.
+ * geometry. False where the item is not shown, or is an overlay (it draws over everything
+ * already), the reason naming it.
  *
  * `view` must be NULL or a live view.
  */
@@ -2491,7 +2774,8 @@ bool cadaclysm_view_set_xray(struct CadaclysmView *view, uint32_t item, bool on)
  * surface switches. An x-ray item's points draw through, solid, whatever this says. The
  * terminal accepts every mode and draws it as OFF. The render view library accepts OFF and
  * refuses SOLID and DASHED: it draws no occluded lines yet. False where the item is not
- * shown, `mode` is not one of the three, or the render view library refuses it.
+ * shown, is an overlay (nothing is in front of one), `mode` is not one of the three, or the
+ * render view library refuses it.
  *
  * `view` must be NULL or a live view.
  */
@@ -2506,8 +2790,10 @@ bool cadaclysm_view_set_occluded(struct CadaclysmView *view, uint32_t item, uint
  * surfaces' edges and curves too. Kept across uploads, removes of other items, moves and
  * surface switches. No upload. The terminal library draws it too; the render view library
  * accepts NULL and refuses a colour: it draws no item's own line colour yet. False, with
- * `cadaclysm_view_last_error` naming the call, where the item is not shown, the layer is
- * not one of the three, a component is not finite, or the render view library refuses it.
+ * `cadaclysm_view_last_error` naming the call, where the item is not shown, is an overlay
+ * (it has none of those lines: an overlay shape's stroke colour is given when it is shown),
+ * the layer is not one of the three, a component is not finite, or the render view library
+ * refuses it.
  *
  * `view` must be NULL or a live view; `rgb` NULL or three floats.
  */
@@ -2527,7 +2813,8 @@ bool cadaclysm_view_set_item_line_colour(struct CadaclysmView *view,
  * Uploads the scene again, as a show does: set it on each item as it is shown, not over a
  * finished scene item by item. The terminal accepts every finish and draws it as gloss; the
  * render view library accepts GLOSS and refuses SATIN and MATTE. False where the item is
- * not shown, `finish` is not one of the three, or the render view library refuses it.
+ * not shown, is an overlay (it is not shaded), `finish` is not one of the three, or the
+ * render view library refuses it.
  *
  * `view` must be NULL or a live view.
  */
@@ -2536,7 +2823,8 @@ bool cadaclysm_view_set_finish(struct CadaclysmView *view, uint32_t item, uint32
 /**
  * Colours faces of an item: `faces[i]` in `rgba[4 * i ..]` (alpha unused), `count` of
  * them; `faces` NULL clears every face colour. Face numbers are the item's pick numbers.
- * False where the item is not shown or a value is not finite.
+ * False where the item is not shown, is an overlay (it has no faces), or a value is not
+ * finite.
  *
  * `view` must be NULL or a live view; `faces` NULL or `count` words; `rgba` `4 * count` floats.
  */
@@ -2549,7 +2837,8 @@ bool cadaclysm_view_set_face_colours(struct CadaclysmView *view,
 /**
  * Moves an item by `matrix`, sixteen doubles column-major (entry `4 * col + row`), kept
  * across uploads; NULL puts it back where it was shown. False where the item is not shown
- * or a number is not finite.
+ * or a number is not finite, and for an overlay, the reason naming it: an overlay hangs from
+ * its anchor in screen space; `cadaclysm_view_move_overlay` moves it.
  *
  * `view` must be NULL or a live view; `matrix` NULL or sixteen doubles.
  */
@@ -2560,7 +2849,8 @@ bool cadaclysm_view_set_placement(struct CadaclysmView *view, uint32_t item, con
  * each, column-major (entry `4 * col + row`; `count` the scene's node count), drawn in
  * place of each node's rest transform. NULL with `count` 0 restores the rest pose. False,
  * with the reason on `cadaclysm_view_last_error`, where the item is not a shown scene, the
- * count differs from the scene's node count, or a matrix is not finite or not rigid.
+ * count differs from the scene's node count, or a matrix is not finite or not rigid; an
+ * overlay is refused by name, as `cadaclysm_view_set_placement` refuses it.
  *
  * `view` must be NULL or a live view; `transforms` must be NULL (with `count` 0) or point
  * at `count` arrays of sixteen doubles.
@@ -2569,6 +2859,94 @@ bool cadaclysm_view_set_node_transforms(struct CadaclysmView *view,
                                         uint32_t item,
                                         const double *transforms,
                                         uint32_t count);
+
+/**
+ * Hides an item whole (`visible` false) or shows it again (1.27): a hidden item draws
+ * nothing -- triangles, lines, points, text, exact surfaces -- is never picked or snapped,
+ * and is left out of `cadaclysm_view_frame` and every box the camera fits. It shows only
+ * where its layer is also shown. Its node switches (`cadaclysm_view_set_node_visible`) are
+ * kept underneath. True where it is shown or hidden now (already so included); false, with
+ * "set_item_visible: no item N", where the item is not shown.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_item_visible(struct CadaclysmView *view, uint32_t item, bool visible);
+
+/**
+ * Draws exactly the nodes `nodes` of `item` x-ray (1.27) -- see-through, as
+ * `cadaclysm_view_set_xray` draws a whole item -- replacing the item's earlier ghosts;
+ * `nodes` NULL (`count` 0) clears them all. A node is the reader's node index, as
+ * `cadaclysm_view_set_node_visible` takes it, and only that node is ghosted, not its
+ * subtree. A plain item (a mesh, lines, a solid) has one node, 0. Kept across uploads;
+ * picking does not see it. The terminal accepts it and draws the nodes as ordinary geometry.
+ * The render view library differs: it ghosts each named node's whole subtree.
+ * False, with the reason, where the item is not shown ("set_node_ghosts: no item N") or a
+ * node is past its nodes ("set_node_ghosts: item N has no node M (it has K)"), changing
+ * nothing.
+ *
+ * `view` must be NULL or a live view; `nodes` NULL or `count` words.
+ */
+bool cadaclysm_view_set_node_ghosts(struct CadaclysmView *view,
+                                    uint32_t item,
+                                    const uint32_t *nodes,
+                                    uint32_t count);
+
+/**
+ * Draws item `item`'s lines in its own dash (1.28): `dash_pt` points on, `gap_pt` off, laid
+ * along its edges, curves, segments, isocurves and exact edges; `dash_pt` 0 is solid (the
+ * default), whatever `gap_pt`. A hidden line the item draws SOLID (`cadaclysm_view_set_occluded`)
+ * takes the same dash; a DASHED item's hidden stretch keeps the view-wide occluded style.
+ * Kept across uploads, removes of other items and surface switches. The terminal accepts
+ * any pattern and draws solid. The render view library accepts 0 and refuses a dash: it
+ * draws no dashes yet. False where the item is not shown or is an overlay, a length is
+ * negative, not finite or past 511.5, or a dash has no gap.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_line_style(struct CadaclysmView *view,
+                                   uint32_t item,
+                                   float dash_pt,
+                                   float gap_pt);
+
+/**
+ * A points item's marker (1.28): `CADACLYSM_VIEW_POINT_DISC` (the default), `_RING`,
+ * `_SQUARE` or `_DIAMOND`, filled or `hollow`. Kept across uploads. False where the item is
+ * not shown or not a points item, or `shape` is not one of the four.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_point_style(struct CadaclysmView *view,
+                                    uint32_t item,
+                                    uint32_t shape,
+                                    bool hollow);
+
+/**
+ * A points item's per-point states (1.28): `count` bytes, one a point in the order shown --
+ * `CADACLYSM_VIEW_POINT_STATE_NORMAL`, `_HOVER`, `_SELECTED` or `_FIRST`. Hover and selected
+ * draw the point in their colour (`cadaclysm_view_set_point_state_colours`); first keeps its
+ * colour and draws a ring round it. Written into the drawn points in place. Kept across
+ * uploads. False where the item is not shown or not a points item, `states` is NULL with a
+ * `count` above 0, `count` is not the item's point count, or a state is past 3. NULL with a
+ * `count` of 0 is an empty list (an item with no points takes it).
+ *
+ * `view` must be NULL or a live view; `states` NULL (with `count` 0) or `count` readable bytes.
+ */
+bool cadaclysm_view_set_point_states(struct CadaclysmView *view,
+                                     uint32_t item,
+                                     const uint8_t *states,
+                                     size_t count);
+
+/**
+ * Draws item `item` after every other item, depth testing off (1.28): over whatever is in
+ * front of it, on-top items in id order among themselves; its hidden lines draw SOLID and its
+ * points draw through. Picked ahead of what is under it. Kept across uploads. The terminal
+ * accepts it and draws the item in place. The render view library accepts false and refuses
+ * true. False where the item is not shown, or is an overlay, text, an image, a body shown
+ * with exact surfaces or exact parts (`cadaclysm_view_show_curves`), or a machining stock.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_on_top(struct CadaclysmView *view, uint32_t item, bool on);
 
 /**
  * Shows a CAM job (1.7): `machining`'s programs, played in order on a stock of its box, with
@@ -2735,6 +3113,49 @@ size_t cadaclysm_view_timeline_status(const struct CadaclysmView *view,
                                       size_t capacity);
 
 /**
+ * Plays a kernel animation on the view's timeline (1.27), bound to shown items and nodes:
+ * each binding names one of the animation's targets and the item it drives, or a node of the
+ * item (`node`, the reader's node index) and that node's whole subtree, which move rigidly;
+ * `CADACLYSM_VIEW_ALL_NODES` binds the item itself. Each frame the track writes, at the
+ * timeline's time, the channels the animation keys on a bound target: translate, rotate and
+ * scale composed onto the placement the target had at play (scale on an item only), visible
+ * (shown above 0.5), colour, and ghost (x-ray above 0.5). A target with no binding drives
+ * nothing; a value track is the host's own. The animation is copied: it is the caller's
+ * again, free to change or free, when this returns. The new track's id (1 or more) -- what
+ * `cadaclysm_view_timeline_remove` takes -- or 0, with the reason: a NULL animation, a
+ * binding with no target, an item not shown, a node past the item's, a target bound twice to
+ * one item and node, a scale on a node, two placement targets one inside the other's
+ * subtree, or no kernel loaded in the process ("play_animation: the kernel is not loaded").
+ * The timeline does not start playing: `cadaclysm_view_timeline_play` and `_seek` move it.
+ * Each frame whose clock moved queues one `CADACLYSM_VIEW_INPUT_EVENT_TIMELINE`.
+ *
+ * The terminal library and the render view library refuse it: "play_animation: animations
+ * need the GPU renderer's timeline".
+ *
+ * `view` must be NULL or a live view; `animation` NULL or a live animation of the loaded
+ * kernel; `bindings` NULL (with `count` 0) or `count` bindings, each `target` NULL or a
+ * NUL-terminated string.
+ */
+uint32_t cadaclysm_view_play_animation(struct CadaclysmView *view,
+                                       const CadaclysmBlacksmithAnimation *animation,
+                                       const struct CadaclysmViewAnimationBinding *bindings,
+                                       uint32_t count);
+
+/**
+ * Takes animation track `track` off the view's timeline (1.27), putting back what it drove
+ * as it was at play: the bound items' placements, colours, x-ray and visibility, and their
+ * nodes' transforms, switches, ghosts and colours -- only the channels the animation keyed;
+ * what the host set elsewhere stands. False, with "timeline_remove: no track N", for a track
+ * no animation played (a machining's track is taken away with its item).
+ *
+ * The terminal library and the render view library play no animation: every track is
+ * refused there.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_timeline_remove(struct CadaclysmView *view, uint32_t track);
+
+/**
  * Shows a kernel solid by its handle, read in place: exact surfaces where they draw,
  * triangles at `tolerance` (0: 0.05) otherwise, its edges, its paint (or `rgb` over it).
  * The item's id, 0 on failure. The solid must stay alive until the item is removed or the
@@ -2803,8 +3224,9 @@ uint32_t cadaclysm_view_load_font(const uint8_t *bytes, size_t length);
 uint32_t cadaclysm_view_show_text(struct CadaclysmView *view, const struct CadaclysmViewText *text);
 
 /**
- * The item's string replaced, nothing else changed. False for an item that is not text,
- * or text that is NULL or not UTF-8.
+ * The item's string replaced, nothing else changed. Overlay text's too (screen text,
+ * 1.24). False for an item that is not text (an overlay shape or image is named as one), or
+ * text that is NULL or not UTF-8.
  *
  * `view` must be NULL or a live view; `text` NULL or a NUL-terminated string.
  */
@@ -2848,6 +3270,34 @@ bool cadaclysm_view_set_viewport_camera(struct CadaclysmView *view,
 bool cadaclysm_view_set_viewport_rects(struct CadaclysmView *view,
                                        const uint32_t *rects,
                                        uint32_t count);
+
+/**
+ * Names viewport `viewport` (1.28): `text` (UTF-8) drawn top left inside it at 12 points in
+ * `colour` (three floats; NULL: the text default, white); NULL text clears it. Kept across
+ * `cadaclysm_view_set_viewport_rects`, and across `cadaclysm_view_set_viewports` while the
+ * index survives (NULL viewports keep viewport 0's). A pick on it answers `viewport_label`
+ * (the pick's `item` 0). The terminal accepts it and prints it as characters, as it prints
+ * overlays; the render view library accepts NULL text and refuses a label. False for no
+ * such viewport, text not UTF-8 or a colour not finite.
+ *
+ * `view` must be NULL or a live view; `text` NULL or NUL-terminated; `colour` NULL or three floats.
+ */
+bool cadaclysm_view_set_viewport_label(struct CadaclysmView *view,
+                                       uint32_t viewport,
+                                       const char *text,
+                                       const float *colour);
+
+/**
+ * Frames viewport `viewport` in `colour` (1.28), one point wide inside its edge; NULL
+ * clears it. Kept and cleared as the label is; never picked. The terminal accepts it and
+ * prints it as characters, as it prints overlays; the render view library accepts NULL and
+ * refuses a border. False for no such viewport or a colour not finite.
+ *
+ * `view` must be NULL or a live view; `colour` NULL or three floats.
+ */
+bool cadaclysm_view_set_viewport_border(struct CadaclysmView *view,
+                                        uint32_t viewport,
+                                        const float *colour);
 
 /**
  * Turns viewport `viewport`'s camera to look along `direction` (three floats, world): an
@@ -2920,7 +3370,8 @@ void cadaclysm_view_look_in(struct CadaclysmView *view, uint32_t viewport, float
 void cadaclysm_view_dolly_in(struct CadaclysmView *view, uint32_t viewport, float ratio);
 
 /**
- * `cadaclysm_view_frame` on viewport `viewport`: `item` 0 fits everything shown.
+ * `cadaclysm_view_frame` on viewport `viewport`: `item` 0 fits everything shown. An overlay
+ * is refused, as there.
  *
  * `view` must be NULL or a live view.
  */
@@ -3247,6 +3698,66 @@ bool cadaclysm_view_move_overlay(struct CadaclysmView *view,
  * `out->size` bytes.
  */
 bool cadaclysm_view_stats(struct CadaclysmView *view, struct CadaclysmViewStats *out);
+
+/**
+ * Takes the oldest input event the view's own window handled and has not handed out yet
+ * (1.26) into `out`: true with one, false with "no event" while the queue is empty -- as
+ * `cadaclysm_view_pick_result` answers before its answer lands, never waiting. `out->size` is
+ * left as the caller set it.
+ *
+ * An own window (and the console, and the terminal library's view) queues every input it
+ * handles, in order, as well as handling it: a drag still orbits, Escape still closes, W
+ * still flies -- the events report, they do not intercept. `CADACLYSM_VIEW_INPUT_EVENT_*`
+ * names each kind:
+ * - `POINTER_DOWN`, `_MOVE`, `_UP`: `x`, `y` in physical pixels (as
+ *   `cadaclysm_view_input` takes them), `button`, `pointer`, `pointer_id`, `modifiers`.
+ *   Consecutive moves of one pointer with the same modifiers are coalesced into the latest.
+ *   Buttons past the middle are not reported, nor a touch the system cancels.
+ * - `WHEEL`: `wheel_y` (a DOM `deltaY`: negative forward), at the pointer's `x`, `y`.
+ * - `KEY_DOWN`, `KEY_UP`: `key`, the `KeyboardEvent.code` name ("KeyR", "Digit1", "Space",
+ *   "Escape", "ArrowUp", "ShiftLeft", "F5"), `modifiers`, `repeat` -- every key, the ones the
+ *   view binds (W, A, S, D, E, Q, Tab, Escape, ...) and the ones it does not, with Ctrl or
+ *   not.
+ * - `RESIZE`: `width`, `height`, the drawing area's new physical size.
+ * - `PICK`: a pick a click (or double click) asked has landed: `pick`, the same answer
+ *   `cadaclysm_view_pick_result` then gives -- both see it, so a host reads either. A host's
+ *   own `cadaclysm_view_request_pick` is not queued.
+ * - `SNAP`: with snapping on, a snap the window's input asked has landed -- a hover's
+ *   (`clicks` 0) or a click's: `snap`, as `cadaclysm_view_snap_result` gives it. A host's
+ *   own `cadaclysm_view_request_snap_in` is not queued.
+ * - `CLOSE`: the window closed (Escape, its close button, `cadaclysm_view_close`) -- the last
+ *   event, with `camera` the camera it closed on, as `cadaclysm_view_run` reports it; the
+ *   queue is still read after `cadaclysm_view_pump` answers `CADACLYSM_VIEW_CLOSED`.
+ * - `TIMELINE` (1.27): the timeline's clock moved this frame -- it played, or the host
+ *   sought, played or paused it -- at most one a drawn frame, with no fields beyond
+ *   `time_ms`; the host reads `cadaclysm_view_timeline_time`.
+ *
+ * The queue holds 1024 events: past that, the oldest pointer move is dropped first, then
+ * the oldest event of any kind; the next event read says how many went (`dropped`). A host
+ * that blocks in `cadaclysm_view_run` and never reads keeps only the latest.
+ *
+ * A view in a host's window, and an offscreen view, queue nothing (`false` always): their
+ * host has its window's events already, and what it forwards through `cadaclysm_view_input`
+ * is its own. The terminal library queues the keys, clicks and wheel it reads (arrow keys
+ * as keys, not the drags they make), a key's down and up together; its wheel is at the
+ * picture's middle.
+ *
+ * `view` must be NULL or a live view (a closed one still answers); `out` NULL or a
+ * `CadaclysmViewInputEvent` of at least `out->size` bytes.
+ */
+bool cadaclysm_view_next_event(struct CadaclysmView *view, struct CadaclysmViewInputEvent *out);
+
+/**
+ * Closes the view's own window as its close button does (1.26): hidden, a `CLOSE` event
+ * queued, `cadaclysm_view_pump` answering `CADACLYSM_VIEW_CLOSED` and a `cadaclysm_view_run`
+ * returning; the view stays live until `cadaclysm_view_destroy`. True, and nothing more, for
+ * a window already closed. The terminal library: the live picture ends, as `q` ends it. The
+ * console: as Escape. False for a view in a host's window or offscreen -- "only a view with a
+ * window of its own is closed" -- and on a thread other than the own windows' one.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_close(struct CadaclysmView *view);
 
 #ifdef __cplusplus
 }  // extern "C"

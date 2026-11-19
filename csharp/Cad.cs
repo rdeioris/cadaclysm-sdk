@@ -399,6 +399,10 @@ internal struct RawOpenOptions
     // showed up elsewhere as heap corruption on one open in three.
     public IntPtr Pick;
     public IntPtr PickUser;
+    // Last in the header. Declared because init writes it: a struct one field short
+    // takes a write past its end, which is the heap corruption PickUser once caused.
+    // `Open`'s `lightmapResolution`.
+    public uint LightmapResolution;
 }
 
 /// <summary>`CadaclysmSvgOptions`. Field order and `Size` are the contract, as <see
@@ -534,6 +538,25 @@ internal struct RawTaskTime
     public double Duration;
 }
 
+/// <summary>`CadaclysmWorkTime`: three `has_*`/value pairs for the dates, `has_pattern`, then the
+/// pattern's `kind` and three more `has_*`/value pairs. C `bool` is one byte, so each `Has*` is
+/// attributed `I1`. Pinned by `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawWorkTime
+{
+    [MarshalAs(UnmanagedType.I1)] public bool HasStart;
+    public double Start;
+    [MarshalAs(UnmanagedType.I1)] public bool HasFinish;
+    public double Finish;
+    [MarshalAs(UnmanagedType.I1)] public bool HasPattern;
+    public uint Kind;
+    [MarshalAs(UnmanagedType.I1)] public bool HasPosition;
+    public int Position;
+    [MarshalAs(UnmanagedType.I1)] public bool HasInterval;
+    public uint Interval;
+    [MarshalAs(UnmanagedType.I1)] public bool HasOccurrences;
+    public uint Occurrences;
+}
 /// <summary>`CadaclysmElementState`: `Node` and `Phase` are `uint32_t`. Pinned by
 /// `tests/bindings.rs`.</summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -745,6 +768,21 @@ internal sealed class HealHandle : CadaclysmHandle
     protected override bool ReleaseHandle()
     {
         Native.cadaclysm_brep_heal_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmRecognize *`, freed by `cadaclysm_brep_recognize_free`; the body taken from it with
+/// `cadaclysm_brep_recognize_body` is a reference of its own and outlives it.</summary>
+internal sealed class RecognizeHandle : CadaclysmHandle
+{
+    public RecognizeHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        Native.cadaclysm_brep_recognize_free(handle);
         return true;
     }
 }
@@ -1095,6 +1133,7 @@ internal static class Native
     [DllImport(Lib)] internal static extern RawMesh64 cadaclysm_node_mesh64(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_lod_levels();
     [DllImport(Lib)] internal static extern RawMesh cadaclysm_node_mesh_lod(SceneHandle scene, uint node, uint level);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_mesh_lightmap_uvs(SceneHandle scene, uint node, out uint vertexCount);
     [DllImport(Lib)] internal static extern float cadaclysm_node_lod_error(SceneHandle scene, uint node, uint level);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_node_collision(SceneHandle scene, uint node, uint hullBudget, ref RawCollision outBody);
@@ -1134,6 +1173,14 @@ internal static class Native
     [DllImport(Lib)] internal static extern uint cadaclysm_brep_heal_fixes(HealHandle heal, [Out] uint[]? items, [Out] double[]? sizes);
     [DllImport(Lib)] internal static extern uint cadaclysm_brep_heal_refused(HealHandle heal, [Out] uint[]? items, [Out] double[]? sizes);
     [DllImport(Lib)] internal static extern double cadaclysm_brep_edge_tolerance(BrepHandle brep, uint edge);
+    [DllImport(Lib)] internal static extern RecognizeHandle cadaclysm_brep_recognized(BrepHandle brep, double tolerance);
+    [DllImport(Lib)] internal static extern BrepHandle cadaclysm_brep_recognize_body(RecognizeHandle r);
+    [DllImport(Lib)] internal static extern void cadaclysm_brep_recognize_free(IntPtr r);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_brep_recognize_summary(RecognizeHandle r, [Out] uint[] counts, [Out] double[] sizes);
+    [DllImport(Lib)] internal static extern uint cadaclysm_brep_recognize_faces(RecognizeHandle r, [Out] uint[]? items, [Out] double[]? sizes);
+    [DllImport(Lib)] internal static extern uint cadaclysm_brep_recognize_refused(RecognizeHandle r, [Out] uint[]? items, [Out] double[]? sizes);
+    [DllImport(Lib)] internal static extern uint cadaclysm_brep_recognize_edges(RecognizeHandle r, [Out] uint[]? items, [Out] double[]? sizes);
     [DllImport(Lib)] internal static extern void cadaclysm_surface_matrix(SceneHandle scene, [Out] float[] outMatrix);
     [DllImport(Lib)] internal static extern RawBounds cadaclysm_node_bounds(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawBounds64 cadaclysm_node_bounds64(SceneHandle scene, uint node);
@@ -1214,6 +1261,39 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_task_link_kind_name(SceneHandle scene, uint schedule, uint link);
     [DllImport(Lib)] internal static extern long cadaclysm_schedule_at(SceneHandle scene, uint schedule, double date,
         uint dates, [Out] RawElementState[]? outStates, uint capacity);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_calendar_name(SceneHandle scene, uint calendar);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_calendar_identification(SceneHandle scene, uint calendar);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_kind(SceneHandle scene, uint calendar);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_calendar_kind_name(SceneHandle scene, uint calendar);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_working_count(SceneHandle scene, uint calendar);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_exception_count(SceneHandle scene, uint calendar);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_calendar_work_time(SceneHandle scene, uint calendar,
+        [MarshalAs(UnmanagedType.I1)] bool exception, uint workTime, out RawWorkTime outValue);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_calendar_work_time_name(SceneHandle scene, uint calendar,
+        [MarshalAs(UnmanagedType.I1)] bool exception, uint workTime);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_work_time_days(SceneHandle scene, uint calendar,
+        [MarshalAs(UnmanagedType.I1)] bool exception, uint workTime, [Out] byte[]? outValues, uint capacity);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_work_time_weekdays(SceneHandle scene, uint calendar,
+        [MarshalAs(UnmanagedType.I1)] bool exception, uint workTime, [Out] byte[]? outValues, uint capacity);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_work_time_months(SceneHandle scene, uint calendar,
+        [MarshalAs(UnmanagedType.I1)] bool exception, uint workTime, [Out] byte[]? outValues, uint capacity);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_work_time_periods(SceneHandle scene, uint calendar,
+        [MarshalAs(UnmanagedType.I1)] bool exception, uint workTime, [Out] double[]? outValues, uint capacity);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_task_calendar(SceneHandle scene, uint schedule, uint task, out uint outValue);
+    [DllImport(Lib)] internal static extern uint cadaclysm_task_duration_kind(SceneHandle scene, uint schedule, uint task);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_task_work_duration(SceneHandle scene, uint schedule, uint task,
+        out double days, out double seconds);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_working_periods(SceneHandle scene, uint calendar,
+        double from, double to, [Out] double[]? outValues, uint capacity, out uint count);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_working_seconds(SceneHandle scene, uint calendar,
+        double from, double to, out double outValue);
+    [DllImport(Lib)] internal static extern uint cadaclysm_calendar_add_work(SceneHandle scene, uint calendar,
+        double from, double days, double seconds, out double outValue);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_calendar_error_message(uint status);
     [DllImport(Lib)] internal static extern void cadaclysm_pose_free(IntPtr pose);
     [DllImport(Lib)] internal static extern uint cadaclysm_pose_ground(IntPtr pose);
     [DllImport(Lib)] internal static extern uint cadaclysm_pose_node_count(IntPtr pose);
@@ -2293,9 +2373,16 @@ public sealed class ElementState
 
 /// <summary>Every date pair a task gives, each seconds since 1970-01-01T00:00 (no zone;
 /// <c>DateTime.UnixEpoch.AddSeconds(seconds)</c> converts) or null where the file gives none,
-/// and `Duration` in seconds. From <see cref="ScheduleTask.Time"/>.</summary>
+/// and `Duration` in seconds. `DurationKind` is `"ELAPSEDTIME"`, `"WORKTIME"` or `"NOTDEFINED"`, null
+/// where the file gives none; `WorkDuration` is the duration in working time, that many working
+/// days then that many seconds of working time, null where there is none (an IFC2X3 task, or no
+/// duration). From <see cref="ScheduleTask.Time"/>.</summary>
 public sealed class TaskTime
 {
+    private static readonly string?[] DurationKinds = { "ELAPSEDTIME", "WORKTIME", "NOTDEFINED", null };
+
+    public string? DurationKind { get; }
+    public (double Days, double Seconds)? WorkDuration { get; }
     public double? ScheduleStart { get; }
     public double? ScheduleFinish { get; }
     public double? EarlyStart { get; }
@@ -2306,8 +2393,10 @@ public sealed class TaskTime
     public double? ActualFinish { get; }
     public double? Duration { get; }
 
-    internal TaskTime(in RawTaskTime raw)
+    internal TaskTime(in RawTaskTime raw, uint durationKind, (double Days, double Seconds)? workDuration)
     {
+        DurationKind = durationKind < DurationKinds.Length ? DurationKinds[durationKind] : null;
+        WorkDuration = workDuration;
         ScheduleStart = raw.HasScheduleStart ? raw.ScheduleStart : null;
         ScheduleFinish = raw.HasScheduleFinish ? raw.ScheduleFinish : null;
         EarlyStart = raw.HasEarlyStart ? raw.EarlyStart : null;
@@ -2385,9 +2474,20 @@ public sealed class ScheduleTask : IEquatable<ScheduleTask>
         get
         {
             Native.cadaclysm_task_time(Handle, Schedule.Index, Index, out var raw);
-            return new TaskTime(raw);
+            var work = Native.cadaclysm_task_work_duration(Handle, Schedule.Index, Index, out var days, out var seconds);
+            return new TaskTime(raw, Native.cadaclysm_task_duration_kind(Handle, Schedule.Index, Index),
+                work ? (days, seconds) : null);
         }
     }
+
+    /// <summary>The index of the work calendar this task works on (<c>scene.Calendars[i]</c>), or
+    /// null where it has none.</summary>
+    public uint? CalendarIndex =>
+        Native.cadaclysm_task_calendar(Handle, Schedule.Index, Index, out var calendar) ? calendar : null;
+
+    /// <summary>The work calendar this task works on, or null where it has none.</summary>
+    public WorkCalendar? Calendar =>
+        Native.cadaclysm_task_calendar(Handle, Schedule.Index, Index, out var calendar) ? new WorkCalendar(Schedule.Scene, calendar) : null;
 
     /// <summary>The nodes it builds or removes.</summary>
     public IReadOnlyList<Node> Nodes
@@ -2432,6 +2532,197 @@ public sealed class TaskLink
     }
 
     public override string ToString() => $"<TaskLink {From.Name} -> {To.Name} {Kind}>";
+}
+
+/// <summary>A repeating set of days (and times of day) in a <see cref="WorkTime"/>'s pattern
+/// (`IfcRecurrencePattern`). `Kind` is `"DAILY"`, `"WEEKLY"`, `"MONTHLY_BY_DAY_OF_MONTH"`,
+/// `"MONTHLY_BY_POSITION"`, `"BY_DAY_COUNT"`, `"BY_WEEKDAY_COUNT"`, `"YEARLY_BY_DAY_OF_MONTH"` or
+/// `"YEARLY_BY_POSITION"`. `Days` (1..31), `Weekdays` (1 = Monday .. 7 = Sunday) and `Months`
+/// (1..12) are sorted; `Position`, `Interval` and `Occurrences` are null where the file gives
+/// none; `Periods` are (start, end) pairs in seconds after midnight, empty for all day.</summary>
+public sealed class Recurrence
+{
+    public string Kind { get; }
+    public IReadOnlyList<int> Days { get; }
+    public IReadOnlyList<int> Weekdays { get; }
+    public IReadOnlyList<int> Months { get; }
+    public int? Position { get; }
+    public int? Interval { get; }
+    public int? Occurrences { get; }
+    public IReadOnlyList<(double Start, double End)> Periods { get; }
+
+    internal Recurrence(string kind, IReadOnlyList<int> days, IReadOnlyList<int> weekdays, IReadOnlyList<int> months,
+        int? position, int? interval, int? occurrences, IReadOnlyList<(double Start, double End)> periods)
+    {
+        Kind = kind;
+        Days = days;
+        Weekdays = weekdays;
+        Months = months;
+        Position = position;
+        Interval = interval;
+        Occurrences = occurrences;
+        Periods = periods;
+    }
+
+    public override string ToString() => $"<Recurrence {Kind}>";
+}
+
+/// <summary>A repeating set of working (or, among a calendar's `Exceptions`, non-working) periods,
+/// valid between two dates (`IfcWorkTime`). `Start` and `Finish` are midnight of their day, in
+/// seconds since 1970-01-01T00:00, or null for an open end; the finish day is included. `Pattern`
+/// is null for every day of the range, all day.</summary>
+public sealed class WorkTime
+{
+    public string Name { get; }
+    public double? Start { get; }
+    public double? Finish { get; }
+    public Recurrence? Pattern { get; }
+
+    internal WorkTime(string name, double? start, double? finish, Recurrence? pattern)
+    {
+        Name = name;
+        Start = start;
+        Finish = finish;
+        Pattern = pattern;
+    }
+
+    public override string ToString() => $"<WorkTime {Name}>";
+}
+
+/// <summary>When work happens (`IfcWorkCalendar`). From <see cref="Scene.Calendars"/> or
+/// <see cref="ScheduleTask.Calendar"/>. `Kind` is `"FIRSTSHIFT"`, `"SECONDSHIFT"`, `"THIRDSHIFT"`,
+/// `"NOTDEFINED"` or `"USERDEFINED"` (`KindName` is a user-defined one's text, empty otherwise).
+/// Dates are seconds since 1970-01-01T00:00, no zone. The queries throw
+/// <see cref="CadaclysmException"/> with the library's message for a date that is not finite or a
+/// `from` after `to`.</summary>
+public sealed class WorkCalendar : IEquatable<WorkCalendar>
+{
+    private static readonly string[] Kinds = { "FIRSTSHIFT", "SECONDSHIFT", "THIRDSHIFT", "NOTDEFINED", "USERDEFINED" };
+    private static readonly string[] RecurrenceKinds =
+    {
+        "DAILY", "WEEKLY", "MONTHLY_BY_DAY_OF_MONTH", "MONTHLY_BY_POSITION", "BY_DAY_COUNT",
+        "BY_WEEKDAY_COUNT", "YEARLY_BY_DAY_OF_MONTH", "YEARLY_BY_POSITION",
+    };
+
+    internal Scene Scene { get; }
+    public uint Index { get; }
+
+    internal WorkCalendar(Scene scene, uint index)
+    {
+        Scene = scene;
+        Index = index;
+    }
+
+    /// <summary>Its name, else its identification, else `calendar #k` (k from 1, in file
+    /// order).</summary>
+    public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_calendar_name(Scene.Handle, Index)) ?? "";
+
+    /// <summary>Its identification, empty where the file gives none.</summary>
+    public string Identification => Marshal.PtrToStringUTF8(Native.cadaclysm_calendar_identification(Scene.Handle, Index)) ?? "";
+
+    public string Kind
+    {
+        get
+        {
+            var kind = Native.cadaclysm_calendar_kind(Scene.Handle, Index);
+            return kind < Kinds.Length ? Kinds[kind] : "NOTDEFINED";
+        }
+    }
+
+    /// <summary>The text of a user-defined kind (`Kind` is `"USERDEFINED"`); empty otherwise.</summary>
+    public string KindName => Marshal.PtrToStringUTF8(Native.cadaclysm_calendar_kind_name(Scene.Handle, Index)) ?? "";
+
+    /// <summary>Its working times, in file order.</summary>
+    public IReadOnlyList<WorkTime> Working => WorkTimes(false, Native.cadaclysm_calendar_working_count(Scene.Handle, Index));
+
+    /// <summary>Its exception (non-working) times, in file order.</summary>
+    public IReadOnlyList<WorkTime> Exceptions => WorkTimes(true, Native.cadaclysm_calendar_exception_count(Scene.Handle, Index));
+
+    private delegate uint Listing(SceneHandle scene, uint calendar, bool exception, uint workTime, byte[]? values, uint capacity);
+
+    private List<WorkTime> WorkTimes(bool exception, uint count)
+    {
+        var handle = Scene.Handle;
+        List<int> Numbers(Listing call, uint w)
+        {
+            var n = call(handle, Index, exception, w, null, 0);
+            var buffer = new byte[n];
+            if (n > 0) call(handle, Index, exception, w, buffer, n);
+            var values = new List<int>(buffer.Length);
+            foreach (var b in buffer) values.Add(b);
+            return values;
+        }
+
+        var found = new List<WorkTime>((int)count);
+        for (uint w = 0; w < count; w++)
+        {
+            Native.cadaclysm_calendar_work_time(handle, Index, exception, w, out var raw);
+            Recurrence? pattern = null;
+            if (raw.HasPattern)
+            {
+                var n = Native.cadaclysm_calendar_work_time_periods(handle, Index, exception, w, null, 0);
+                var flat = new double[2 * n];
+                if (n > 0) Native.cadaclysm_calendar_work_time_periods(handle, Index, exception, w, flat, n);
+                var periods = new List<(double Start, double End)>((int)n);
+                for (var i = 0; i < n; i++) periods.Add((flat[2 * i], flat[2 * i + 1]));
+                pattern = new Recurrence(
+                    raw.Kind < RecurrenceKinds.Length ? RecurrenceKinds[raw.Kind] : "DAILY",
+                    Numbers(Native.cadaclysm_calendar_work_time_days, w),
+                    Numbers(Native.cadaclysm_calendar_work_time_weekdays, w),
+                    Numbers(Native.cadaclysm_calendar_work_time_months, w),
+                    raw.HasPosition ? raw.Position : null,
+                    raw.HasInterval ? (int)raw.Interval : null,
+                    raw.HasOccurrences ? (int)raw.Occurrences : null,
+                    periods);
+            }
+            found.Add(new WorkTime(
+                Marshal.PtrToStringUTF8(Native.cadaclysm_calendar_work_time_name(handle, Index, exception, w)) ?? "",
+                raw.HasStart ? raw.Start : null,
+                raw.HasFinish ? raw.Finish : null,
+                pattern));
+        }
+        return found;
+    }
+
+    private static void Check(uint status)
+    {
+        if (status != 0)
+            throw new CadaclysmException(Marshal.PtrToStringUTF8(Native.cadaclysm_calendar_error_message(status)) ?? "");
+    }
+
+    /// <summary>The working periods overlapping <paramref name="from"/>..<paramref name="to"/>,
+    /// clipped to it, sorted and merged: (start, end) pairs, no two touching or overlapping.</summary>
+    public IReadOnlyList<(double Start, double End)> WorkingPeriods(double from, double to)
+    {
+        Check(Native.cadaclysm_calendar_working_periods(Scene.Handle, Index, from, to, null, 0, out var count));
+        var flat = new double[2 * count];
+        if (count > 0) Check(Native.cadaclysm_calendar_working_periods(Scene.Handle, Index, from, to, flat, count, out count));
+        var found = new List<(double Start, double End)>((int)count);
+        for (var i = 0; i < count; i++) found.Add((flat[2 * i], flat[2 * i + 1]));
+        return found;
+    }
+
+    /// <summary>The working seconds in <paramref name="from"/>..<paramref name="to"/>.</summary>
+    public double WorkingSeconds(double from, double to)
+    {
+        Check(Native.cadaclysm_calendar_working_seconds(Scene.Handle, Index, from, to, out var seconds));
+        return seconds;
+    }
+
+    /// <summary>The date <paramref name="days"/> working days and then <paramref name="seconds"/> of
+    /// working time after <paramref name="from"/> (before it, when negative). A forward result
+    /// landing at the start of a working day is the end of the previous one. Throws when no working
+    /// time lies within 100 years.</summary>
+    public double AddWork(double from, double days, double seconds = 0.0)
+    {
+        Check(Native.cadaclysm_calendar_add_work(Scene.Handle, Index, from, days, seconds, out var date));
+        return date;
+    }
+
+    public bool Equals(WorkCalendar? other) => other is not null && other.Index == Index && ReferenceEquals(other.Scene, Scene);
+    public override bool Equals(object? obj) => Equals(obj as WorkCalendar);
+    public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Scene), Index);
+    public override string ToString() => $"<WorkCalendar {Index} {Name}>";
 }
 
 /// <summary>A building's programme: an `IfcWorkSchedule` and the tasks it controls. From
@@ -2650,7 +2941,7 @@ public sealed class Brep : IDisposable
     /// between the same two vertices that part by up to it; <c>vertex</c> is what decides which
     /// edges are candidates at all, and raising it is what could close a slot. Nothing
     /// moves. The new brep is the caller's to dispose.</summary>
-    public (Brep Brep, SewReport Report) Sewed(double? tolerance = null, double? vertex = null)
+    public (Brep Brep, SewReport Report) Sew(double? tolerance = null, double? vertex = null)
     {
         if (Handle.IsClosed) throw new CadaclysmException("brep: released");
         var counts = new uint[4];
@@ -2667,7 +2958,7 @@ public sealed class Brep : IDisposable
     /// <summary>What is wrong with this brep, as a <see cref="HealthReport"/>: the free edges (the
     /// sides one face bounds) and the wires they chain into, with each edge's nearest partner and
     /// the gap to it; the features below <c>tolerance</c>; the loose edges; and what
-    /// <see cref="Sewed"/> would join and leave. <c>tolerance</c> is the length below which a
+    /// <see cref="Sew"/> would join and leave. <c>tolerance</c> is the length below which a
     /// feature is small and a gap closes -- null, or a value that is not finite and positive,
     /// takes the default, <c>1e-4</c> times the diagonal (the report shows what was used).
     /// <c>mesh</c> also meshes the brep and reports where the mesh cracks
@@ -2709,7 +3000,7 @@ public sealed class Brep : IDisposable
     /// kind of fix; a kind switched off is refused as <c>toggled</c>. <c>tolerance</c> null, or a
     /// value that is not finite and positive, takes the default (the report shows what was
     /// used). The new brep is the caller's to dispose.</summary>
-    public (Brep Brep, HealReport Report) Healed(double? tolerance = null, bool edges = true, bool faces = true, bool holes = true)
+    public (Brep Brep, HealReport Report) Heal(double? tolerance = null, bool edges = true, bool faces = true, bool holes = true)
     {
         if (Handle.IsClosed) throw new CadaclysmException("brep: released");
         using var heal = Native.cadaclysm_brep_healed(Handle, tolerance ?? double.NaN, HealFlags(edges, faces, holes));
@@ -2747,9 +3038,50 @@ public sealed class Brep : IDisposable
         return double.IsNaN(t) ? null : t;
     }
 
-    /// <summary><see cref="Healed"/>'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.</summary>
+    /// <summary><see cref="Heal"/>'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.</summary>
     internal static uint HealFlags(bool edges, bool faces, bool holes) =>
         (edges ? 1u : 0u) | (faces ? 2u : 0u) | (holes ? 4u : 0u);
+
+    /// <summary>This brep with its free-form surfaces and edge curves given their analytic kind,
+    /// and what was taken, as a new <see cref="Brep"/> and a <see cref="RecognizeReport"/>; this
+    /// one is left as it was. A NURBS (or revolved, extruded or swept) surface that is a plane,
+    /// cylinder, cone, sphere or torus within <c>tolerance</c> of every sample of its faces and
+    /// every point of their edges becomes exactly that, and an edge curve that is a line, circle
+    /// or ellipse within it likewise -- so a file that stored analytic faces as NURBS (a .3dm
+    /// especially) comes back as they were made. Faces and edges keep their numbers.
+    /// <c>tolerance</c> null, or a value that is not finite and positive, takes the default, 1e-6
+    /// of the body's extent -- not the file's declared tolerance, at which a fillet's blend reads
+    /// as a torus (the report shows what was used). The new brep is the caller's to dispose.</summary>
+    public (Brep Brep, RecognizeReport Report) Recognize(double? tolerance = null)
+    {
+        if (Handle.IsClosed) throw new CadaclysmException("brep: released");
+        using var r = Native.cadaclysm_brep_recognized(Handle, tolerance ?? double.NaN);
+        if (r.IsInvalid) throw new CadaclysmException(Cadaclysm.LastErrorOr("recognized"));
+        var counts = new uint[10];
+        var sizes = new double[3];
+        if (!Native.cadaclysm_brep_recognize_summary(r, counts, sizes))
+            throw new CadaclysmException(Cadaclysm.LastErrorOr("recognized"));
+        var n = Native.cadaclysm_brep_recognize_faces(r, null, null);
+        var faceItems = new uint[2 * n];
+        var faceSizes = new double[n];
+        if (n > 0) Native.cadaclysm_brep_recognize_faces(r, faceItems, faceSizes);
+        n = Native.cadaclysm_brep_recognize_refused(r, null, null);
+        var refusedItems = new uint[2 * n];
+        var refusedSizes = new double[n];
+        if (n > 0) Native.cadaclysm_brep_recognize_refused(r, refusedItems, refusedSizes);
+        n = Native.cadaclysm_brep_recognize_edges(r, null, null);
+        var edgeItems = new uint[2 * n];
+        var edgeSizes = new double[n];
+        if (n > 0) Native.cadaclysm_brep_recognize_edges(r, edgeItems, edgeSizes);
+        var report = RecognizeReport.FromRows(counts, sizes, faceItems, faceSizes, refusedItems, refusedSizes, edgeItems, edgeSizes);
+        var body = Native.cadaclysm_brep_recognize_body(r);
+        if (body.IsInvalid)
+        {
+            body.Dispose();
+            throw new CadaclysmException(Cadaclysm.LastErrorOr("recognized"));
+        }
+        return (new Brep(body), report);
+    }
 
     public void Dispose() => Handle.Dispose();
 }
@@ -2794,7 +3126,7 @@ public readonly struct Manifold
         $"is_manifold={IsManifold}, is_closed={IsClosed})";
 }
 
-/// <summary>What <see cref="Brep.Sewed"/> did, as plain data: the edges it joined
+/// <summary>What <see cref="Brep.Sew"/> did, as plain data: the edges it joined
 /// (<c>Pairs</c>), the free edges before and after, how many groups of free edges between the
 /// same two vertices it left free (<c>Refused</c>: too far apart for the tolerance, or more
 /// than two), the widest gap it sewed, and the two tolerances it used.</summary>
@@ -2872,13 +3204,13 @@ public sealed record HealthReport(double Tolerance, double Rounding, double Exte
     }
 }
 
-/// <summary>One small feature <see cref="Brep.Healed"/> removed (<see cref="HealReport.Fixes"/>):
+/// <summary>One small feature <see cref="Brep.Heal"/> removed (<see cref="HealReport.Fixes"/>):
 /// its <c>Kind</c> (as <see cref="SmallFeature.Kind"/>), its <c>Index</c> in the input (the edge,
 /// face or loop number <see cref="Brep.Health"/> gave it), its <c>Size</c>, and how far the
 /// vertices it merged <c>Moved</c>.</summary>
 public sealed record HealFix(string Kind, uint Index, double Size, double Moved);
 
-/// <summary>One small feature <see cref="Brep.Healed"/> left, and why
+/// <summary>One small feature <see cref="Brep.Heal"/> left, and why
 /// (<see cref="HealReport.Refused"/>): <c>Kind</c> and <c>Index</c> as in <see cref="HealFix"/>;
 /// <c>Why</c> is "would_empty_loop", "closed", "seam", "chain" (a chain wider than the
 /// tolerance), "neighbours_part" (a sliver's neighbours part), "uneven" (uneven sliver sides),
@@ -2887,7 +3219,7 @@ public sealed record HealFix(string Kind, uint Index, double Size, double Moved)
 /// gap, else 0.</summary>
 public sealed record HealRefusal(string Kind, uint Index, string Why, double Figure);
 
-/// <summary>What <see cref="Brep.Healed"/> did, as plain data: the <c>Tolerance</c> it healed
+/// <summary>What <see cref="Brep.Heal"/> did, as plain data: the <c>Tolerance</c> it healed
 /// at, the furthest any trim <c>Moved</c>, whether the body guard refused fixes
 /// (<c>Guarded</c>), the <c>Fixes</c> made and the features <c>Refused</c>; and the body's
 /// health before and after at that tolerance -- its small features, free edges, whether it is
@@ -2914,6 +3246,57 @@ public sealed record HealReport(double Tolerance, double Moved, bool Guarded, IR
                                          refusedSizes[i]);
         return new HealReport(sizes[0], sizes[1], counts[2] != 0, fixes, refused, counts[3], counts[4], counts[5], counts[6],
                               counts[7] != 0, counts[8] != 0, counts[9], counts[10]);
+    }
+}
+
+/// <summary>One face <see cref="Brep.Recognize"/> gave an analytic kind
+/// (<see cref="RecognizeReport.Faces"/>): its <c>Face</c> number (the same before and after), its
+/// <c>Kind</c> ("plane", "cylinder", "cone", "sphere" or "torus"), and how far any sample of it
+/// lies from the analytic surface (<c>Deviation</c>).</summary>
+public sealed record RecognizedFace(uint Face, string Kind, double Deviation);
+
+/// <summary>One face <see cref="Brep.Recognize"/> left free-form, and why
+/// (<see cref="RecognizeReport.Refused"/>): <c>Why</c> is "no_kind" (no kind fits within the
+/// tolerance; <c>Closest</c> the nearest kind's deviation), "mixed_normals", "parameter_trims" (a
+/// parameter trim cannot be lifted) or "too_few_samples"; <c>Closest</c> is null but for
+/// "no_kind".</summary>
+public sealed record RecognizeRefusal(uint Face, string Why, double? Closest);
+
+/// <summary>One edge whose curve <see cref="Brep.Recognize"/> gave an analytic kind
+/// (<see cref="RecognizeReport.Edges"/>): its brep <c>Edge</c> id (as
+/// <see cref="Brep.EdgeTolerance"/> takes one), its <c>Kind</c> ("line", "circle" or
+/// "ellipse"), and how far any point of the curve or the edge lies from the analytic curve
+/// (<c>Deviation</c>).</summary>
+public sealed record RecognizedEdge(uint Edge, string Kind, double Deviation);
+
+/// <summary>What <see cref="Brep.Recognize"/> did, as plain data: the <c>Tolerance</c> it
+/// fitted to, the <c>Faces</c> given an analytic kind and those <c>Refused</c>, the <c>Edges</c>
+/// given one (in edge order), how many edges were left free-form (<c>EdgesLeft</c>), and the
+/// worst deviation of a face and of an edge taken (0 where none was).</summary>
+public sealed record RecognizeReport(double Tolerance, IReadOnlyList<RecognizedFace> Faces, IReadOnlyList<RecognizeRefusal> Refused,
+                                     IReadOnlyList<RecognizedEdge> Edges, uint EdgesLeft, double WorstFace, double WorstEdge)
+{
+    internal static readonly string[] FaceKinds = { "plane", "cylinder", "cone", "sphere", "torus" };
+    internal static readonly string[] EdgeKinds = { "line", "circle", "ellipse" };
+    internal static readonly string[] Whys = { "no_kind", "mixed_normals", "parameter_trims", "too_few_samples" };
+
+    /// <summary>The flat rows of the recognition C ABI as a report: counts 10 (faces per kind,
+    /// faces left, edges per kind, edges left), sizes 3 (tolerance, worst face, worst edge), each
+    /// row two items and one size.</summary>
+    internal static RecognizeReport FromRows(uint[] counts, double[] sizes, uint[] faceItems, double[] faceSizes, uint[] refusedItems,
+                                             double[] refusedSizes, uint[] edgeItems, double[] edgeSizes)
+    {
+        var faces = new RecognizedFace[faceSizes.Length];
+        for (var i = 0; i < faces.Length; i++)
+            faces[i] = new RecognizedFace(faceItems[2 * i], FaceKinds[faceItems[2 * i + 1]], faceSizes[i]);
+        var refused = new RecognizeRefusal[refusedSizes.Length];
+        for (var i = 0; i < refused.Length; i++)
+            refused[i] = new RecognizeRefusal(refusedItems[2 * i], Whys[refusedItems[2 * i + 1]],
+                                              double.IsNaN(refusedSizes[i]) ? null : refusedSizes[i]);
+        var edges = new RecognizedEdge[edgeSizes.Length];
+        for (var i = 0; i < edges.Length; i++)
+            edges[i] = new RecognizedEdge(edgeItems[2 * i], EdgeKinds[edgeItems[2 * i + 1]], edgeSizes[i]);
+        return new RecognizeReport(sizes[0], faces, refused, edges, counts[9], sizes[1], sizes[2]);
     }
 }
 
@@ -3702,6 +4085,19 @@ public sealed class Node : IEquatable<Node>
     /// once and switch level by drawing a different index range.</summary>
     public Mesh? MeshLod(uint level) => MeshOf(Native.cadaclysm_node_mesh_lod(Scene.Handle, Index, level));
 
+    /// <summary>A second set of texture coordinates for <see cref="Mesh"/>, two floats a vertex in
+    /// its order, packed into the unit square with no two triangles overlapping: what a baked
+    /// lightmap needs. Empty when not asked for at open, for a node with no B-rep, and for a body
+    /// whose charts did not fit (the scene's diagnostics say which). A view into the scene.</summary>
+    public unsafe ReadOnlySpan<float> LightmapUvs
+    {
+        get
+        {
+            var at = Native.cadaclysm_node_mesh_lightmap_uvs(Scene.Handle, Index, out var count);
+            return at == IntPtr.Zero || count == 0 ? ReadOnlySpan<float>.Empty : new ReadOnlySpan<float>((void*)at, (int)(count * 2));
+        }
+    }
+
     /// <summary>How far <see cref="MeshLod"/> at this level moved the surface, in the
     /// scene's units -- what to pick a level by. Zero at level 0.</summary>
     public float LodError(uint level) => Native.cadaclysm_node_lod_error(Scene.Handle, Index, level);
@@ -4202,6 +4598,18 @@ public sealed class Scene : IDisposable
         }
     }
 
+    /// <summary>The file's IFC work calendars (`IfcWorkCalendar`), in file order; empty for a file
+    /// that records none.</summary>
+    public IReadOnlyList<WorkCalendar> Calendars
+    {
+        get
+        {
+            var count = Native.cadaclysm_calendar_count(Handle);
+            var found = new List<WorkCalendar>((int)count);
+            for (uint i = 0; i < count; i++) found.Add(new WorkCalendar(this, i));
+            return found;
+        }
+    }
     /// <summary>The link the file declares as the mechanism's base, or null when it declares
     /// none (the default ground is then the link on the most joints; see <see
     /// cref="Pose"/>).</summary>
@@ -4712,7 +5120,7 @@ public static class Cadaclysm
         return ((uint)Math.Round(rgb[0] * 255) << 16) | ((uint)Math.Round(rgb[1] * 255) << 8) | (uint)Math.Round(rgb[2] * 255);
     }
 
-    private static RawOpenOptions BuildOptions(Convention convention, bool colours, double sourceMetresPerUnit)
+    private static RawOpenOptions BuildOptions(Convention convention, bool colours, double sourceMetresPerUnit, uint lightmapResolution)
     {
         var options = new RawOpenOptions();
         Native.cadaclysm_open_options_init(ref options);
@@ -4722,6 +5130,7 @@ public static class Cadaclysm
         options.Uvs = (packed & ConventionFlag.UvWorld) != 0 ? 1u : 0u;
         options.Colors = colours ? 1u : 0u;
         options.SourceMetersPerUnit = sourceMetresPerUnit;
+        options.LightmapResolution = lightmapResolution;
         return options;
     }
 
@@ -4762,13 +5171,16 @@ public static class Cadaclysm
     /// said. A `.zip` (or `.stpZ`, STEP's zip) opens its first readable member;
     /// <see cref="Scene.SourceName"/> says which. A `.gz` is read as the format named
     /// before it: `part.step.gz` as `.step`.</remarks>
+    /// <param name="lightmapResolution">A lightmap atlas for a texture that many texels on a side,
+    /// one chart per B-rep face, read back as <see cref="Node.LightmapUvs"/>; 0 (the default) for
+    /// none.</param>
     public static Scene Open(string path, Convention convention = Convention.Native, string? schema = null,
-        bool colours = false, double sourceMetresPerUnit = 0)
+        bool colours = false, double sourceMetresPerUnit = 0, uint lightmapResolution = 0)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
             throw new CadaclysmException($"{path}: no such file");
 
-        var options = BuildOptions(convention, colours, sourceMetresPerUnit);
+        var options = BuildOptions(convention, colours, sourceMetresPerUnit, lightmapResolution);
 
         // A directory goes over whole rather than being narrowed to one file here: the
         // library walks it and keys each schema under the name that schema itself declares.
@@ -4803,11 +5215,15 @@ public static class Cadaclysm
     /// the smoke this binding is built against opens memory by name alone.</param>
     /// <param name="schema">Must be a path here: there is no file on disk to read a
     /// `FILE_SCHEMA` line out of.</param>
+    /// <param name="lightmapResolution">A lightmap atlas for a texture that many texels on a side,
+    /// one chart per B-rep face, read back as <see cref="Node.LightmapUvs"/>; 0 (the default) for
+    /// none.</param>
     public static unsafe Scene OpenMemory(ReadOnlySpan<byte> bytes, string name, string? format = null,
-        string? schema = null, Convention convention = Convention.Native, bool colours = false)
+        string? schema = null, Convention convention = Convention.Native, bool colours = false,
+        uint lightmapResolution = 0)
     {
         format ??= Path.GetExtension(name).TrimStart('.');
-        var options = BuildOptions(convention, colours, 0);
+        var options = BuildOptions(convention, colours, 0, lightmapResolution);
         IntPtr list = IntPtr.Zero, text = IntPtr.Zero;
         try
         {
