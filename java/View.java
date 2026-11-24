@@ -78,8 +78,17 @@ public final class View implements AutoCloseable {
      * {@code _set_item_visible}, {@code _set_node_ghosts} ({@link #playAnimation}, {@link #removeTrack},
      * {@link Item#setVisible}, {@link Item#setNodeGhosts}) -- and the {@link TimelineEvent}.
      * 1.28: the drafting styles and the pick's viewport label.
+     * 1.29: live geometry ({@link Item#setLines}, {@link Item#setCurves}, {@link Item#setPoints},
+     * {@link Item#setMeshPositions}) and {@link #showGlyphs}.
+     * 1.30: picking and snapping -- {@link #setPickAperture}, {@link #pickRect}, {@link Item#setSnapPoints},
+     * {@link #setSnapBase}, the pick's segment, the snap's label, lock and guides, and the input event's tail.
+     * 1.31: clip planes -- {@link #setClipPlane(int, ClipPlane)}, {@link #clearClipPlane} and {@link #clipPlane}.
+     * 1.32: clip sets -- the plane's outline, {@link #setClipMode}, {@link #clipMode} and viewports' own sets
+     * ({@link #setViewportClipPlane}, {@link #clearViewportClipPlane}, {@link #viewportClipPlane},
+     * {@link #setViewportClipMode}, {@link #viewportClipMode}).
+     * 1.33: {@link #setTextures} and {@link #textures}.
      */
-    static final int ABI_MINOR = 28;
+    static final int ABI_MINOR = 33;
     /** CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0). */
     static final int NAVIGATION_FLY = 1;
     static final int OPEN = 1;
@@ -102,9 +111,17 @@ public final class View implements AutoCloseable {
     /** A shown solid's material (CADACLYSM_VIEW_MATERIAL_*, 1.21). */
     static final Map<String, Integer> MATERIALS = Map.of("default", 0, "plastic", 1, "metal", 2, "matte", 3, "paint", 4,
             "brushed", 5, "glass", 6);
-    /** The CADACLYSM_VIEW_SNAP_* bits by the names setSnap takes and Snap.kind reports; "all" is every one (1.22). */
-    static final Map<String, Integer> SNAP_KINDS = Map.of("vertex", 1, "midpoint", 2, "centre", 4, "quadrant", 8, "edge", 16,
-            "face", 32, "grid", 64, "plane", 128, "all", 0xFF);
+    /**
+     * The CADACLYSM_VIEW_SNAP_* bits by the names setSnap takes and Snap.kind reports (1.22; 1.30 added "end",
+     * "intersection", "point" and "alignment"); "all" is every one, "default" the library's default (all but END,
+     * INTERSECTION and ALIGNMENT, which are opt-in).
+     */
+    static final Map<String, Integer> SNAP_KINDS = Map.ofEntries(Map.entry("vertex", 1), Map.entry("midpoint", 2),
+            Map.entry("centre", 4), Map.entry("quadrant", 8), Map.entry("edge", 16), Map.entry("face", 32), Map.entry("grid", 64),
+            Map.entry("plane", 128), Map.entry("end", 1 << 8), Map.entry("intersection", 1 << 9), Map.entry("point", 1 << 10),
+            Map.entry("alignment", 1 << 11), Map.entry("all", 0xFFF), Map.entry("default", 0x4FF));
+    /** The CADACLYSM_VIEW_HIT_* kinds of a {@link RectHit} by name (1.30). */
+    static final Map<String, Integer> HIT_KINDS = Map.of("face", 1, "node", 2, "segment", 3, "edge", 4, "point", 5);
     /** CadaclysmViewSnap.edge where the snap is on no edge. */
     static final int SNAP_NO_EDGE = 0xFFFFFFFF;
     static final Map<String, Integer> TEXT_MODES = Map.of("label", 0, "world", 1);
@@ -158,7 +175,9 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("has_point"),
             MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("point"),
             ValueLayout.JAVA_INT.withName("overlay"),
-            ValueLayout.JAVA_INT.withName("viewport_label"));
+            ValueLayout.JAVA_INT.withName("viewport_label"),
+            ValueLayout.JAVA_INT.withName("segment"),
+            ValueLayout.JAVA_FLOAT.withName("distance_px"));
     /** CadaclysmViewEventPick: the pick inside an input event, CadaclysmViewPick as 1.26 laid the event out (40 bytes). */
     static final MemoryLayout EVENT_PICK = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
@@ -177,6 +196,18 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("size"), ValueLayout.JAVA_FLOAT.withName("dash"), ValueLayout.JAVA_FLOAT.withName("gap"),
             ValueLayout.JAVA_FLOAT.withName("dim"), ValueLayout.JAVA_INT.withName("has_colour"),
             MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("colour"));
+    /** CadaclysmViewClipPlane (1.32): 120 bytes, no padding (1.31's 96 and the outline). */
+    static final StructLayout CLIP_PLANE = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"), ValueLayout.JAVA_INT.withName("cap"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("normal"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("cap_colour"), ValueLayout.JAVA_INT.withName("hatch"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("hatch_colour"), ValueLayout.JAVA_FLOAT.withName("hatch_angle"),
+            ValueLayout.JAVA_FLOAT.withName("hatch_spacing"), ValueLayout.JAVA_FLOAT.withName("hatch_width"),
+            ValueLayout.JAVA_INT.withName("outline"), MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("outline_colour"),
+            ValueLayout.JAVA_FLOAT.withName("outline_width"), ValueLayout.JAVA_INT.withName("reserved"));
+    /** The number of clip-plane slots (CADACLYSM_VIEW_CLIP_PLANES, 1.31). */
+    public static final int CLIP_PLANES = 6;
     static final MemoryLayout SNAP_SETTINGS = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
             ValueLayout.JAVA_INT.withName("kinds"),
@@ -194,7 +225,32 @@ public final class View implements AutoCloseable {
             MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("axis"),
             ValueLayout.JAVA_DOUBLE.withName("radius"),
             ValueLayout.JAVA_FLOAT.withName("distance_px"),
+            ValueLayout.JAVA_INT.withName("clicks"),
+            MemoryLayout.sequenceLayout(32, ValueLayout.JAVA_BYTE).withName("label"),
+            ValueLayout.JAVA_INT.withName("locked"),
+            ValueLayout.JAVA_FLOAT.withName("locked_angle"),
+            ValueLayout.JAVA_INT.withName("guide_count"),
+            ValueLayout.JAVA_INT.withName("pad0"),
+            MemoryLayout.sequenceLayout(12, ValueLayout.JAVA_DOUBLE).withName("guides"));
+    /** CadaclysmViewEventSnap: the snap inside an input event, CadaclysmViewSnap as 1.22 laid it out (88 bytes). */
+    static final MemoryLayout EVENT_SNAP = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("kind"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point"),
+            ValueLayout.JAVA_INT.withName("item"),
+            ValueLayout.JAVA_INT.withName("node"),
+            ValueLayout.JAVA_INT.withName("face"),
+            ValueLayout.JAVA_INT.withName("edge"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("tangent"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("axis"),
+            ValueLayout.JAVA_DOUBLE.withName("radius"),
+            ValueLayout.JAVA_FLOAT.withName("distance_px"),
             ValueLayout.JAVA_INT.withName("clicks"));
+    /** CadaclysmViewRectHit (1.30): one thing in a rectangle, an array element with no size. */
+    static final MemoryLayout RECT_HIT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("item"),
+            ValueLayout.JAVA_INT.withName("kind"),
+            ValueLayout.JAVA_INT.withName("index"));
 
     /** CADACLYSM_VIEW_LAYER_EDGES, _CURVES and _ISOCURVES: the layers the line colours take. */
     static final int LAYER_EDGES = 1, LAYER_CURVES = 2, LAYER_ISOCURVES = 3;
@@ -206,6 +262,33 @@ public final class View implements AutoCloseable {
     /** How every "dashed" item's hidden lines and points look: dash and gap in points, the coverage kept (0..1, above 0), an optional colour (3 numbers in 0..1). */
     public record OccludedStyle(float dash, float gap, float dim, float[] colour) {
         public static final OccludedStyle DEFAULT = new OccludedStyle(6f, 4f, 0.5f, null);
+    }
+
+    /**
+     * A clip plane (view ABI 1.31, {@link View#setClipPlane(int, ClipPlane)}): what lies on the side {@code normal}
+     * points to is hidden. {@code cap} (3 numbers in 0..1, or null) fills the cut of every body; {@code hatch} (likewise,
+     * only with a cap) lines it at {@code hatchAngle} degrees from the plane's first axis, {@code hatchSpacing} apart in
+     * model units (0: automatic, a fiftieth of the scene's size), each {@code hatchWidth} points wide.
+     * {@link View#clipPlane} answers the normal of unit length, and these defaults where there is no hatch. 1.32:
+     * {@code outline} (3 numbers in 0..1, or null) draws the cut as a line {@code outlineWidth} points wide (0: 1; 1
+     * where there is no outline).
+     */
+    public record ClipPlane(double[] point, double[] normal, float[] cap, float[] hatch, float hatchAngle, float hatchSpacing,
+            float hatchWidth, float[] outline, float outlineWidth) {
+        /** A plane with no outline (1.31's fields). */
+        public ClipPlane(double[] point, double[] normal, float[] cap, float[] hatch, float hatchAngle, float hatchSpacing, float hatchWidth) {
+            this(point, normal, cap, hatch, hatchAngle, hatchSpacing, hatchWidth, null, 1f);
+        }
+        /** This plane with the outline {@code outline} (or none, null), {@code outlineWidth} points wide. */
+        public ClipPlane withOutline(float[] outline, float outlineWidth) {
+            return new ClipPlane(point, normal, cap, hatch, hatchAngle, hatchSpacing, hatchWidth, outline, outlineWidth);
+        }
+        /** A bare plane: no cap, no hatch. */
+        public ClipPlane(double[] point, double[] normal) { this(point, normal, null, null); }
+        /** A capped plane, no hatch. */
+        public ClipPlane(double[] point, double[] normal, float[] cap) { this(point, normal, cap, null); }
+        /** A plane with a cap and a hatch at 45 degrees, spaced automatically, 1 point wide. */
+        public ClipPlane(double[] point, double[] normal, float[] cap, float[] hatch) { this(point, normal, cap, hatch, 45f, 0f, 1f); }
     }
 
     static final MemoryLayout VIEWPORT = MemoryLayout.structLayout(
@@ -299,7 +382,10 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("node"));
     /** CADACLYSM_VIEW_ALL_NODES (UINT32_MAX): a binding to the item itself. */
     static final int ALL_NODES = -1;
-    /** CadaclysmViewInputEvent, 1.26: 272 bytes, padded explicitly, the pick, snap and camera nested whole. */
+    /**
+     * CadaclysmViewInputEvent, 1.26: 272 bytes, padded explicitly, the pick, snap and camera nested whole; 1.30 grew its
+     * tail to 424 bytes (its snap frozen as the 1.22 EVENT_SNAP, so the camera stays at 224).
+     */
     static final MemoryLayout INPUT_EVENT = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
             ValueLayout.JAVA_INT.withName("kind"),
@@ -318,9 +404,17 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("pad0"),
             MemoryLayout.sequenceLayout(32, ValueLayout.JAVA_BYTE).withName("key"),
             EVENT_PICK.withName("pick"),
-            SNAP.withName("snap"),
+            EVENT_SNAP.withName("snap"),
             CAMERA.withName("camera"),
-            ValueLayout.JAVA_INT.withName("pick_viewport_label"));
+            ValueLayout.JAVA_INT.withName("pick_viewport_label"),
+            ValueLayout.JAVA_INT.withName("pick_segment"),
+            ValueLayout.JAVA_FLOAT.withName("pick_distance_px"),
+            MemoryLayout.sequenceLayout(32, ValueLayout.JAVA_BYTE).withName("snap_label"),
+            ValueLayout.JAVA_INT.withName("snap_locked"),
+            ValueLayout.JAVA_FLOAT.withName("snap_locked_angle"),
+            ValueLayout.JAVA_INT.withName("snap_guide_count"),
+            ValueLayout.JAVA_INT.withName("pad1"),
+            MemoryLayout.sequenceLayout(12, ValueLayout.JAVA_DOUBLE).withName("snap_guides"));
     /** The CADACLYSM_VIEW_INPUT_EVENT_* kinds (1.26; TIMELINE 1.27). */
     static final int INPUT_EVENT_POINTER_DOWN = 1, INPUT_EVENT_POINTER_MOVE = 2, INPUT_EVENT_POINTER_UP = 3, INPUT_EVENT_WHEEL = 4,
             INPUT_EVENT_KEY_DOWN = 5, INPUT_EVENT_KEY_UP = 6, INPUT_EVENT_RESIZE = 7, INPUT_EVENT_PICK = 8, INPUT_EVENT_SNAP = 9,
@@ -450,14 +544,17 @@ public final class View implements AutoCloseable {
                 setNodeColor, setNodeHighlight, setViewports, requestPick, requestPickIn, pickResult, frameNode, look,
                 dolly, input, showMesh, showLines, showPoints, showCurves, showImage, setColour, setXray, setOccluded, setFinish, setFaceColours,
                 setPlacement, showSolid, showSolidFaces, image, size, setLod, wakeMs, setNodeTransforms, parseColour, loadFont, showText,
-                setText, setDoubleClickFrames, focus, navigation, setLighting, lighting, setOccludedStyle, occludedStyle,
+                setText, setDoubleClickFrames, focus, navigation, setLighting, lighting, setTextures, textures, setOccludedStyle, occludedStyle,
                 setLineColour, lineColour, setItemLineColour, showOverlay, showOverlayImage, moveOverlay, stats, nextEvent, closeWindow,
                 setSnap, requestSnapIn, snapResult, clearSnap, setWorkPlane, clearWorkPlane, viewportCamera,
                 setViewportCamera, setViewportRects, aim, setPivot, setTap, orbitIn, panIn, zoomIn, lookIn, dollyIn,
                 frameIn, standardIn, showMachining, machiningSeek, machiningColourBy, machiningOverlays, machiningInfo,
                 machiningHeights, timelinePlay, timelinePause, timelineSeek, timelineSetLoop, timelineTime,
                 timelineDuration, timelinePlaying, timelineStatus, playAnimation, timelineRemove, setItemVisible, setNodeGhosts,
-                setLineStyle, setPointStyle, setPointStates, setPointStateColours, setViewportLabel, setViewportBorder, setOnTop;
+                setLineStyle, setPointStyle, setPointStates, setPointStateColours, setViewportLabel, setViewportBorder, setOnTop,
+                setLines, setCurves, setPoints, setMeshPositions, showGlyphs, setPickAperture, pickRect, setSnapPoints, setSnapBase,
+                setClipPlane, clipPlane, setClipMode, clipMode, setViewportClipPlane, viewportClipPlane, setViewportClipMode,
+                viewportClipMode;
 
         @SuppressWarnings("restricted") // libraryLookup: the view library chosen.
         Library(Path file) {
@@ -527,6 +624,26 @@ public final class View implements AutoCloseable {
             setViewportLabel = bind(linker, lib, "cadaclysm_view_set_viewport_label", FunctionDescriptor.of(B, A, I, A, A));
             setViewportBorder = bind(linker, lib, "cadaclysm_view_set_viewport_border", FunctionDescriptor.of(B, A, I, A));
             setOnTop = bind(linker, lib, "cadaclysm_view_set_on_top", FunctionDescriptor.of(B, A, I, B));
+            setLines = bind(linker, lib, "cadaclysm_view_set_lines", FunctionDescriptor.of(B, A, I, A, L));
+            setCurves = bind(linker, lib, "cadaclysm_view_set_curves", FunctionDescriptor.of(B, A, I, A, L));
+            setPoints = bind(linker, lib, "cadaclysm_view_set_points", FunctionDescriptor.of(B, A, I, A, L));
+            setMeshPositions = bind(linker, lib, "cadaclysm_view_set_mesh_positions", FunctionDescriptor.of(B, A, I, A, A, L));
+            showGlyphs = bind(linker, lib, "cadaclysm_view_show_glyphs", FunctionDescriptor.of(I, A, A, A, L, I, F, A));
+            // 1.30: picking and snapping.
+            setPickAperture = bind(linker, lib, "cadaclysm_view_set_pick_aperture", FunctionDescriptor.of(B, A, F));
+            pickRect = bind(linker, lib, "cadaclysm_view_pick_rect", FunctionDescriptor.of(L, A, I, F, F, F, F, B, A, L));
+            setSnapPoints = bind(linker, lib, "cadaclysm_view_set_snap_points", FunctionDescriptor.of(B, A, I, A, L, A));
+            setSnapBase = bind(linker, lib, "cadaclysm_view_set_snap_base", FunctionDescriptor.of(B, A, A, F));
+            // 1.31: clip planes.
+            setClipPlane = bind(linker, lib, "cadaclysm_view_set_clip_plane", FunctionDescriptor.of(B, A, I, A));
+            clipPlane = bind(linker, lib, "cadaclysm_view_clip_plane", FunctionDescriptor.of(B, A, I, A));
+            // 1.32: clip sets.
+            setClipMode = bind(linker, lib, "cadaclysm_view_set_clip_mode", FunctionDescriptor.of(B, A, I));
+            clipMode = bind(linker, lib, "cadaclysm_view_clip_mode", FunctionDescriptor.of(I, A));
+            setViewportClipPlane = bind(linker, lib, "cadaclysm_view_set_viewport_clip_plane", FunctionDescriptor.of(B, A, I, I, A));
+            viewportClipPlane = bind(linker, lib, "cadaclysm_view_viewport_clip_plane", FunctionDescriptor.of(B, A, I, I, A));
+            setViewportClipMode = bind(linker, lib, "cadaclysm_view_set_viewport_clip_mode", FunctionDescriptor.of(B, A, I, I));
+            viewportClipMode = bind(linker, lib, "cadaclysm_view_viewport_clip_mode", FunctionDescriptor.of(I, A, I));
             setFinish = bind(linker, lib, "cadaclysm_view_set_finish", FunctionDescriptor.of(B, A, I, I));
             setFaceColours = bind(linker, lib, "cadaclysm_view_set_face_colours", FunctionDescriptor.of(B, A, I, A, A, I));
             setPlacement = bind(linker, lib, "cadaclysm_view_set_placement", FunctionDescriptor.of(B, A, I, A));
@@ -543,6 +660,8 @@ public final class View implements AutoCloseable {
             navigation = bind(linker, lib, "cadaclysm_view_navigation", FunctionDescriptor.of(I, A));
             setLighting = bind(linker, lib, "cadaclysm_view_set_lighting", FunctionDescriptor.of(B, A, I));
             lighting = bind(linker, lib, "cadaclysm_view_lighting", FunctionDescriptor.of(I, A));
+            setTextures = bind(linker, lib, "cadaclysm_view_set_textures", FunctionDescriptor.of(B, A, B));
+            textures = bind(linker, lib, "cadaclysm_view_textures", FunctionDescriptor.of(B, A));
             setOccludedStyle = bind(linker, lib, "cadaclysm_view_set_occluded_style", FunctionDescriptor.of(B, A, A));
             occludedStyle = bind(linker, lib, "cadaclysm_view_occluded_style", FunctionDescriptor.of(B, A, A));
             setLineColour = bind(linker, lib, "cadaclysm_view_set_line_colour", FunctionDescriptor.of(B, A, I, A, I));
@@ -969,17 +1088,63 @@ public final class View implements AutoCloseable {
      * in), or null where the library read no depth (a machining stock, the terminal library);
      * {@code overlay} (1.24) true where the item is an overlay: it was over the pixel, so nothing of
      * the scene beneath it was picked ({@code face} is a text overlay's line, else 0);
-     * {@code viewportLabel} (1.28) the viewport whose label was under the pixel, else -1 (none).
+     * {@code viewportLabel} (1.28) the viewport whose label was under the pixel, else -1 (none);
+     * {@code segment} (1.30) a lines item's segment, a curves item's Bezier, a kernel solid's or read scene's kernel
+     * edge index -- null for a face, a point, a glyph, a label or an overlay; {@code distancePx}, how far the cursor
+     * was from the wire (0 for a face).
      */
-    public record Pick(int item, int node, int face, int clicks, float[] point, boolean overlay, int viewportLabel) {
-        /** A pick of the scene: no overlay, no viewport label. */
+    public record Pick(int item, int node, int face, int clicks, float[] point, boolean overlay, int viewportLabel,
+                       Integer segment, float distancePx) {
+        /** A pick of the scene: no overlay, no viewport label, no segment. */
         public Pick(int item, int node, int face, int clicks, float[] point) {
-            this(item, node, face, clicks, point, false, -1);
+            this(item, node, face, clicks, point, false, -1, null, 0f);
         }
 
-        /** A pick with no viewport label. */
+        /** A pick with no viewport label and no segment. */
         public Pick(int item, int node, int face, int clicks, float[] point, boolean overlay) {
-            this(item, node, face, clicks, point, overlay, -1);
+            this(item, node, face, clicks, point, overlay, -1, null, 0f);
+        }
+
+        /** A pick with no segment. */
+        public Pick(int item, int node, int face, int clicks, float[] point, boolean overlay, int viewportLabel) {
+            this(item, node, face, clicks, point, overlay, viewportLabel, null, 0f);
+        }
+    }
+
+    /**
+     * One thing in a rectangle (view ABI 1.30, {@link View#pickRect}): its item, its kind -- "face" (numbered as a pick
+     * numbers it), "node" (an item with no face ranges), "segment" (a lines item's segment or a curves item's Bezier),
+     * "edge" (a kernel solid's or read scene's kernel edge index) or "point" (a point's or glyph's index) -- and that index.
+     */
+    public record RectHit(int item, String kind, int index) {
+    }
+
+    /** A guide a snap answer drew (view ABI 1.30): from a trail point or the lock's base to the snapped point, world coordinates. */
+    public record SnapGuide(double[] from, double[] to) {
+    }
+
+    /**
+     * How a clip set's planes combine (view ABI 1.32, {@code CADACLYSM_VIEW_CLIP_*}): INTERSECTION (the default) draws
+     * where every plane keeps, CUTAWAY hides only where every plane hides; INHERIT is a viewport's: no set of its own,
+     * the view-wide one.
+     */
+    public enum ClipMode {
+        INTERSECTION(0), CUTAWAY(1), INHERIT(2);
+
+        final int code;
+
+        ClipMode(int code) {
+            this.code = code;
+        }
+
+        /** The header's CADACLYSM_VIEW_CLIP_* value. */
+        public int code() {
+            return code;
+        }
+
+        static ClipMode of(int code) {
+            for (ClipMode m : values()) if (m.code == code) return m;
+            throw new ViewException("the view library answered clip mode " + code);
         }
     }
 
@@ -1038,25 +1203,32 @@ public final class View implements AutoCloseable {
 
     /** A CadaclysmViewPick as the answer: null for no item; the point only where has_point is set (Python's _pick_dict). */
     static Pick pickOf(MemorySegment raw) {
-        return pickOf(raw, raw.get(ValueLayout.JAVA_INT, off(PICK, "viewport_label")));
+        return pickOf(raw, raw.get(ValueLayout.JAVA_INT, off(PICK, "viewport_label")), raw.get(ValueLayout.JAVA_INT, off(PICK, "segment")),
+                raw.get(ValueLayout.JAVA_FLOAT, off(PICK, "distance_px")));
     }
 
-    /** As {@link #pickOf(MemorySegment)} for a pick whose label lies elsewhere (the event's 40-byte pick). */
-    static Pick pickOf(MemorySegment raw, int viewportLabel) {
-        return raw.get(ValueLayout.JAVA_INT, off(PICK, "item")) == 0 && viewportLabel < 0 ? null : answerOf(raw, viewportLabel);
+    /**
+     * As {@link #pickOf(MemorySegment)} for a pick whose label, segment and distance lie elsewhere (the event's 40-byte
+     * pick: its tail carries them).
+     */
+    static Pick pickOf(MemorySegment raw, int viewportLabel, int segment, float distancePx) {
+        return raw.get(ValueLayout.JAVA_INT, off(PICK, "item")) == 0 && viewportLabel < 0 ? null
+                : answerOf(raw, viewportLabel, segment, distancePx);
     }
 
     /** A CadaclysmViewPick as it was answered, item 0 (nothing hit) included. */
     static Pick answerOf(MemorySegment raw) {
-        return answerOf(raw, raw.get(ValueLayout.JAVA_INT, off(PICK, "viewport_label")));
+        return answerOf(raw, raw.get(ValueLayout.JAVA_INT, off(PICK, "viewport_label")), raw.get(ValueLayout.JAVA_INT, off(PICK, "segment")),
+                raw.get(ValueLayout.JAVA_FLOAT, off(PICK, "distance_px")));
     }
 
-    static Pick answerOf(MemorySegment raw, int viewportLabel) {
+    static Pick answerOf(MemorySegment raw, int viewportLabel, int segment, float distancePx) {
         float[] point = raw.get(ValueLayout.JAVA_INT, off(PICK, "has_point")) != 0
                 ? raw.asSlice(off(PICK, "point"), 12).toArray(ValueLayout.JAVA_FLOAT) : null;
         return new Pick(raw.get(ValueLayout.JAVA_INT, off(PICK, "item")), raw.get(ValueLayout.JAVA_INT, off(PICK, "node")),
                 raw.get(ValueLayout.JAVA_INT, off(PICK, "face")), raw.get(ValueLayout.JAVA_INT, off(PICK, "clicks")), point,
-                raw.get(ValueLayout.JAVA_INT, off(PICK, "overlay")) != 0, viewportLabel);
+                raw.get(ValueLayout.JAVA_INT, off(PICK, "overlay")) != 0, viewportLabel, segment == SNAP_NO_EDGE ? null : segment,
+                distancePx);
     }
 
     /**
@@ -1066,10 +1238,15 @@ public final class View implements AutoCloseable {
      * grid or plane snap), its {@code edge} (null for a face, grid or plane snap), the edge's unit
      * {@code tangent} there, a circular edge's unit {@code axis} and {@code radius} (centre and quadrant),
      * how many pixels the cursor was from it, and {@code clicks}: 0 for {@link #snap(int, int, int)} and a
-     * hover, 1 for a click's snap, 2 for a double click's.
+     * hover, 1 for a click's snap, 2 for a double click's. 1.30: the kinds "end", "intersection", "point" and
+     * "alignment" too; {@code edge} is a lines item's segment, a curves item's Bezier or a kernel solid's kernel edge
+     * index; {@code label}, the point's label for a "point" snap, else the kind's name; {@code lockedAngle}, the angle
+     * in degrees where the lock ({@link #setSnapBase}) turned the point, else null; and {@code guides}, the 0-2 guides
+     * drawn (an alignment's, or the lock's ray).
      */
     public record Snap(String kind, double[] point, int item, int node, int face, Integer edge, float[] tangent,
-                       float[] axis, double radius, float distancePx, int clicks) {
+                       float[] axis, double radius, float distancePx, int clicks, String label, Float lockedAngle,
+                       List<SnapGuide> guides) {
     }
 
     /** A CadaclysmViewSnap as the answer: null for kind 0 (nothing snapped) (Python's _snap_dict). */
@@ -1079,22 +1256,47 @@ public final class View implements AutoCloseable {
 
     /** A CadaclysmViewSnap as it was answered, kind 0 ("none": nothing snapped) included; edge null where it is on none. */
     static Snap snapAnswerOf(MemorySegment raw) {
-        int kind = raw.get(ValueLayout.JAVA_INT, off(SNAP, "kind")), edge = raw.get(ValueLayout.JAVA_INT, off(SNAP, "edge"));
+        return snapAnswerOf(raw, raw.asSlice(off(SNAP, "label"), 32), raw.get(ValueLayout.JAVA_INT, off(SNAP, "locked")),
+                raw.get(ValueLayout.JAVA_FLOAT, off(SNAP, "locked_angle")), raw.get(ValueLayout.JAVA_INT, off(SNAP, "guide_count")),
+                raw.asSlice(off(SNAP, "guides"), 96));
+    }
+
+    /** An input event's snap: the frozen 1.22 fields, and the 1.30 ones from the event's own tail; null for kind 0. */
+    static Snap eventSnapOf(MemorySegment event) {
+        MemorySegment raw = event.asSlice(off(INPUT_EVENT, "snap"), EVENT_SNAP.byteSize());
+        if (raw.get(ValueLayout.JAVA_INT, off(EVENT_SNAP, "kind")) == 0) return null;
+        return snapAnswerOf(raw, event.asSlice(off(INPUT_EVENT, "snap_label"), 32), event.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "snap_locked")),
+                event.get(ValueLayout.JAVA_FLOAT, off(INPUT_EVENT, "snap_locked_angle")),
+                event.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "snap_guide_count")), event.asSlice(off(INPUT_EVENT, "snap_guides"), 96));
+    }
+
+    /** The 1.22 fields read from {@code raw} (a snap or an event's frozen snap), the 1.30 ones as given. */
+    static Snap snapAnswerOf(MemorySegment raw, MemorySegment label, int locked, float lockedAngle, int guideCount, MemorySegment guides) {
+        int kind = raw.get(ValueLayout.JAVA_INT, off(EVENT_SNAP, "kind")), edge = raw.get(ValueLayout.JAVA_INT, off(EVENT_SNAP, "edge"));
         String name = kind == 0 ? "none" : SNAP_KINDS.entrySet().stream()
-                .filter(e -> e.getValue() == kind && !"all".equals(e.getKey())).map(Map.Entry::getKey).findFirst()
-                .orElse(Integer.toString(kind));
-        return new Snap(name, raw.asSlice(off(SNAP, "point"), 24).toArray(ValueLayout.JAVA_DOUBLE),
-                raw.get(ValueLayout.JAVA_INT, off(SNAP, "item")), raw.get(ValueLayout.JAVA_INT, off(SNAP, "node")),
-                raw.get(ValueLayout.JAVA_INT, off(SNAP, "face")), edge == SNAP_NO_EDGE ? null : edge,
-                raw.asSlice(off(SNAP, "tangent"), 12).toArray(ValueLayout.JAVA_FLOAT),
-                raw.asSlice(off(SNAP, "axis"), 12).toArray(ValueLayout.JAVA_FLOAT),
-                raw.get(ValueLayout.JAVA_DOUBLE, off(SNAP, "radius")), raw.get(ValueLayout.JAVA_FLOAT, off(SNAP, "distance_px")),
-                raw.get(ValueLayout.JAVA_INT, off(SNAP, "clicks")));
+                .filter(e -> e.getValue() == kind && !"all".equals(e.getKey()) && !"default".equals(e.getKey()))
+                .map(Map.Entry::getKey).findFirst().orElse(Integer.toString(kind));
+        byte[] text = label.toArray(ValueLayout.JAVA_BYTE);
+        int n = 0;
+        while (n < text.length && text[n] != 0) n++;
+        double[] g = guides.toArray(ValueLayout.JAVA_DOUBLE);
+        List<SnapGuide> drawn = new ArrayList<>();
+        for (int k = 0; k < Math.min(Integer.toUnsignedLong(guideCount), 2L); k++) {
+            drawn.add(new SnapGuide(java.util.Arrays.copyOfRange(g, 6 * k, 6 * k + 3), java.util.Arrays.copyOfRange(g, 6 * k + 3, 6 * k + 6)));
+        }
+        return new Snap(name, raw.asSlice(off(EVENT_SNAP, "point"), 24).toArray(ValueLayout.JAVA_DOUBLE),
+                raw.get(ValueLayout.JAVA_INT, off(EVENT_SNAP, "item")), raw.get(ValueLayout.JAVA_INT, off(EVENT_SNAP, "node")),
+                raw.get(ValueLayout.JAVA_INT, off(EVENT_SNAP, "face")), edge == SNAP_NO_EDGE ? null : edge,
+                raw.asSlice(off(EVENT_SNAP, "tangent"), 12).toArray(ValueLayout.JAVA_FLOAT),
+                raw.asSlice(off(EVENT_SNAP, "axis"), 12).toArray(ValueLayout.JAVA_FLOAT),
+                raw.get(ValueLayout.JAVA_DOUBLE, off(EVENT_SNAP, "radius")), raw.get(ValueLayout.JAVA_FLOAT, off(EVENT_SNAP, "distance_px")),
+                raw.get(ValueLayout.JAVA_INT, off(EVENT_SNAP, "clicks")), new String(text, 0, n, java.nio.charset.StandardCharsets.UTF_8),
+                locked != 0 ? lockedAngle : null, List.copyOf(drawn));
     }
 
     /**
      * Why the library at {@code path}, answering {@code version} from cadaclysm_view_abi_version,
-     * is refused -- null when this wrapper takes it (1.27 or a later 1.x).
+     * is refused -- null when this wrapper takes it (1.30 or a later 1.x).
      */
     static String abiRefusal(String path, int version) {
         int major = version >>> 16, minor = version & 0xFFFF;
@@ -1642,6 +1844,40 @@ public final class View implements AutoCloseable {
         }
     }
 
+    /** The glyph kinds, in the header's order (CADACLYSM_VIEW_GLYPH_*). */
+    public static final List<String> GLYPH_KINDS = List.of("arrow", "tick", "cross", "square", "triangle", "parallel",
+            "perpendicular", "coincident", "tangent", "fixed", "horizontal", "vertical");
+
+    /** The dir the last {@link #showGlyphs} handed the library (a testing hook: NULL when there was none). */
+    static MemorySegment lastGlyphDir = MemorySegment.NULL;
+
+    /** {@link #showGlyphs(float[], String, float, String, float[])}: 12 points across, the edge colour, unturned. */
+    public Item showGlyphs(float[] at, String kind) {
+        return showGlyphs(at, kind, 12f, null, null);
+    }
+
+    /**
+     * Drafting symbols of one {@code kind} ({@link #GLYPH_KINDS}) at the points {@code at} (three floats each),
+     * {@code sizePt} points across at any zoom, in {@code colour} (null: the edge colour), turned to
+     * {@code dir} (three floats a point, as projected on the screen; null: unturned). Glyph i is node i.
+     */
+    public Item showGlyphs(float[] at, String kind, float sizePt, String colour, float[] dir) {
+        int code = GLYPH_KINDS.indexOf(kind);
+        if (code < 0) throw new ViewException("show glyphs: '" + kind + "' is not a glyph kind (" + String.join(", ", GLYPH_KINDS) + ")");
+        if (at.length % 3 != 0) throw new ViewException("showGlyphs takes 3 numbers each, not " + at.length);
+        if (dir != null && dir.length != at.length) {
+            throw new ViewException("showGlyphs has " + at.length / 3 + " points but " + dir.length / 3 + " directions");
+        }
+        float[] rgb = lib.colour(colour);
+        exact(rgb, 3, "showGlyphs colour");
+        MemorySegment p = live(c("show_glyphs"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment a = floats(arena, at), d = floats(arena, dir), col = floats(arena, rgb);
+            lastGlyphDir = d;
+            return item(call(() -> (int) lib.showGlyphs.invoke(p, a, d, (long) (at.length / 3), code, sizePt, col)), null, "showGlyphs");
+        }
+    }
+
     /** corners: twelve floats, bottom-left, bottom-right, top-right, top-left; rgba rows from the top, w * h * 4 bytes. */
     public Item showImage(float[] corners, byte[] rgba, int w, int h, float opacity) {
         if (corners == null || corners.length != 12) {
@@ -2070,6 +2306,21 @@ public final class View implements AutoCloseable {
         ok(call(() -> (boolean) lib.setLighting.invoke(p, which)), "lighting");
     }
 
+    /** Whether a textured material draws its texture (view ABI 1.33), as Python's View.textures: true by default. */
+    public boolean textures() {
+        MemorySegment p = live(c("textures"));
+        return call(() -> (boolean) lib.textures.invoke(p));
+    }
+
+    /**
+     * Draw each textured material's texture ({@code true}, the default) or each part in its colour. The terminal
+     * and render-view libraries take it and draw colours either way.
+     */
+    public void setTextures(boolean on) {
+        MemorySegment p = live(c("set_textures"));
+        ok(call(() -> (boolean) lib.setTextures.invoke(p, on)), "textures");
+    }
+
     /**
      * The colour every edge draws in: {@code rgb} ({@code "#rgb"}, {@code "#rrggbb"} or a CSS colour
      * name), or with {@code fromPart} each part's own colour, brightened so an edge reads over its
@@ -2370,6 +2621,7 @@ public final class View implements AutoCloseable {
             MemorySegment out = arena.allocate(PICK);
             out.set(ValueLayout.JAVA_INT, off(PICK, "size"), (int) PICK.byteSize());
             out.set(ValueLayout.JAVA_INT, off(PICK, "viewport_label"), -1);
+            out.set(ValueLayout.JAVA_INT, off(PICK, "segment"), SNAP_NO_EDGE);
             for (int i = 0; i < 200; i++) {
                 draw();
                 if (call(() -> (boolean) lib.pickResult.invoke(p, out))) return pickOf(out);
@@ -2395,11 +2647,277 @@ public final class View implements AutoCloseable {
             MemorySegment out = arena.allocate(PICK);
             out.set(ValueLayout.JAVA_INT, off(PICK, "size"), (int) PICK.byteSize());
             out.set(ValueLayout.JAVA_INT, off(PICK, "viewport_label"), -1);
+            out.set(ValueLayout.JAVA_INT, off(PICK, "segment"), SNAP_NO_EDGE);
             if (call(() -> (boolean) lib.pickResult.invoke(p, out))) return Optional.of(answerOf(out));
         }
         String waiting = lib.lastErrorText();
         if (!waiting.isEmpty() && !waiting.endsWith("no pick result")) throw new ViewException(waiting);
         return Optional.empty();
+    }
+
+    /**
+     * How far a pick reaches for lines, curves, points and glyphs (view ABI 1.30), in points (times the screen density):
+     * 0 restores the default, 4; others clamp to 1..32. Faces are always the pixel's. The library refuses a negative
+     * size or one that is not finite, in its own words. The terminal and render view libraries keep it, but their picks
+     * are face picks.
+     */
+    public void setPickAperture(float points) {
+        MemorySegment p = live(c("set_pick_aperture"));
+        ok(call(() -> (boolean) lib.setPickAperture.invoke(p, points)), "setPickAperture");
+    }
+
+    /**
+     * Sets clip-plane slot {@code slot} (0..5, view ABI 1.31; see {@link ClipPlane}): what lies on the side the normal
+     * points to is hidden, in every viewport; a point is drawn only where every set plane keeps it. Clips the surfaces,
+     * edges, curves, lines, points, glyphs, picks and snaps; not the grid, text, images, overlays or the machining stock.
+     * Other than three numbers for the point, normal or a colour is refused before the call; the library refuses a slot
+     * past the last, a zero or not finite normal, a colour outside 0..1, a hatch without a cap, a negative spacing and a
+     * width above 100 points, in its own words. The terminal and render view libraries draw no clip planes and refuse
+     * every plane.
+     */
+    public void setClipPlane(int slot, ClipPlane plane) {
+        checkPlane(plane, "setClipPlane");
+        MemorySegment p = live(c("set_clip_plane"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment raw = rawPlane(arena, plane);
+            ok(call(() -> (boolean) lib.setClipPlane.invoke(p, slot, raw)), "setClipPlane");
+        }
+    }
+
+    private static void checkPlane(ClipPlane plane, String call) {
+        if (plane == null) throw new ViewException(call + ": a plane, not null (" + (call.equals("setClipPlane") ? "clearClipPlane" : "clearViewportClipPlane") + " empties a slot)");
+        if (plane.point() == null || plane.normal() == null) throw new ViewException(call + ": a point and a normal, not null");
+        exact(plane.point(), 3, call + " point");
+        exact(plane.normal(), 3, call + " normal");
+        exact(plane.cap(), 3, call + " cap");
+        exact(plane.hatch(), 3, call + " hatch");
+        exact(plane.outline(), 3, call + " outline");
+    }
+
+    private static MemorySegment rawPlane(Arena arena, ClipPlane plane) {
+        MemorySegment raw = arena.allocate(CLIP_PLANE);
+        raw.set(ValueLayout.JAVA_INT, off(CLIP_PLANE, "size"), (int) CLIP_PLANE.byteSize());
+        raw.set(ValueLayout.JAVA_INT, off(CLIP_PLANE, "cap"), plane.cap() == null ? 0 : 1);
+        raw.set(ValueLayout.JAVA_INT, off(CLIP_PLANE, "hatch"), plane.hatch() == null ? 0 : 1);
+        raw.set(ValueLayout.JAVA_INT, off(CLIP_PLANE, "outline"), plane.outline() == null ? 0 : 1);
+        for (int i = 0; i < 3; i++) {
+            raw.set(ValueLayout.JAVA_DOUBLE, off(CLIP_PLANE, "point") + 8L * i, plane.point()[i]);
+            raw.set(ValueLayout.JAVA_DOUBLE, off(CLIP_PLANE, "normal") + 8L * i, plane.normal()[i]);
+            if (plane.cap() != null) raw.set(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "cap_colour") + 4L * i, plane.cap()[i]);
+            if (plane.hatch() != null) raw.set(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "hatch_colour") + 4L * i, plane.hatch()[i]);
+            if (plane.outline() != null) raw.set(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "outline_colour") + 4L * i, plane.outline()[i]);
+        }
+        raw.set(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "hatch_angle"), plane.hatchAngle());
+        raw.set(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "hatch_spacing"), plane.hatchSpacing());
+        raw.set(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "hatch_width"), plane.hatchWidth());
+        raw.set(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "outline_width"), plane.outlineWidth());
+        return raw;
+    }
+
+    private static ClipPlane planeOf(MemorySegment raw) {
+        double[] point = new double[3], normal = new double[3];
+        for (int i = 0; i < 3; i++) {
+            point[i] = raw.get(ValueLayout.JAVA_DOUBLE, off(CLIP_PLANE, "point") + 8L * i);
+            normal[i] = raw.get(ValueLayout.JAVA_DOUBLE, off(CLIP_PLANE, "normal") + 8L * i);
+        }
+        float[] cap = raw.get(ValueLayout.JAVA_INT, off(CLIP_PLANE, "cap")) != 0 ? floatsAt(raw, off(CLIP_PLANE, "cap_colour")) : null;
+        boolean hasOutline = raw.get(ValueLayout.JAVA_INT, off(CLIP_PLANE, "outline")) != 0;
+        float[] outline = hasOutline ? floatsAt(raw, off(CLIP_PLANE, "outline_colour")) : null;
+        float outlineWidth = hasOutline ? raw.get(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "outline_width")) : 1f;
+        if (raw.get(ValueLayout.JAVA_INT, off(CLIP_PLANE, "hatch")) == 0) {
+            return new ClipPlane(point, normal, cap, null, 45f, 0f, 1f, outline, outlineWidth);
+        }
+        return new ClipPlane(point, normal, cap, floatsAt(raw, off(CLIP_PLANE, "hatch_colour")),
+                raw.get(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "hatch_angle")), raw.get(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "hatch_spacing")),
+                raw.get(ValueLayout.JAVA_FLOAT, off(CLIP_PLANE, "hatch_width")), outline, outlineWidth);
+    }
+
+    /** {@link #setClipPlane(int, ClipPlane)} with a bare plane: no cap, no hatch. */
+    public void setClipPlane(int slot, double[] point, double[] normal) {
+        setClipPlane(slot, new ClipPlane(point, normal));
+    }
+
+    /** Empties clip-plane slot {@code slot} (view ABI 1.31); an empty slot stays so. Every view library takes it. */
+    public void clearClipPlane(int slot) {
+        MemorySegment p = live(c("set_clip_plane"));
+        ok(call(() -> (boolean) lib.setClipPlane.invoke(p, slot, MemorySegment.NULL)), "clearClipPlane");
+    }
+
+    /**
+     * Clip-plane slot {@code slot} (view ABI 1.31) as set, the normal of unit length; empty for an empty slot (always, on
+     * the terminal and render view libraries). The library refuses a slot past the last, in its own words.
+     */
+    public Optional<ClipPlane> clipPlane(int slot) {
+        MemorySegment p = live(c("clip_plane"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment raw = arena.allocate(CLIP_PLANE);
+            raw.set(ValueLayout.JAVA_INT, off(CLIP_PLANE, "size"), (int) CLIP_PLANE.byteSize());
+            boolean got = call(() -> (boolean) lib.clipPlane.invoke(p, slot, raw));
+            if (!got) {
+                if (lib.lastErrorText().endsWith("is empty")) return Optional.empty();
+                throw lib.failure("clipPlane");
+            }
+            return Optional.of(planeOf(raw));
+        }
+    }
+
+    /**
+     * Sets how the view-wide clip planes combine (view ABI 1.32): {@link ClipMode#INTERSECTION} (the default) or
+     * {@link ClipMode#CUTAWAY}. The library refuses INHERIT (a viewport's), in its own words; the terminal and render
+     * view libraries refuse a cutaway.
+     */
+    public void setClipMode(ClipMode mode) {
+        if (mode == null) throw new ViewException("setClipMode: a mode, not null");
+        MemorySegment p = live(c("set_clip_mode"));
+        ok(call(() -> (boolean) lib.setClipMode.invoke(p, mode.code())), "setClipMode");
+    }
+
+    /** How the view-wide clip planes combine (view ABI 1.32). */
+    public ClipMode clipMode() {
+        MemorySegment p = live(c("clip_mode"));
+        return ClipMode.of(call(() -> (int) lib.clipMode.invoke(p)));
+    }
+
+    /**
+     * Sets slot {@code slot} of viewport {@code viewport}'s own clip set (view ABI 1.32), as
+     * {@link #setClipPlane(int, ClipPlane)} sets the view-wide one, in that viewport only: the first gives it a set of
+     * its own (every other slot empty, mode intersection), which it then draws, picks and snaps with instead of the
+     * view-wide planes. With no viewports set, viewport 0 is the window. The library refuses what setClipPlane refuses, a
+     * viewport past the last and one past 7, in its own words.
+     */
+    public void setViewportClipPlane(int viewport, int slot, ClipPlane plane) {
+        checkPlane(plane, "setViewportClipPlane");
+        MemorySegment p = live(c("set_viewport_clip_plane"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment raw = rawPlane(arena, plane);
+            ok(call(() -> (boolean) lib.setViewportClipPlane.invoke(p, viewport, slot, raw)), "setViewportClipPlane");
+        }
+    }
+
+    /** {@link #setViewportClipPlane(int, int, ClipPlane)} with a bare plane: no cap, no hatch, no outline. */
+    public void setViewportClipPlane(int viewport, int slot, double[] point, double[] normal) {
+        setViewportClipPlane(viewport, slot, new ClipPlane(point, normal));
+    }
+
+    /**
+     * Empties slot {@code slot} of viewport {@code viewport}'s own clip set (view ABI 1.32); the viewport keeps a set of its
+     * own ({@link #setViewportClipMode} with INHERIT drops it).
+     */
+    public void clearViewportClipPlane(int viewport, int slot) {
+        MemorySegment p = live(c("set_viewport_clip_plane"));
+        ok(call(() -> (boolean) lib.setViewportClipPlane.invoke(p, viewport, slot, MemorySegment.NULL)), "clearViewportClipPlane");
+    }
+
+    /**
+     * Slot {@code slot} of viewport {@code viewport}'s own clip set (view ABI 1.32), as {@link #clipPlane} answers the
+     * view-wide one; empty for an empty slot or where the viewport has no set of its own (it draws with the view-wide
+     * planes).
+     */
+    public Optional<ClipPlane> viewportClipPlane(int viewport, int slot) {
+        MemorySegment p = live(c("viewport_clip_plane"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment raw = arena.allocate(CLIP_PLANE);
+            raw.set(ValueLayout.JAVA_INT, off(CLIP_PLANE, "size"), (int) CLIP_PLANE.byteSize());
+            boolean got = call(() -> (boolean) lib.viewportClipPlane.invoke(p, viewport, slot, raw));
+            if (!got) {
+                String why = lib.lastErrorText();
+                if (why.endsWith("is empty") || why.endsWith("has no clip planes of its own")) return Optional.empty();
+                throw lib.failure("viewportClipPlane");
+            }
+            return Optional.of(planeOf(raw));
+        }
+    }
+
+    /**
+     * Sets viewport {@code viewport}'s clip mode (view ABI 1.32): INTERSECTION or CUTAWAY sets its own set's mode, giving
+     * it a set of its own if it had none; INHERIT drops its set, back to the view-wide one. The library refuses a viewport
+     * past the last (past 7 for INHERIT), in its own words.
+     */
+    public void setViewportClipMode(int viewport, ClipMode mode) {
+        if (mode == null) throw new ViewException("setViewportClipMode: a mode, not null (INHERIT drops the viewport's set)");
+        MemorySegment p = live(c("set_viewport_clip_mode"));
+        ok(call(() -> (boolean) lib.setViewportClipMode.invoke(p, viewport, mode.code())), "setViewportClipMode");
+    }
+
+    /** Viewport {@code viewport}'s clip mode (view ABI 1.32): its own set's, or INHERIT where it has none. */
+    public ClipMode viewportClipMode(int viewport) {
+        MemorySegment p = live(c("viewport_clip_mode"));
+        return ClipMode.of(call(() -> (int) lib.viewportClipMode.invoke(p, viewport)));
+    }
+
+    private static float[] floatsAt(MemorySegment raw, long at) {
+        return new float[] {raw.get(ValueLayout.JAVA_FLOAT, at), raw.get(ValueLayout.JAVA_FLOAT, at + 4), raw.get(ValueLayout.JAVA_FLOAT, at + 8)};
+    }
+
+    /** {@link #pickRect(float, float, float, float, boolean, int)} crossing, in viewport 0. */
+    public List<RectHit> pickRect(float x, float y, float w, float h) {
+        return pickRect(x, y, w, h, true, 0);
+    }
+
+    /**
+     * What lies in a rectangle of {@code viewport} (view ABI 1.30; device pixels from its top left, a negative {@code w}
+     * or {@code h} flipping it), CPU only: with {@code crossing}, everything with a visible part inside, else what lies
+     * wholly inside and is visible. Hidden things come only drawn x-ray or on top; text, images, overlays, viewport
+     * labels, machining stocks and isocurves are left out. Every hit, sorted by item, kind and index (see
+     * {@link RectHit}); an exact item shown with no mesh has edges here, no faces. A rectangle wholly off the viewport,
+     * and a lost device, answer none. The library refuses a rectangle that is not finite and an unknown viewport in its
+     * own words; the render view library refuses the call.
+     */
+    public List<RectHit> pickRect(float x, float y, float w, float h, boolean crossing, int viewport) {
+        MemorySegment p = live(c("pick_rect"));
+        try (Arena arena = Arena.ofConfined()) {
+            long capacity = 64;
+            MemorySegment buf = arena.allocate(RECT_HIT, capacity);
+            long first = call(() -> (long) lib.pickRect.invoke(p, viewport, x, y, w, h, crossing, buf, capacity));
+            long n = first;
+            MemorySegment hits = buf;
+            if (n == 0) {
+                String why = lib.lastErrorText();   // this call's own refusal: the library cleared the error first
+                if (!why.isEmpty()) throw new ViewException(why);
+            }
+            if (n > capacity) {
+                // The count rule: asked again with a buffer of the total, never a cut list.
+                MemorySegment all = arena.allocate(RECT_HIT, first);
+                n = call(() -> (long) lib.pickRect.invoke(p, viewport, x, y, w, h, crossing, all, first));
+                hits = all;
+            }
+            long kept = Math.min(n, hits.byteSize() / RECT_HIT.byteSize());
+            List<RectHit> out = new ArrayList<>((int) kept);
+            for (long i = 0; i < kept; i++) {
+                MemorySegment r = hits.asSlice(i * RECT_HIT.byteSize(), RECT_HIT.byteSize());
+                int kind = r.get(ValueLayout.JAVA_INT, off(RECT_HIT, "kind"));
+                String name = HIT_KINDS.entrySet().stream().filter(e -> e.getValue() == kind).map(Map.Entry::getKey).findFirst()
+                        .orElse(Integer.toString(kind));
+                out.add(new RectHit(r.get(ValueLayout.JAVA_INT, off(RECT_HIT, "item")), name, r.get(ValueLayout.JAVA_INT, off(RECT_HIT, "index"))));
+            }
+            return List.copyOf(out);
+        }
+    }
+
+    /**
+     * The angle lock (view ABI 1.30): snaps that land on no point kind turn about {@code point} (world, three numbers)
+     * onto the nearest multiple of {@code stepDeg} (0 &lt; step &lt;= 180), in the work plane's directions or the plane
+     * facing the eye; the answer is kind "plane" with its lockedAngle and the lock's ray as its guide. Null clears it
+     * (a NULL point goes to the library, the step ignored). Other than three numbers is refused before the call; the
+     * library refuses a point that is not finite and a step out of range in its own words. The terminal and render view
+     * libraries refuse it.
+     */
+    public void setSnapBase(double[] point, float stepDeg) {
+        MemorySegment p = live(c("set_snap_base"));
+        if (point == null) {
+            ok(call(() -> (boolean) lib.setSnapBase.invoke(p, MemorySegment.NULL, stepDeg)), "setSnapBase");
+            return;
+        }
+        exact(point, 3, "setSnapBase point");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment xyz = arena.allocateFrom(ValueLayout.JAVA_FLOAT, (float) point[0], (float) point[1], (float) point[2]);
+            ok(call(() -> (boolean) lib.setSnapBase.invoke(p, xyz, stepDeg)), "setSnapBase");
+        }
+    }
+
+    /** {@link #setSnapBase(double[], float)} at 15 degree steps; null clears it. */
+    public void setSnapBase(double[] point) {
+        setSnapBase(point, 15f);
     }
 
     /** {@link #setSnap(String[], float, boolean)} with the library's default aperture and the marker drawn. */
@@ -2408,9 +2926,10 @@ public final class View implements AutoCloseable {
     }
 
     /**
-     * What a snap may land on: "all", or any of "vertex", "midpoint", "centre" (a circular edge's),
-     * "quadrant", "edge", "face", "grid" and "plane"; no names is "all", and null switches snapping off, as a view
-     * starts. {@code aperturePx} is how far from the cursor a point kind may lie (0: the library's default,
+     * What a snap may land on: "default", "all", or any of "vertex", "midpoint", "centre" (a circular edge's),
+     * "quadrant", "edge", "face", "grid", "plane", and (1.30) "end", "intersection", "point" (the points
+     * {@link Item#setSnapPoints} gave) and "alignment"; no names is "default" (the first eight and "point"), and null
+     * switches snapping off, as a view starts. {@code aperturePx} is how far from the cursor a point kind may lie (0: the library's default,
      * 10 points; otherwise 2..32), {@code marker} whether the view draws the marker at the snap. Once on, a
      * mouse hovering over a view in its own window snaps, and so does a click ({@link #lastSnap()} reads
      * them); {@link #snap(int, int, int)} asks one at any pixel. Where kinds compete, a corner beats the face
@@ -2419,7 +2938,7 @@ public final class View implements AutoCloseable {
      */
     public void setSnap(String[] kinds, float aperturePx, boolean marker) {
         int bits = 0;
-        if (kinds != null && kinds.length == 0) bits = SNAP_KINDS.get("all");
+        if (kinds != null && kinds.length == 0) bits = SNAP_KINDS.get("default");
         if (kinds != null) for (String name : kinds) bits |= named(SNAP_KINDS, name, "snap kind");
         MemorySegment p = live(c("set_snap"));
         try (Arena arena = Arena.ofConfined()) {
@@ -2542,6 +3061,7 @@ public final class View implements AutoCloseable {
             MemorySegment pick = arena.allocate(PICK);
             pick.set(ValueLayout.JAVA_INT, 0, (int) PICK.byteSize());
             pick.set(ValueLayout.JAVA_INT, off(PICK, "viewport_label"), -1);
+            pick.set(ValueLayout.JAVA_INT, off(PICK, "segment"), SNAP_NO_EDGE);
             ok(call(() -> (boolean) lib.run.invoke(p, cam, pick)), "run");
             markClosed();
             float[] eye = cam.asSlice(off(CAMERA, "eye"), 12).toArray(ValueLayout.JAVA_FLOAT);
@@ -2565,8 +3085,7 @@ public final class View implements AutoCloseable {
         if (handle.address == 0) throw new ViewException(call + ": the view is closed");
         MemorySegment p = MemorySegment.ofAddress(handle.address);
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment out = arena.allocate(INPUT_EVENT);
-            out.set(ValueLayout.JAVA_INT, off(INPUT_EVENT, "size"), (int) INPUT_EVENT.byteSize());
+            MemorySegment out = newInputEvent(arena);
             if (call(() -> (boolean) lib.nextEvent.invoke(p, out))) return Optional.of(eventOf(out, yUp));
         }
         String why = lib.lastErrorText();
@@ -2630,12 +3149,25 @@ public final class View implements AutoCloseable {
             MemorySegment out = arena.allocate(PICK);
             out.set(ValueLayout.JAVA_INT, off(PICK, "size"), (int) PICK.byteSize());
             out.set(ValueLayout.JAVA_INT, off(PICK, "viewport_label"), -1);
+            out.set(ValueLayout.JAVA_INT, off(PICK, "segment"), SNAP_NO_EDGE);
             MemorySegment p = MemorySegment.ofAddress(handle.address);
             if (call(() -> (boolean) lib.pickResult.invoke(p, out))) picked = pickOf(out);
         }
         markClosed();
         return new Camera(closedOn.eye(), closedOn.target(), closedOn.up(), closedOn.orthographic(), closedOn.azimuth(),
                 closedOn.elevation(), picked);
+    }
+
+    /**
+     * The buffer next_event fills: its size, and the tail at the none values (no viewport label, no segment), which is
+     * what an older library that leaves the tail alone answers.
+     */
+    static MemorySegment newInputEvent(Arena arena) {
+        MemorySegment out = arena.allocate(INPUT_EVENT);
+        out.set(ValueLayout.JAVA_INT, off(INPUT_EVENT, "size"), (int) INPUT_EVENT.byteSize());
+        out.set(ValueLayout.JAVA_INT, off(INPUT_EVENT, "pick_viewport_label"), -1);
+        out.set(ValueLayout.JAVA_INT, off(INPUT_EVENT, "pick_segment"), SNAP_NO_EDGE);
+        return out;
     }
 
     /** A CadaclysmViewInputEvent as its record. */
@@ -2662,8 +3194,10 @@ public final class View implements AutoCloseable {
             case INPUT_EVENT_RESIZE -> new ResizeEvent(raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "width")),
                     raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "height")), t, dropped);
             case INPUT_EVENT_PICK -> new PickEvent(pickOf(raw.asSlice(off(INPUT_EVENT, "pick"), EVENT_PICK.byteSize()),
-                    raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "pick_viewport_label"))), t, dropped);
-            case INPUT_EVENT_SNAP -> new SnapEvent(snapOf(raw.asSlice(off(INPUT_EVENT, "snap"), SNAP.byteSize())), t, dropped);
+                    raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "pick_viewport_label")),
+                    raw.get(ValueLayout.JAVA_INT, off(INPUT_EVENT, "pick_segment")),
+                    raw.get(ValueLayout.JAVA_FLOAT, off(INPUT_EVENT, "pick_distance_px"))), t, dropped);
+            case INPUT_EVENT_SNAP -> new SnapEvent(eventSnapOf(raw), t, dropped);
             case INPUT_EVENT_TIMELINE -> new TimelineEvent(t, dropped);
             case INPUT_EVENT_CLOSE -> {
                 MemorySegment cam = raw.asSlice(off(INPUT_EVENT, "camera"), CAMERA.byteSize());
@@ -3095,6 +3629,83 @@ public final class View implements AutoCloseable {
             }
         }
 
+        private static float[] units(float[] values, int per, String what) {
+            if (values.length % per != 0) throw new ViewException(what + " takes " + per + " numbers each, not " + values.length);
+            return values;
+        }
+
+        /** Replaces a showLines item's segments (six floats each) under the same id: colour, layer, dash, placement and on top kept. */
+        public void setLines(float[] segments) {
+            units(segments, 6, "setLines");
+            MemorySegment p = view.live(c("set_lines"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = floats(arena, segments);
+                view.ok(call(() -> (boolean) view.lib.setLines.invoke(p, id, s, (long) (segments.length / 6))), "setLines");
+            }
+        }
+
+        /** Replaces a curves item's curves (sixteen floats each: four control points as x, y, z, w). */
+        public void setCurves(float[] beziers) {
+            units(beziers, 16, "setCurves");
+            MemorySegment p = view.live(c("set_curves"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment b = floats(arena, beziers);
+                view.ok(call(() -> (boolean) view.lib.setCurves.invoke(p, id, b, (long) (beziers.length / 16))), "setCurves");
+            }
+        }
+
+        /** Replaces a points item's points (three floats each); a new count keeps the point states by index. */
+        public void setPoints(float[] positions) {
+            units(positions, 3, "setPoints");
+            MemorySegment p = view.live(c("set_points"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = floats(arena, positions);
+                view.ok(call(() -> (boolean) view.lib.setPoints.invoke(p, id, s, (long) (positions.length / 3))), "setPoints");
+            }
+        }
+
+        /** Moves a showMesh item's vertices (as many as it was shown with); {@code normals} the same length, or null to recompute. */
+        public void setMeshPositions(float[] positions, float[] normals) {
+            units(positions, 3, "setMeshPositions");
+            if (normals != null && normals.length != positions.length) {
+                throw new ViewException("setMeshPositions has " + positions.length / 3 + " positions but " + normals.length / 3 + " normals");
+            }
+            MemorySegment p = view.live(c("set_mesh_positions"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = floats(arena, positions), n = floats(arena, normals);
+                view.ok(call(() -> (boolean) view.lib.setMeshPositions.invoke(p, id, s, n, (long) (positions.length / 3))), "setMeshPositions");
+            }
+        }
+
+        /**
+         * Points a "point" snap lands on (view ABI 1.30): three numbers each, in the coordinates the item was shown in,
+         * moving with its node 0, each answering {@code label} (at most 31 bytes of UTF-8; null or "": "point"). No
+         * points clear them; they also go with the item's removal. A null label goes to the library as NULL, never as
+         * "". A count not a multiple of three and a label holding a NUL are refused before the call; the library
+         * refuses text, glyph, image and machining items, a label past 31 bytes and a value that is not finite, in its
+         * own words. The terminal and render view libraries refuse it.
+         */
+        public void setSnapPoints(double[] xyz, String label) {
+            if (xyz == null) throw new ViewException("setSnapPoints: points, not null (none clears them)");
+            if (xyz.length % 3 != 0) throw new ViewException("setSnapPoints takes 3 numbers each, not " + xyz.length);
+            if (label != null && label.indexOf('\0') >= 0) {
+                throw new ViewException("snap point label \"" + label + "\": a NUL character cannot be shown (the C string ends there)");
+            }
+            float[] points = new float[xyz.length];
+            for (int i = 0; i < xyz.length; i++) points[i] = (float) xyz[i];
+            MemorySegment p = view.live(c("set_snap_points"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = points.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_FLOAT, points);
+                MemorySegment l = label == null ? MemorySegment.NULL : arena.allocateFrom(label);
+                view.ok(call(() -> (boolean) view.lib.setSnapPoints.invoke(p, id, s, (long) (points.length / 3), l)), "setSnapPoints");
+            }
+        }
+
+        /** {@link #setSnapPoints(double[], String)} answering "point". */
+        public void setSnapPoints(double[] xyz) {
+            setSnapPoints(xyz, null);
+        }
+
         /** Draws the item after every other, depth testing off; picked ahead of what is under it. */
         public void setOnTop(boolean on) {
             MemorySegment p = view.live(c("set_on_top"));
@@ -3208,9 +3819,10 @@ public final class View implements AutoCloseable {
 
     /**
      * An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the window,
-     * drawn over everything, untouched by the camera. remove, userLayer and, for text, text and colour
-     * work as on any item; the item calls that mean nothing for an overlay (colour on a shape or an image,
-     * placement, xray, frame, ...) throw, saying it is an overlay.
+     * drawn over everything, untouched by the camera. remove, userLayer, colour (a shape's fill and
+     * stroke, or text's glyphs, in place) and, for text, text work as on any item; the item calls that
+     * mean nothing for an overlay (colour on an image, placement, xray, frame, ...) throw, saying it is
+     * an overlay.
      */
     public static final class Overlay extends Item {
         private Anchor anchor;

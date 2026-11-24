@@ -47,7 +47,21 @@ const ABI_MAJOR = 1;
 // 1.27: animations -- cadaclysm_view_play_animation, _timeline_remove, _set_item_visible, _set_node_ghosts
 // (View.playAnimation, View.removeTrack, Item.setVisible, Item.setNodeGhosts) and the timeline input event.
 // 1.28: the drafting styles and the pick's viewport label.
-const ABI_MINOR = 28;
+// 1.29: live geometry and glyphs.
+// 1.30: picking and snapping -- cadaclysm_view_set_pick_aperture, _pick_rect, _set_snap_points and _set_snap_base
+// (View.setPickAperture, View.pickRect, View.setSnapBase, Item.setSnapPoints), the pick's segment and distancePx, the
+// snap's label, lockedAngle and guides, and the snap kinds end, intersection, point and alignment.
+// 1.31: clip planes -- cadaclysm_view_set_clip_plane and _clip_plane (View.setClipPlane, View.clearClipPlane,
+// View.clipPlane).
+// 1.32: clip sets -- the cut's outline (CadaclysmViewClipPlane grew to 120 bytes), cadaclysm_view_set_clip_mode and
+// _clip_mode (View.clipMode, the cutaway), and viewports' own sets (View.setViewportClipPlane,
+// View.clearViewportClipPlane, View.viewportClipPlane, View.setViewportClipMode, View.viewportClipMode).
+// 1.33: cadaclysm_view_set_textures and _textures (View.textures): a material's base-colour texture drawn.
+const ABI_MINOR = 33;
+const CLIP_PLANES = 6;   // CADACLYSM_VIEW_CLIP_PLANES
+const CLIP_VIEWPORTS = 8;   // CADACLYSM_VIEW_CLIP_VIEWPORTS
+const CLIP_MODES = { intersection: 0, cutaway: 1 };   // CADACLYSM_VIEW_CLIP_INTERSECTION, _CUTAWAY
+const CLIP_INHERIT = 2;   // CADACLYSM_VIEW_CLIP_INHERIT: a viewport's
 const ALL_NODES = 0xFFFFFFFF;   // CADACLYSM_VIEW_ALL_NODES: a binding to the item itself, not one of its nodes
 const OPEN = 1;
 const CLOSED = 2;
@@ -58,12 +72,18 @@ const LIGHTING = Object.freeze({ headlight: 0, studio: 1 });
 const OCCLUDED = Object.freeze({ off: 0, solid: 1, dashed: 2 });
 const POINT_SHAPES = ['disc', 'ring', 'square', 'diamond'];
 const POINT_STATES = ['normal', 'hover', 'selected', 'first'];
+const GLYPH_KINDS = ['arrow', 'tick', 'cross', 'square', 'triangle', 'parallel', 'perpendicular', 'coincident', 'tangent', 'fixed', 'horizontal', 'vertical'];
 // CADACLYSM_VIEW_LAYER_EDGES, _CURVES and _ISOCURVES: the layers the line colours take.
 const LINE_LAYERS = Object.freeze({ edges: 1, curves: 2, isocurves: 3 });
 const FINISH = Object.freeze({ gloss: 0, satin: 1, matte: 2 });
 const MATERIAL = Object.freeze({ default: 0, plastic: 1, metal: 2, matte: 3, paint: 4, brushed: 5, glass: 6 });
 // The CADACLYSM_VIEW_SNAP_* bits by the names setSnap takes and a snap's `kind` reports.
-const SNAP_KINDS = Object.freeze({ vertex: 1, midpoint: 2, centre: 4, quadrant: 8, edge: 16, face: 32, grid: 64, plane: 128 });
+const SNAP_KINDS = Object.freeze({ vertex: 1, midpoint: 2, centre: 4, quadrant: 8, edge: 16, face: 32, grid: 64, plane: 128,
+  end: 256, intersection: 512, point: 1024, alignment: 2048 });
+// CADACLYSM_VIEW_SNAP_ALL and _DEFAULT (1.30): every kind, and the library's default set (the first eight and 'point').
+const SNAP_SETS = Object.freeze({ all: 0xFFF, default: 0x4FF });
+// CADACLYSM_VIEW_HIT_* (1.30) by the `kind` pickRect reports.
+const HIT_KINDS = Object.freeze({ face: 1, node: 2, segment: 3, edge: 4, point: 5 });
 const SNAP_NONE = 0xFFFFFFFF;   // CadaclysmViewSnap.edge where the snap is on no edge
 const STANDARD = Object.freeze({ top: 0, front: 1, right: 2, iso: 3 });
 const ALIGN = Object.freeze({ 'top-left': 0, top: 1, 'top-right': 2, left: 3, centre: 4, center: 4, right: 5,
@@ -132,6 +152,8 @@ koffi.struct('CadaclysmViewPick', {
   point: koffi.array('float', 3),
   overlay: 'uint32_t',
   viewport_label: 'int32_t',
+  segment: 'uint32_t',
+  distance_px: 'float',
 });
 koffi.struct('CadaclysmViewLod', {
   size: 'uint32_t',
@@ -145,6 +167,22 @@ koffi.struct('CadaclysmViewOccludedStyle', {
   dim: 'float',
   has_colour: 'uint32_t',
   colour: koffi.array('float', 3),
+});
+koffi.struct('CadaclysmViewClipPlane', {
+  size: 'uint32_t',
+  cap: 'uint32_t',
+  point: koffi.array('double', 3),
+  normal: koffi.array('double', 3),
+  cap_colour: koffi.array('float', 3),
+  hatch: 'uint32_t',
+  hatch_colour: koffi.array('float', 3),
+  hatch_angle: 'float',
+  hatch_spacing: 'float',
+  hatch_width: 'float',
+  outline: 'uint32_t',
+  outline_colour: koffi.array('float', 3),
+  outline_width: 'float',
+  reserved: 'uint32_t',
 });
 koffi.struct('CadaclysmViewSnapSettings', {
   size: 'uint32_t',
@@ -165,6 +203,34 @@ koffi.struct('CadaclysmViewSnap', {
   radius: 'double',
   distance_px: 'float',
   clicks: 'uint32_t',
+  label: koffi.array('char', 32),
+  locked: 'uint32_t',
+  locked_angle: 'float',
+  guide_count: 'uint32_t',
+  pad0: 'uint32_t',
+  guides: koffi.array('double', 12),
+});
+// CadaclysmViewEventSnap: the snap inside an input event, CadaclysmViewSnap as 1.22 laid it out (88 bytes);
+// the 1.30 fields are the event's own snap_* tail.
+koffi.struct('CadaclysmViewEventSnap', {
+  size: 'uint32_t',
+  kind: 'uint32_t',
+  point: koffi.array('double', 3),
+  item: 'uint32_t',
+  node: 'uint32_t',
+  face: 'uint32_t',
+  edge: 'uint32_t',
+  tangent: koffi.array('float', 3),
+  axis: koffi.array('float', 3),
+  radius: 'double',
+  distance_px: 'float',
+  clicks: 'uint32_t',
+});
+// CadaclysmViewRectHit (1.30): one thing pickRect found, an array element (no size).
+koffi.struct('CadaclysmViewRectHit', {
+  item: 'uint32_t',
+  kind: 'uint32_t',
+  index: 'uint32_t',
 });
 koffi.struct('CadaclysmViewViewport', {
   size: 'uint32_t',
@@ -336,7 +402,8 @@ koffi.struct('CadaclysmViewEventPick', {
   point: koffi.array('float', 3),
   overlay: 'uint32_t',
 });
-// CadaclysmViewInputEvent, 1.26: 272 bytes, padded explicitly; the pick, snap and camera nested whole.
+// CadaclysmViewInputEvent, 1.26: 272 bytes, padded explicitly; the pick, snap and camera nested whole. 1.30: 424 bytes, its
+// snap frozen at 88 (camera stays at 224), the pick's and snap's new fields in a tail.
 koffi.struct('CadaclysmViewInputEvent', {
   size: 'uint32_t',
   kind: 'uint32_t',
@@ -355,9 +422,17 @@ koffi.struct('CadaclysmViewInputEvent', {
   pad0: 'uint32_t',
   key: koffi.array('char', 32),
   pick: 'CadaclysmViewEventPick',
-  snap: 'CadaclysmViewSnap',
+  snap: 'CadaclysmViewEventSnap',
   camera: 'CadaclysmViewCamera',
   pick_viewport_label: 'int32_t',
+  pick_segment: 'uint32_t',
+  pick_distance_px: 'float',
+  snap_label: koffi.array('char', 32),
+  snap_locked: 'uint32_t',
+  snap_locked_angle: 'float',
+  snap_guide_count: 'uint32_t',
+  pad1: 'uint32_t',
+  snap_guides: koffi.array('double', 12),
 });
 const SIZE = (name) => koffi.sizeof(name);
 
@@ -395,6 +470,8 @@ function _bind(l) {
     set_background: f('void cadaclysm_view_set_background(CadaclysmView *view, const float *rgb)'),
     set_lighting: f('bool cadaclysm_view_set_lighting(CadaclysmView *view, uint32_t lighting)'),
     lighting: f('uint32_t cadaclysm_view_lighting(const CadaclysmView *view)'),
+    set_textures: f('bool cadaclysm_view_set_textures(CadaclysmView *view, bool on)'),
+    textures: f('bool cadaclysm_view_textures(const CadaclysmView *view)'),
     set_occluded_style: f('bool cadaclysm_view_set_occluded_style(CadaclysmView *view, const CadaclysmViewOccludedStyle *style)'),
     occluded_style: f('bool cadaclysm_view_occluded_style(const CadaclysmView *view, _Inout_ CadaclysmViewOccludedStyle *style)'),
     set_line_colour: f('bool cadaclysm_view_set_line_colour(CadaclysmView *view, uint32_t layer, const float *rgb, uint32_t from_part)'),
@@ -478,6 +555,11 @@ function _bind(l) {
     set_viewport_label: f('bool cadaclysm_view_set_viewport_label(CadaclysmView *view, uint32_t viewport, const char *text, const float *colour)'),
     set_viewport_border: f('bool cadaclysm_view_set_viewport_border(CadaclysmView *view, uint32_t viewport, const float *colour)'),
     set_on_top: f('bool cadaclysm_view_set_on_top(CadaclysmView *view, uint32_t item, bool on)'),
+    set_lines: f('bool cadaclysm_view_set_lines(CadaclysmView *view, uint32_t item, const float *segments, size_t count)'),
+    set_curves: f('bool cadaclysm_view_set_curves(CadaclysmView *view, uint32_t item, const float *beziers, size_t count)'),
+    set_points: f('bool cadaclysm_view_set_points(CadaclysmView *view, uint32_t item, const float *positions, size_t count)'),
+    set_mesh_positions: f('bool cadaclysm_view_set_mesh_positions(CadaclysmView *view, uint32_t item, const float *positions, const float *normals, size_t count)'),
+    show_glyphs: f('uint32_t cadaclysm_view_show_glyphs(CadaclysmView *view, const float *at, const float *dir, size_t count, uint32_t kind, float size_pt, const float *colour)'),
     show_solid: f('uint32_t cadaclysm_view_show_solid(CadaclysmView *view, const void *solid, double tolerance, const float *rgb)'),
     show_solid_faces: f('uint32_t cadaclysm_view_show_solid_faces(CadaclysmView *view, const void *solid, double tolerance, const float *rgb, uint32_t material, float opacity, const uint32_t *faces, uint32_t face_count)'),
     image: f('bool cadaclysm_view_image(CadaclysmView *view, uint8_t *rgba, size_t capacity)'),
@@ -485,6 +567,18 @@ function _bind(l) {
     set_double_click_frames: f('void cadaclysm_view_set_double_click_frames(CadaclysmView *view, bool on)'),
     focus: f('bool cadaclysm_view_focus(CadaclysmView *view, const float *point)'),
     navigation: f('uint32_t cadaclysm_view_navigation(CadaclysmView *view)'),
+    set_snap_points: f('bool cadaclysm_view_set_snap_points(CadaclysmView *view, uint32_t item, const float *xyz, size_t count, const char *label)'),
+    set_snap_base: f('bool cadaclysm_view_set_snap_base(CadaclysmView *view, const float *xyz, float step_deg)'),
+    set_pick_aperture: f('bool cadaclysm_view_set_pick_aperture(CadaclysmView *view, float aperture_pt)'),
+    pick_rect: f('size_t cadaclysm_view_pick_rect(CadaclysmView *view, uint32_t viewport, float x, float y, float w, float h, bool crossing, _Out_ CadaclysmViewRectHit *out, size_t capacity)'),
+    set_clip_plane: f('bool cadaclysm_view_set_clip_plane(CadaclysmView *view, uint32_t slot, const CadaclysmViewClipPlane *plane)'),
+    clip_plane: f('bool cadaclysm_view_clip_plane(const CadaclysmView *view, uint32_t slot, _Inout_ CadaclysmViewClipPlane *out)'),
+    set_clip_mode: f('bool cadaclysm_view_set_clip_mode(CadaclysmView *view, uint32_t mode)'),
+    clip_mode: f('uint32_t cadaclysm_view_clip_mode(const CadaclysmView *view)'),
+    set_viewport_clip_plane: f('bool cadaclysm_view_set_viewport_clip_plane(CadaclysmView *view, uint32_t viewport, uint32_t slot, const CadaclysmViewClipPlane *plane)'),
+    viewport_clip_plane: f('bool cadaclysm_view_viewport_clip_plane(const CadaclysmView *view, uint32_t viewport, uint32_t slot, _Inout_ CadaclysmViewClipPlane *out)'),
+    set_viewport_clip_mode: f('bool cadaclysm_view_set_viewport_clip_mode(CadaclysmView *view, uint32_t viewport, uint32_t mode)'),
+    viewport_clip_mode: f('uint32_t cadaclysm_view_viewport_clip_mode(const CadaclysmView *view, uint32_t viewport)'),
   };
 }
 
@@ -731,6 +825,8 @@ function _doubles(a, n, what) {
   if (v.length !== n) throw new ViewError(`${what}: ${n} numbers, not ${v.length}`);
   return Float64Array.from(v);
 }
+/** A missing argument's ViewError. */
+function _need(what) { throw new ViewError(`${what}: three numbers, not nothing`); }
 /** A u32 argument: a whole number in 0..4294967295, or a ViewError naming `what`. */
 function _u32Of(n, what) {
   if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > 0xFFFFFFFF) throw new ViewError(`${what}: ${typeof n === 'number' ? n : typeof n} is not a u32`);
@@ -927,6 +1023,43 @@ class Item {
     }));
     this._ok(this.view._lib.fn.set_point_states(this.view._live('cadaclysm_view_set_point_states'), this.id, _nonNull(codes), codes.length), 'setPointStates');
   }
+  /** 1.29: replaces a lines item's segments (six numbers each) in place; an empty list empties it. */
+  setLines(segments) {
+    const s = _floatsOf(segments, 6, 'setLines', 'segment');
+    this._ok(this.view._lib.fn.set_lines(this.view._live('cadaclysm_view_set_lines'), this.id, _nonNull(s), s.length / 6), 'setLines');
+  }
+  /** 1.29: replaces a curves item's Beziers (sixteen numbers each) in place. */
+  setCurves(beziers) {
+    const b = _floatsOf(beziers, 16, 'setCurves', 'curve');
+    this._ok(this.view._lib.fn.set_curves(this.view._live('cadaclysm_view_set_curves'), this.id, _nonNull(b), b.length / 16), 'setCurves');
+  }
+  /** 1.29: replaces a points item's positions (three numbers each); the point states stay by index. */
+  setPoints(positions) {
+    const p = _floatsOf(positions, 3, 'setPoints', 'point');
+    this._ok(this.view._lib.fn.set_points(this.view._live('cadaclysm_view_set_points'), this.id, _nonNull(p), p.length / 3), 'setPoints');
+  }
+  /** 1.29: moves a mesh item's vertices in place (same count); null normals are recomputed. */
+  setMeshPositions(positions, normals = null) {
+    const p = _floatsOf(positions, 3, 'setMeshPositions', 'vertex');
+    const n = normals == null ? null : _floatsOf(normals, 3, 'setMeshPositions normals', 'normal');
+    if (n !== null && n.length !== p.length) throw new ViewError(`setMeshPositions: ${p.length / 3} positions but ${n.length / 3} normals`);
+    this._ok(this.view._lib.fn.set_mesh_positions(this.view._live('cadaclysm_view_set_mesh_positions'), this.id, _nonNull(p), n === null ? null : _nonNull(n), p.length / 3), 'setMeshPositions');
+  }
+  /**
+   * 1.30: points a 'point' snap lands on -- `[[x, y, z], ...]` or flat, in the coordinates the item was
+   * shown in, moving with its node 0 -- each answering `label` (at most 31 bytes of UTF-8; null or '':
+   * 'point'). No points clear them; they also go with the item's removal. A null label goes to the
+   * library as NULL, never as ''. A count not a multiple of three and a label holding a NUL are refused
+   * before the call; the library refuses text, glyph, image and machining items, a label past 31
+   * bytes and a value that is not finite, in its own words. The terminal library refuses it.
+   */
+  setSnapPoints(points, label = null) {
+    const flat = ArrayBuffer.isView(points) ? points : Array.from(points ?? [], (e) => (typeof e === 'number' ? [e] : Array.from(e))).flat();
+    const p = _floatsOf(flat, 3, 'setSnapPoints', 'point');
+    if (label !== null && typeof label !== 'string') throw new ViewError(`setSnapPoints label: text or null, not ${_kind(label)}`);
+    if (label !== null && label.includes('\0')) throw new ViewError(`snap point label ${JSON.stringify(label)}: a NUL character cannot be shown (the C string ends there)`);
+    this._ok(this.view._lib.fn.set_snap_points(this.view._live('cadaclysm_view_set_snap_points'), this.id, p.length ? p : null, p.length / 3, label), 'setSnapPoints');
+  }
   /** Draws the item after every other, depth testing off; picked ahead of what is under it. */
   setOnTop(on = true) {
     this._ok(this.view._lib.fn.set_on_top(this.view._live('cadaclysm_view_set_on_top'), this.id, Boolean(on)), 'setOnTop');
@@ -983,10 +1116,10 @@ class Item {
 /**
  * An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the window
  * ('top-left', 'top', 'top-right', 'left', 'centre', 'right', 'bottom-left', 'bottom' or
- * 'bottom-right'), drawn over everything, untouched by the camera. `remove`, `setUserLayer` and, for
- * text, `setText` and `setColour` work as on any item; the item calls that mean nothing for an
- * overlay (`setColour` on a shape or an image, `setPlacement`, `setXray`, `frame`, ...) throw, saying it is
- * an overlay.
+ * 'bottom-right'), drawn over everything, untouched by the camera. `remove`, `setUserLayer`,
+ * `setColour` (a shape's fill and stroke, or text's glyphs, in place) and, for text, `setText` work
+ * as on any item; the item calls that mean nothing for an overlay (`setColour` on an image,
+ * `setPlacement`, `setXray`, `frame`, ...) throw, saying it is an overlay.
  */
 class Overlay extends Item {
   constructor(v, id, shown, anchor) { super(v, id, shown); this.anchor = anchor; }
@@ -1171,6 +1304,20 @@ class View {
     return this._item(this._lib.fn.show_lines(this._live('cadaclysm_view_show_lines'), _nonNull(s), s.length / 6, _rgb(rgb, 'showLines rgb', this._lib)), null, 'showLines');
   }
   /**
+   * 1.29: drafting glyphs: one of 'arrow', 'tick', 'cross', 'square', 'triangle', 'parallel',
+   * 'perpendicular', 'coincident', 'tangent', 'fixed', 'horizontal', 'vertical' at each of `at`'s
+   * points (three numbers each), `sizePt` points across, in `colour` (null: the edge colour),
+   * turned to `dir` as projected on the screen (three numbers a glyph, or null: unturned; 'arrow' points along it). Each glyph picks as a node.
+   */
+  showGlyphs(at, { kind, sizePt = 12, colour = null, dir = null } = {}) {
+    const k = GLYPH_KINDS.indexOf(kind);
+    if (k < 0) throw new TypeError(`showGlyphs: '${kind}' is not a glyph kind (${GLYPH_KINDS.join(', ')})`);
+    const a = _floatsOf(at, 3, 'showGlyphs', 'glyph');
+    const d = dir == null ? null : _floatsOf(dir, 3, 'showGlyphs dir', 'direction');
+    if (d !== null && d.length !== a.length) throw new ViewError(`showGlyphs: ${a.length / 3} points but ${d.length / 3} directions`);
+    return this._item(this._lib.fn.show_glyphs(this._live('cadaclysm_view_show_glyphs'), _nonNull(a), d === null ? null : _nonNull(d), a.length / 3, k, Number(sizePt), _rgb(colour, 'showGlyphs rgb', this._lib)), null, 'showGlyphs');
+  }
+  /**
    * Points, three numbers each (a flat run, or `[x, y, z]` a point): a disc `sizePx` device
    * pixels across (1 to 64) at each, in `colour` (null: the edge colour; any colour `showLines`
    * takes), as one item. A point does not pick; the item is framed by its points' box. The
@@ -1336,9 +1483,125 @@ class View {
     const raw = { size: SIZE('CadaclysmViewOccludedStyle'), dash: style.dash ?? 6, gap: style.gap ?? 4, dim: style.dim ?? 0.5, has_colour: colour ? 1 : 0, colour: colour ? Array.from(colour) : [0, 0, 0] };
     this._ok(this._lib.fn.set_occluded_style(this._live('cadaclysm_view_set_occluded_style'), raw), 'occludedStyle');
   }
+  /**
+   * Sets clip-plane slot `slot` (0..5), view-wide: what lies on the side `normal` points to is hidden from every
+   * item, edge, curve, line, point, pick and snap (not the grid, text, images or overlays). A point is drawn only
+   * where every set plane keeps it: two make a slab, six a box. `plane` is { point, normal } (three numbers each)
+   * with, optionally, `cap` (a colour filling the cut of every closed body), `hatch` (a colour, needs `cap`: lines
+   * over the cap), `hatchAngle` (degrees from the plane's first axis, 45), `hatchSpacing` (scene units; 0, the
+   * default: a fiftieth of the scene's size), `hatchWidth` (points, 1), and (1.32) `outline` (a colour drawing the
+   * cut as a line, capped or not) `outlineWidth` points wide (1; 0 reads back 1). null clears the slot. Translucent
+   * items are clipped, never capped. The library's refusals (a zero normal, a hatch without a cap, a slot past the
+   * last, an outline width above 100, every plane on the terminal library) throw a ViewError with its words.
+   */
+  setClipPlane(slot, plane) {
+    const at = _u32Of(slot, 'setClipPlane slot');
+    const raw = plane == null ? null : this._clipPlaneRaw(plane, 'setClipPlane');
+    this._ok(this._lib.fn.set_clip_plane(this._live('cadaclysm_view_set_clip_plane'), at, raw), 'setClipPlane');
+  }
+  /** A CadaclysmViewClipPlane from `plane`, its errors naming `what`. */
+  _clipPlaneRaw(plane, what) {
+    const cap = plane.cap == null ? null : _rgb(plane.cap, `${what} cap`, this._lib);
+    const hatch = plane.hatch == null ? null : _rgb(plane.hatch, `${what} hatch`, this._lib);
+    const outline = plane.outline == null ? null : _rgb(plane.outline, `${what} outline`, this._lib);
+    return {
+      size: SIZE('CadaclysmViewClipPlane'), cap: cap ? 1 : 0,
+      point: Array.from(_doubles(plane.point, 3, `${what} point`) ?? _need(`${what} point`)),
+      normal: Array.from(_doubles(plane.normal, 3, `${what} normal`) ?? _need(`${what} normal`)),
+      cap_colour: cap ? Array.from(cap) : [0, 0, 0], hatch: hatch ? 1 : 0, hatch_colour: hatch ? Array.from(hatch) : [0, 0, 0],
+      hatch_angle: plane.hatchAngle ?? 45, hatch_spacing: plane.hatchSpacing ?? 0, hatch_width: plane.hatchWidth ?? 1,
+      outline: outline ? 1 : 0, outline_colour: outline ? Array.from(outline) : [0, 0, 0], outline_width: plane.outlineWidth ?? 1,
+      reserved: 0,
+    };
+  }
+  /** The plane record of a filled CadaclysmViewClipPlane. */
+  static _clipPlaneOf(out) {
+    const hatch = out.hatch !== 0;
+    const outline = out.outline !== 0;
+    return {
+      point: Array.from(out.point), normal: Array.from(out.normal),
+      cap: out.cap !== 0 ? Array.from(out.cap_colour) : null, hatch: hatch ? Array.from(out.hatch_colour) : null,
+      hatchAngle: hatch ? out.hatch_angle : 45, hatchSpacing: hatch ? out.hatch_spacing : 0, hatchWidth: hatch ? out.hatch_width : 1,
+      outline: outline ? Array.from(out.outline_colour) : null, outlineWidth: outline ? out.outline_width : 1,
+    };
+  }
+  static _clipPlaneOut() {
+    return { size: SIZE('CadaclysmViewClipPlane'), cap: 0, point: [0, 0, 0], normal: [0, 0, 0], cap_colour: [0, 0, 0], hatch: 0, hatch_colour: [0, 0, 0], hatch_angle: 0, hatch_spacing: 0, hatch_width: 0, outline: 0, outline_colour: [0, 0, 0], outline_width: 0, reserved: 0 };
+  }
+  /** Clears clip-plane slot `slot`; an empty slot stays empty. */
+  clearClipPlane(slot) { this.setClipPlane(slot, null); }
+  /**
+   * Clip-plane slot `slot` as set, the normal of unit length and a zero width resolved to 1: { point, normal, cap,
+   * hatch, hatchAngle, hatchSpacing, hatchWidth, outline, outlineWidth } (cap, hatch and outline [r, g, b] or null;
+   * with no hatch the angle, spacing and width are the defaults 45, 0, 1; with no outline its width is 1); null for an
+   * empty slot (and always on the terminal library). A slot past the last throws.
+   */
+  clipPlane(slot) {
+    const at = _u32Of(slot, 'clipPlane slot');
+    const out = View._clipPlaneOut();
+    if (!this._lib.fn.clip_plane(this._live('cadaclysm_view_clip_plane'), at, out)) {
+      if (at < CLIP_PLANES) return null;
+      throw this._lib.failure('clipPlane');
+    }
+    return View._clipPlaneOf(out);
+  }
+  /**
+   * 1.32: how the view-wide planes combine: 'intersection' (the default: drawn where every plane keeps) or 'cutaway'
+   * (hidden only where every plane hides: two planes cut a quarter away). Another name throws before the library;
+   * the terminal library refuses 'cutaway'.
+   */
+  get clipMode() { return this._lib.fn.clip_mode(this._live('cadaclysm_view_clip_mode')) === CLIP_MODES.cutaway ? 'cutaway' : 'intersection'; }
+  set clipMode(mode) { this._ok(this._lib.fn.set_clip_mode(this._live('cadaclysm_view_set_clip_mode'), _name(CLIP_MODES, mode, 'clipMode')), 'clipMode'); }
+  /**
+   * 1.32: sets slot `slot` of viewport `viewport`'s own clip set, `plane` as setClipPlane takes it (null clears the
+   * slot; the set stays its own), in that viewport only: the first plane gives the viewport a set of its own (every
+   * other slot empty, mode 'intersection'), which it then draws, picks and snaps with instead of the view-wide set.
+   * With no viewports set, viewport 0 is the window. A viewport past the last (or past 7) throws the library's words.
+   */
+  setViewportClipPlane(viewport, slot, plane) {
+    const vp = _u32Of(viewport, 'setViewportClipPlane viewport');
+    const at = _u32Of(slot, 'setViewportClipPlane slot');
+    const raw = plane == null ? null : this._clipPlaneRaw(plane, 'setViewportClipPlane');
+    this._ok(this._lib.fn.set_viewport_clip_plane(this._live('cadaclysm_view_set_viewport_clip_plane'), vp, at, raw), 'setViewportClipPlane');
+  }
+  /** 1.32: clears slot `slot` of viewport `viewport`'s own clip set; setViewportClipMode(viewport, null) drops the set. */
+  clearViewportClipPlane(viewport, slot) { this.setViewportClipPlane(viewport, slot, null); }
+  /**
+   * 1.32: slot `slot` of viewport `viewport`'s own clip set, as clipPlane answers; null for an empty slot or a viewport
+   * with no set of its own (it draws with the view-wide planes). A slot past the last throws.
+   */
+  viewportClipPlane(viewport, slot) {
+    const vp = _u32Of(viewport, 'viewportClipPlane viewport');
+    const at = _u32Of(slot, 'viewportClipPlane slot');
+    const out = View._clipPlaneOut();
+    if (!this._lib.fn.viewport_clip_plane(this._live('cadaclysm_view_viewport_clip_plane'), vp, at, out)) {
+      if (at < CLIP_PLANES) return null;
+      throw this._lib.failure('viewportClipPlane');
+    }
+    return View._clipPlaneOf(out);
+  }
+  /**
+   * 1.32: viewport `viewport`'s clip mode: 'intersection' or 'cutaway' sets its own set's mode, giving it a set of its
+   * own if it had none; null (or 'inherit') drops its set, back to the view-wide one. Another name throws.
+   */
+  setViewportClipMode(viewport, mode) {
+    const vp = _u32Of(viewport, 'setViewportClipMode viewport');
+    const code = mode == null || mode === 'inherit' ? CLIP_INHERIT : _name(CLIP_MODES, mode, 'setViewportClipMode mode');
+    this._ok(this._lib.fn.set_viewport_clip_mode(this._live('cadaclysm_view_set_viewport_clip_mode'), vp, code), 'setViewportClipMode');
+  }
+  /** 1.32: viewport `viewport`'s own set's mode, 'intersection' or 'cutaway'; null where it inherits the view-wide set. */
+  viewportClipMode(viewport) {
+    const code = this._lib.fn.viewport_clip_mode(this._live('cadaclysm_view_viewport_clip_mode'), _u32Of(viewport, 'viewportClipMode viewport'));
+    return code === CLIP_MODES.intersection ? 'intersection' : code === CLIP_MODES.cutaway ? 'cutaway' : null;
+  }
   /** How plain parts are lit, as Python's View.lighting: 'headlight' (the default) or 'studio' (a key light fixed above the scene, an ambient and a camera fill). */
   get lighting() { return this._lib.fn.lighting(this._live('cadaclysm_view_lighting')) === 1 ? 'studio' : 'headlight'; }
   set lighting(name) { this._ok(this._lib.fn.set_lighting(this._live('cadaclysm_view_set_lighting'), _name(LIGHTING, name, 'lighting')), 'lighting'); }
+  /** Whether parts whose material has a base-colour texture (a glTF's, `Node.material`) draw it -- true, the
+   *  default -- or draw in their colour, as every CAD part does (1.33). The terminal and render-view libraries
+   *  draw colours either way. */
+  get textures() { return Boolean(this._lib.fn.textures(this._live('cadaclysm_view_textures'))); }
+  set textures(on) { this._ok(this._lib.fn.set_textures(this._live('cadaclysm_view_set_textures'), Boolean(on)), 'textures'); }
   // -- the timeline --
   /** Play at `speed` times real time; it stops at its end unless `setLoop()` is on; at the end it starts again from 0. */
   play(speed = 1) { this._ok(this._lib.fn.timeline_play(this._live('cadaclysm_view_timeline_play'), Number(speed)), 'play'); }
@@ -1424,17 +1687,19 @@ class View {
     return undefined;
   }
   /**
-   * What a snap may land on (cadaclysm_view.py's `set_snap`): 'all' (the default), one kind's name,
-   * an array of names, or null to switch snapping off -- 'vertex', 'midpoint', 'centre' (a circular
-   * edge's), 'quadrant', 'edge', 'face', 'grid' and 'plane'. `aperturePx`: how far from the cursor
+   * What a snap may land on (cadaclysm_view.py's `set_snap`): 'default' (the default: the first eight
+   * and 'point'), 'all', one kind's name, an array of names, or null to switch snapping off -- 'vertex',
+   * 'midpoint', 'centre' (a circular edge's), 'quadrant', 'edge', 'face', 'grid' and 'plane'; 1.30's 'end'
+   * (a lines or curves item's piece ends), 'intersection' (edges crossing on screen), 'point' (an item's
+   * setSnapPoints) and 'alignment' (lined up with an earlier snap). `aperturePx`: how far from the cursor
    * a point kind may lie (0: the library's default, 10 points); `marker`: whether the view draws its
    * marker at the snap. A view starts with snapping off; once on, a mouse over a view in its own
    * window snaps, and so does a click (`lastSnap` reads them); `snap` asks one at any pixel.
    */
-  setSnap(kinds = 'all', options = {}) {
+  setSnap(kinds = 'default', options = {}) {
     const o = options ?? {};
     let bits = 0;
-    if (kinds === 'all') bits = 0xFF;
+    if (typeof kinds === 'string' && Object.hasOwn(SNAP_SETS, kinds)) bits = SNAP_SETS[kinds];
     else if (kinds !== null) {
       for (const name of typeof kinds === 'string' ? [kinds] : Array.isArray(kinds) ? kinds : [kinds]) {
         if (!Object.hasOwn(SNAP_KINDS, name)) throw new ViewError(`snap kind ${_kind(name)}: one of ${Object.keys(SNAP_KINDS).join(', ')}`);
@@ -1446,7 +1711,7 @@ class View {
   }
   /**
    * The snap under pixel (x, y) of `viewport`: `{ kind, point, item, node, face, edge, tangent, axis,
-   * radius, distancePx, clicks }`, or null where nothing in the kinds setSnap chose lies there --
+   * radius, distancePx, clicks, label, lockedAngle, guides }` (see `_snap`), or null where nothing in the kinds setSnap chose lies there --
    * always null while snapping is off. Draws until the answer lands, as `pick` does (a never-drawn
    * view first). A failure other than "no answer yet" throws at once with the library's own message.
    */
@@ -1493,6 +1758,63 @@ class View {
     const n = Float64Array.from(_fixed(normal, 3, 'setWorkPlane normal'));
     this._ok(this._lib.fn.set_work_plane(this._live('cadaclysm_view_set_work_plane'), o, x, n, _finite(step, 'setWorkPlane step')), 'setWorkPlane');
   }
+  /**
+   * The angle lock (1.30): snaps that land on no point kind turn about `point` (world, three numbers)
+   * onto the nearest multiple of `stepDeg` (0 < step <= 180), in the work plane's directions or the
+   * plane facing the eye; the answer is kind 'plane' with its `lockedAngle` and the lock's ray as its
+   * guide. null clears it (a NULL point goes to the library, the step ignored). Other than three numbers
+   * is refused before the call; the library refuses a point that is not finite and a step out of range
+   * in its own words. The terminal library refuses it.
+   */
+  setSnapBase(point, stepDeg = 15) {
+    const p = this._live('cadaclysm_view_set_snap_base');
+    let xyz = null;
+    if (point != null) {
+      // Any array-like of numbers (an Array, a typed array, { length, 0.. }), as the typings say; text is not one.
+      const v = typeof point === 'object' && typeof point.length === 'number' ? Array.from(point, Number) : null;
+      if (v === null) throw new ViewError(`setSnapBase point: 3 numbers, not ${_kind(point)}`);
+      if (v.length !== 3) throw new ViewError(`setSnapBase point: 3 numbers, not ${v.length}`);
+      xyz = Float32Array.from(v);
+    }
+    this._ok(this._lib.fn.set_snap_base(p, xyz, stepDeg), 'setSnapBase');
+  }
+  /**
+   * How far a pick reaches for lines, curves, points and glyphs (1.30), in points (times the screen
+   * density): 0 restores the default, 4; others clamp to 1..32. Faces are always the pixel's. The
+   * library refuses a negative size or one that is not finite, in its own words. The terminal library
+   * keeps it, but its picks are face picks.
+   */
+  setPickAperture(points) {
+    this._ok(this._lib.fn.set_pick_aperture(this._live('cadaclysm_view_set_pick_aperture'), points), 'setPickAperture');
+  }
+  /**
+   * What lies in a rectangle of `viewport` (1.30; device pixels from its top left, a negative `w` or `h`
+   * flipping it), CPU only: with `crossing` (the default), everything with a visible part inside, else
+   * what lies wholly inside and is visible. Hidden things come only drawn x-ray or on top; text, images,
+   * overlays, viewport labels, machining stocks and isocurves are left out. Every hit as `{ item, kind,
+   * index }`, sorted by item, kind and index: 'face' (numbered as pick numbers it), 'node' (an item with
+   * no face ranges), 'segment' (a lines item's segment, a curves item's Bezier), 'edge' (a kernel
+   * solid's or read scene's edge index) or 'point' (a point's or glyph's index). An exact item shown with
+   * no mesh has edges here, no faces. A rectangle wholly off the viewport, and a lost device, answer [].
+   * The library refuses a rectangle that is not finite and an unknown viewport in its own words.
+   */
+  pickRect(x, y, w, h, { crossing = true, viewport = 0 } = {}) {
+    const p = this._live('cadaclysm_view_pick_rect');
+    const ask = (capacity) => {
+      const out = Array.from({ length: capacity }, () => ({ item: 0, kind: 0, index: 0 }));
+      return [Number(this._lib.fn.pick_rect(p, viewport, x, y, w, h, Boolean(crossing), out, capacity)), out];
+    };
+    let [total, out] = ask(64);
+    if (total === 0) {
+      const why = this._lib.lastError();   // this call's own refusal: the library cleared the error first
+      if (why) throw new ViewError(why);
+      return [];
+    }
+    // The count rule: asked again with a buffer of the total, never a cut list.
+    if (total > out.length) [total, out] = ask(total);
+    return out.slice(0, Math.min(total, out.length)).map((r) => ({ item: r.item,
+      kind: Object.keys(HIT_KINDS).find((k) => HIT_KINDS[k] === r.kind) ?? String(r.kind), index: r.index }));
+  }
   draw() { this._ok(this._lib.fn.draw(this._live('cadaclysm_view_draw')), 'draw'); this._drawn = true; }
   /**
    * The oldest input event the view's own window handled and has not handed out yet (view ABI 1.26),
@@ -1515,7 +1837,8 @@ class View {
   nextEvent() {
     // Not _live(): the queue is read after the window has closed (its 'close' event last).
     if (this._pointer === null) throw new ViewError('cadaclysm_view_next_event: the view is closed');
-    const out = { size: SIZE('CadaclysmViewInputEvent'), pick_viewport_label: -1 };
+    // The none values (Global (c)): a library that leaves the tail untouched reads as no label and no segment.
+    const out = { size: SIZE('CadaclysmViewInputEvent'), pick_viewport_label: -1, pick_segment: SNAP_NONE };
     if (this._lib.fn.next_event(this._pointer, out)) return _event(out, this._yUp);
     const why = this._lib.lastError();
     if (why && !why.endsWith('no event')) throw new ViewError(why);
@@ -1808,9 +2131,10 @@ function _event(e, yUp) {
   } else if (type === 'resize') {
     Object.assign(out, { width: e.width ?? 0, height: e.height ?? 0 });
   } else if (type === 'pick') {
-    out.pick = _hit(e.pick, e.pick_viewport_label) ? _pick(e.pick, e.pick_viewport_label) : null;
+    out.pick = _hit(e.pick, e.pick_viewport_label) ? _pick(e.pick, e.pick_viewport_label, e.pick_segment, e.pick_distance_px) : null;
   } else if (type === 'snap') {
-    out.snap = e.snap?.kind ? _snap(e.snap) : null;
+    out.snap = e.snap?.kind ? _snap(e.snap, { label: e.snap_label, locked: e.snap_locked, locked_angle: e.snap_locked_angle,
+      guide_count: e.snap_guide_count, guides: e.snap_guides }) : null;
   } else if (type === 'timeline') {
     // no fields beyond the stamp: the clock is View.time
   } else if (type === 'close') {
@@ -1829,9 +2153,10 @@ function _keyName(key) {
   return Buffer.from(nul < 0 ? bytes : bytes.subarray(0, nul)).toString('utf8');
 }
 
-/** A CadaclysmViewPick for the library to fill: `size` set, every other field zero. */
+/** A CadaclysmViewPick for the library to fill: `size` set, the none values (label -1, segment UINT32_MAX), every other field zero. */
 function _rawPick() {
-  return { size: SIZE('CadaclysmViewPick'), item: 0, node: 0, face: 0, clicks: 0, has_point: 0, point: [0, 0, 0], overlay: 0, viewport_label: -1 };
+  return { size: SIZE('CadaclysmViewPick'), item: 0, node: 0, face: 0, clicks: 0, has_point: 0, point: [0, 0, 0], overlay: 0, viewport_label: -1,
+    segment: SNAP_NONE, distance_px: 0 };
 }
 
 /**
@@ -1840,11 +2165,14 @@ function _rawPick() {
  * coordinates the items were shown in -- or null where the library read no depth (no hit to
  * place, a machining stock, the terminal library); `overlay` (1.24) true where the item is an
  * overlay: it was over the pixel, so nothing of the scene beneath it was picked (`face` is a text
- * overlay's line, else 0).
+ * overlay's line, else 0); `segment` (1.30) the wire hit's segment -- a lines item's segment, a
+ * curves item's Bezier, a kernel solid's edge index -- or null for a face, a point, a glyph or a
+ * label; `distancePx` (1.30) from the cursor to the hit in device pixels, 0 for a face.
  */
-function _pick(raw, label = raw.viewport_label) {
+function _pick(raw, label = raw.viewport_label, segment = raw.segment, distance = raw.distance_px) {
   return { item: raw.item, node: raw.node, face: raw.face, clicks: raw.clicks,
-    point: raw.has_point ? Array.from(raw.point) : null, overlay: Boolean(raw.overlay), viewportLabel: label };
+    point: raw.has_point ? Array.from(raw.point) : null, overlay: Boolean(raw.overlay), viewportLabel: label,
+    segment: segment == null || segment === SNAP_NONE ? null : segment, distancePx: distance ?? 0 };
 }
 
 /** Whether a pick answer hit something: an item, or (1.28) a viewport's label (`viewport_label` -1 is none). */
@@ -1855,20 +2183,29 @@ function _hit(raw, label = raw?.viewport_label) {
 /** A CadaclysmViewSnap for the library to fill: `size` set, every other field zero. */
 function _rawSnap() {
   return { size: SIZE('CadaclysmViewSnap'), kind: 0, point: [0, 0, 0], item: 0, node: 0, face: 0, edge: 0,
-    tangent: [0, 0, 0], axis: [0, 0, 0], radius: 0, distance_px: 0, clicks: 0 };
+    tangent: [0, 0, 0], axis: [0, 0, 0], radius: 0, distance_px: 0, clicks: 0, label: '', locked: 0, locked_angle: 0,
+    guide_count: 0, pad0: 0, guides: new Array(12).fill(0) };
 }
 
 /**
  * A snap answer as cadaclysm_view.py's `_snap_dict`, camelCase: the kind's name, the point snapped
  * to (in the coordinates the items were shown in), the item, node and face, the edge (null for a
  * face, grid or plane snap), the edge's tangent, a circle's axis and radius, the cursor's distance
- * in pixels, and clicks (0 for `snap` and a hover, 1 or 2 for a click's).
+ * in pixels, and clicks (0 for `snap` and a hover, 1 or 2 for a click's). 1.30: `label` (a 'point'
+ * snap's label, else the kind's name), `lockedAngle` (degrees in 0..360 where setSnapBase's lock turned
+ * the point, else null) and `guides` (0 to 2 `[from, to]` world point pairs: alignment guides or the
+ * lock's ray). `tail`: an input event's snap_* fields, which its frozen 1.22 snap lacks.
  */
-function _snap(raw) {
+function _snap(raw, tail = raw) {
   const kind = Object.keys(SNAP_KINDS).find((k) => SNAP_KINDS[k] === raw.kind) ?? String(raw.kind);
+  const g = Array.from(tail.guides ?? []);
+  const guides = [];
+  // At most two: guide_count past 2 never reads past the 12 doubles.
+  for (let k = 0; k < Math.min(tail.guide_count ?? 0, 2); k++) guides.push([g.slice(k * 6, k * 6 + 3), g.slice(k * 6 + 3, k * 6 + 6)]);
   return { kind, point: Array.from(raw.point), item: raw.item, node: raw.node, face: raw.face,
     edge: raw.edge === SNAP_NONE ? null : raw.edge, tangent: Array.from(raw.tangent), axis: Array.from(raw.axis),
-    radius: raw.radius, distancePx: raw.distance_px, clicks: raw.clicks };
+    radius: raw.radius, distancePx: raw.distance_px, clicks: raw.clicks,
+    label: _keyName(tail.label), lockedAngle: tail.locked ? tail.locked_angle : null, guides };
 }
 
 /** Forget the library, the shared window and the window list (tests; nothing of this module's own may leak between them). */
@@ -1960,6 +2297,6 @@ function _present(obj, options = {}, mode = 'show', transforms = null) {
 
 module.exports = {
   ViewError, View, Item, Overlay, Machining, Library, useTerminal, useWgpu, use, current, pump, loadFont,
-  OPEN, CLOSED, VIEWS, _find, _camera, _pick, _event, _png, _reset, _open, _release, _views, _present, _aim, _shared,
-  _sizeOf: SIZE, _POINT_SHAPES: POINT_SHAPES, _POINT_STATES: POINT_STATES,
+  OPEN, CLOSED, VIEWS, CLIP_PLANES, CLIP_VIEWPORTS, _find, _camera, _pick, _event, _png, _reset, _open, _release, _views, _present, _aim, _shared,
+  _sizeOf: SIZE, _POINT_SHAPES: POINT_SHAPES, _POINT_STATES: POINT_STATES, _GLYPH_KINDS: GLYPH_KINDS,
 };

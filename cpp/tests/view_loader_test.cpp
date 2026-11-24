@@ -475,9 +475,9 @@ static void test_pick() {
     CHECK(drawn == 1, "drawn not set");
     CHECK(out.size == sizeof out && out.item == 7 && out.node == 3 && out.face == 11, "the pick %u %u %u", out.item,
           out.node, out.face);
-    // 1.8's, 1.24's and 1.28's fields come through whole: a 44-byte answer, the clicks, the
-    // point and the overlay flag.
-    CHECK(sizeof out == 44 && out.clicks == 2 && out.has_point == 1 && out.point[0] == 1.5f && out.point[1] == -2.0f &&
+    // 1.8's, 1.24's and 1.28's fields come through whole: a 52-byte answer (1.30), the clicks,
+    // the point and the overlay flag.
+    CHECK(sizeof out == 52 && out.clicks == 2 && out.has_point == 1 && out.point[0] == 1.5f && out.point[1] == -2.0f &&
               out.point[2] == 0.25f && out.overlay == 1,
           "the pick's fields: size %u, clicks %u, has_point %u, overlay %u", static_cast<unsigned>(sizeof out), out.clicks,
           out.has_point, out.overlay);
@@ -486,6 +486,8 @@ static void test_pick() {
     // 1.28: the buffer is handed over with no label hit (-1, not the 0 of memset) -- the fake
     // leaves the field alone -- and a library's own answer comes through.
     CHECK(out.viewport_label == -1, "the pick's viewport_label starts at -1, not %d", out.viewport_label);
+    // 1.30: likewise segment starts at UINT32_MAX, no wire, not memset's 0 (segment 0 is a wire).
+    CHECK(out.segment == 0xFFFFFFFFu, "the pick's segment starts at UINT32_MAX, not %u", out.segment);
     fake::reset();
     fake::pick_label = 2;
     drawn = 1;
@@ -724,7 +726,7 @@ static void test_png(const char* empty) {
 }
 
 // cvl_snap, Python's View.snap, as cvl_pick: a never-drawn view drawn first, the request, then
-// draws until the answer lands -- every field of the 88-byte answer through; the library's own
+// draws until the answer lands -- every field of the answer through (232 bytes since 1.30); the library's own
 // refusal at once; "snap: the answer never landed (...)" after 200 draws.
 static void test_snap() {
     std::vector<char> err(CVL_ERROR, 0);
@@ -736,7 +738,7 @@ static void test_snap() {
     int drawn = 0;
     CHECK(cvl_snap(&t, fake::view(), &drawn, 1, 10, 20, &out, err.data(), err.size()), "%s", err.data());
     CHECK(drawn == 1, "drawn not set");
-    CHECK(out.size == 88 && out.kind == CADACLYSM_VIEW_SNAP_VERTEX && out.point[0] == -1.0 && out.point[1] == 1.0 &&
+    CHECK(out.size == 232 && out.kind == CADACLYSM_VIEW_SNAP_VERTEX && out.point[0] == -1.0 && out.point[1] == 1.0 &&
               out.point[2] == 0.0 && out.item == 7 && out.node == 3 && out.face == 11 && out.edge == 2 &&
               out.tangent[1] == 1.0f && out.radius == 0.5 && out.distance_px == 2.5f && out.clicks == 1,
           "the snap: size %u kind %u item %u edge %u clicks %u", out.size, out.kind, out.item, out.edge, out.clicks);
@@ -774,20 +776,20 @@ static void test_snap() {
     CHECK(fake::snap_waits == 800, "%d waits answered, not 200", 1000 - fake::snap_waits);
 }
 
-// ---- the ABI the table needs: 1.28 (parse_colour 1.5; load_font, show_text, set_text 1.6; set_double_click_frames,
+// ---- the ABI the table needs: 1.33 (parse_colour 1.5; load_font, show_text, set_text 1.6; set_double_click_frames,
 // focus, navigation 1.8; set_lighting, lighting 1.9; the viewport cameras 1.10; show_points 1.11; set_occluded 1.13;
 // set_finish 1.18; set_occluded_style, occluded_style 1.20; show_solid_faces 1.21; the six snap calls 1.22;
 // set_line_colour, line_colour, set_item_line_colour 1.23; show_overlay, show_overlay_image, move_overlay 1.24; stats 1.25;
-// next_event, close 1.26; set_item_visible, set_node_ghosts, play_animation, timeline_remove 1.27; the seven drafting calls 1.28) ---
+// next_event, close 1.26; set_item_visible, set_node_ghosts, play_animation, timeline_remove 1.27; the seven drafting calls 1.28; set_lines, set_curves, set_points, set_mesh_positions, show_glyphs 1.29; set_snap_points, set_snap_base, set_pick_aperture, pick_rect 1.30; set_clip_plane, clip_plane 1.31; set_clip_mode, clip_mode, set_viewport_clip_plane, viewport_clip_plane, set_viewport_clip_mode, viewport_clip_mode 1.32; set_textures, textures 1.33) ---
 
 static void test_abi() {
     std::vector<char> err(CVL_ERROR, 0);
-    CHECK(cvl_check_abi(0x1001Cu, "lib", err.data(), err.size()), "1.28 refused: %s", err.data());
-    CHECK(cvl_check_abi(0x1001Du, "lib", err.data(), err.size()), "1.29 refused: %s", err.data());
-    CHECK(!cvl_check_abi(0x1001Bu, "lib", err.data(), err.size()), "1.27 accepted");
-    CHECK(std::string(err.data()) == "lib: view ABI 1.27, this SDK needs 1.28 or a later 1.x", "%s", err.data());
-    CHECK(!cvl_check_abi(0x2001Cu, "lib", err.data(), err.size()), "2.28 accepted");
-    CHECK(std::string(err.data()) == "lib: view ABI 2.28, this SDK needs 1.28 or a later 1.x", "%s", err.data());
+    CHECK(cvl_check_abi(0x10021u, "lib", err.data(), err.size()), "1.33 refused: %s", err.data());
+    CHECK(cvl_check_abi(0x10022u, "lib", err.data(), err.size()), "1.34 refused: %s", err.data());
+    CHECK(!cvl_check_abi(0x10020u, "lib", err.data(), err.size()), "1.32 accepted");
+    CHECK(std::string(err.data()) == "lib: view ABI 1.32, this SDK needs 1.33 or a later 1.x", "%s", err.data());
+    CHECK(!cvl_check_abi(0x20021u, "lib", err.data(), err.size()), "2.33 accepted");
+    CHECK(std::string(err.data()) == "lib: view ABI 2.33, this SDK needs 1.33 or a later 1.x", "%s", err.data());
 }
 
 // ---- a real (stand-in) library through cvl_open --------------------------------------------
@@ -799,7 +801,7 @@ static void test_fake_library(const char* path) {
     CHECK(cvl_open(&t, path, err.data(), err.size()), "%s", err.data());
     CHECK(t.label[0] == 0 && !cvl_is_terminal(&t) && !cvl_is_wgpu(&t), "label '%s'", t.label);
     CHECK(t.show_solid != nullptr && t.parse_colour != nullptr && t.set_text != nullptr && t.standard_in != nullptr &&
-          t.abi_version() == 0x1001Cu,
+          t.abi_version() == 0x10021u,
           "the table is not bound");
     CHECK(t.set_double_click_frames != nullptr && t.focus != nullptr && t.navigation != nullptr,
           "1.8's calls are not bound");
@@ -832,14 +834,25 @@ static void test_fake_library(const char* path) {
               t.set_point_state_colours != nullptr && t.set_viewport_label != nullptr &&
               t.set_viewport_border != nullptr && t.set_on_top != nullptr,
           "1.28's drafting calls are not bound");
-    // A library older than the table (1.27: no drafting styles) is refused before any call is
+    CHECK(t.set_lines != nullptr && t.set_curves != nullptr && t.set_points != nullptr && t.set_mesh_positions != nullptr &&
+              t.show_glyphs != nullptr,
+          "1.29's live-geometry and glyph calls are not bound");
+    CHECK(t.set_snap_points != nullptr && t.set_snap_base != nullptr && t.set_pick_aperture != nullptr &&
+              t.pick_rect != nullptr,
+          "1.30's picking and snapping calls are not bound");
+    CHECK(t.set_clip_plane != nullptr && t.clip_plane != nullptr, "1.31's clip-plane calls are not bound");
+    CHECK(t.set_clip_mode != nullptr && t.clip_mode != nullptr && t.set_viewport_clip_plane != nullptr &&
+              t.viewport_clip_plane != nullptr && t.set_viewport_clip_mode != nullptr && t.viewport_clip_mode != nullptr,
+          "1.32's clip-set calls are not bound");
+    CHECK(t.set_textures != nullptr && t.textures != nullptr, "1.33's texture calls are not bound");
+    // A library older than the table (1.32: no textures) is refused before any call is
     // bound, in Python's words.
     static CvlTable old;
-    cvl_setenv("CVL_FAKE_ABI_MINOR", "27");
+    cvl_setenv("CVL_FAKE_ABI_MINOR", "32");
     int opened = cvl_open(&old, path, err.data(), err.size());
     cvl_setenv("CVL_FAKE_ABI_MINOR", nullptr);
-    CHECK(!opened, "a view library of ABI 1.27 was opened");
-    CHECK(std::string(err.data()) == std::string(path) + ": view ABI 1.27, this SDK needs 1.28 or a later 1.x", "%s",
+    CHECK(!opened, "a view library of ABI 1.32 was opened");
+    CHECK(std::string(err.data()) == std::string(path) + ": view ABI 1.32, this SDK needs 1.33 or a later 1.x", "%s",
           err.data());
     CHECK(old.library == nullptr && old.show_solid == nullptr, "a refused library filled the table");
     CHECK(std::strcmp(cvl_error(&t), "the view library failed") == 0, "NULL last_error: %s", cvl_error(&t));
@@ -908,18 +921,21 @@ int main(int argc, char** argv) {
     static_assert(offsetof(CadaclysmViewOccludedStyle, dim) == 12 && offsetof(CadaclysmViewOccludedStyle, has_colour) == 16 &&
                       offsetof(CadaclysmViewOccludedStyle, colour) == 20,
                   "CadaclysmViewOccludedStyle's fields moved");
-    // The snap structs as 1.22 reads and writes them: 16 and 88 bytes, no padding.
+    // The snap structs as 1.22 reads and writes them: 16 and 88 bytes, no padding; 1.30 grew the
+    // answer to 232 at its tail (the event keeps the 88-byte copy) and the kinds to twelve.
     static_assert(sizeof(CadaclysmViewSnapSettings) == 16 && offsetof(CadaclysmViewSnapSettings, aperture_px) == 8 &&
                       offsetof(CadaclysmViewSnapSettings, marker) == 12,
                   "CadaclysmViewSnapSettings's fields moved");
-    static_assert(sizeof(CadaclysmViewSnap) == 88, "CadaclysmViewSnap is not 88 bytes");
+    static_assert(sizeof(CadaclysmViewSnap) == 232 && sizeof(CadaclysmViewEventSnap) == 88,
+                  "CadaclysmViewSnap is not 232 bytes, or the event's snap not 88");
     static_assert(offsetof(CadaclysmViewSnap, point) == 8 && offsetof(CadaclysmViewSnap, item) == 32 &&
                       offsetof(CadaclysmViewSnap, edge) == 44 && offsetof(CadaclysmViewSnap, tangent) == 48 &&
                       offsetof(CadaclysmViewSnap, axis) == 60 && offsetof(CadaclysmViewSnap, radius) == 72 &&
                       offsetof(CadaclysmViewSnap, distance_px) == 80 && offsetof(CadaclysmViewSnap, clicks) == 84,
                   "CadaclysmViewSnap's fields moved");
     static_assert(CADACLYSM_VIEW_SNAP_VERTEX == 1 && CADACLYSM_VIEW_SNAP_FACE == 32 && CADACLYSM_VIEW_SNAP_PLANE == 128 &&
-                      CADACLYSM_VIEW_SNAP_ALL == 255,
+                      CADACLYSM_VIEW_SNAP_ALL == 4095 && CADACLYSM_VIEW_SNAP_DEFAULT == 1279 &&
+                      CADACLYSM_VIEW_SNAP_END == 256 && CADACLYSM_VIEW_SNAP_ALIGNMENT == 2048,
                   "the snap kinds moved");
     // The animation binding as 1.27 reads it: target, item, node -- 16 bytes on 64-bit; the
     // whole item is node UINT32_MAX; the timeline event is kind 11, with no fields of its own.
@@ -929,6 +945,19 @@ int main(int argc, char** argv) {
                   "CadaclysmViewAnimationBinding's fields moved");
     static_assert(CADACLYSM_VIEW_ALL_NODES == 0xFFFFFFFFu && CADACLYSM_VIEW_INPUT_EVENT_TIMELINE == 11,
                   "ALL_NODES or the timeline event kind moved");
+    // The clip plane as 1.32 reads and writes it: 120 bytes (1.31's 96, then the outline), no
+    // padding; six slots; the modes; eight viewports with sets of their own.
+    static_assert(sizeof(CadaclysmViewClipPlane) == 120 && offsetof(CadaclysmViewClipPlane, point) == 8 &&
+                      offsetof(CadaclysmViewClipPlane, normal) == 32 && offsetof(CadaclysmViewClipPlane, cap_colour) == 56 &&
+                      offsetof(CadaclysmViewClipPlane, hatch) == 68 && offsetof(CadaclysmViewClipPlane, hatch_colour) == 72 &&
+                      offsetof(CadaclysmViewClipPlane, hatch_angle) == 84 && offsetof(CadaclysmViewClipPlane, hatch_width) == 92 &&
+                      offsetof(CadaclysmViewClipPlane, outline) == 96 && offsetof(CadaclysmViewClipPlane, outline_colour) == 100 &&
+                      offsetof(CadaclysmViewClipPlane, outline_width) == 112 && offsetof(CadaclysmViewClipPlane, reserved) == 116,
+                  "CadaclysmViewClipPlane's fields moved");
+    static_assert(CADACLYSM_VIEW_CLIP_PLANES == 6, "the clip-plane slots are not six");
+    static_assert(CADACLYSM_VIEW_CLIP_INTERSECTION == 0 && CADACLYSM_VIEW_CLIP_CUTAWAY == 1 &&
+                      CADACLYSM_VIEW_CLIP_INHERIT == 2 && CADACLYSM_VIEW_CLIP_VIEWPORTS == 8,
+                  "the clip modes or the clip viewports moved");
 
     // The standard views, Python's VIEWS table.
     double az = 0, el = 0;

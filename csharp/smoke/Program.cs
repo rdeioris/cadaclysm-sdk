@@ -322,6 +322,40 @@ using (var cubeScene = Cadaclysm.Cadaclysm.Open(cubePath))
         return Fail("pose([]) on a file without a mechanism was accepted");
     }
     catch (CadaclysmException e) when (e.Message.Contains("no mechanism")) { }
+    // glTF materials and images: the cube (not glTF) has neither.
+    if (cubeScene.ImageCount != 0 || cubeScene.Nodes.Any(n => n.Material is not null))
+        return Fail("materials: cube.scad has an image or a material");
+    try { cubeScene.Image(0); return Fail("materials: cube.scad answered image 0"); }
+    catch (ArgumentOutOfRangeException) { }
+}
+// textured-quad.glb (samples/textured-quad.py): a textured "Checker" and an untextured "Plain".
+using (var quad = Cadaclysm.Cadaclysm.Open(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, "textured-quad.glb")))
+{
+    var materials = new Dictionary<string, Material>();
+    foreach (var node in quad.Nodes)
+        if (node.Material is Material mat) materials[mat.Name] = mat;
+    if (!materials.Keys.OrderBy(k => k, StringComparer.Ordinal).SequenceEqual(new[] { "Checker", "Plain" }))
+        return Fail($"materials: textured-quad.glb names {string.Join(",", materials.Keys)}");
+    var checker = materials["Checker"];
+    Console.WriteLine($"materials: {checker}");
+    if (!checker.BaseColor.SequenceEqual(new[] { 1f, 0.5f, 0.25f, 1f }) || checker.Metallic != 0f || checker.Roughness != 0.5f
+        || checker.AlphaMode != "mask" || checker.AlphaCutoff != 0.25f || !checker.DoubleSided
+        || checker.BaseColorImage != 0u || checker.BaseColorUvSet != 0
+        || !checker.UvOffset.SequenceEqual(new[] { 0.5f, 0f }) || checker.UvRotation != 0f || !checker.UvScale.SequenceEqual(new[] { 2f, 2f })
+        || checker.WrapU != "clamp_to_edge" || checker.WrapV != "mirrored_repeat" || checker.MagFilter != "linear" || checker.MinFilter != "linear")
+        return Fail($"materials: Checker reads {checker} metallic={checker.Metallic} roughness={checker.Roughness} cutoff={checker.AlphaCutoff} "
+            + $"double={checker.DoubleSided} uvset={checker.BaseColorUvSet} offset={string.Join(",", checker.UvOffset)} rot={checker.UvRotation} "
+            + $"scale={string.Join(",", checker.UvScale)} wrap={checker.WrapU},{checker.WrapV} filter={checker.MagFilter},{checker.MinFilter}");
+    var plain = materials["Plain"];
+    if (plain.BaseColorImage is not null || plain.AlphaMode != "opaque") return Fail($"materials: Plain reads {plain}");
+    if (quad.ImageCount != 1) return Fail($"materials: textured-quad.glb has {quad.ImageCount} images");
+    var image = quad.Image(0);
+    Console.WriteLine($"images: {image}");
+    if (image.Mime != "image/png" || image.Name != "checker" || image.Data.Length != 75
+        || !image.Data.Take(4).SequenceEqual(new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G' }))
+        return Fail($"materials: image 0 reads {image}");
+    try { quad.Image(1); return Fail("materials: image 1 of 1 was answered"); }
+    catch (ArgumentOutOfRangeException) { }
 }
 scene.ForgetMeshes();
 if (scene.Query("class == solid").Count == 0 || scene.Walk().Where(n => n.CanMesh).Sum(n => (long)(n.Mesh?.TriangleCount ?? 0)) != triangles) return Fail("forget_meshes did not rebuild");
@@ -3444,6 +3478,120 @@ using var outline = rect.WithHole(hole);
         var middle = SkRefused(() => s.TangentAtEnd(curve, line, end: "middle"));
         if (middle is null || !middle.Message.Contains("end must be one of")) return Fail($"sketch: a bad end name gave '{middle?.Message}'");
     }
+    // sketch part 2: smooth/translated/rotated, polygon, chamfer, patterns, auto-constrain (Python's test_sketch_*)
+    {
+        // smooth
+        using (var s = new Sketch())
+        {
+            var c = s.AddPoint(0, 0); var a0 = s.AddPoint(5, 0); var a1 = s.AddPoint(0, 5);
+            var arc = s.AddArc(c, a0, a1);
+            var bez = s.AddBezier(a1, (-2, 5.3), (-4, 4), (-6, 1));
+            s.Fix(arc);
+            var id = s.Smooth(arc, bez);
+            if (s.ConstraintKind(id) != "smooth") return Fail($"sketch2: smooth reads back as {s.ConstraintKind(id)}");
+        }
+        // translated and rotated
+        using (var s = new Sketch())
+        {
+            var p = s.AddPoint(1, 1); var q = s.AddPoint(0, 0); var f = s.AddPoint(0, 0); var t = s.AddPoint(3, 4);
+            s.Fix(p); s.Fix(f); s.Fix(t);
+            var id = s.Translated(p, q, f, t);
+            if (s.ConstraintKind(id) != "translated") return Fail($"sketch2: translated reads back as {s.ConstraintKind(id)}");
+            if (!s.Solve().Converged) return Fail("sketch2: translated does not solve");
+            var got = s.Point(q);
+            if (!Near1(got.X, 4, 1e-9) || !Near1(got.Y, 5, 1e-9)) return Fail($"sketch2: translated put q at {got}");
+        }
+        using (var s = new Sketch())
+        {
+            var c = s.AddPoint(0, 0); var f = s.AddPoint(2, 0); var t = s.AddPoint(0, 7); var p = s.AddPoint(3, 1); var q = s.AddPoint(0, 0.5);
+            s.Fix(c); s.Fix(f); s.Fix(t); s.Fix(p);
+            var id = s.Rotated(p, q, c, f, t);
+            if (s.ConstraintKind(id) != "rotated") return Fail($"sketch2: rotated reads back as {s.ConstraintKind(id)}");
+            if (!s.Solve().Converged) return Fail("sketch2: rotated does not solve");
+            var got = s.Point(q);
+            if (!Near1(got.X, -1, 1e-9) || !Near1(got.Y, 3, 1e-9)) return Fail($"sketch2: rotated put q at {got}");
+        }
+        // polygon
+        using (var s = new Sketch())
+        {
+            var poly = s.AddPolygon((0, 0), (5, 0), 6);
+            if (poly.Corners.Count != 6 || poly.Sides.Count != 6) return Fail($"sketch2: the hexagon has {poly.Corners.Count} corners and {poly.Sides.Count} sides");
+            for (var i = 0; i < 6; i++)
+            {
+                var a = s.Point(poly.Corners[i]); var b = s.Point(poly.Corners[(i + 1) % 6]);
+                if (!Near1(Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y)), 5, 1e-9)) return Fail($"sketch2: hexagon side {i} is not 5");
+            }
+            if (s.Kind(poly.Circumcircle) != "circle" || s.Kind(poly.Incircle) != "circle" || s.Kind(poly.Centre) != "point") return Fail("sketch2: the polygon's centre or circles read wrong");
+            if (s.Diagnose().Free != 4) return Fail($"sketch2: the hexagon's dof is {s.Diagnose().Free}, not 4");
+        }
+        // chamfer
+        using (var s = new Sketch())
+        {
+            var (rc, rs) = s.AddRect((0, 0), (10, 10));
+            var ch = s.Chamfer(rs[0], rs[1], 2, 3);
+            var pa = s.Point(ch.Points.A); var pb = s.Point(ch.Points.B);
+            if (!Near1(pa.X, 8, 1e-9) || !Near1(pa.Y, 0, 1e-9) || !Near1(pb.X, 10, 1e-9) || !Near1(pb.Y, 3, 1e-9)) return Fail($"sketch2: the chamfer points are {pa} and {pb}");
+            if (ch.Corner != rc[1]) return Fail($"sketch2: the chamfer corner is {ch.Corner}, not {rc[1]}");
+            var loops = s.Profiles(1e-9);
+            if (loops.Count != 1 || !Near1(loops[0].AreaProperties().Area, 97, 1e-9)) return Fail("sketch2: the chamfered square is not one loop of area 97");
+            var bad = SkRefused(() => s.Chamfer(rs[0], rs[1], 20, 3));
+            if (bad is null || !bad.Message.StartsWith("sketch_chamfer: ")) return Fail($"sketch2: an over-long chamfer gave '{bad?.Message}'");
+        }
+        using (var s = new Sketch())
+        {
+            var (_, rs) = s.AddRect((0, 0), (10, 10));
+            var ch = s.ChamferAngle(rs[0], rs[1], 2, Math.PI / 4);
+            if (s.ConstraintKind(ch.Dimensions.B) != "angle") return Fail("sketch2: the chamfer_angle's second dimension is not an angle");
+        }
+        // patterns
+        using (var s = new Sketch())
+        {
+            var circle = s.AddCircle(s.AddPoint(10, 0), 1);
+            var centre = s.AddPoint(0, 0);
+            var pat = s.PatternCircular(new[] { circle }, centre, 6, Math.PI / 3);
+            if (pat.Copies.Count != 5 || pat.Steps.Count != 2 || pat.Dimensions.Count != 1) return Fail($"sketch2: the circular pattern is {pat.Copies.Count}/{pat.Steps.Count}/{pat.Dimensions.Count}");
+            if (!s.Solve().Converged) return Fail("sketch2: the circular pattern does not solve");
+            var c1 = s.Point(s.Centre(pat.Copies[0][0]));
+            if (!Near1(c1.X, 5, 1e-9) || !Near1(c1.Y, 8.660254037844386, 1e-9)) return Fail($"sketch2: copy 1 centre is {c1}");
+        }
+        using (var s = new Sketch())
+        {
+            var p = s.AddPoint(0, 0);
+            var pat = s.PatternRectangular(new[] { p }, (2, 0), 3);
+            if (pat.Copies.Count != 2 || pat.Dimensions.Count != 2) return Fail($"sketch2: the rectangular pattern is {pat.Copies.Count}/{pat.Dimensions.Count}");
+            if (!s.Solve().Converged) return Fail("sketch2: the rectangular pattern does not solve");
+            var p1 = s.Point(pat.Copies[0][0]); var p2 = s.Point(pat.Copies[1][0]);
+            if (!Near1(p1.X, 2, 1e-9) || !Near1(p1.Y, 0, 1e-9) || !Near1(p2.X, 4, 1e-9) || !Near1(p2.Y, 0, 1e-9)) return Fail($"sketch2: the copies are at {p1} and {p2}");
+        }
+        // mirror: a triangle with a-b on the construction line x = 0, c free
+        using (var s = new Sketch())
+        {
+            var axis = s.AddLine(s.AddPoint(0, 0), s.AddPoint(0, 10));
+            s.SetConstruction(axis);
+            uint a = s.AddPoint(0, 2), b = s.AddPoint(0, 8), c = s.AddPoint(5, 5);
+            s.AddLine(a, b);
+            var ents = new[] { c, s.AddLine(b, c), s.AddLine(c, a) };
+            var mir = s.Mirror(ents, axis);
+            if (mir.Copies.Count != 3 || mir.Constraints.Count == 0) return Fail($"sketch2: the mirror is {mir.Copies.Count}/{mir.Constraints.Count}");
+            if (s.Kind(mir.Copies[0]) != "point" || s.Kind(mir.Copies[1]) != "line" || s.Kind(mir.Copies[2]) != "line") return Fail("sketch2: the mirror copies' kinds");
+            var mc = s.Point(mir.Copies[0]);
+            if (!Near1(mc.X, -5, 1e-9) || !Near1(mc.Y, 5, 1e-9)) return Fail($"sketch2: the mirrored point is {mc}");
+            foreach (var k in mir.Constraints)
+                if (s.ConstraintKind(k) is not ("symmetric" or "equal_radius" or "point_on_line")) return Fail($"sketch2: a mirror constraint is {s.ConstraintKind(k)}");
+            var before = s.Entities().Length;
+            var onLine = SkRefused(() => s.Mirror(new[] { c, axis }, axis));
+            if (onLine is null || !onLine.Message.Contains("mirror line must not be among")) return Fail($"sketch2: mirroring the line itself gave '{onLine?.Message}'");
+            if (s.Entities().Length != before) return Fail("sketch2: a refused mirror changed the sketch");
+        }
+        // auto-constrain
+        using (var profile = Profile.Rect(10, 6))
+        using (var s = Sketch.FromProfile(profile, infer: false))
+        {
+            var added = s.AutoConstrain(0, true);
+            if (added.Length == 0) return Fail("sketch2: auto_constrain added nothing");
+            if (s.Diagnose().Free != 0) return Fail($"sketch2: auto_constrain left {s.Diagnose().Free} free");
+        }
+    }
     Console.WriteLine("sketch: entities, constraints, solves, diagnosis, references and refusals with ids");
 }
 // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
@@ -3550,6 +3698,11 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
         var nodeNames = gltf.RootElement.GetProperty("nodes").EnumerateArray().Select(n => n.GetProperty("name").GetString()).ToArray();
         if (!nodeNames.SequenceEqual(["Solid 1", "Solid 2"])) return Fail($"mesh_file: glTF nodes {string.Join(", ", nodeNames)}");
     }
+    var package3mf = Blacksmith.MeshFile(both, "3mf");
+    if (!package3mf.Take(4).SequenceEqual(new byte[] { 0x50, 0x4b, 0x03, 0x04 })) return Fail("mesh_file: the 3MF is not a zip package");
+    var plyBinary = Encoding.Latin1.GetString(Blacksmith.MeshFile(both, "ply"));
+    if (!plyBinary.StartsWith("ply\n") || !plyBinary.Contains("binary_little_endian")) return Fail("mesh_file: the binary PLY's header");
+    if (!Encoding.UTF8.GetString(Blacksmith.MeshFile(both, "ply-ascii")).Contains("format ascii 1.0")) return Fail("mesh_file: the ASCII PLY's header");
     try { Blacksmith.MeshFile([meshA], "step"); return Fail("mesh_file: format step did not throw"); }
     catch (BuildException e) when (e.Message.Contains("mesh_file: format \"step\" is not one of")) { }
     try { Blacksmith.MeshFile([], "stl"); return Fail("mesh_file: no solids did not throw"); }
@@ -4078,6 +4231,30 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
         try { busBreps[0].Recognize(); return Fail("brep recognize: a released brep answered"); }
         catch (CadaclysmException e) when (e.Message.Contains("released")) { }
         Console.WriteLine("reader recognize: box-union-sphere's ball, tolerance and released: ok");
+        // recognizeTolerance on Open: unasked the ball is still NURBS, asked it arrives analytic.
+        using (var plainScene = Cadaclysm.Cadaclysm.Open(busPath))
+        using (var askedScene = Cadaclysm.Cadaclysm.Open(busPath, recognizeTolerance: 1e-6))
+        {
+            var plainBreps = plainScene.Nodes.Select(n => n.Brep).Where(b => b is not null).Select(b => b!).ToList();
+            var askedBreps = askedScene.Nodes.Select(n => n.Brep).Where(b => b is not null).Select(b => b!).ToList();
+            try
+            {
+                var (plainBack, plainReport) = plainBreps[0].Recognize();
+                plainBack.Dispose();
+                var (askedBack, askedReport) = askedBreps[0].Recognize();
+                askedBack.Dispose();
+                if (!plainReport.Faces.Any(f => f.Kind == "sphere")) return Fail("recognize on open: unasked, the ball is no longer NURBS");
+                if (askedReport.Faces.Count != 0) return Fail($"recognize on open: asked, faces still recognized: {string.Join(" ", askedReport.Faces.Select(f => f.Kind))}");
+            }
+            finally
+            {
+                foreach (var b in plainBreps) b.Dispose();
+                foreach (var b in askedBreps) b.Dispose();
+            }
+        }
+        try { Cadaclysm.Cadaclysm.Open(busPath, recognizeTolerance: -1).Dispose(); return Fail("recognize on open: a negative tolerance opened"); }
+        catch (CadaclysmException e) when (e.Message.Contains("recognize_tolerance")) { }
+        Console.WriteLine("reader recognize on open: unasked NURBS, asked analytic, negative refused: ok");
     }
     else Console.WriteLine($"reader recognize: {busPath} not to hand, skipped");
     var rrd = Cadaclysm.RecognizeReport.FromRows(new uint[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 11 }, new[] { 0.5, 0.25, 0.125 },
@@ -5845,6 +6022,236 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             if (!said.Contains("has to cross the face")) return Fail($"fit_to_face: a short line refused as '{said}'");
         }
 
+        // 6d. offsets (spec section 8): a line and an arc exactly, a wavy bicubic within its
+        // tolerance, an arc on a quarter wall along and across it, a cube and its top face
+        {
+            var z = (0.0, 0.0, 1.0);
+            using var line = new NurbsCurve(new (double, double, double)[] { (0, 0, 0), (10, 0, 0) }, 1);
+            using (var o = line.Offset(2, z))
+            {
+                var (lo, hi) = o.Domain;
+                if (o.FitError != 0.0) return Fail($"offset: the line's fit error {o.FitError}");
+                if (D3(o.Point(lo), (0, -2, 0)) > 1e-12 || D3(o.Point(hi), (10, -2, 0)) > 1e-12)
+                    return Fail($"offset: the line runs {o.Point(lo)} to {o.Point(hi)}");
+            }
+            var h = Math.Sqrt(0.5);
+            using var arc = new NurbsCurve(new (double, double, double)[] { (2, 0, 0), (2, 2, 0), (0, 2, 0) }, 2, new[] { 1.0, h, 1.0 });
+            using (var o = arc.Offset(1, z, 1e-6))
+            {
+                if (o.FitError != 0.0) return Fail($"offset: the arc's fit error {o.FitError}");
+                if (Math.Abs(D3(o.Point(0.5), (0, 0, 0)) - 3) > 1e-12) return Fail($"offset: the arc's mid point {o.Point(0.5)}");
+            }
+            var said = Refused(() => arc.Offset(-2, z, 1e-6));
+            if (!said.StartsWith("nurbs_curve_offset: ")) return Fail($"offset: an arc used up refused as '{said}'");
+
+            var wavy = new List<(double, double, double)>();
+            for (var i = 0; i < 4; i++)
+                for (var j = 0; j < 4; j++) wavy.Add((i, j, Math.Sin(i) * Math.Cos(j) / 4));
+            var k = new[] { 0.0, 0, 0, 0, 3, 3, 3, 3 };
+            using var s = new NurbsSurface(wavy, (4, 4), 3, 3, null, k, k);
+            if (s.FitError is not null) return Fail($"offset: a built surface carries fit error {s.FitError}");
+            using (var o = s.Offset(0.2, 1e-6))
+            {
+                if (!(o.FitError is >= 0.0 and <= 1e-6)) return Fail($"offset: the bicubic's fit error {o.FitError}");
+                var (p, n) = (s.PointAt(1.5, 1.5), s.NormalAt(1.5, 1.5));
+                if (D3(o.PointAt(1.5, 1.5), (p.X + 0.2 * n.X, p.Y + 0.2 * n.Y, p.Z + 0.2 * n.Z)) > 1e-6)
+                    return Fail($"offset: the bicubic at (1.5, 1.5) reads {o.PointAt(1.5, 1.5)}");
+            }
+
+            using var quarter = new NurbsSurface(new (double, double, double)[] { (2, 0, 0), (2, 0, 5), (2, 2, 0), (2, 2, 5), (0, 2, 0), (0, 2, 5) },
+                (3, 2), 2, 1, new[] { 1, 1, h, h, 1, 1 }, new[] { 0.0, 0, 0, 1, 1, 1 }, new[] { 0.0, 0, 1, 1 });
+            using var wall = quarter.ToSheet();
+            using var onWall = new NurbsCurve(new (double, double, double)[] { (2, 0, 2), (2, 2, 2), (0, 2, 2) }, 2, new[] { 1.0, h, 1.0 });
+            using (var up = onWall.OffsetNormalToSheet(wall, 1, 1e-6))
+            using (var along = onWall.OffsetTangentToSheet(wall, 1, 1e-6))
+            {
+                if (!(up.FitError <= 1e-6) || !(along.FitError <= 1e-6)) return Fail($"offset: the wall's fit errors {up.FitError}, {along.FitError}");
+                for (var i = 0; i <= 20; i++)
+                {
+                    var (a, b) = up.Domain;
+                    var q = up.Point(a + (b - a) * i / 20);
+                    if (Math.Abs(Math.Sqrt(q.X * q.X + q.Y * q.Y) - 3) > 2e-6 || Math.Abs(q.Z - 2) > 2e-6) return Fail($"offset_normal_to_sheet: {q} is off r 3, z 2");
+                    (a, b) = along.Domain;
+                    q = along.Point(a + (b - a) * i / 20);
+                    if (Math.Abs(Math.Sqrt(q.X * q.X + q.Y * q.Y) - 2) > 2e-6 || Math.Abs(q.Z - 3) > 2e-6) return Fail($"offset_tangent_to_sheet: {q} is off r 2, z 3");
+                }
+            }
+
+            using var cube = Solid.Cuboid(10, 10, 10);
+            using (var grown = cube.Offset(1, 1e-6))
+            using (var shrunk = cube.Offset(-1, 1e-6))
+            {
+                if (Math.Abs(grown.Mass().Volume - 1728) > 1e-6) return Fail($"offset: the grown cube's volume {grown.Mass().Volume}");
+                if (Math.Abs(shrunk.Mass().Volume - 512) > 1e-6) return Fail($"offset: the shrunk cube's volume {shrunk.Mass().Volume}");
+            }
+            using (var top = cube.OffsetFace(1, 1, 1e-6))
+            {
+                var (min, max) = top.Bounds64;
+                if (top.Faces != 1 || Math.Abs(top.Mass().Area - 100) > 1e-6 || Math.Abs(min[2] - 6) > 1e-9 || Math.Abs(max[2] - 6) > 1e-9)
+                    return Fail($"offset_face: {top.Faces} faces, area {top.Mass().Area}, z {min[2]}..{max[2]}");
+            }
+            said = Refused(() => cube.Offset(0));
+            if (!said.StartsWith("solid_offset: ")) return Fail($"offset: a distance 0 refused as '{said}'");
+            said = Refused(() => cube.OffsetFace(1, 0));
+            if (!said.StartsWith("solid_offset_face: ")) return Fail($"offset_face: a distance 0 refused as '{said}'");
+        }
+
+        // 6e. face split: a box's top split by a line across it, on its face and on every face it
+        // lies on; a sphere along its silhouette
+        {
+            using var cube = Solid.Cuboid(10, 10, 10);
+            using var across = new NurbsCurve(new (double, double, double)[] { (-8, -2, 5), (8, 3, 5) }, 1);
+            foreach (var faces in new int?[]?[] { null, new int?[] { 1 }, new int?[] { null } })
+            {
+                using var split = cube.SplitFaces(new[] { across }, faces);
+                var sm = split.Mass();
+                if (split.Faces != 7 || !sm.Closed || Math.Abs(sm.Volume - 1000) > 1e-6 || Math.Abs(sm.Area - 600) > 1e-6)
+                    return Fail($"split_faces: {split.Faces} faces, closed {sm.Closed}, volume {sm.Volume}, area {sm.Area}");
+                var tops = Enumerable.Range(0, split.Faces).Count(f => Math.Abs(split.FaceInnerPoint(f).Point.Z - 5) < 1e-9);
+                if (tops != 2) return Fail($"split_faces: {tops} faces on the top");
+            }
+            var said = Refused(() => cube.SplitFaces(Array.Empty<NurbsCurve>()));
+            if (!said.StartsWith("split_faces: ")) return Fail($"split_faces: no curves refused as '{said}'");
+            try
+            {
+                cube.SplitFaces(new[] { across }, new int?[] { 1, 2 });
+                return Fail("split_faces: two faces for one curve not refused");
+            }
+            catch (ArgumentException) { }
+            const double r = 5;
+            using var ball = Solid.Sphere(r);
+            using (var halves = ball.SplitAlongSilhouette((0, 0, 1)))
+            {
+                var hm = halves.Mass();
+                if (halves.Faces != 2 || !hm.Closed || Math.Abs(hm.Area - 4 * Math.PI * r * r) > 1e-6 * hm.Area)
+                    return Fail($"split_along_silhouette: {halves.Faces} faces, closed {hm.Closed}, area {hm.Area}");
+            }
+            said = Refused(() => cube.SplitAlongSilhouette((0, 0, 1)));
+            if (!said.StartsWith("split_along_silhouette: ")) return Fail($"split_along_silhouette: a box along z refused as '{said}'");
+        }
+
+        // 6f. surface edits: untrim, unstitch, ruled faces off edges, a seam moved, sheets and
+        // surfaces merged, and tweens; paint and ids follow the face each result face comes from
+        {
+            static bool Red(double[]? c) => c is not null && c[0] == 1 && c[1] == 0 && c[2] == 0;
+            static NurbsSurface Patch(double x0, double x1, double z = 0) =>
+                new(new (double, double, double)[] { (x0, 0, z), (x0, 1, z), (x1, 0, z), (x1, 1, z) }, (2, 2), 1, 1);
+            using var plainCube = Solid.Cuboid(10, 10, 10);
+            using var blueCube = plainCube.Coloured(0, 0, 1);
+            using var redTop = blueCube.Coloured(1, 0, 0, 1);
+            using var cube = redTop.Track();
+            foreach (var which in new[] { Untrim.Holes, Untrim.Outer, Untrim.All })
+            {
+                using var out1 = cube.Untrim(1, which);
+                var um = out1.Mass();
+                if (out1.Faces != 6 || !um.Closed || Math.Abs(um.Volume - 1000) > 1e-6)
+                    return Fail($"untrim {which}: {out1.Faces} faces, closed {um.Closed}, volume {um.Volume}");
+                if (!Red(out1.FaceColour(1)) || out1.FaceId(1) != cube.FaceId(1)) return Fail($"untrim {which}: the top lost its paint or id");
+            }
+            using (var bore = Solid.Cylinder(2, 20))
+            using (var drill = bore.Translate(0, 0, -10))
+            using (var bored = cube.Cut(drill))
+            {
+                var top = Enumerable.Range(0, bored.Faces).First(f => Math.Abs(bored.FaceInnerPoint(f).Point.Z - 5) < 1e-9);
+                using var open = bored.Untrim(top, Untrim.Holes);
+                using var topSheet = open.FaceSheet(top);
+                if (open.Faces != bored.Faces || open.Mass().Closed || Math.Abs(topSheet.Mass().Area - 100) > 1e-6)
+                    return Fail($"untrim holes: {open.Faces} faces, top area {topSheet.Mass().Area}");
+            }
+
+            var sheets = cube.Unstitch();
+            if (sheets.Count != 6 || sheets.Any(s => s.Faces != 1 || Math.Abs(s.Mass().Area - 100) > 1e-6))
+                return Fail($"unstitch: {sheets.Count} sheets");
+            foreach (var s in sheets) s.Dispose();
+            var alone = cube.Unstitch(new[] { 1 });
+            if (alone.Count != 2 || alone[0].Faces != 1 || alone[1].Faces != 5 || !Red(alone[0].FaceColour(0)))
+                return Fail($"unstitch top: {alone.Count} bodies");
+            foreach (var s in alone) s.Dispose();
+            var together = cube.Unstitch(new[] { 1, 2 }, together: true);
+            if (together.Count != 2 || together[0].Faces != 2 || together[1].Faces != 4) return Fail($"unstitch together: {together.Count} bodies");
+            foreach (var s in together) s.Dispose();
+
+            var edge = cube.Edges.First(e => e.Faces.Contains(1));
+            using (var ruled = cube.RuledFromEdges(new[] { edge }, Ruling.Normal, 2))
+            using (var other = cube.RuledFromEdges(new[] { edge.Index }, Ruling.Normal, 2, alternateFace: true))
+            using (var up = cube.RuledFromEdges(new[] { edge.Index }, Ruling.Direction, 3, direction: (0, 0, 1)))
+            {
+                if (ruled.Faces != 1 || Math.Abs(ruled.Mass().Area - 20) > 1e-6) return Fail($"ruled_from_edges: area {ruled.Mass().Area}");
+                if (Red(ruled.FaceColour(0)) == Red(other.FaceColour(0))) return Fail("ruled_from_edges: both faces took one colour");
+                if (Math.Abs(up.Mass().Area - 30) > 1e-6) return Fail($"ruled_from_edges direction: area {up.Mass().Area}");
+            }
+            try
+            {
+                cube.RuledFromEdges(new[] { 0 }, Ruling.Direction);
+                return Fail("ruled_from_edges: ruling Direction with no direction not refused");
+            }
+            catch (ArgumentException) { }
+
+            const double r = 2, ht = 5;
+            using var can = Solid.Cylinder(r, ht);
+            var wall = Enumerable.Range(0, can.Faces).First(f =>
+            {
+                var p = can.FaceInnerPoint(f).Point;
+                return Math.Abs(Math.Sqrt(p.X * p.X + p.Y * p.Y) - r) < 1e-9 && p.Z > 0 && p.Z < ht;
+            });
+            using var paintedCan = can.Coloured(1, 0, 0, wall);
+            using var painted = paintedCan.Track();
+            using (var reseamed = painted.ChangeSeam(wall, 1.0))
+            {
+                if (reseamed.Faces != can.Faces || Math.Abs(reseamed.Mass().Volume - Math.PI * r * r * ht) > 1e-9 * Math.PI * r * r * ht)
+                    return Fail($"change_seam: {reseamed.Faces} faces, volume {reseamed.Mass().Volume}");
+                if (!Red(reseamed.FaceColour(wall)) || reseamed.FaceId(wall) != painted.FaceId(wall)) return Fail("change_seam: the wall lost its paint or id");
+            }
+
+            using var left = Patch(0, 1);
+            using var right = Patch(1, 2);
+            using (var merged = left.Merge(right))
+            {
+                var (mu, mv) = merged.Domain;
+                if (D3(merged.PointAt(mu.Hi, mv.Hi), (2, 1, 0)) > 1e-12) return Fail($"merge: the far corner is {merged.PointAt(mu.Hi, mv.Hi)}");
+            }
+            using (var leftSheet = left.ToSheet())
+            using (var redSheet = leftSheet.Coloured(1, 0, 0))
+            using (var rightSheet = right.ToSheet())
+            using (var mergedSheet = redSheet.MergeSurfaces(rightSheet))
+            {
+                if (mergedSheet.Faces != 1 || Math.Abs(mergedSheet.Mass().Area - 2) > 1e-9 || !Red(mergedSheet.FaceColour(0)))
+                    return Fail($"merge_surfaces: {mergedSheet.Faces} faces, area {mergedSheet.Mass().Area}");
+            }
+            using (var high = Patch(0, 1, 4))
+            {
+                var tweens = left.Tween(high, 3);
+                if (tweens.Count != 3) return Fail($"tween: {tweens.Count} surfaces");
+                for (var i = 0; i < 3; i++)
+                    if (Math.Abs(tweens[i].PointAt(0.5, 0.5).Z - (i + 1)) > 1e-12) return Fail($"tween: surface {i} at z {tweens[i].PointAt(0.5, 0.5).Z}");
+                foreach (var t in tweens) t.Dispose();
+            }
+
+            using var far = Patch(5, 6);
+            using var farSheet = far.ToSheet();
+            using var leftAlone = left.ToSheet();
+            foreach (var (call, name) in new (Action, string)[]
+            {
+                (() => plainCube.Untrim(99), "untrim"),
+                (() => plainCube.Unstitch(new[] { 99 }), "unstitch"),
+                (() => plainCube.Unstitch(new[] { 1, 1 }), "unstitch"),
+                (() => plainCube.RuledFromEdges(Array.Empty<int>(), Ruling.Normal), "ruled_from_edges"),
+                (() => plainCube.RuledFromEdges(new[] { 999 }, Ruling.Normal), "ruled_from_edges"),
+                (() => plainCube.RuledFromEdges(new[] { 0 }, Ruling.Normal, 0), "ruled_from_edges"),
+                (() => plainCube.RuledFromEdges(new[] { 0 }, Ruling.Direction, direction: (0, 0, 0)), "ruled_from_edges"),
+                (() => plainCube.ChangeSeam(99, 1.0), "change_seam"),
+                (() => plainCube.ChangeSeam(1, 1.0), "change_seam"),
+                (() => plainCube.MergeSurfaces(leftAlone), "merge_surfaces"),
+                (() => leftAlone.MergeSurfaces(farSheet), "merge_surfaces"),
+                (() => left.Merge(far), "nurbs_surface_merge"),
+                (() => left.Tween(far, 0), "nurbs_surface_tween"),
+            })
+            {
+                var said = Refused(call);
+                if (!said.StartsWith(name + ": ")) return Fail($"{name}: refused as '{said}'");
+            }
+        }
+
         // 7. maps and values
         {
             using var c = new NurbsCurve(new (double, double, double)[] { (0, 0, 0), (1, 1, 1), (2, 0, 0) }, 2, new[] { 1.0, 0.5, 1.0 });
@@ -6310,6 +6717,13 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             var (pair, pr2) = blk.Pattern(Pattern.Rectangular((1, 0, 0), 2, 8).Take(2));
             using (pair)
                 if (pr2.Instances != 2 || pr2.Booleans != 1 || !HrNear(pair.Mass().Volume, 28800, 1e-6)) return Fail($"pattern: {pr2}, volume {pair.Mass().Volume}");
+            var mirrored = Pattern.Mirror(new double[] { 5, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 });
+            if (mirrored.Count != 2 || !mirrored[0].Rows.SequenceEqual(Transform.Identity().Rows)) return Fail($"pattern_mirror: {mirrored.Count} placements");
+            var mp = mirrored[1].Point((7, 1, 2));
+            if (Math.Abs(mp.X - 3) > 1e-12 || Math.Abs(mp.Y - 1) > 1e-12 || Math.Abs(mp.Z - 2) > 1e-12) return Fail($"pattern_mirror: (7, 1, 2) went to {mp}");
+            string? zeroNormal = null;
+            try { Pattern.Mirror(new double[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0 }); } catch (BuildException e) { zeroNormal = e.Message; }
+            if (zeroNormal is null || !zeroNormal.Contains("pattern_mirror")) return Fail($"pattern_mirror: a zero normal gave '{zeroNormal}'");
             var ring = Pattern.Circular((0, 0, 0), (0, 0, 1), 6);
             if (ring.Count != 6 || Math.Abs(ring[1].Rows[0] - 0.5) > 1e-12) return Fail($"pattern_circular: {ring.Count}, {ring[1]}");
             using (var line = NurbsCurve.Through(new[] { (0.0, 0.0, 0.0), (30.0, 0.0, 0.0) }, 1))
@@ -6431,6 +6845,95 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             var (t4, m4) = CsThrown(() => rod.ThreadRecord(3));
             if (t4 != nameof(BuildException) || m4 != "thread_record: face 3 is not one of the solid's 3") return Fail($"thread_record refusal: {t4}: {m4}");
             Console.WriteLine("blacksmith threads: ok");
+        }
+
+        // 6b2. gear profiles (clockwork plan 1's hand-computed figures): I1 an involute m 1 z 20
+        // on every default, I5 the centre distance plain and shifted, C2 a cycloidal pinion's leaf,
+        // and a 3-tooth involute refused
+        {
+            using (var g = Profile.GearInvolute(1, 20))
+            {
+                if (Math.Abs(g.PitchRadius - 10) > 1e-9 || g.BaseRadius is not { } gb || Math.Abs(gb - 9.396926208) > 1e-9
+                    || Math.Abs(g.TipRadius - 11) > 1e-9 || Math.Abs(g.RootRadius - 8.75) > 1e-9
+                    || Math.Abs(g.Thickness - 1.570796327) > 1e-6 || g.Undercut)
+                    return Fail($"gear_involute I1: {g}");
+                if (!(g.Profile.AreaProperties().Area > 0)) return Fail("gear_involute I1: an empty profile");
+            }
+            var a0 = Blacksmith.GearCentreDistanceInvolute(1, 20, 40);
+            if (Math.Abs(a0 - 30) > 1e-9) return Fail($"gear_centre_distance_involute I5: {a0}");
+            var a1 = Blacksmith.GearCentreDistanceInvolute(1, 20, 40, 0.25, 0.25);
+            if (!(a1 > 30.4 && a1 < 30.5)) return Fail($"gear_centre_distance_involute I5 shifted: {a1}");
+            using (var leaf = Profile.GearPinionCycloidal(1, 8, 60))
+            {
+                if (Math.Abs(leaf.Thickness - 1.05) > 1e-6 || leaf.BaseRadius is not null || leaf.Undercut)
+                    return Fail($"gear_pinion_cycloidal C2: {leaf}");
+            }
+            using (var wheel = Profile.GearWheelCycloidal(1, 60, 8))
+            {
+                if (Math.Abs(wheel.PitchRadius - 30) > 1e-9 || wheel.BaseRadius is not null || !(wheel.TipRadius > wheel.PitchRadius))
+                    return Fail($"gear_wheel_cycloidal: pitch {wheel.PitchRadius}, base {wheel.BaseRadius}, tip {wheel.TipRadius}");
+            }
+            var (gt, gm) = CsThrown(() => Profile.GearInvolute(1, 3));
+            if (gt != nameof(BuildException) || !gm.StartsWith("profile_gear_involute: ")) return Fail($"gear_involute refusal: {gt}: {gm}");
+            Console.WriteLine("blacksmith gears: ok");
+        }
+
+        // 6b2a. NACA airfoils: 2412 parsed, seven points with the leading edge (the middle one) at
+        // the origin and the closed trailing edge one point, A1 0012's half-thickness at mid-chord
+        // (Abbott & von Doenhoff 0.05294), the spline and the profile, and the refusals
+        {
+            var n = Naca.Parse("2412");
+            if (n != Naca.Four(0.02, 0.4, 0.12)) return Fail($"naca_parse 2412: {n}");
+            if (Naca.Parse("23112") != Naca.Five(0.3, 0.15, 0.12, true)) return Fail($"naca_parse 23112: {Naca.Parse("23112")}");
+            var seven = n.Points(1, 7);
+            if (seven.Length != 7 || seven[3] != (0.0, 0.0) || seven[0] != (1.0, 0.0) || seven[6] != (1.0, 0.0) || !(seven[1].Y > 0 && seven[5].Y < 0))
+                return Fail($"naca_points A5: {string.Join(" ", seven)}");
+            if (n.Points(1).Length != 101) return Fail("naca_points: the default count is not 101");
+            var a1 = Naca.Parse("0012").Points(1, 201, false)[50];
+            if (Math.Abs(a1.X - 0.5) > 1e-15 || Math.Abs(a1.Y - 0.052940252) > 1e-9) return Fail($"naca_points A1: {a1}");
+            var (controls, error) = Naca.Parse("4412").Spline(50);
+            if (controls.Length != 32 || controls[0] != (50.0, 0.0) || !(error > 0 && error < 1e-4 * 50)) return Fail($"naca_spline: {controls.Length} {controls[0]} {error}");
+            var (wing, werror) = Naca.Parse("4412").Profile(50, false);
+            using (wing)
+            {
+                if (!(werror > 0 && werror <= 5e-4) || !(wing.AreaProperties().Area > 0)) return Fail($"profile_naca: {werror}");
+            }
+            var (nt, nm) = CsThrown(() => Naca.Parse("26012"));
+            if (nt != nameof(BuildException) || nm != "naca_parse: 5-digit positions are 1 to 5") return Fail($"naca_parse refusal: {nt}: {nm}");
+            (nt, nm) = CsThrown(() => n.Points(0));
+            if (nt != nameof(BuildException) || !nm.StartsWith("naca_points: ")) return Fail($"naca_points refusal: {nt}: {nm}");
+            (nt, nm) = CsThrown(() => n.Spline(1, 7));
+            if (nt != nameof(BuildException) || !nm.StartsWith("naca_spline: ")) return Fail($"naca_spline refusal: {nt}: {nm}");
+            (nt, nm) = CsThrown(() => n.Profile(1, true, -1));
+            if (nt != nameof(BuildException) || !nm.StartsWith("profile_naca: ")) return Fail($"profile_naca refusal: {nt}: {nm}");
+            Console.WriteLine("blacksmith naca: ok");
+        }
+
+        // 6b3. contact settle (clockwork plan 3's hand-computed figures): a driver disc of radius 1
+        // at (3, 0) about (5, 0) held at pi, a follower disc at (2, 0) about the origin. S1 clockwise
+        // from pi to pi/3, S5 counter-clockwise to the limit 3 pi/2, S6 recoiled from pi/6, the
+        // default tolerance, and a direction 0 refused
+        {
+            using var c1 = Profile.Circle(1);
+            using var sd = c1.Translate(3, 0);
+            using var sf = c1.Translate(2, 0);
+            var sh = Math.Sqrt(3) / 2;
+            var s1 = Blacksmith.ContactSettle(sd, (5, 0), Math.PI, sf, (0, 0), Math.PI, -1, tolerance: 1e-11);
+            if (Math.Abs(s1.Value - Math.PI / 3) > 1e-9 || s1.Recoiled || !(s1.Steps > 0) || s1.Contact is not { } k1
+                || Math.Abs(k1.Point.X - 1.5) > 1e-9 || Math.Abs(k1.Point.Y - sh) > 1e-9
+                || Math.Abs(k1.Normal.X + 0.5) > 1e-9 || Math.Abs(k1.Normal.Y - sh) > 1e-9
+                || k1.Driver.Loop != 0 || k1.Follower.Loop != 0)
+                return Fail($"contact_settle S1: {s1}");
+            var s5 = Blacksmith.ContactSettle(sd, (5, 0), Math.PI, sf, (0, 0), Math.PI, 1, limit: 1.5 * Math.PI, tolerance: 1e-11);
+            if (s5.Value != 1.5 * Math.PI || s5.Contact is not null || s5.Recoiled) return Fail($"contact_settle S5: {s5}");
+            var s6 = Blacksmith.ContactSettle(sd, (5, 0), Math.PI, sf, (0, 0), Math.PI / 6, -1, tolerance: 1e-11);
+            if (Math.Abs(s6.Value - Math.PI / 3) > 1e-9 || s6.Contact is null || !s6.Recoiled) return Fail($"contact_settle S6: {s6}");
+            var sDefault = Blacksmith.ContactSettle(sd, (5, 0), Math.PI, sf, (0, 0), Math.PI, -1);
+            var sNamed = Blacksmith.ContactSettle(sd, (5, 0), Math.PI, sf, (0, 0), Math.PI, -1, tolerance: 2e-9 * Math.Sqrt(2));
+            if (sDefault != sNamed) return Fail($"contact_settle default tolerance: {sDefault} != {sNamed}");
+            var (st, sm) = CsThrown(() => Blacksmith.ContactSettle(sd, (5, 0), Math.PI, sf, (0, 0), Math.PI, 0));
+            if (st != nameof(BuildException) || !sm.StartsWith("contact_settle: ")) return Fail($"contact_settle refusal: {st}: {sm}");
+            Console.WriteLine("blacksmith contact settle: S1, S5, S6, the default and the refusal ok");
         }
 
         // 6c. curves on a sheet: a ring on a square offset along it, split along it, parted by a panel gap
@@ -6619,6 +7122,39 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             if (t != nameof(BuildException) || !msg.Contains("at least one station")) return Fail($"fillet_law: no stations gave {t}: {msg}");
             (t, msg) = CsThrown(() => cube.FilletLaw(new[] { 0 }, law));
             if (t != nameof(BuildException) || !msg.Contains("a radius law rounds only spline edges")) return Fail($"fillet_law: a cube edge gave {t}: {msg}");
+            // A box edge by chord and by two set-backs: the closed forms of a quarter round and a quarter conic.
+            using var cbox = Solid.Cuboid(40, 30, 20);
+            var cedge = cbox.Edges.First(e => e.Kind == "line" && e.Faces.Length == 2);
+            double cl = cbox.EdgeLength(cedge.Index, 1e-9).Value, quarter = 1 - Math.PI / 4, cr = 4.0 / Math.Sqrt(2.0);
+            using var chorded = cbox.FilletChord(new[] { cedge }, 4.0);
+            double vc = chorded.Mass(1e-6).Volume, wantC = 24000 - cl * cr * cr * quarter;
+            if (Math.Abs(vc - wantC) > 1e-6 * wantC) return Fail($"fillet_chord: volume {vc}, want {wantC}");
+            using var asym = cbox.FilletAsymmetric(new[] { cedge.Index }, cedge.Faces[0], 6.0, 2.0);
+            double va = asym.Mass(1e-6).Volume, wantA = 24000 - cl * 6 * 2 * quarter;
+            if (Math.Abs(va - wantA) > 1e-6 * wantA) return Fail($"fillet_asymmetric: volume {va}, want {wantA}");
+            (t, msg) = CsThrown(() => cbox.FilletChord(new[] { cedge }, 0.0));
+            if (t != nameof(BuildException) || !msg.Contains("the chord must be positive")) return Fail($"fillet_chord: a zero chord gave {t}: {msg}");
+            (t, msg) = CsThrown(() => cbox.FilletAsymmetric(new[] { cedge }, cedge.Faces[0], 6.0, 0.0));
+            if (t != nameof(BuildException) || !msg.Contains("distances must be positive")) return Fail($"fillet_asymmetric: a zero distance gave {t}: {msg}");
+            // A box's top full-rounded between its long sides (a half cylinder of radius 3), and a
+            // plate and boss's ridges rounded by rule: material away.
+            using var frRib = Solid.Cuboid(40, 6, 12);
+            int ribTop = frRib.SelectFace(Selector.Normal((0, 0, 1))), ribFront = frRib.SelectFace(Selector.Normal((0, -1, 0)));
+            int ribBack = frRib.SelectFace(Selector.Normal((0, 1, 0)));
+            using var frFullRound = frRib.FilletFullRound(ribFront, ribTop, ribBack);
+            double vf = frFullRound.Mass(1e-6).Volume, wantF = 40 * 6 * 12 - 40 * 9 * (2 - Math.PI / 2);
+            if (Math.Abs(vf - wantF) > 1e-3 * wantF) return Fail($"fillet_full_round: volume {vf}, want {wantF}");
+            (t, msg) = CsThrown(() => frRib.FilletFullRound(ribFront, frRib.Faces + 3, ribBack));
+            if (t != nameof(BuildException) || !msg.Contains("no such face")) return Fail($"fillet_full_round: a face past the last gave {t}: {msg}");
+            using var frPlate = Solid.Cuboid(40, 30, 5);
+            using var frBoss = Solid.Cylinder(6, 8);
+            using var frBossUp = frBoss.Translate(0, 0, 2.5);
+            using var frBossed = frPlate.Join(frBossUp);
+            double frBossedVolume = frBossed.Mass(1e-6).Volume;
+            using var frRidged = frBossed.FilletRule(Enumerable.Range(0, frBossed.Faces), 1.0, rule: EdgeRule.Convex, tolerance: 0.05);
+            if (frRidged.Mass(1e-6).Volume >= frBossedVolume) return Fail($"fillet_rule: convex at r 1 left volume {frRidged.Mass(1e-6).Volume} from {frBossedVolume}");
+            (t, msg) = CsThrown(() => frRib.FilletRule(Enumerable.Range(0, frRib.Faces), 1.0, rule: EdgeRule.Concave));
+            if (t != nameof(BuildException) || !msg.Contains("no edge between the faces matches the rule")) return Fail($"fillet_rule: a box's valleys gave {t}: {msg}");
             foreach (var c in rowsA.Concat(rowsB)) c.Dispose();
         }
         Console.WriteLine("sheets from curves: lofts, sweeps, patches, trims, joins, fillets, reports and refusals all read back");
@@ -6841,6 +7377,118 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             if (!Near(cuboid.FaceFrame((int)shot[0].Id)[9..12], new double[] { 1, 0, 0 }, 1e-9)) return Fail("face tree: the first face met is not the +x face");
         }
         Console.WriteLine("rtree: rays, triangle trees and a cuboid's face tree all read back");
+    }
+    // 4c2. polygon sets: Python's test_polygon_set_*, figure for figure
+    {
+        var owned = new List<IDisposable>();
+        T K<T>(T x) where T : IDisposable { owned.Add(x); return x; }
+        PolygonSet Bx(double x0, double y0, double x1, double y1) => K(PolygonSet.FromRings(new[] { (x0, y0), (x1, y0), (x1, y1), (x0, y1) }));
+        string PsRefused(Action act)
+        {
+            try { act(); return "(no exception)"; }
+            catch (BuildException e) { return e.Message; }
+        }
+        bool Ring(IReadOnlyList<(double X, double Y)> got, params (double, double)[] want) => got.SequenceEqual(want);
+        bool PsNear(double got, double want, double tol) => Math.Abs(got - want) <= tol;
+        // 1. booleans and measures
+        var pa = Bx(0, 0, 2, 2);
+        var pb = Bx(1, 1, 3, 3);
+        if (K(pa.Union(pb)).Area != 7.0 || K(pa.Intersection(pb)).Area != 1.0 || K(pa.Difference(pb)).Area != 3.0
+            || K(pa.SymmetricDifference(pb)).Area != 6.0)
+            return Fail("polygon set: the booleans' areas are not 7, 1, 3, 6");
+        if (pa.IntersectionArea(pb) != 1.0 || pa.DifferenceArea(pb) != 3.0) return Fail("polygon set: intersection/difference area are not 1, 3");
+        var tiles = new List<PolygonSet>();
+        for (var i = 0; i < 4; i++)
+            for (var j = 0; j < 3; j++) tiles.Add(Bx(i, j, i + 1, j + 1));
+        var tiled = K(PolygonSet.UnionAll(tiles));
+        if (tiled.Polygons.Count != 1 || tiled.Area != 12.0 || tiled.Perimeter != 14.0) return Fail($"polygon set union_all: {tiled}, perimeter {tiled.Perimeter}");
+        if (tiled.Bounds != (0.0, 0.0, 4.0, 3.0) || tiled.Centroid is not (double cx, double cy) || !PsNear(cx, 2.0, 1e-9) || !PsNear(cy, 1.5, 1e-9))
+            return Fail($"polygon set union_all: bounds {tiled.Bounds}, centroid {tiled.Centroid}");
+        var none = K(new PolygonSet());
+        if (!none.IsEmpty || none.Bounds is not null || none.Centroid is not null) return Fail("polygon set: the empty set has bounds or a centroid");
+        // 2. rings come back as written, or as shapely (GEOS 3.13) gives a verb's result
+        var room = K(PolygonSet.FromRings(new[] { (0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0), (0.0, 0.0) }));
+        var roomRings = room.Polygons;
+        if (roomRings.Count != 1 || !Ring(roomRings[0].Outer, (0, 0), (4, 0), (4, 3), (0, 3)) || roomRings[0].Holes.Count != 0)
+            return Fail("polygon set: a made room did not come back as written");
+        if (!Ring(K(room.Cleaned()).Polygons[0].Outer, (0, 0), (0, 3), (4, 3), (4, 0))) return Fail("polygon set: the cleaned room is not shapely's ring");
+        var cut = K(room.Difference(Bx(1, -1, 2, 4))).Polygons;
+        if (cut.Count != 2 || !Ring(cut[0].Outer, (0, 0), (0, 3), (1, 3), (1, 0)) || !Ring(cut[1].Outer, (4, 3), (4, 0), (2, 0), (2, 3)))
+            return Fail("polygon set: the cut room is not shapely's two rings");
+        var holed = K(Bx(0, 0, 10, 10).Difference(Bx(4, 4, 6, 6)));
+        var holedRings = holed.Polygons;
+        if (holedRings.Count != 1 || !Ring(holedRings[0].Outer.Take(2).ToList(), (0, 10), (10, 10))
+            || !Ring(holedRings[0].Holes[0].Take(2).ToList(), (6, 4), (6, 6)) || holed.Area != 96.0)
+            return Fail("polygon set: the holed square is not shapely's rings");
+        // 3. the buffer is shapely's (2.1 / GEOS 3.13)
+        var sq = Bx(0, 0, 10, 10);
+        if (!PsNear(K(sq.Buffer(-2)).Area, 36.0, 1e-12) || !K(sq.Buffer(-6)).IsEmpty) return Fail("polygon set buffer: the square shrunk by 2 or 6");
+        var dumbbell = K(PolygonSet.UnionAll(new[] { Bx(0, 0, 4, 4), Bx(4, 1.5, 8, 2.5), Bx(8, 0, 12, 4) }));
+        var shrunk = K(dumbbell.Buffer(-1));
+        if (shrunk.Polygons.Count != 2 || !PsNear(shrunk.Area, 8.088436436788012, 1e-9)) return Fail($"polygon set buffer: the dumbbell shrunk to {shrunk}");
+        var gap = K(PolygonSet.UnionAll(new[] { Bx(0, 0, 1, 1), Bx(1.5, 0, 2.5, 1) }));
+        var closedGap = K(K(gap.Buffer(0.3)).Buffer(-0.3));
+        if (!PsNear(closedGap.Area, 2.4057536390037235, 1e-9)) return Fail($"polygon set buffer: the gap closed to area {closedGap.Area:R}");
+        if (!PsNear(K(Bx(0, 0, 4, 3).Buffer(1, join: PolygonJoin.Mitre)).Area, 30.0, 30.0 * 1e-6)) return Fail("polygon set buffer: a mitred box is not 30");
+        var flat = K(PolygonSet.BufferPolyline(new[] { (0.0, 0.0), (4.0, 0.0) }, 0.5, cap: PolygonCap.Flat));
+        if (flat.Bounds != (0.0, -0.5, 4.0, 0.5)) return Fail($"polygon set buffer_polyline: a flat-capped line's bounds {flat.Bounds}");
+        var wobbly = PsRefused(() => sq.Buffer(1, join: (PolygonJoin)7).Dispose());
+        if (!wobbly.StartsWith("polygon_set_buffer: join")) return Fail($"polygon set buffer: an unknown join gave '{wobbly}'");
+        // 4. a profile goes across and back
+        using (var washer = Profile.Circle(10).WithHole(Profile.Circle(4)))
+        {
+            var s = K(PolygonSet.FromProfile(washer, 1e-3));
+            var exact = Math.PI * (100 - 16);
+            if (Math.Abs(s.Area - exact) >= exact * 1e-3 || s.Polygons[0].Holes.Count != 1) return Fail($"polygon set from profile: the washer is {s}");
+            var backs = s.ToProfiles();
+            foreach (var p in backs) owned.Add(p);
+            if (backs.Count != 1 || !PsNear(K(PolygonSet.FromProfile(backs[0], 1e-3)).Area, s.Area, 1e-9)) return Fail("polygon set to profiles: the washer did not come back");
+            var tol = PsRefused(() => PolygonSet.FromProfile(washer, -1).Dispose());
+            if (!tol.StartsWith("profile_polygon_set: tolerance")) return Fail($"polygon set from profile: tolerance -1 gave '{tol}'");
+        }
+        var plan = Bx(0, 0, 4, 3);
+        var walls = K(K(plan.Buffer(0.1, join: PolygonJoin.Mitre)).Difference(plan));
+        var wallRings = walls.ToProfiles();
+        foreach (var p in wallRings) owned.Add(p);
+        if (wallRings.Count != 1) return Fail($"polygon set to profiles: the walls are {wallRings.Count} profiles");
+        using (var wallSolid = Solid.Extrude(wallRings[0], Frame.Xy(), 2.5))
+            if (!PsNear(wallSolid.Mass().Volume, walls.Area * 2.5, walls.Area * 2.5 * 1e-6)) return Fail($"polygon set to profiles: the walls extruded to {wallSolid.Mass().Volume}");
+        if (none.ToProfiles().Count != 0) return Fail("polygon set to profiles: the empty set gave a profile");
+        // 5. the questions
+        var r = holed;
+        if (!r.Locate(new[] { (1.0, 1.0), (4.0, 5.0), (5.0, 5.0) }).SequenceEqual(new[] { 1, 0, -1 })) return Fail("polygon set locate: not inside, on, outside");
+        if (!r.Contains(Bx(0, 0, 1, 1)) || r.Contains(Bx(3, 3, 7, 7)) || r.Contains(Bx(4, 4, 6, 8)) || !r.Contains(Bx(4, 6, 6, 8))) return Fail("polygon set contains");
+        if (!r.Intersects(Bx(10, 0, 12, 1)) || r.Intersects(Bx(4.5, 4.5, 5.5, 5.5))) return Fail("polygon set intersects");
+        if (!r.ContainsPolyline(new[] { (1.0, 1.0), (9.0, 1.0) }) || r.ContainsPolyline(new[] { (1.0, 5.0), (9.0, 5.0) })
+            || r.ContainsPolyline(new[] { (0.0, 0.0), (10.0, 0.0) }))
+            return Fail("polygon set contains_polyline");
+        if (!r.IntersectsPolyline(new[] { (-1.0, 5.0), (11.0, 5.0) })) return Fail("polygon set intersects_polyline");
+        if (r.Distance(Bx(12, 0, 13, 1)) != 2.0 || r.DistanceToPoint((5, 5)) != 1.0 || r.BoundaryDistance((1, 1)) != 1.0
+            || r.DistanceToPolyline(new[] { (13.0, 0.0), (13.0, 10.0) }) != 3.0)
+            return Fail("polygon set: a distance is not 2, 1, 1, 3");
+        var clipped = r.ClipPolyline(new[] { (-1.0, 5.0), (11.0, 5.0) });
+        if (clipped.Count != 2 || !Ring(clipped[0], (0, 5), (4, 5)) || !Ring(clipped[1], (6, 5), (10, 5))) return Fail("polygon set clip_polyline");
+        var moved = K(r.Transformed(0, -1, 1, 0, 1, 2));
+        if (moved.Area != 96.0 || moved.Bounds != (-9.0, 2.0, 1.0, 12.0)) return Fail($"polygon set transformed: {moved}, bounds {moved.Bounds}");
+        var twoPoints = PsRefused(() => PolygonSet.FromRings(new[] { (0.0, 0.0), (1.0, 0.0) }).Dispose());
+        if (!twoPoints.Contains("ring 0 has 2 points")) return Fail($"polygon set from rings: two points gave '{twoPoints}'");
+        var nanPoint = PsRefused(() => r.Locate(new[] { (0.0, 0.0), (double.NaN, 0.0) }));
+        if (!nanPoint.Contains("point 1 is not finite")) return Fail($"polygon set locate: a NaN point gave '{nanPoint}'");
+        // 6. lifetime: a disposed set refuses
+        var gone = PolygonSet.FromRings(new[] { (0.0, 0.0), (1.0, 0.0), (1.0, 1.0) });
+        gone.Dispose();
+        gone.Dispose();
+        foreach (var (name, call) in new (string, Action)[] {
+            ("area", () => _ = gone.Area), ("polygons", () => _ = gone.Polygons), ("union", () => pa.Union(gone)),
+            ("union_all", () => PolygonSet.UnionAll(new[] { pa, gone })), ("clip", () => gone.ClipPolyline(new[] { (0.0, 0.0), (1.0, 1.0) })) })
+        {
+            string said;
+            try { call(); said = "(no exception)"; }
+            catch (ObjectDisposedException e) { said = e.Message; }
+            if (!said.StartsWith("polygon_set: closed")) return Fail($"polygon set {name}: a disposed set gave '{said}'");
+        }
+        Console.WriteLine($"polygon sets: booleans, rings, buffers, profiles, questions and lifetime all read back ({owned.Count} sets and profiles)");
+        foreach (var o in owned) o.Dispose();
     }
     // 4d. the interpolator: Python's test_interpolator_*, trimmed to what proves the marshalling
     {
@@ -7286,6 +7934,27 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
         if (!notFlat.StartsWith("flat_pattern: ")) return Fail($"flat pattern: a cube gave '{notFlat}'");
         var ball = Refused(() => { using var s = Solid.Sphere(5); s.Unroll(); });
         if (!ball.StartsWith("unroll: ")) return Fail($"unroll: a sphere gave '{ball}'");
+        // Python's test_sheet_metal_a_hem_a_fold_and_a_contour (rope and double) and
+        // test_sheet_metal_a_lofted_flange_unfolds.
+        var hemEdge = rim.Take(1).ToList();
+        using (var rope = smPlate.SheetHem(hemEdge, HemKind.Rope, 0, rule, gap: 2))
+            if (rope.SheetInfo().Bends.Count != 2) return Fail($"sheet hem: a rope hem has {rope.SheetInfo().Bends.Count} bends, not its curl's two halves");
+        using (var twice = smPlate.SheetHem(hemEdge, HemKind.Double, 8, rule))
+            if (twice.SheetInfo().Bends.Count != 2) return Fail($"sheet hem: a double hem has {twice.SheetInfo().Bends.Count} bends, not 2");
+        var loftBottom = new[] { (-10.0, -10.0, 0.0), (10.0, -10.0, 0.0), (10.0, 10.0, 0.0), (-10.0, 10.0, 0.0) };
+        var loftTop = new[] { (-15.0, -15.0, 20.0), (15.0, -15.0, 20.0), (15.0, 15.0, 20.0), (-15.0, 15.0, 20.0) };
+        using (var hopper = Solid.SheetLoftedFlange(loftBottom, loftTop, rule))
+        {
+            var hInfo = hopper.SheetInfo();
+            if (hInfo.Bends.Count != 2) return Fail($"sheet lofted flange: the hopper has {hInfo.Bends.Count} bends, not 2");
+            using var hFlat = hopper.FlatPattern(hInfo.FixedFace, rule);
+            using var hOutline = hFlat.Profile;
+            using var hAgain = Solid.FoldFlat(hOutline, hFlat.FoldBends, rule, hFlat.Frame);
+            if (!SmNear(hAgain.Mass().Volume, hopper.Mass().Volume, 1e-6))
+                return Fail($"sheet lofted flange: folded back to {hAgain.Mass().Volume}, not the hopper's {hopper.Mass().Volume}");
+        }
+        var onePoint = Refused(() => Solid.SheetLoftedFlange(new[] { (0.0, 0.0, 0.0) }, loftTop, rule).Dispose());
+        if (!onePoint.StartsWith("sheet_lofted_flange: ")) return Fail($"sheet lofted flange: a one-point profile gave '{onePoint}'");
         // Rips, join and corner breaks on the plate: a rip 40 long and 0.5 wide through the 1 thick
         // wall; the four thickness edges (on neither broad face) rounded 3, two chamfered 2.
         using (var smRipped = smPlate.SheetRipPoints(top, new double[] { 0, -20, 0 }, new double[] { 0, 20, 0 }, 0.5))
@@ -7304,7 +7973,7 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
             if (!SmNear(smChamfered.Mass().Volume, 2400 - 4, 1e-6)) return Fail($"sheet chamfer: volume {smChamfered.Mass().Volume}, not 2396");
         var smSelfJoin = Refused(() => smPlate.SheetJoin(smCorners[0], smCorners[0], rule).Dispose());
         if (!smSelfJoin.StartsWith("sheet_join: ")) return Fail($"sheet join: an edge with itself gave '{smSelfJoin}'");
-        Console.WriteLine($"sheet metal: a 60 x 40 tray, 4 bends, flat {wantFlat:G10}, dxf + page, folded back; a plate ripped, rounded and chamfered; a can unrolled to {un.Faces.Count} faces; refusals");
+        Console.WriteLine($"sheet metal: a 60 x 40 tray, 4 bends, flat {wantFlat:G10}, dxf + page, folded back; a plate ripped, rounded and chamfered; a can unrolled to {un.Faces.Count} faces; refusals; rope + double hems; a lofted hopper");
     }
     // 4i. curves as objects: crates/cadaclysm-blacksmith-capi/tests/curve_objects_abi.rs's closed forms
     {
@@ -7499,6 +8168,105 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
         var nan = Refused(() => sq.Contains((double.NaN, 0)));
         if (!nan.StartsWith("profile_contains: ")) return Fail($"profile contains: a NaN point gave '{nan}'");
         Console.WriteLine($"profile toolkit: union 175, difference 75, regions [25, 75, 75]; contains, six relations, deviation; offsets sharp {sharp:G6} chamfer {chamfer:G6} smooth {smooth:G6}; polyline tools; refusal");
+    }
+    // 4i. squish: the C ABI's squish_abi.rs -- a half ball squished apart (the disk exactly, the
+    // dome with its distortion), the dome alone compress-only with a point, both faces refused.
+    {
+        using var sqBall = Solid.Sphere(5);
+        using var sqBlock = Solid.Cuboid(20, 20, 10);
+        using var sqBelow = sqBlock.Translate(0, 0, -5);
+        using var half = sqBall.Cut(sqBelow, null);
+        if (half.Faces != 2) return Fail($"squish: the half ball has {half.Faces} faces, not 2");
+        var apart = half.Squish(explode: true);
+        using (apart.Sheet)
+        {
+            if (apart.Faces.Count != 2 || apart.Distortion.Count != 2 || apart.Exact.Count != 1 || apart.Sheet.Faces != 2)
+                return Fail($"squish: {apart}");
+        }
+        var disk = apart.Faces[0] == apart.Exact[0] ? 0 : 1;
+        var dome = 1 - disk;
+        if (Math.Abs(apart.Distortion[disk].AreaMean - 1) > 1e-6) return Fail($"squish: the disk's area mean {apart.Distortion[disk].AreaMean}, not 1");
+        var dd = apart.Distortion[dome];
+        // The dome's rim kept: its area near half the dome's, every triangle the right way up.
+        if (!(dd.AreaMin > 0 && dd.AreaMin <= dd.AreaMean && dd.AreaMean <= dd.AreaMax) || dd.AreaMean < 0.45 || dd.AreaMean > 0.7)
+            return Fail($"squish: the dome's distortion {dd}");
+        var pole = half.Squish(new[] { apart.Faces[dome] }, points: new[] { new double[] { 0, 0, 5 }, new double[] { 50, 50, 50 } },
+            deformation: SquishDeformation.CompressOnly, preserveBoundary: false);
+        using (pole.Sheet)
+        {
+            if (pole.Distortion.Count != 1 || pole.Distortion[0].LengthMin < 1)
+                return Fail($"squish: compress only, but {string.Join("; ", pole.Distortion)}");
+            if (pole.Points.Count != 2 || pole.Points[0] is not { } q0 || Math.Abs(q0[2]) > 1e-9 || pole.Points[1] is not null || pole.Curves.Count != 0)
+                return Fail($"squish: points {string.Join("; ", pole.Points.Select(p => p is null ? "none" : string.Join(", ", p)))}");
+        }
+        var closed = Refused(() => half.Squish());
+        if (!closed.StartsWith("squish: ") || !closed.Contains("closed")) return Fail($"squish: both faces gave '{closed}'");
+        Console.WriteLine($"squish: a half ball apart (disk exact, dome area mean {dd.AreaMean:G6}), the dome compress-only (length min {pole.Distortion[0].LengthMin:G6}) with a point; refusal");
+    }
+    // 4j. from_mesh: Python's test_from_mesh_* -- a unit cube's 12 triangles made a box
+    // (prismatic, planes and faceted), less a triangle an open shell, a stray index and an unknown
+    // mode refused; a bored block's mesh back with a cylinder (from_mesh.rs's a_bore_comes_back_a_cylinder);
+    // and a STEP cube's node read back through the reader's mesh.
+    {
+        var fmPositions = new double[] { 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1 };
+        var fmTriangles = new uint[] { 0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7 };
+        var (fmCube, fmR) = Solid.FromMesh(fmPositions, fmTriangles);
+        using (fmCube)
+        {
+            if (fmR != new FromMeshReport(true, 6, 12, 8, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0)) return Fail($"from_mesh: the cube gave {fmR}");
+            if (fmCube.Faces != 6 || fmCube.Edges.Count != 12 || Math.Abs(fmCube.Mass().Volume - 1) > 1e-9)
+                return Fail($"from_mesh: the cube is {fmCube.Faces} faces, {fmCube.Edges.Count} edges, volume {fmCube.Mass().Volume}");
+        }
+        var (fmPlanes, fmP) = Solid.FromMesh(fmPositions, fmTriangles, mode: FromMeshMode.Planes);
+        using (fmPlanes)
+            if (fmP != new FromMeshReport(true, 6, 12, 8, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0)) return Fail($"from_mesh: planes gave {fmP}");
+        var (fmFaceted, fmF) = Solid.FromMesh(fmPositions, fmTriangles, mode: FromMeshMode.Faceted, angleTolerance: double.NaN);
+        using (fmFaceted)
+            if (!fmF.Closed || fmF.Faces != 12 || fmF.Edges != 18 || fmF.Vertices != 8 || fmF.Planes != 0 || fmFaceted.Faces != 12)
+                return Fail($"from_mesh: faceted gave {fmF}");
+        var (fmSheet, fmS) = Solid.FromMesh(fmPositions, fmTriangles[3..]);
+        using (fmSheet)
+            if (fmS.Closed || fmS.Holes != 1 || fmS.BoundaryEdges != 3 || fmS.NonManifoldEdges != 0 || fmSheet.Faces != 6)
+                return Fail($"from_mesh: less a triangle gave {fmS}");
+        var fmStray = Refused(() => Solid.FromMesh(fmPositions, new uint[] { 0, 1, 8 }));
+        if (!fmStray.StartsWith("from_mesh: a triangle index is out of range")) return Fail($"from_mesh: a stray index gave '{fmStray}'");
+        var fmNone = Refused(() => Solid.FromMesh(fmPositions, Array.Empty<uint>()));
+        if (!fmNone.StartsWith("from_mesh: no triangles")) return Fail($"from_mesh: no triangles gave '{fmNone}'");
+        var fmMode = Refused(() => Solid.FromMesh(fmPositions, fmTriangles, mode: (FromMeshMode)3));
+        if (!fmMode.StartsWith("from_mesh: mode 3 is not one of")) return Fail($"from_mesh: mode 3 gave '{fmMode}'");
+        // A 4 x 4 x 2 block less a radius-1 pin, meshed at 0.01: the bore comes back as cylinder
+        // faces, 6 planes besides (a plain cylinder's mesh has no ruling seam, so it stays planes).
+        using (var fmBlock = Solid.Cuboid(4, 4, 2))
+        using (var fmPin = Solid.Cylinder(1, 4))
+        using (var fmPinAt = fmPin.Translate(0, 0, -2))
+        using (var fmBored = fmBlock.Cut(fmPinAt, 1e-4))
+        {
+            var fmMesh = fmBored.Mesh64(0.01).Copy();
+            var (fmBack, fmB) = Solid.FromMesh(fmMesh.Positions, fmMesh.Indices);
+            using (fmBack)
+                if (!fmB.Closed || fmB.Planes != 6 || fmB.Cylinders < 1 || fmB.Faces != 6 + fmB.Cylinders
+                    || Math.Abs(fmBack.Mass().Volume - (32 - 2 * Math.PI)) > 0.01)
+                    return Fail($"from_mesh: the bored block gave {fmB}, volume {fmBack.Mass().Volume}");
+        }
+        var fmStep = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cadaclysm-smoke-from-mesh-{Environment.ProcessId}.stp");
+        using (var unit = Solid.Cuboid(1, 1, 1)) unit.Step(fmStep);
+        try
+        {
+            using var fmScene = Cadaclysm.Cadaclysm.Open(fmStep);
+            var fmNode = fmScene.Nodes.First(n => n.Mesh64 is { } m && m.Indices.Length > 0);
+            var (fmRead, fmN) = Solid.FromMeshNode(fmNode);
+            using (fmRead)
+                if (!fmN.Closed || fmN.Faces != 6 || fmN.Edges != 12 || Math.Abs(fmRead.Mass().Volume - 1) > 1e-6)
+                    return Fail($"from_mesh_node: the STEP cube gave {fmN}");
+            var (fmReadFaceted, fmNf) = Solid.FromMeshNode(fmNode, mode: FromMeshMode.Faceted);
+            using (fmReadFaceted)
+                if (!fmNf.Closed || fmNf.Faces != 12 || fmNf.Edges != 18) return Fail($"from_mesh_node: faceted gave {fmNf}");
+            var (fmReadPlanes, fmNp) = Solid.FromMeshNode(fmNode, mode: FromMeshMode.Planes);
+            using (fmReadPlanes)
+                if (!fmNp.Closed || fmNp.Faces != 6 || fmNp.Edges != 12 || fmNp.Planes != 6) return Fail($"from_mesh_node: planes gave {fmNp}");
+        }
+        finally { System.IO.File.Delete(fmStep); }
+        Console.WriteLine("from_mesh: a cube prismatic and planes (6 faces, 12 edges, volume 1) and faceted (12, 18), less a triangle open (1 hole, 3 boundary edges), refusals, a bored block's bore a cylinder; a STEP cube's node 6 faces, 12 edges");
     }
     // 5. containment, one-shot and classifier
     using (var box = Solid.Cuboid(2, 3, 4))

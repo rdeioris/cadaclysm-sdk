@@ -77,7 +77,7 @@ for (const node of scene.nodes()) {
   console.log(node.label, mesh.triangleCount, 'triangles', node.bounds.size);
   node.saveMesh(`${node.index}.stl`);
 }
-scene.save('model.glb');                  // the whole scene: 'glb', 'gltf', 'obj', 'usda' or '3dm'
+scene.save('model.glb');                  // the whole scene: 'glb', 'gltf', 'obj', 'usda', '3mf', 'ply' or '3dm'
 scene.close();
 ```
 

@@ -399,10 +399,12 @@ internal struct RawOpenOptions
     // showed up elsewhere as heap corruption on one open in three.
     public IntPtr Pick;
     public IntPtr PickUser;
-    // Last in the header. Declared because init writes it: a struct one field short
+    // Declared because init writes it: a struct one field short
     // takes a write past its end, which is the heap corruption PickUser once caused.
     // `Open`'s `lightmapResolution`.
     public uint LightmapResolution;
+    // `Open`'s `recognizeTolerance` (sequential layout pads it to 8).
+    public double RecognizeTolerance;
 }
 
 /// <summary>`CadaclysmSvgOptions`. Field order and `Size` are the contract, as <see
@@ -630,6 +632,41 @@ internal struct RawCollisionHull
     public IntPtr Indices;
     public uint VertexCount;
     public uint IndexCount;
+}
+
+/// <summary>`CadaclysmMaterial`, written through a pointer by `cadaclysm_node_material` -- no
+/// marshalling, so the fixed buffers and the one-byte `bool` are the header's own layout.
+/// Pinned against the header by `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RawMaterial
+{
+    public IntPtr Name;
+    public fixed float BaseColor[4];
+    public float Metallic;
+    public float Roughness;
+    public uint AlphaMode;
+    public float AlphaCutoff;
+    [MarshalAs(UnmanagedType.I1)] public bool DoubleSided;
+    public uint BaseColorImage;
+    public uint BaseColorUvSet;
+    public fixed float UvOffset[2];
+    public float UvRotation;
+    public fixed float UvScale[2];
+    public uint WrapU;
+    public uint WrapV;
+    public uint MagFilter;
+    public uint MinFilter;
+}
+
+/// <summary>`CadaclysmImage`, written through a pointer by `cadaclysm_image`. Pinned against the
+/// header by `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawImage
+{
+    public IntPtr Bytes;
+    public nuint Size;
+    public IntPtr Mime;
+    public IntPtr Name;
 }
 
 // Field order must match the header's CadaclysmAttribute exactly.
@@ -1118,6 +1155,11 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_id(SceneHandle scene, uint node);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_node_color(SceneHandle scene, uint node, [Out] float[] rgba);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static unsafe extern bool cadaclysm_node_material(SceneHandle scene, uint node, RawMaterial* outMaterial);
+    [DllImport(Lib)] internal static extern uint cadaclysm_image_count(SceneHandle scene);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static unsafe extern bool cadaclysm_image(SceneHandle scene, uint image, RawImage* outImage);
     [DllImport(Lib)] internal static extern void cadaclysm_node_transform(SceneHandle scene, uint node,
         [Out] double[] outMatrix);
     [DllImport(Lib)] internal static extern uint cadaclysm_node_attribute_count(SceneHandle scene, uint node);
@@ -1826,6 +1868,95 @@ public sealed class Collision
 
     /// <summary>`none`, `box`, `sphere`, `capsule`, `cylinder` or `hull`.</summary>
     public string ShapeName => Shape < Names.Length ? Names[Shape] : Shape.ToString();
+}
+
+/// <summary>A part's PBR metallic-roughness material, as glTF 2.0 defines one (<see
+/// cref="Node.Material"/>). Plain data, copied out.</summary>
+/// <remarks><see cref="BaseColor"/> is the base colour factor, RGBA in **linear** light (the
+/// node's <see cref="Node.Colour"/> is the same factor in display space). <see
+/// cref="BaseColorImage"/> is the <see cref="Scene.Image"/> index the base colour texture reads,
+/// or null for an untextured material (and for a texture whose image the library does not
+/// read, such as WebP). The texture reads texture coordinates set <see cref="BaseColorUvSet"/>
+/// (0 the mesh's `Uvs`) through `KHR_texture_transform`: <see cref="UvOffset"/>, <see
+/// cref="UvRotation"/> (radians) and <see cref="UvScale"/>. <see cref="AlphaMode"/> is
+/// `opaque`, `mask` (cut below <see cref="AlphaCutoff"/>) or `blend`; <see cref="WrapU"/> and
+/// <see cref="WrapV"/> `repeat`, `mirrored_repeat` or `clamp_to_edge`; <see cref="MagFilter"/>
+/// and <see cref="MinFilter"/> `linear` or `nearest`.</remarks>
+public sealed class Material
+{
+    private static readonly string[] Alphas = { "opaque", "mask", "blend" };
+    private static readonly string[] Wraps = { "repeat", "mirrored_repeat", "clamp_to_edge" };
+    private static readonly string[] Filters = { "linear", "nearest" };
+
+    public string Name { get; }
+    public float[] BaseColor { get; }
+    public float Metallic { get; }
+    public float Roughness { get; }
+    public string AlphaMode { get; }
+    public float AlphaCutoff { get; }
+    public bool DoubleSided { get; }
+    public uint? BaseColorImage { get; }
+    public uint BaseColorUvSet { get; }
+    public float[] UvOffset { get; }
+    public float UvRotation { get; }
+    public float[] UvScale { get; }
+    public string WrapU { get; }
+    public string WrapV { get; }
+    public string MagFilter { get; }
+    public string MinFilter { get; }
+
+    internal unsafe Material(in RawMaterial raw)
+    {
+        static string Named(string[] table, uint value) => value < table.Length ? table[value] : value.ToString();
+
+        Name = Marshal.PtrToStringUTF8(raw.Name) ?? "";
+        BaseColor = new float[4];
+        UvOffset = new float[2];
+        UvScale = new float[2];
+        fixed (RawMaterial* p = &raw)
+        {
+            for (var i = 0; i < 4; i++) BaseColor[i] = p->BaseColor[i];
+            for (var i = 0; i < 2; i++) UvOffset[i] = p->UvOffset[i];
+            for (var i = 0; i < 2; i++) UvScale[i] = p->UvScale[i];
+        }
+        Metallic = raw.Metallic;
+        Roughness = raw.Roughness;
+        AlphaMode = Named(Alphas, raw.AlphaMode);
+        AlphaCutoff = raw.AlphaCutoff;
+        DoubleSided = raw.DoubleSided;
+        BaseColorImage = raw.BaseColorImage == uint.MaxValue ? null : raw.BaseColorImage;
+        BaseColorUvSet = raw.BaseColorUvSet;
+        UvRotation = raw.UvRotation;
+        WrapU = Named(Wraps, raw.WrapU);
+        WrapV = Named(Wraps, raw.WrapV);
+        MagFilter = Named(Filters, raw.MagFilter);
+        MinFilter = Named(Filters, raw.MinFilter);
+    }
+
+    public override string ToString() =>
+        $"Material('{Name}', base_color=({string.Join(", ", BaseColor)}), image={(BaseColorImage?.ToString() ?? "None")}, alpha={AlphaMode})";
+}
+
+/// <summary>An image a material names (<see cref="Scene.Image"/>), **encoded** as the file held
+/// it: <see cref="Data"/> the PNG, JPEG, WebP or KTX2 bytes (copied out), <see cref="Mime"/> `image/png`,
+/// `image/jpeg`, `image/webp` or `image/ktx2` (for an image the library does not read, what the file declared), <see
+/// cref="Name"/> its name in the file.</summary>
+public sealed class Image
+{
+    public byte[] Data { get; }
+    public string Mime { get; }
+    public string Name { get; }
+
+    internal Image(in RawImage raw)
+    {
+        var size = checked((int)raw.Size);
+        Data = new byte[raw.Bytes == IntPtr.Zero ? 0 : size];
+        if (Data.Length > 0) Marshal.Copy(raw.Bytes, Data, 0, Data.Length);
+        Mime = Marshal.PtrToStringUTF8(raw.Mime) ?? "";
+        Name = Marshal.PtrToStringUTF8(raw.Name) ?? "";
+    }
+
+    public override string ToString() => $"Image('{Name}', {Mime}, {Data.Length} bytes)";
 }
 
 /// <summary>A node's convex hull for a physics engine, as triangles -- a view over the
@@ -4019,6 +4150,17 @@ public sealed class Node : IEquatable<Node>
         }
     }
 
+    /// <summary>This part's PBR material (a glTF primitive's), or null -- every part of every
+    /// other format. Its own, else its shape's, as <see cref="Colour"/> resolves.</summary>
+    public unsafe Material? Material
+    {
+        get
+        {
+            RawMaterial raw;
+            return Native.cadaclysm_node_material(Scene.Handle, Index, &raw) ? new Material(in raw) : null;
+        }
+    }
+
     /// <summary>Where this node's geometry sits, as a row-major 4x4 double matrix -- `M[0..2,
     /// 0..2]` the rotation and scale block, `M[0..2, 3]` the offset.</summary>
     public double[,] Transform => Matrices.ToRowMajor(RawTransform);
@@ -4467,6 +4609,21 @@ public sealed class Scene : IDisposable
     /// </summary>
     public double MetresPerUnit => Native.cadaclysm_metres_per_unit(Handle);
 
+    /// <summary>How many images the scene's materials name (<see cref="Image"/>); 0 for every
+    /// format but glTF.</summary>
+    public uint ImageCount => Native.cadaclysm_image_count(Handle);
+
+    /// <summary>Image <paramref name="index"/> (0 to <see cref="ImageCount"/> - 1), encoded as the
+    /// file held it -- the <see cref="Material.BaseColorImage"/> a material names. Throws <see
+    /// cref="ArgumentOutOfRangeException"/> past the last.</summary>
+    public unsafe Image Image(uint index)
+    {
+        RawImage raw;
+        if (!Native.cadaclysm_image(Handle, index, &raw))
+            throw new ArgumentOutOfRangeException(nameof(index), $"image {index}: the scene has {ImageCount}");
+        return new Image(in raw);
+    }
+
     /// <summary>What the file declares about its own precision, as <see cref="Cadaclysm.Tolerances"/>:
     /// the absolute tolerance in the file's own unit (beside <see cref="MetresPerUnit"/>, whatever
     /// convention the scene was opened into) and the angular one in radians, null for one it does
@@ -4836,7 +4993,8 @@ public sealed class Scene : IDisposable
     /// the float mesh and the line views are the library's own caches and outlive one.</summary>
     internal ulong Forgets { get; private set; }
 
-    /// <summary>Write the whole scene to `path`: "glb", "gltf" or "obj" -- every placement of
+    /// <summary>Write the whole scene to `path`: "glb", "gltf", "obj", "usda", "3mf", "ply"
+    /// (binary) or "ply-ascii" (PLY bakes every placement into one body) -- every placement of
     /// every shape, named and placed as the tree is, unlike <see cref="Node.SaveMesh"/> which
     /// writes one node's mesh on its own.</summary>
     public void Save(string path, string format = "glb")
@@ -5120,7 +5278,8 @@ public static class Cadaclysm
         return ((uint)Math.Round(rgb[0] * 255) << 16) | ((uint)Math.Round(rgb[1] * 255) << 8) | (uint)Math.Round(rgb[2] * 255);
     }
 
-    private static RawOpenOptions BuildOptions(Convention convention, bool colours, double sourceMetresPerUnit, uint lightmapResolution)
+    private static RawOpenOptions BuildOptions(Convention convention, bool colours, double sourceMetresPerUnit, uint lightmapResolution,
+        double recognizeTolerance)
     {
         var options = new RawOpenOptions();
         Native.cadaclysm_open_options_init(ref options);
@@ -5131,6 +5290,8 @@ public static class Cadaclysm
         options.Colors = colours ? 1u : 0u;
         options.SourceMetersPerUnit = sourceMetresPerUnit;
         options.LightmapResolution = lightmapResolution;
+        // Not checked here: the library refuses a negative, NaN or infinite tolerance by name.
+        options.RecognizeTolerance = recognizeTolerance;
         return options;
     }
 
@@ -5174,13 +5335,17 @@ public static class Cadaclysm
     /// <param name="lightmapResolution">A lightmap atlas for a texture that many texels on a side,
     /// one chart per B-rep face, read back as <see cref="Node.LightmapUvs"/>; 0 (the default) for
     /// none.</param>
+    /// <param name="recognizeTolerance">Recognize every B-rep body (<see cref="Node.Brep"/>) at
+    /// this tolerance, as <see cref="Brep.Recognize"/> would; 0 (the default) is off, 1e-6 the
+    /// usual ask. Meshes are unchanged.</param>
     public static Scene Open(string path, Convention convention = Convention.Native, string? schema = null,
-        bool colours = false, double sourceMetresPerUnit = 0, uint lightmapResolution = 0)
+        bool colours = false, double sourceMetresPerUnit = 0, uint lightmapResolution = 0,
+        double recognizeTolerance = 0)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
             throw new CadaclysmException($"{path}: no such file");
 
-        var options = BuildOptions(convention, colours, sourceMetresPerUnit, lightmapResolution);
+        var options = BuildOptions(convention, colours, sourceMetresPerUnit, lightmapResolution, recognizeTolerance);
 
         // A directory goes over whole rather than being narrowed to one file here: the
         // library walks it and keys each schema under the name that schema itself declares.
@@ -5209,7 +5374,7 @@ public static class Cadaclysm
 
     /// <summary>Open a CAD file already in bytes.</summary>
     /// <param name="format">The kind as an extension would name it -- "step", "ifc", "igs",
-    /// "brep", "3dm", "scad". Defaults to <paramref name="name"/>'s own extension, since there
+    /// "brep", "3dm", "scad", "3mf", "ply". Defaults to <paramref name="name"/>'s own extension, since there
     /// is otherwise no file name to take it from -- Python's `open_memory` has no such
     /// default and always requires the caller to state it; this binding infers one because
     /// the smoke this binding is built against opens memory by name alone.</param>
@@ -5218,12 +5383,15 @@ public static class Cadaclysm
     /// <param name="lightmapResolution">A lightmap atlas for a texture that many texels on a side,
     /// one chart per B-rep face, read back as <see cref="Node.LightmapUvs"/>; 0 (the default) for
     /// none.</param>
+    /// <param name="recognizeTolerance">Recognize every B-rep body (<see cref="Node.Brep"/>) at
+    /// this tolerance, as <see cref="Brep.Recognize"/> would; 0 (the default) is off, 1e-6 the
+    /// usual ask. Meshes are unchanged.</param>
     public static unsafe Scene OpenMemory(ReadOnlySpan<byte> bytes, string name, string? format = null,
         string? schema = null, Convention convention = Convention.Native, bool colours = false,
-        uint lightmapResolution = 0)
+        uint lightmapResolution = 0, double recognizeTolerance = 0)
     {
         format ??= Path.GetExtension(name).TrimStart('.');
-        var options = BuildOptions(convention, colours, 0, lightmapResolution);
+        var options = BuildOptions(convention, colours, 0, lightmapResolution, recognizeTolerance);
         IntPtr list = IntPtr.Zero, text = IntPtr.Zero;
         try
         {

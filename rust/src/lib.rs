@@ -920,6 +920,75 @@ impl Beziers64Data {
 }
 
 /// What a node turned out to be for a physics engine: a box, sphere, capsule or
+/// A part's PBR metallic-roughness material, as glTF 2.0 defines one ([`Node::material`]).
+/// Plain data, copied out.
+///
+/// `base_color` is the base colour factor, RGBA in **linear** light (glTF's own space; the
+/// node's [`Node::colour`] is the same factor in display space). `base_color_image` is the
+/// [`Scene::image`] the base colour texture reads, or `None` for an untextured material (and
+/// for a texture whose image the library does not read, such as WebP). The texture reads
+/// texture coordinates set `base_color_uv_set` (0 the mesh's `uvs`) through
+/// `KHR_texture_transform`: `uv_offset`, `uv_rotation` (radians) and `uv_scale`.
+/// `alpha_mode` is `"opaque"`, `"mask"` (cut below `alpha_cutoff`) or `"blend"`; `wrap_u`
+/// and `wrap_v` `"repeat"`, `"mirrored_repeat"` or `"clamp_to_edge"`; `mag_filter` and
+/// `min_filter` `"linear"` or `"nearest"` -- Python's names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Material {
+    pub name: String,
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub alpha_mode: &'static str,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
+    pub base_color_image: Option<u32>,
+    pub base_color_uv_set: u32,
+    pub uv_offset: [f32; 2],
+    pub uv_rotation: f32,
+    pub uv_scale: [f32; 2],
+    pub wrap_u: &'static str,
+    pub wrap_v: &'static str,
+    pub mag_filter: &'static str,
+    pub min_filter: &'static str,
+}
+
+impl Material {
+    fn from_raw(raw: &sys::CadaclysmMaterial) -> Material {
+        let named = |table: &[&'static str], v: u32| table.get(v as usize).copied().unwrap_or("unknown");
+        const ALPHA: [&str; 3] = ["opaque", "mask", "blend"];
+        const WRAP: [&str; 3] = ["repeat", "mirrored_repeat", "clamp_to_edge"];
+        const FILTER: [&str; 2] = ["linear", "nearest"];
+        Material {
+            name: unsafe { text(raw.name) },
+            base_color: raw.base_color,
+            metallic: raw.metallic,
+            roughness: raw.roughness,
+            alpha_mode: named(&ALPHA, raw.alpha_mode),
+            alpha_cutoff: raw.alpha_cutoff,
+            double_sided: raw.double_sided,
+            base_color_image: (raw.base_color_image != NONE).then_some(raw.base_color_image),
+            base_color_uv_set: raw.base_color_uv_set,
+            uv_offset: raw.uv_offset,
+            uv_rotation: raw.uv_rotation,
+            uv_scale: raw.uv_scale,
+            wrap_u: named(&WRAP, raw.wrap_u),
+            wrap_v: named(&WRAP, raw.wrap_v),
+            mag_filter: named(&FILTER, raw.mag_filter),
+            min_filter: named(&FILTER, raw.min_filter),
+        }
+    }
+}
+
+/// An image a material names ([`Scene::image`]), **encoded** as the file held it: `data` the
+/// PNG, JPEG, WebP or KTX2 bytes (copied out), `mime` `"image/png"`, `"image/jpeg"`, `"image/webp"` or `"image/ktx2"` (for an image the
+/// library does not read, what the file declared), `name` its name in the file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Image {
+    pub data: Vec<u8>,
+    pub mime: String,
+    pub name: String,
+}
+
 /// cylinder where one fits within `error`, else a convex hull. `frame` (column-major)
 /// and `half_extent` are always the true oriented box. Plain data, copied out.
 #[derive(Clone, Debug, PartialEq)]
@@ -4202,6 +4271,14 @@ impl<'s> Node<'s> {
         })
     }
 
+    /// This part's PBR material (a glTF primitive's), or `None` -- every part of every other
+    /// format. Its own, else its shape's, as [`Node::colour`] resolves.
+    pub fn material(&self) -> Option<Material> {
+        let mut raw = std::mem::MaybeUninit::<sys::CadaclysmMaterial>::uninit();
+        let ok = unsafe { (self.scene.api.cadaclysm_node_material)(self.scene.raw(), self.index, raw.as_mut_ptr()) };
+        ok.then(|| Material::from_raw(unsafe { &raw.assume_init() }))
+    }
+
     /// The convex hull [`Node::collision`] counted, as triangles, copied out. Empty for
     /// a node that draws nothing.
     pub fn collision_hull(&self, hull_budget: u32) -> CollisionHull {
@@ -4772,6 +4849,23 @@ impl Scene {
         rows(&out)
     }
 
+    /// How many images the scene's materials name ([`Scene::image`]); 0 for every format
+    /// but glTF.
+    pub fn image_count(&self) -> u32 {
+        unsafe { (self.api.cadaclysm_image_count)(self.raw()) }
+    }
+
+    /// Image `index` (0 to [`Scene::image_count`] - 1), encoded as the file held it -- the
+    /// `base_color_image` a [`Material`] names. An error past the last.
+    pub fn image(&self, index: u32) -> Result<Image> {
+        let mut raw = sys::CadaclysmImage { bytes: ptr::null(), size: 0, mime: ptr::null(), name: ptr::null() };
+        if !unsafe { (self.api.cadaclysm_image)(self.raw(), index, &mut raw) } {
+            return Err(Error::new(format!("image {index}: the scene has {}", self.image_count())));
+        }
+        let data = if raw.bytes.is_null() || raw.size == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(raw.bytes, raw.size) }.to_vec() };
+        Ok(Image { data, mime: unsafe { text(raw.mime) }, name: unsafe { text(raw.name) } })
+    }
+
     /// What this file held that the reader could not build.
     pub fn diagnostics(&self) -> Vec<String> {
         let count = unsafe { (self.api.cadaclysm_diagnostic_count)(self.raw()) };
@@ -5111,7 +5205,8 @@ impl Scene {
         unsafe { (self.api.cadaclysm_forget_meshes)(self.raw().cast_mut()) }
     }
 
-    /// Write the whole scene to `path`: `"glb"`, `"gltf"` or `"obj"` -- every placement
+    /// Write the whole scene to `path`: `"glb"`, `"gltf"`, `"obj"`, `"usda"`, `"3mf"`, `"ply"`
+    /// (binary) or `"ply-ascii"` (PLY bakes every placement into one body) -- every placement
     /// of every shape, named and placed as the tree is, in the convention it was opened
     /// with. [`Node::save_mesh`] writes one node's mesh on its own instead.
     pub fn save(&self, path: impl AsRef<Path>, format: &str) -> Result<()> {
@@ -5239,6 +5334,7 @@ pub struct OpenOptions {
     source_metres_per_unit: f64,
     name: Option<String>,
     lightmap_resolution: u32,
+    recognize_tolerance: f64,
 }
 
 impl OpenOptions {
@@ -5250,6 +5346,15 @@ impl OpenOptions {
     /// texel, read back as [`Node::lightmap_uvs`]. 0, the default, is none.
     pub fn lightmap_resolution(mut self, texels: u32) -> OpenOptions {
         self.lightmap_resolution = texels;
+        self
+    }
+
+    /// Recognize every B-rep body the scene hands out ([`Node::brep`]) at this tolerance, as
+    /// [`Brep::recognize`] would: NURBS planes, cylinders, cones, spheres and tori, and line,
+    /// circle and ellipse edge curves, come back exact. 0 (the default) is off; `1e-6` is the
+    /// usual ask. Meshes are unchanged. A negative, NaN or infinite tolerance makes `open` fail.
+    pub fn recognize_tolerance(mut self, tolerance: f64) -> OpenOptions {
+        self.recognize_tolerance = tolerance;
         self
     }
 
@@ -5315,6 +5420,7 @@ impl OpenOptions {
             pick: std::ptr::null(),
             pick_user: std::ptr::null_mut(),
             lightmap_resolution: self.lightmap_resolution,
+            recognize_tolerance: self.recognize_tolerance,
         };
         Ok((options, held))
     }
@@ -6201,7 +6307,7 @@ mod tests {
         let Some(mechanism) = open_mechanism_solid() else { return };
         let pose = mechanism.pose(&[], None).unwrap();
         let camera = mechanism.shown_with(fake::leaked(), Shown::Pose(&mechanism, &pose.transforms), &ViewOptions::default(), true).unwrap().expect("a camera");
-        assert_eq!(camera.pick, Some(crate::view::Pick { item: 3, node: 4, face: 5, clicks: 1, point: None, overlay: false, viewport_label: None }));
+        assert_eq!(camera.pick, Some(crate::view::Pick { item: 3, node: 4, face: 5, clicks: 1, point: None, overlay: false, viewport_label: None, segment: None, distance_px: 0.0 }));
     }
 
     // ---- Node::silhouette_beziers --------------------------------------------------------
@@ -6638,6 +6744,27 @@ mod tests {
         assert!(report.edges.iter().all(|e| back.edge_tolerance(e.edge).is_some()), "{report:?}");
         back.release();
         assert_eq!(body.recognize(Some(0.25)).unwrap().1.tolerance, 0.25);
+    }
+
+    #[test]
+    fn recognize_on_open() {
+        // Unasked the ball is still NURBS; asked, every body arrives already analytic.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../cadaclysm-acis/tests/fixtures/rhino/box-union-sphere.3dm");
+        let plain = match open(&path) {
+            Ok(scene) => scene,
+            Err(err) => {
+                eprintln!("skipped: {err} (no library to open box-union-sphere.3dm with)");
+                return;
+            }
+        };
+        let asked = OpenOptions::new().recognize_tolerance(1e-6).open(&path).unwrap();
+        let first = |scene: &Scene| scene.nodes().iter().find_map(|n| n.brep()).expect("a body");
+        let (_, r0) = first(&plain).recognize(None).unwrap();
+        let (_, r1) = first(&asked).recognize(None).unwrap();
+        assert!(r0.faces.iter().any(|f| f.kind == "sphere"), "unasked: still NURBS, {r0:?}");
+        assert!(r1.faces.is_empty(), "asked: already analytic, {r1:?}");
+        let refused = OpenOptions::new().recognize_tolerance(-1.0).open(&path).err().expect("a negative tolerance refused");
+        assert!(refused.to_string().contains("recognize_tolerance"), "{refused}");
     }
 
     #[test]

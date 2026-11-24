@@ -23,6 +23,9 @@ func test_mesh_formats_include_stl_and_glb():
 	eq(names.get("stl"), "stl")
 	eq(names.get("glb"), "glb")
 	eq(names.get("stl-ascii"), "stl")
+	eq(names.get("3mf"), "3mf")
+	eq(names.get("ply"), "ply")
+	eq(names.get("ply-ascii"), "ply")
 
 func test_conventions_by_name():
 	eq(Cadaclysm.convention("native"), 0)
@@ -345,6 +348,35 @@ func test_brep_recognize_takes_a_3dm_ball_back_to_a_sphere_and_leaves_the_origin
 	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
 	eq(body.recognize(0.25)["report"]["tolerance"], 0.25)
 	scene.close()
+
+func test_recognize_on_open():
+	# unasked the ball is still NURBS; asked, every body arrives already analytic
+	var path := fixture(BOX_UNION_SPHERE)
+	if path == "":
+		return
+	for c in [[{"convention": "native"}, true], [{"convention": "native", "recognize_tolerance": 1e-6}, false]]:
+		var scene := CadaclysmScene.open_with(path, c[0])
+		ok(scene != null, Cadaclysm.last_error())
+		if scene == null:
+			return
+		var body: CadaclysmBrep = null
+		for n in scene.nodes:
+			if n.brep != null:
+				body = n.brep
+				break
+		ok(body != null, "a brep body")
+		var pair := body.recognize()
+		var kinds := []
+		for f in pair["report"]["faces"]:
+			kinds.append(f["kind"])
+		if c[1]:
+			ok("sphere" in kinds, "unasked: a sphere still to take, " + str(kinds))
+		else:
+			eq(kinds.size(), 0, "asked: already analytic, " + str(kinds))
+		pair["body"].release()
+		scene.close()
+	fails(func(): CadaclysmScene.open_with(path, {"recognize_tolerance": -1}), "recognize_tolerance")
+	fails(func(): CadaclysmScene.open_with(path, {"recognize_tolerance": "x"}), "recognize_tolerance")
 
 func test_query():
 	var scene := native()

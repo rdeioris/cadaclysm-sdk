@@ -54,7 +54,17 @@ local M = {}
 -- 1.27: animations -- cadaclysm_view_play_animation, _timeline_remove, _set_item_visible, _set_node_ghosts and the
 -- "timeline" event (View:play_animation, :remove_track, Item:set_visible, Item:set_node_ghosts).
 -- 1.28: the drafting styles and the pick's viewport_label.
-local ABI_MAJOR, ABI_MINOR = 1, 28
+-- 1.29: live geometry (Item:set_lines, :set_curves, :set_points, :set_mesh_positions) and View:show_glyphs.
+-- 1.30: picking and snapping -- View:set_pick_aperture, :pick_rect, :set_snap_base, Item:set_snap_points, the
+-- pick's segment, the snap's label, lock and guides, and the input event's tail.
+-- 1.31: clip planes -- cadaclysm_view_set_clip_plane and _clip_plane (View:set_clip_plane, :clear_clip_plane,
+-- :clip_plane).
+-- 1.32: clip sets -- the cut's outline, cadaclysm_view_set_clip_mode and _clip_mode (the cutaway), and
+-- viewports' own sets (View:set_viewport_clip_plane, :clear_viewport_clip_plane, :viewport_clip_plane,
+-- :set_viewport_clip_mode, :viewport_clip_mode).
+-- 1.33: cadaclysm_view_set_textures and _textures (View:textures, :set_textures): a material's base-colour
+-- texture drawn.
+local ABI_MAJOR, ABI_MINOR = 1, 33
 local NAVIGATION_FLY = 1   -- CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0)
 local OPEN, CLOSED = 1, 2
 local INPUT_CLOSE, NONE_COMING = 1, 0xFFFFFFFF
@@ -331,6 +341,8 @@ local ENTRY_POINTS = {
   "cadaclysm_view_set_line_style", "cadaclysm_view_set_point_style", "cadaclysm_view_set_point_states",
   "cadaclysm_view_set_point_state_colours", "cadaclysm_view_set_viewport_label", "cadaclysm_view_set_viewport_border",
   "cadaclysm_view_set_on_top",
+  "cadaclysm_view_set_lines", "cadaclysm_view_set_curves", "cadaclysm_view_set_points", "cadaclysm_view_set_mesh_positions",
+  "cadaclysm_view_show_glyphs",
   "cadaclysm_view_set_line_colour", "cadaclysm_view_line_colour", "cadaclysm_view_set_item_line_colour",
   "cadaclysm_view_viewport_camera", "cadaclysm_view_set_viewport_camera", "cadaclysm_view_set_viewport_rects",
   "cadaclysm_view_aim", "cadaclysm_view_set_pivot", "cadaclysm_view_set_tap", "cadaclysm_view_orbit_in",
@@ -340,6 +352,11 @@ local ENTRY_POINTS = {
   "cadaclysm_view_clear_snap", "cadaclysm_view_set_work_plane", "cadaclysm_view_clear_work_plane",
   "cadaclysm_view_show_overlay", "cadaclysm_view_show_overlay_image", "cadaclysm_view_move_overlay",
   "cadaclysm_view_stats", "cadaclysm_view_next_event", "cadaclysm_view_close",
+  "cadaclysm_view_set_pick_aperture", "cadaclysm_view_pick_rect", "cadaclysm_view_set_snap_points",
+  "cadaclysm_view_set_snap_base", "cadaclysm_view_set_clip_plane", "cadaclysm_view_clip_plane",
+  "cadaclysm_view_set_clip_mode", "cadaclysm_view_clip_mode", "cadaclysm_view_set_viewport_clip_plane",
+  "cadaclysm_view_viewport_clip_plane", "cadaclysm_view_set_viewport_clip_mode", "cadaclysm_view_viewport_clip_mode",
+  "cadaclysm_view_set_textures", "cadaclysm_view_textures",
 }
 
 local open_views = {}   -- windows of a view's own on the wgpu library, in the order made
@@ -1165,6 +1182,16 @@ end
 function View:set_lighting(name)
   ok(self, self._lib.C.cadaclysm_view_set_lighting(self:_live("cadaclysm_view_set_lighting"), name_of(LIGHTING, name, "lighting")))
 end
+--- Whether parts whose material has a base-colour texture (a glTF's, Node:material()) draw it --
+--- true, the default -- or draw in their colour, as every CAD part does (1.33), as Python's
+--- View.textures. The terminal and render-view libraries draw colours either way.
+function View:textures()
+  return self._lib.C.cadaclysm_view_textures(self:_live("cadaclysm_view_textures")) == true
+end
+--- Sets whether textured parts draw their texture (true) or their colour (false).
+function View:set_textures(on)
+  ok(self, self._lib.C.cadaclysm_view_set_textures(self:_live("cadaclysm_view_set_textures"), on and true or false))
+end
 --- How every "dashed" item's hidden lines and points look, view-wide: `t.dash` and `t.gap`
 --- in points (6, 4), `t.dim` the coverage kept (0.5), `t.colour` one colour for all of them
 --- (text or three numbers; nil: each line's own). Every key is optional. `false` sets the
@@ -1238,19 +1265,23 @@ end
 -- coordinates the items were shown in -- or nil where the library read no depth (no hit to
 -- place, a machining stock, the terminal library), and `overlay` (1.24): true where the item is
 -- an overlay, over the pixel, so nothing of the scene beneath it was picked. Nil for no item.
--- `label`: the viewport whose label was hit (a raw -1 is none). Omit it only for a 44-byte
--- CadaclysmViewPick (its own field is read); the event's 40-byte pick has none, so the event
--- path must pass its `pick_viewport_label`.
-local function pick_of(raw, label)
-  if label == nil then label = raw.viewport_label end
+-- `label`: the viewport whose label was hit (a raw -1 is none). 1.30: `segment` -- a lines item's
+-- segment, a curves item's Bezier, a kernel solid's or read scene's kernel edge index; nil (a raw
+-- 0xFFFFFFFF) for a face, a point, a glyph, a label or an overlay -- and `distance_px`, how far the
+-- cursor was from the wire (0 for a face). Omit `label`, `segment` and `distance` only for a 52-byte
+-- CadaclysmViewPick (its own fields are read); the event's 40-byte pick has none, so the event path
+-- passes its tail's.
+local function pick_of(raw, label, segment, distance)
+  if label == nil then label, segment, distance = raw.viewport_label, raw.segment, raw.distance_px end
   if raw.item == 0 and label < 0 then return nil end
   return { item = raw.item, node = raw.node, face = raw.face, clicks = raw.clicks,
     point = raw.has_point ~= 0 and { raw.point[0], raw.point[1], raw.point[2] } or nil,
-    overlay = raw.overlay ~= 0, viewport_label = label >= 0 and label or nil }
+    overlay = raw.overlay ~= 0, viewport_label = label >= 0 and label or nil,
+    segment = segment ~= 0xFFFFFFFF and segment or nil, distance_px = distance }
 end
--- A pick buffer for the library to fill: its size set, "no label hit" until it writes one.
+-- A pick buffer for the library to fill: its size set, "no label hit" and "no segment" until it writes them.
 function View._new_pick()
-  return ffi.new("CadaclysmViewPick", { size = ffi.sizeof("CadaclysmViewPick"), viewport_label = -1 })
+  return ffi.new("CadaclysmViewPick", { size = ffi.sizeof("CadaclysmViewPick"), viewport_label = -1, segment = 0xFFFFFFFF })
 end
 
 --- What is under pixel (x, y) of `viewport` (default 0): { item, node, face, clicks, point, overlay, viewport_label }, or nil for nothing.
@@ -1299,35 +1330,53 @@ end
 -- A block of its own: it adds no local to the main chunk (LuaJIT allows 200).
 do
   -- The CADACLYSM_VIEW_SNAP_* bits by the names set_snap takes and a snap's `kind` reports:
-  -- bit n is the nth name.
-  local SNAP_KINDS = names({ "vertex", "midpoint", "centre", "quadrant", "edge", "face", "grid", "plane" })
+  -- bit n is the nth name (1.30 added "end", "intersection", "point" and "alignment").
+  local SNAP_KINDS = names({ "vertex", "midpoint", "centre", "quadrant", "edge", "face", "grid", "plane",
+    "end", "intersection", "point", "alignment" })
+  local SNAP_ALL, SNAP_DEFAULT = 0xFFF, 0x4FF   -- CADACLYSM_VIEW_SNAP_ALL and _DEFAULT
   local SNAP_NONE = 0xFFFFFFFF   -- CadaclysmViewSnap.edge where the snap is on no edge
 
-  -- A snap answer as Python's `_snap_dict`; nil for kind 0 (nothing snapped).
-  local function snap_of(raw)
+  -- A snap answer as Python's `_snap_dict`; nil for kind 0 (nothing snapped). `tail`: the input
+  -- event whose `snap_*` fields carry what its frozen 1.22 snap (CadaclysmViewEventSnap) lacks.
+  local function snap_of(raw, tail)
     if raw.kind == 0 then return nil end
     local kind = tostring(raw.kind)
     for i, n in ipairs(SNAP_KINDS._list) do
       if raw.kind == bit.lshift(1, i - 1) then kind = n break end
     end
+    local label, locked, angle, count, g
+    if tail then
+      label, locked, angle, count, g = tail.snap_label, tail.snap_locked, tail.snap_locked_angle, tail.snap_guide_count, tail.snap_guides
+    else
+      label, locked, angle, count, g = raw.label, raw.locked, raw.locked_angle, raw.guide_count, raw.guides
+    end
+    local guides = {}
+    for k = 0, math.min(count, 2) - 1 do
+      guides[k + 1] = { { g[6 * k], g[6 * k + 1], g[6 * k + 2] }, { g[6 * k + 3], g[6 * k + 4], g[6 * k + 5] } }
+    end
     return { kind = kind, point = { raw.point[0], raw.point[1], raw.point[2] }, item = raw.item, node = raw.node,
       face = raw.face, edge = raw.edge ~= SNAP_NONE and raw.edge or nil,
       tangent = { raw.tangent[0], raw.tangent[1], raw.tangent[2] }, axis = { raw.axis[0], raw.axis[1], raw.axis[2] },
-      radius = raw.radius, distance_px = raw.distance_px, clicks = raw.clicks }
+      radius = raw.radius, distance_px = raw.distance_px, clicks = raw.clicks,
+      label = ffi.string(label, 32):match("^[^%z]*"), locked_angle = locked ~= 0 and angle or nil, guides = guides }
   end
   View._snap_of = snap_of   -- the input events' block reads a SNAP event's snap with it
 
-  --- What a snap may land on (Python's `set_snap`): "all" (or no argument), one kind's name, a
-  --- list of names, or false to switch snapping off -- "vertex", "midpoint", "centre" (a circular
-  --- edge's), "quadrant", "edge", "face", "grid" and "plane". `opts.aperture_px`: how far from the
-  --- cursor a point kind may lie (0, the default: the library's 10 points); `opts.marker` (default
-  --- true): whether the view draws its marker at the snap. A view starts with snapping off. Once
-  --- on, a mouse over a view in its own window snaps, and so does a click (`last_snap` reads
-  --- them); `snap` asks one at any pixel. Where kinds compete, a corner beats the face it is on.
+  --- What a snap may land on (Python's `set_snap`): "default" (or no argument: the first eight and
+  --- "point"), "all", one kind's name, a list of names, or false to switch snapping off -- "vertex",
+  --- "midpoint", "centre" (a circular edge's), "quadrant", "edge", "face", "grid", "plane", and (1.30)
+  --- "end", "intersection", "point" (the points Item:set_snap_points gave) and "alignment".
+  --- `opts.aperture_px`: how far from the cursor a point kind may lie (0, the default: the library's
+  --- 10 points); `opts.marker` (default true): whether the view draws its marker at the snap. A view
+  --- starts with snapping off. Once on, a mouse over a view in its own window snaps, and so does a
+  --- click (`last_snap` reads them); `snap` asks one at any pixel. Where kinds compete, a corner
+  --- beats the face it is on.
   function View:set_snap(kinds, opts)
     local bits = 0
-    if kinds == nil or kinds == "all" then
-      bits = 0xFF
+    if kinds == nil or kinds == "default" then
+      bits = SNAP_DEFAULT
+    elseif kinds == "all" then
+      bits = SNAP_ALL
     elseif kinds ~= false then
       for _, n in ipairs(type(kinds) == "table" and kinds or { kinds }) do
         bits = bit.bor(bits, bit.lshift(1, name_of(SNAP_KINDS, n, "snap kind")))
@@ -1342,7 +1391,9 @@ do
   end
 
   --- The snap under pixel (x, y) of `viewport` (default 0): { kind, point, item, node, face, edge,
-  --- tangent, axis, radius, distance_px, clicks }, or nil where nothing in the kinds set_snap chose
+  --- tangent, axis, radius, distance_px, clicks, label, locked_angle, guides } (1.30: `label` the
+  --- point's label for a "point" snap, else the kind's name; `locked_angle` the lock's angle in
+  --- degrees, else nil; `guides` the 0-2 guides drawn, each { from, to }), or nil where nothing in the kinds set_snap chose
   --- lies there -- always nil while snapping is off. Draws until the answer lands, as `pick` does
   --- (a never-drawn view first). A failure other than "no answer yet" raises the library's message.
   function View:snap(x, y, viewport)
@@ -1457,9 +1508,9 @@ do
     elseif kind == "resize" then
       e.width, e.height = tonumber(raw.width), tonumber(raw.height)
     elseif kind == "pick" then
-      e.pick = pick_of(raw.pick, raw.pick_viewport_label)
+      e.pick = pick_of(raw.pick, raw.pick_viewport_label, raw.pick_segment, raw.pick_distance_px)
     elseif kind == "snap" then
-      e.snap = View._snap_of(raw.snap)
+      e.snap = View._snap_of(raw.snap, raw)
     elseif kind == "close" then
       e.camera = camera_of(raw.camera, View._new_pick(), y_up)
     end
@@ -1487,6 +1538,7 @@ function View:next_event()
   local raw = ffi.new("CadaclysmViewInputEvent")
   raw.size = ffi.sizeof("CadaclysmViewInputEvent")
   raw.pick_viewport_label = -1   -- "no label hit", until the library writes one
+  raw.pick_segment = 0xFFFFFFFF  -- "no segment": a 1.29 library leaves the 1.30 tail as it was
   if self._lib.C.cadaclysm_view_next_event(p, raw) then return event_of(raw, self._y_up) end
   local waiting = last_error(self._lib)
   if waiting ~= "" and waiting:sub(-8) ~= "no event" then fail(waiting, 2) end
@@ -1828,6 +1880,325 @@ do
     local i = uint(index, "viewport")
     ok(self, self._lib.C.cadaclysm_view_set_viewport_border(self:_live("cadaclysm_view_set_viewport_border"), i,
       rgb_or_nil(colour, "viewport border colour", self._lib)))
+  end
+end
+
+-- The 1.29 live geometry and glyphs. A block of its own: it adds no local to the main chunk (LuaJIT allows 200).
+do
+  -- CADACLYSM_VIEW_GLYPH_*, in the header's order.
+  local GLYPH_KINDS = { "arrow", "tick", "cross", "square", "triangle", "parallel", "perpendicular",
+                        "coincident", "tangent", "fixed", "horizontal", "vertical" }
+  M.GLYPH_KINDS = GLYPH_KINDS
+  local glyph_code = {}
+  for i, name in ipairs(GLYPH_KINDS) do glyph_code[name] = i - 1 end
+
+  -- A flat table of numbers as a C float array and its count of records of `k` numbers each.
+  local function floats(t, what, k)
+    local a, n = carray("float", t, what)
+    if n % k ~= 0 then fail(("%s takes %d numbers each, not %d"):format(what, k, n), 3) end
+    return a, n / k
+  end
+
+  --- Replaces a show_lines item's segments (six numbers each) under the same id: colour, layer, dash,
+  --- placement and on top kept, the camera not re-framed.
+  function Item:set_lines(segments)
+    local a, n = floats(segments, "set_lines", 6)
+    local view = self.view
+    item_ok(self, view._lib.C.cadaclysm_view_set_lines(view:_live("cadaclysm_view_set_lines"), self.id, a, n))
+  end
+
+  --- Replaces a show_curves item's curves (sixteen numbers each: four control points as x, y, z, w).
+  function Item:set_curves(beziers)
+    local a, n = floats(beziers, "set_curves", 16)
+    local view = self.view
+    item_ok(self, view._lib.C.cadaclysm_view_set_curves(view:_live("cadaclysm_view_set_curves"), self.id, a, n))
+  end
+
+  --- Replaces a show_points item's points (three numbers each). The same count keeps the point states;
+  --- a new count keeps them by index, new points normal.
+  function Item:set_points(positions)
+    local a, n = floats(positions, "set_points", 3)
+    local view = self.view
+    item_ok(self, view._lib.C.cadaclysm_view_set_points(view:_live("cadaclysm_view_set_points"), self.id, a, n))
+  end
+
+  --- Moves a show_mesh item's vertices (as many as it was shown with), its triangles kept. `normals`: the
+  --- same numbers, or nil to recompute them.
+  function Item:set_mesh_positions(positions, normals)
+    local a, n = floats(positions, "set_mesh_positions", 3)
+    local nrm = nil
+    if normals ~= nil then
+      local nn
+      nrm, nn = floats(normals, "set_mesh_positions normals", 3)
+      if nn ~= n then fail(("set_mesh_positions has %d positions but %d normals"):format(n, nn), 2) end
+    end
+    local view = self.view
+    item_ok(self, view._lib.C.cadaclysm_view_set_mesh_positions(view:_live("cadaclysm_view_set_mesh_positions"), self.id, a, nrm, n))
+  end
+
+  --- Drafting symbols of one `kind` (GLYPH_KINDS) at the points `at` (three numbers each), `size_pt`
+  --- points across at any zoom (default 12), in `colour` (nil: the edge colour), turned to `dir`
+  --- (three numbers a point, as projected on the screen; nil: unturned). Glyph i is node i.
+  function View:show_glyphs(at, kind, size_pt, colour, dir)
+    local code = glyph_code[kind]
+    if code == nil then
+      fail("show glyphs: '" .. tostring(kind) .. "' is not a glyph kind (" .. table.concat(GLYPH_KINDS, ", ") .. ")", 2)
+    end
+    local a, n = floats(at, "show_glyphs", 3)
+    local d = nil
+    if dir ~= nil then
+      local dn
+      d, dn = floats(dir, "show_glyphs dir", 3)
+      if dn ~= n then fail(("show_glyphs has %d points but %d directions"):format(n, dn), 2) end
+    end
+    if size_pt == nil then size_pt = 12 end
+    if type(size_pt) ~= "number" then fail("show_glyphs size_pt: a number, not " .. describe(size_pt), 2) end
+    local rgb = colour ~= nil and floats3(colour, "show_glyphs colour", self._lib) or nil
+    return self:_item(self._lib.C.cadaclysm_view_show_glyphs(self:_live("cadaclysm_view_show_glyphs"), a, d, n, code, size_pt, rgb), nil)
+  end
+end
+
+-- The 1.30 picking and snapping calls. A block of its own: it adds no local to the main chunk (LuaJIT allows 200).
+do
+  -- CADACLYSM_VIEW_HIT_* by number: the `kind` a pick_rect hit reports.
+  local HIT_KINDS = { [1] = "face", [2] = "node", [3] = "segment", [4] = "edge", [5] = "point" }
+
+  --- How far a pick reaches for lines, curves, points and glyphs, in points (times the screen density):
+  --- 0 restores the default, 4; others clamp to 1..32. Faces are always the pixel's. A negative size or
+  --- one that is not finite is the library's refusal. The terminal and render view libraries keep it,
+  --- but their picks are face picks.
+  function View:set_pick_aperture(points)
+    ok(self, self._lib.C.cadaclysm_view_set_pick_aperture(self:_live("cadaclysm_view_set_pick_aperture"),
+      number(points, "set_pick_aperture")))
+  end
+
+  --- What lies in a rectangle of `viewport` (default 0; device pixels from its top left, a negative `w`
+  --- or `h` flipping it), CPU only: with `crossing` (default true), everything with a visible part
+  --- inside, else what lies wholly inside and is visible. Hidden things come only drawn x-ray or on
+  --- top; text, images, overlays, viewport labels, machining stocks and isocurves are left out. Every
+  --- hit, sorted by item, kind and index, as { item, kind, index }: "face" (numbered as `pick` numbers
+  --- it), "node" (an item with no face ranges), "segment" (a lines item's segment or a curves item's
+  --- Bezier), "edge" (a kernel solid's or read scene's kernel edge index) or "point" (a point's or
+  --- glyph's index). An exact item shown with no mesh has edges here, no faces. A rectangle wholly off
+  --- the viewport, and a lost device, answer {}; a rectangle that is not finite or an unknown viewport
+  --- is the library's refusal. The render view library refuses the call.
+  function View:pick_rect(x, y, w, h, crossing, viewport)
+    number(x, "pick_rect x"); number(y, "pick_rect y"); number(w, "pick_rect w"); number(h, "pick_rect h")
+    viewport = viewport == nil and 0 or uint(viewport, "pick_rect viewport")
+    crossing = crossing ~= false
+    local p = self:_live("cadaclysm_view_pick_rect")
+    local C = self._lib.C
+    local cap = 64
+    local buf = ffi.new("CadaclysmViewRectHit[?]", cap)
+    local n = tonumber(C.cadaclysm_view_pick_rect(p, viewport, x, y, w, h, crossing, buf, cap))
+    if n == 0 then void_ok(self) end   -- this call's own refusal: the library cleared the error first
+    if n > cap then
+      -- The count rule: asked again with a buffer of the total, never a cut list.
+      cap = n
+      buf = ffi.new("CadaclysmViewRectHit[?]", cap)
+      n = tonumber(C.cadaclysm_view_pick_rect(p, viewport, x, y, w, h, crossing, buf, cap))
+    end
+    local hits = {}
+    for i = 0, math.min(n, cap) - 1 do
+      local r = buf[i]
+      hits[i + 1] = { item = r.item, kind = HIT_KINDS[r.kind] or tostring(r.kind), index = r.index }
+    end
+    return hits
+  end
+
+  --- The angle lock: snaps that land on no point kind turn about `point` (world, three numbers) onto
+  --- the nearest multiple of `step` degrees (default 15; 0 < step <= 180), in the work plane's
+  --- directions or the plane facing the eye; the answer is kind "plane" with its `locked_angle` and the
+  --- lock's ray as its guide. nil clears it (a NULL point goes to the library, the step ignored).
+  --- Other than three numbers is refused before the call; a point that is not finite or a step out of
+  --- range is the library's refusal. The terminal and render view libraries refuse it.
+  function View:set_snap_base(point, step)
+    step = step == nil and 15 or number(step, "set_snap_base step")
+    local xyz = point ~= nil and exactly("float", point, 3, "set_snap_base point") or nil
+    ok(self, self._lib.C.cadaclysm_view_set_snap_base(self:_live("cadaclysm_view_set_snap_base"), xyz, step))
+  end
+
+  --- Points a "point" snap lands on: three numbers each (a flat list, or a list of { x, y, z }), in the
+  --- coordinates the item was shown in, moving with its node 0, each answering `label` (at most 31 bytes
+  --- of UTF-8; nil or "": "point"). An empty list clears them; they also go with the item's removal.
+  --- nil goes to the library as NULL, never as "". A count not a multiple of three and a label holding
+  --- a NUL are refused before the call; text, glyph, image and machining items, a label past 31 bytes
+  --- and a value that is not finite are the library's refusal. The terminal and render view libraries
+  --- refuse it.
+  function Item:set_snap_points(points, label)
+    table_of(points, "set_snap_points")
+    local flat = points
+    if type(points[1]) == "table" then
+      flat = {}
+      for k, xyz in ipairs(points) do
+        if type(xyz) ~= "table" or #xyz ~= 3 then fail(("set_snap_points: point %d is not 3 numbers"):format(k), 2) end
+        flat[#flat + 1], flat[#flat + 2], flat[#flat + 3] = xyz[1], xyz[2], xyz[3]
+      end
+    end
+    local a, n = carray("float", flat, "set_snap_points")
+    if n % 3 ~= 0 then fail(("set_snap_points takes 3 numbers each, not %d"):format(n), 2) end
+    if label ~= nil and type(label) ~= "string" then fail("snap point label: a string, not " .. describe(label), 2) end
+    if label ~= nil and label:find("\0", 1, true) then
+      fail(("snap point label %q: a NUL character cannot be shown (the C string ends there)"):format(label), 2)
+    end
+    local text = label
+    local view = self.view
+    item_ok(self, view._lib.C.cadaclysm_view_set_snap_points(view:_live("cadaclysm_view_set_snap_points"), self.id,
+      n > 0 and a or nil, n / 3, text))
+  end
+end
+
+-- The 1.31 clip planes and the 1.32 clip sets. A block of its own: it adds no local to the main chunk (LuaJIT allows 200).
+do
+  local CLIP_PLANES = 6   -- CADACLYSM_VIEW_CLIP_PLANES
+  M.CLIP_PLANES = CLIP_PLANES
+
+  local CLIP_MODES = names({ "intersection", "cutaway" })            -- CADACLYSM_VIEW_CLIP_INTERSECTION, _CUTAWAY
+  local VIEWPORT_CLIP_MODES = names({ "intersection", "cutaway", "inherit" })   -- and _INHERIT (2)
+  M.CLIP_VIEWPORTS = 8   -- CADACLYSM_VIEW_CLIP_VIEWPORTS
+
+  -- A CadaclysmViewClipPlane from the arguments `what` (the caller's name) took.
+  local function clip_plane_of(self, what, point, normal, opts)
+    if opts ~= nil and type(opts) ~= "table" then fail(what .. " opts: a table or nil, not " .. describe(opts), 3) end
+    opts = opts or {}
+    local p = ffi.new("CadaclysmViewClipPlane", { size = ffi.sizeof("CadaclysmViewClipPlane") })
+    local at = exactly("double", point, 3, what .. " point")
+    local n = exactly("double", normal, 3, what .. " normal")
+    if at == nil or n == nil then fail(what .. ": a point and a normal, three numbers each", 3) end
+    for k = 0, 2 do p.point[k], p.normal[k] = at[k], n[k] end
+    if opts.cap ~= nil then
+      local c = floats3(opts.cap, what .. " cap", self._lib)
+      p.cap = 1
+      for k = 0, 2 do p.cap_colour[k] = c[k] end
+    end
+    if opts.hatch ~= nil then
+      local c = floats3(opts.hatch, what .. " hatch", self._lib)
+      p.hatch = 1
+      for k = 0, 2 do p.hatch_colour[k] = c[k] end
+    end
+    p.hatch_angle = opts.hatch_angle == nil and 45 or number(opts.hatch_angle, what .. " hatch_angle")
+    p.hatch_spacing = opts.hatch_spacing == nil and 0 or number(opts.hatch_spacing, what .. " hatch_spacing")
+    p.hatch_width = opts.hatch_width == nil and 1 or number(opts.hatch_width, what .. " hatch_width")
+    if opts.outline ~= nil then
+      local c = floats3(opts.outline, what .. " outline", self._lib)
+      p.outline = 1
+      for k = 0, 2 do p.outline_colour[k] = c[k] end
+    end
+    p.outline_width = opts.outline_width == nil and 1 or number(opts.outline_width, what .. " outline_width")
+    return p
+  end
+
+  -- The plane record of a filled CadaclysmViewClipPlane.
+  local function clip_record(out)
+    local function three(a) return { a[0], a[1], a[2] } end
+    local r = { point = three(out.point), normal = three(out.normal), hatch_angle = 45, hatch_spacing = 0, hatch_width = 1,
+                outline_width = 1 }
+    if out.cap ~= 0 then r.cap = three(out.cap_colour) end
+    if out.hatch ~= 0 then
+      r.hatch = three(out.hatch_colour)
+      r.hatch_angle, r.hatch_spacing, r.hatch_width = out.hatch_angle, out.hatch_spacing, out.hatch_width
+    end
+    if out.outline ~= 0 then r.outline, r.outline_width = three(out.outline_colour), out.outline_width end
+    return r
+  end
+
+  --- Sets clip-plane slot `slot` (0..5), view-wide: what lies on the side `normal` points to is
+  --- hidden from every item, edge, curve, line, point, pick and snap (not the grid, text, images or
+  --- overlays). A point is drawn only where every set plane keeps it: two make a slab, six a box.
+  --- `point` and `normal` are three numbers each. `opts` (optional): `cap`, a colour (text or three
+  --- numbers in 0..1) filling the cut of every closed body; `hatch`, a colour (needs `cap`) for lines
+  --- over the cap at `hatch_angle` degrees (45) from the plane's first axis, `hatch_spacing` apart in
+  --- the scene's units (0, the default: a fiftieth of the scene's size) and `hatch_width` points wide
+  --- (1). 1.32: `outline`, a colour drawing the cut as a line `outline_width` points wide (1; 0
+  --- reads back 1), capped or not. Translucent items are clipped, never capped. A zero normal, a
+  --- hatch without a cap, a slot past the last, an outline width above 100 and the like are the
+  --- library's refusal; the terminal library refuses every plane.
+  function View:set_clip_plane(slot, point, normal, opts)
+    local p = clip_plane_of(self, "set_clip_plane", point, normal, opts)
+    ok(self, self._lib.C.cadaclysm_view_set_clip_plane(self:_live("cadaclysm_view_set_clip_plane"),
+      uint(slot, "set_clip_plane slot"), p))
+  end
+
+  --- Clears clip-plane slot `slot`; an empty slot stays empty.
+  function View:clear_clip_plane(slot)
+    ok(self, self._lib.C.cadaclysm_view_set_clip_plane(self:_live("cadaclysm_view_set_clip_plane"),
+      uint(slot, "clear_clip_plane slot"), nil))
+  end
+
+  --- Clip-plane slot `slot` as set, with the normal of unit length and a zero width resolved to 1:
+  --- { point = {x, y, z}, normal = {x, y, z}, cap = nil | {r, g, b}, hatch = nil | {r, g, b},
+  --- hatch_angle, hatch_spacing, hatch_width, outline = nil | {r, g, b}, outline_width } (with no
+  --- hatch, the defaults 45, 0, 1; with no outline, a width of 1); nil for an empty slot (and always
+  --- on the terminal library). A slot past the last raises.
+  function View:clip_plane(slot)
+    slot = uint(slot, "clip_plane slot")
+    local out = ffi.new("CadaclysmViewClipPlane", { size = ffi.sizeof("CadaclysmViewClipPlane") })
+    if not self._lib.C.cadaclysm_view_clip_plane(self:_live("cadaclysm_view_clip_plane"), slot, out) then
+      if slot < CLIP_PLANES then return nil end
+      failure(self._lib, 1)
+    end
+    return clip_record(out)
+  end
+
+  --- How the view-wide planes combine (1.32): "intersection" (the default: drawn where every plane
+  --- keeps) or "cutaway" (hidden only where every plane hides). Another name is refused before C;
+  --- the terminal library refuses "cutaway".
+  function View:set_clip_mode(mode)
+    ok(self, self._lib.C.cadaclysm_view_set_clip_mode(self:_live("cadaclysm_view_set_clip_mode"),
+      name_of(CLIP_MODES, mode, "clip mode")))
+  end
+
+  --- The view-wide planes' mode (1.32): "intersection" or "cutaway".
+  function View:clip_mode()
+    return self._lib.C.cadaclysm_view_clip_mode(self:_live("cadaclysm_view_clip_mode")) == 1 and "cutaway" or "intersection"
+  end
+
+  --- Sets slot `slot` of viewport `viewport`'s own clip set (1.32), taking what set_clip_plane takes,
+  --- in that viewport only: the first gives the viewport a set of its own (every other slot empty,
+  --- mode "intersection"), which it then draws, picks and snaps with instead of the view-wide set.
+  --- With no viewports set, viewport 0 is the window. A viewport past the last (or past
+  --- CLIP_VIEWPORTS - 1) is the library's refusal.
+  function View:set_viewport_clip_plane(viewport, slot, point, normal, opts)
+    local p = clip_plane_of(self, "set_viewport_clip_plane", point, normal, opts)
+    ok(self, self._lib.C.cadaclysm_view_set_viewport_clip_plane(self:_live("cadaclysm_view_set_viewport_clip_plane"),
+      uint(viewport, "set_viewport_clip_plane viewport"), uint(slot, "set_viewport_clip_plane slot"), p))
+  end
+
+  --- Clears slot `slot` of viewport `viewport`'s own clip set (1.32); the set stays its own
+  --- (set_viewport_clip_mode(viewport, nil) drops it).
+  function View:clear_viewport_clip_plane(viewport, slot)
+    ok(self, self._lib.C.cadaclysm_view_set_viewport_clip_plane(self:_live("cadaclysm_view_set_viewport_clip_plane"),
+      uint(viewport, "clear_viewport_clip_plane viewport"), uint(slot, "clear_viewport_clip_plane slot"), nil))
+  end
+
+  --- Slot `slot` of viewport `viewport`'s own clip set (1.32), as clip_plane answers; nil for an
+  --- empty slot or a viewport with no set of its own (it draws with the view-wide planes). A slot
+  --- past the last raises.
+  function View:viewport_clip_plane(viewport, slot)
+    viewport, slot = uint(viewport, "viewport_clip_plane viewport"), uint(slot, "viewport_clip_plane slot")
+    local out = ffi.new("CadaclysmViewClipPlane", { size = ffi.sizeof("CadaclysmViewClipPlane") })
+    if not self._lib.C.cadaclysm_view_viewport_clip_plane(self:_live("cadaclysm_view_viewport_clip_plane"), viewport, slot, out) then
+      if slot < CLIP_PLANES then return nil end
+      failure(self._lib, 1)
+    end
+    return clip_record(out)
+  end
+
+  --- Viewport `viewport`'s clip mode (1.32): "intersection" or "cutaway" sets its own set's mode,
+  --- giving it a set of its own if it had none; nil (or "inherit") drops its set, back to the
+  --- view-wide one. Another name is refused before C.
+  function View:set_viewport_clip_mode(viewport, mode)
+    local code = mode == nil and VIEWPORT_CLIP_MODES.inherit or name_of(VIEWPORT_CLIP_MODES, mode, "viewport clip mode")
+    ok(self, self._lib.C.cadaclysm_view_set_viewport_clip_mode(self:_live("cadaclysm_view_set_viewport_clip_mode"),
+      uint(viewport, "set_viewport_clip_mode viewport"), code))
+  end
+
+  --- Viewport `viewport`'s own set's mode (1.32): "intersection" or "cutaway"; nil where it has no
+  --- set of its own (it inherits the view-wide one).
+  function View:viewport_clip_mode(viewport)
+    local code = self._lib.C.cadaclysm_view_viewport_clip_mode(self:_live("cadaclysm_view_viewport_clip_mode"),
+      uint(viewport, "viewport_clip_mode viewport"))
+    return VIEWPORT_CLIP_MODES._list[code + 1] ~= "inherit" and VIEWPORT_CLIP_MODES._list[code + 1] or nil
   end
 end
 

@@ -76,6 +76,27 @@ typedef enum CadaclysmMeshColors {
   CADACLYSM_COLORS_PER_FACE = 1,
 } CadaclysmMeshColors;
 
+typedef enum CadaclysmAlphaMode {
+
+  CADACLYSM_ALPHA_OPAQUE = 0,
+
+  CADACLYSM_ALPHA_MASK = 1,
+
+  CADACLYSM_ALPHA_BLEND = 2,
+} CadaclysmAlphaMode;
+
+typedef enum CadaclysmWrap {
+  CADACLYSM_WRAP_REPEAT = 0,
+  CADACLYSM_WRAP_MIRRORED_REPEAT = 1,
+  CADACLYSM_WRAP_CLAMP_TO_EDGE = 2,
+} CadaclysmWrap;
+
+typedef enum CadaclysmFilter {
+
+  CADACLYSM_FILTER_LINEAR = 0,
+  CADACLYSM_FILTER_NEAREST = 1,
+} CadaclysmFilter;
+
 typedef enum CadaclysmPairKind {
   CADACLYSM_PAIR_REVOLUTE = 0,
   CADACLYSM_PAIR_PRISMATIC = 1,
@@ -260,6 +281,8 @@ typedef struct CadaclysmOpenOptions {
   void *pick_user;
 
   uint32_t lightmap_resolution;
+
+  double recognize_tolerance;
 } CadaclysmOpenOptions;
 
 typedef struct CadaclysmBounds {
@@ -503,6 +526,41 @@ typedef struct CadaclysmWindow {
   void *handle;
   void *display;
 } CadaclysmWindow;
+
+typedef struct CadaclysmMaterial {
+
+  const char *name;
+  float base_color[4];
+  float metallic;
+  float roughness;
+
+  uint32_t alpha_mode;
+
+  float alpha_cutoff;
+
+  bool double_sided;
+  uint32_t base_color_image;
+  uint32_t base_color_uv_set;
+  float uv_offset[2];
+  float uv_rotation;
+  float uv_scale[2];
+
+  uint32_t wrap_u;
+  uint32_t wrap_v;
+
+  uint32_t mag_filter;
+  uint32_t min_filter;
+} CadaclysmMaterial;
+
+typedef struct CadaclysmImage {
+
+  const uint8_t *bytes;
+  size_t size;
+
+  const char *mime;
+
+  const char *name;
+} CadaclysmImage;
 
 typedef struct CadaclysmSvgOptions {
   uint32_t size;
@@ -1145,6 +1203,16 @@ bool cadaclysm_node_save_mesh(const struct CadaclysmScene *scene,
 const char *cadaclysm_pick_file(const struct CadaclysmWindow *parent);
 
 const char *cadaclysm_pick_save(const struct CadaclysmWindow *parent, const char *suggested_name);
+
+bool cadaclysm_node_material(const struct CadaclysmScene *scene,
+                             uint32_t node,
+                             struct CadaclysmMaterial *out);
+
+uint32_t cadaclysm_image_count(const struct CadaclysmScene *scene);
+
+bool cadaclysm_image(const struct CadaclysmScene *scene,
+                     uint32_t image,
+                     struct CadaclysmImage *out);
 
 bool cadaclysm_license_set(const char *text_or_path);
 

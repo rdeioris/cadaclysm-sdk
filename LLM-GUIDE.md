@@ -1,6 +1,6 @@
 # Cadaclysm blacksmith: a modelling guide for language models
 
-**For cadaclysm 0.15.0.** The API below is this release's: use it with the wrappers and libraries of 0.15.0.
+**For cadaclysm 0.16.0.** The API below is this release's: use it with the wrappers and libraries of 0.16.0.
 
 > This file teaches a language model (ChatGPT, Gemini, Claude or any other) to write Python
 > that builds exact solid CAD parts with the cadaclysm modelling kernel, the *blacksmith*,
@@ -1044,7 +1044,7 @@ Write several solids as one Rhino `.3dm` (version 8, which Rhino 8 and 9 open), 
 ```python
 mesh_file(solids: Sequence[Solid], format: str = 'stl', names: 'Sequence[str] | None' = None, looks: 'Sequence[Sequence[float]] | None' = None, tolerance: 'float | None' = None) -> bytes
 ```
-Several solids meshed at `tolerance` — each the mesh `Solid.mesh()` hands out — as one file's bytes in `format`: `"stl"` (binary, every solid in one body), `"stl-ascii"` (one body named as the first solid), `"obj"` (one named object a solid, no material library), `"glb"` or `"gltf"` (one named node a solid in a material of its own; the `.gltf` with its buffer embedded). `names` one a solid (left out: each solid's own name, else `Solid 1`, `Solid 2`, ...); `looks` one a solid, six numbers each — linear `r, g, b, a, metallic, roughness` in 0..1 — the glTF's materials (left out: each solid's own colour); STL and OBJ ignore them. No solids, an unknown format, or names or looks not one a solid raises `BuildError`.
+Several solids meshed at `tolerance` — each the mesh `Solid.mesh()` hands out — as one file's bytes in `format`: `"stl"` (binary, every solid in one body), `"stl-ascii"` (one body named as the first solid), `"obj"` (one named object a solid, no material library), `"glb"` or `"gltf"` (one named node a solid in a material of its own; the `.gltf` with its buffer embedded), `"3mf"` (a 3MF package, one named object a solid, in millimetres), `"ply"` (binary little-endian) or `"ply-ascii"` (PLY, every solid's triangles in one body). 3MF and PLY carry the solids' colours — each face its own where it was painted, else the solid's; 3MF a colour a triangle, PLY a colour a vertex — and none when no solid is coloured. `names` one a solid (left out: each solid's own name, else `Solid 1`, `Solid 2`, ...); `looks` one a solid, six numbers each — linear `r, g, b, a, metallic, roughness` in 0..1 — the glTF's materials (left out: each solid's own colour); the other formats ignore them. No solids, an unknown format, or names or looks not one a solid raises `BuildError`.
 
 ```python
 svg(things: Sequence[Solid | Profile], path: FilePath | None = None) -> str | None
@@ -1079,6 +1079,11 @@ A DXF file's closed loops as `Profile`s, the way back from a drawing: its lines,
 HLR_KINDS = ('sharp', 'smooth', 'outline', 'iso', 'boundary')
 ```
 The kinds of a hidden-line view's lines, in the C API's numbering from 0: `"sharp"` (an edge between faces that meet at an angle), `"smooth"` (an edge between faces near tangent), `"outline"` (a silhouette, where a surface turns away from the eye), `"iso"` (an isocurve) and `"boundary"` (an edge with one face, a sheet's rim).
+
+```python
+SQUISH_DEFORMATIONS = {'free': 0, 'stretch_mostly': 1, 'stretch_only': 2, 'compress_mostly': 3, 'compress_only': 4}
+```
+The deformations `Solid.squish()` takes, by name, and their C API codes: `free` 0, `stretch_mostly` 1, `stretch_only` 2, `compress_mostly` 3 and `compress_only` 4.
 
 ```python
 PAGE_UNITS = {'unitless': 0, 'in': 1, 'ft': 2, 'mm': 4, 'cm': 5, 'm': 6}
@@ -1131,6 +1136,8 @@ Set a kernel option, by its name, for the whole process from the next call on �
 
 `tolerance.angular` (default one degree, in radians): the angle that stands in where nothing declares one. Above 0 and below a right angle.
 
+`intersect.free_form_exact` (default 0): whether `Solid.intersect()`'s exact route takes free-form faces too — NURBS, extrusion, revolution and sum faces, each held as its exact NURBS — rather than only planes, cylinders, cones, spheres, tori and certified helical walls. Where it answers, every chain lies on its exact curve, certified to have missed no branch. 1 to take them, 0 not to. Off by default because an exact answer on a free-form body costs several times the mesh route's (a median 3.9 s against 0.7 s on corpus bodies against their turned copies), and where the exact route refuses — a near-tangent pair it cannot certify, a face with no exact NURBS form — the mesh route still runs after it. There is no work budget. The booleans and the section verbs never read it.
+
 A name that is not an option, or a value the option does not take, raises `BuildError` and changes nothing, saying which and what it takes.
 
 ```python
@@ -1147,6 +1154,16 @@ The whole thread size table as `ThreadSize`s: ISO metric coarse M1 .. M64, ISO m
 thread_size(designation: str) -> ThreadSize
 ```
 The `ThreadSize` `designation` names: the exact designation first, then forgiven — case and spaces ignored, `"M10"` the coarse row, `"M10x1.25"` the fine one, `"1/4-20"` the UNC or UNF row of that TPI. A designation no row matches raises `BuildError`.
+
+```python
+gear_centre_distance_involute(module: float, teeth_first: int, teeth_second: int, *, shift_first=None, shift_second=None, pressure_angle=None) -> float
+```
+The centre distance of two involute gears of `module`, `teeth_first` and `teeth_second` teeth, in mesh without backlash: `module (z1 + z2) / 2 cos(alpha) / cos(alpha_w)`, the working angle `alpha_w` solved from the shifts. `None` is the default: shifts 0, `pressure_angle` 20 degrees (radians). A module not positive, fewer than 4 teeth, a pressure angle outside (0, pi/4) or shifts that leave no working angle raises `BuildError`.
+
+```python
+contact_settle(driver: 'Profile', driver_pivot: Point2, driver_angle: float, follower: 'Profile', follower_pivot: Point2, previous: float, direction: int, *, limit=None, tolerance=None) -> Settle
+```
+Where the follower comes to rest, as a `Settle`: two profiles turning about parallel axes, the `driver` held at `driver_angle`, the `follower` urged along `direction` (+1 counter-clockwise, -1 clockwise) from `previous` — an escapement's pallet and wheel, a ratchet and its click. Each profile is drawn in its own frame, the frame's origin at its pivot: a local point `p` of a link at angle `a` lies at `pivot + R(a) p`; angles are radians. Both profiles are regions with their holes. A follower that starts penetrating recoils against `direction` to first contact; otherwise it advances to first contact or to `limit`, an absolute follower angle. Conservative advancement on the exact profiles (lines and arcs in closed form, other segments through their NURBS form) never steps over a thin feature, and the answer never penetrates: in contact the gap is within `tolerance`. `None` is the default: `limit` one full turn from `previous` along `direction`, `tolerance` `1e-9` times the larger bounding-box diagonal of the two placed profiles. A profile with no segments, a pivot, angle or `previous` not finite, a `direction` other than +1 or -1, a `limit` infinite or not strictly along `direction` from `previous`, a negative or infinite tolerance, a follower that cannot clear by turning, or no convergence within 100 000 gap evaluations raises `BuildError`.
 
 ```python
 angle(a: Point3, vertex: Point3, b: Point3) -> float
@@ -1289,6 +1306,21 @@ Profile.arc_through(start: Point2, through: Point2, end: Point2) -> Profile
 The arc from `start` through `through` to `end`: one exact arc leaving the start, open — the circle through the three points, swept the way round that passes `through`. Three points in a line raises `BuildError`.
 
 ```python
+Profile.gear_involute(module: float, teeth: int, *, pressure_angle=None, shift=None, addendum=None, dedendum=None, root_fillet=None, backlash=None, tolerance=None) -> GearProfile
+```
+An involute spur gear of `teeth` teeth of `module`, tooth 0 centred on the sketch's x axis, as a `GearProfile`: the flanks NURBS within `tolerance` of the true involute, the tips, root fillets and root arcs exact — one closed outline that extrudes, cuts and exports as any other. `None` is the default: `pressure_angle` 20 degrees (radians), `shift` 0, `addendum` 1 and `dedendum` 1.25 (factors of the module), `root_fillet` `0.38 module`, `backlash` 0 (taken off this gear's tooth), `tolerance` `1e-4 module`. Undercut is flagged in the report, not drawn. Fewer than 4 teeth, a module not positive, a pressure angle outside (0, pi/4), a pointed tooth or a root fillet that does not fit raises `BuildError`; `gear_centre_distance_involute` places its mate.
+
+```python
+Profile.gear_wheel_cycloidal(module: float, teeth: int, pinion_leaves: int, *, thickness=None, addendum=None, dedendum=None, root_fillet=None, tolerance=None) -> GearProfile
+```
+A cycloidal clock wheel of `teeth` teeth of `module` driving a pinion of `pinion_leaves` leaves, tooth 0 centred on the sketch's x axis, as a `GearProfile`: addendum flanks within `tolerance` of the true epicycloid rolled by a circle of half the pinion's pitch radius, radial dedendum flanks, fillets and root arcs exact. `None` is the default: `thickness` `pi module / 2`, `addendum` up to the flanks' crossing with the point rounded, `dedendum` 1.57 (a factor of the module), `root_fillet` `0.25 module`, `tolerance` `1e-4 module`. The centre distance to the pinion is the two reports' pitch radii added. A pinion of under 6 leaves, a wheel no larger than it, a size not positive or a fillet that does not fit raises `BuildError`.
+
+```python
+Profile.gear_pinion_cycloidal(module: float, leaves: int, wheel_teeth: int, *, thickness=None, tip='round', clearance=None, root_fillet=None, tolerance=None) -> GearProfile
+```
+A cycloidal clock pinion of `leaves` leaves of `module` driven by a wheel of `wheel_teeth` teeth, leaf 0 centred on the sketch's x axis, as a `GearProfile`: radial flanks inside the pitch circle and a `tip` `"round"` (a semicircle of half the leaf thickness) or `"ogive"` (the epicycloid, truncated at `0.855 module`). `None` is the default: `thickness` `1.05 module` (6 to 10 leaves) or `1.25 module`, `clearance` `0.4 module` below the wheel's addendum, `root_fillet` `0.25 module`, `tolerance` `1e-4 module`. Under 6 leaves, a wheel no larger than the pinion, a size not positive, a negative clearance, a tip that is neither or a fillet that does not fit raises `BuildError`.
+
+```python
 Profile.ellipse(centre: Point2, rx: float, ry: float) -> Profile
 ```
 The ellipse about `centre` with semi-axes `rx` along x and `ry` along y, closed: four exact quarter conics, counter-clockwise from the point `rx` along x. A semi-axis not positive and finite raises `BuildError`.
@@ -1330,7 +1362,7 @@ Parsed: a list of dicts.
 ```python
 Profile.fillet_corner(a: 'Profile', b: 'Profile', radius: float, tolerance: 'float | None' = None) -> dict[str, Any]
 ```
-A sketch fillet between two open profiles that meet at an end, within `tolerance`: both cut back to the tangent points, each still running the way it ran, and the arc from the first's side to the second's, all as pieces `Profile.from_pieces()` reads — `{a, b, arc}`. Profiles that do not meet at an end, do not meet in straight segments, run straight on or fold back, or a radius that does not fit, raises `BuildError`.
+A sketch fillet between two open profiles that meet at an end, within `tolerance`: both cut back to the tangent points, each still running the way it ran, and the arc from the first's side to the second's, all as pieces `Profile.from_pieces()` reads — `{a, b, arc}`. Profiles that do not meet at an end, run straight on or fold back, or a radius that does not fit, raises `BuildError`.
 
 Parsed: a dict.
 
@@ -3229,6 +3261,41 @@ solid.drop_faces(faces: Iterable[int]) -> Solid
 This solid without the faces listed: the rest keep their surfaces, curves and colours in their order, so an index into the result is this one's with the dropped ones closed up. Dropping every face raises `BuildError`.
 
 ```python
+solid.split_faces(curves: 'NurbsCurve | Iterable[NurbsCurve]', faces: 'Iterable[int | None] | None' = None, tolerance: 'float | None' = None) -> Solid
+```
+This solid with its faces split along `curves` (`NurbsCurve`s), in place: still one body — a closed solid stays closed, a sheet keeps its rim — with more faces, each new face a piece of a face of this one on its own surface and every new edge the curve itself, as OCCT's SplitShape. Nothing is cut away. Curve `i` is laid on face `faces[i]`, which it must lie on, or — `faces` `None`, or an entry `None` — on every face it lies on, only where it does, so one curve can run over several faces. A curve may run past its face (what lies outside is dropped), cross other curves, and close on itself inside a face as an island; every stretch kept must end on the face's edges or on another curve's end. Exact on planes, cylinders, spheres and tori. Both pieces of a split face keep its colour and attributes; the first keeps its id, the others get new ids whose origin is the face. `tolerance` `None` is the solid's effective tolerance. `faces` not as long as `curves`, no curves, a face this solid has not, a curve off its face, a stretch stopping inside a face, a curve through a pole of its face's surface (a sphere's pole, a cone's apex), or no curve crossing any face raises `BuildError`.
+
+```python
+solid.split_along_silhouette(direction: 'Point3', tolerance: 'float | None' = None) -> Solid
+```
+This solid with its faces split along its silhouette seen along `direction` — a parallel view, looking along it: every face the outline runs across is cut there, into the part facing the view and the part facing away, still one body with more faces, as Fusion's silhouette split — a mould's parting line for a pull along `direction`. Exact on planes, cylinders, cones, spheres and tori where the view allows (a sphere splits on its equator, a cylinder seen side on along its two side lines), fitted within `tolerance` (`None`: the solid's effective tolerance) elsewhere. Colours, ids and attributes as `Solid.split_faces()`. A zero or non-finite direction, an outline through a pole of a face's surface (a sphere seen across its axis, a cone seen side on), or an outline that crosses no face (a box seen along an axis) raises `BuildError`.
+
+```python
+solid.untrim(face: int, which: str = 'all', tolerance: 'float | None' = None) -> Solid
+```
+This solid with face `face` untrimmed, as Fusion's UntrimFeatures and Rhino's RemoveHoles: `which` `"holes"` takes every hole of the face away — a neighbour that shared one of its edges keeps it as a free edge, so a bored solid becomes an open sheet with the bore's walls hanging, and a face with no hole comes back unchanged; `"outer"` makes its outer boundary the surface's natural one — its own parameter domain where it has one, the box of the face's parameters where the surface runs on (a plane, a cylinder's length), the full turn with a seam where the face already wraps round — the holes kept; `"all"` (the default) does both. A side of the new boundary lying on an old edge of the face keeps that edge, so the face stays joined there. Every face keeps its index, colour, id and attributes. `tolerance` 0 or `None` is the solid's effective tolerance. Another `which`, a face this solid has not, a face with no surface or boundary to read, a natural boundary with no extent, or a kept hole the natural boundary would touch raises `BuildError`.
+
+```python
+solid.unstitch(faces: 'Iterable[int] | None' = None, together: bool = False) -> list[Solid]
+```
+This solid taken apart along its edges into bodies, each a solid of its own, as Fusion's UnstitchFeatures and Rhino's UnjoinEdges: every face kept as it is, the edges between faces of one body still shared, those between bodies left free on each side. `faces` `None` (or empty): every face a one-face sheet of its own. Otherwise, with `together`, the faces listed are one body; without, each listed face is a sheet of its own; either way the faces not listed are one body per edge-connected run of them, as `Solid.lumps()` finds bodies. The bodies come back listed ones first, the rest in the order of their first faces; listed faces sharing no edge with each other come back a body each. Every face keeps its colour, id and attributes. A face this solid has not, or a face listed twice, raises `BuildError`.
+
+```python
+solid.ruled_from_edges(edges: 'Iterable[int | Edge]', ruling: str = 'tangent', distance: float = 1.0, angle: float = 0.0, direction: 'Point3 | None' = None, alternate_face: bool = False, tolerance: 'float | None' = None) -> Solid
+```
+A sheet of ruled faces, one off each of `edges` (edges or indices into `Solid.edges`), as Fusion's RuledSurfaceFeatures from edges: each face runs from the edge `distance` (1 by default) along its `ruling` — `"tangent"` (the default: square to the edge in its face's tangent plane, away from the face: the face carried on), `"normal"` (the face's outward normal) or `"direction"` (along `direction`, normalised, not made square to the edge; given with `"direction"` and only then) — turned by `angle` radians about the edge: a positive angle tilts a tangent ruling towards the face's outward normal and a normal ruling back over the face. A negative `distance` rules the other way. The face the ruling hangs off is the edge's first, its second with `alternate_face`. The far side is exact where the ruling is constant or an affine image of the edge (a line, a direction, an arc or rim circle on a plane, cylinder, cone or sphere), fitted within `tolerance` (0 or `None`: the solid's effective tolerance) elsewhere; faces meeting along a side are sewn into one sheet, corners between edges that are not tangent left as they fall. Each ruled face takes the colour and attributes of the face it hangs off. Another `ruling`, a `direction` given without `"direction"` or missing with it, no edges, an edge out of range, a distance zero or not finite, an angle not finite, a zero direction, a ruling along the edge's tangent, or an edge with no exact curve raises `BuildError`.
+
+```python
+solid.change_seam(face: int, parameter: float, along_u: bool = True, tolerance: 'float | None' = None) -> Solid
+```
+This solid with face `face`'s seam moved to `parameter` along `u` (`along_u`, the default) or `v`, as Rhino's Brep.ChangeSeam: the face's surface must close on itself that way and the face go all the way round it. `parameter` is in the face's own parameters, wrapped into the period; a seam already there gives the solid back as it was. The shape, the face count and every other face are unchanged; edges crossing the new seam are cut in two at it. Cylinders, cones, spheres and tori (along `u`; a torus along `v` too) keep their surface, a closed NURBS is reseamed, a surface of revolution turning a whole turn moves its seam along its spin. Every face keeps its index, colour, id and attributes. `tolerance` 0 or `None` is the solid's effective tolerance. A face this solid has not, a parameter not finite, a surface not closed that way or of a kind whose seam is not moved, a face with no seam, or a hole across the new seam raises `BuildError`.
+
+```python
+solid.merge_surfaces(other: 'Solid', tolerance: 'float | None' = None) -> Solid
+```
+This one-face sheet and `other` merged along a side they share into one one-face sheet, as Rhino's Brep.MergeSurfaces: both faces untrimmed — bounded by their surfaces' four sides, as a box's face is — and their surfaces joined end to end as `NurbsSurface.merge()` joins them, every point of either a point of the result, the joint left smooth where it already was. The sheet faces as this one's face does and takes its colour, id and attributes. `tolerance` 0 or `None` is the two bodies' effective tolerance. A body with other than one face, a trimmed face, no side shared within the tolerance, sides that meet only in part, or sides parametrised differently raises `BuildError`.
+
+```python
 solid.trim(tool: 'Solid', keep: Literal['outside', 'inside'] = 'outside', tolerance: 'float | None' = 0.05, progress: Progress = None) -> Solid
 ```
 This sheet (or solid) cut along the closed `tool`'s boundary and the pieces on one side thrown away: `keep` `"outside"` (the default) keeps what lies outside the tool — a hole punched through — and `"inside"` what lies within it. Nothing on the kept side raises `BuildError`. `tolerance` and `progress` as for `Solid.join()`.
@@ -3276,12 +3343,12 @@ This half and its reflection across `plane` (a `Frame`, its z the plane's normal
 ```python
 solid.pattern(transforms: 'Iterable[Transform | Iterable[float]]', tolerance: 'float | None' = None) -> tuple[Solid, PatternReport]
 ```
-This body and its copies at `transforms` (rigid `Transform`s, typically from `Pattern`, instance 0 the identity keeping the original) as one body — a pattern of bodies — beside a `PatternReport`. Copies apart from each other are put together with no boolean at all; copies that overlap are joined, one boolean a group. No transforms, or one that is not rigid, raises `BuildError`.
+This body and its copies at `transforms` (rigid `Transform`s, typically from `Pattern`, instance 0 the identity keeping the original) as one body — a pattern of bodies — beside a `PatternReport`. Copies apart from each other are put together with no boolean at all; copies that overlap are joined, one boolean a group. No transforms, or one that is neither rigid nor a mirror, raises `BuildError`.
 
 ```python
 solid.pattern_feature(tool: 'Solid', op: str, transforms: 'Iterable[Transform | Iterable[float]]', tolerance: 'float | None' = None) -> tuple[Solid, PatternReport]
 ```
-`tool` — any closed solid, typically a `_tool` call's result — placed at each of `transforms` and applied to this body by `op`, `"cut"` or `"join"`: a pattern of features, Fusion's compute type *identical*, beside a `PatternReport`. Copies apart from each other are one multi-lump tool and **one** boolean, however many there are; overlapping copies fall into a few groups. A copy that shares no volume with the body is missed: dropped for a cut, kept as a body of its own for a join. An unknown `op`, no transforms, one not rigid, or a tool that is not closed raises `BuildError`.
+`tool` — any closed solid, typically a `_tool` call's result — placed at each of `transforms` and applied to this body by `op`, `"cut"` or `"join"`: a pattern of features, Fusion's compute type *identical*, beside a `PatternReport`. Copies apart from each other are one multi-lump tool and **one** boolean, however many there are; overlapping copies fall into a few groups. A copy that shares no volume with the body is missed: dropped for a cut, kept as a body of its own for a join. An unknown `op`, no transforms, one neither rigid nor a mirror, or a tool that is not closed raises `BuildError`.
 
 ```python
 solid.hole(points: 'Point3 | Iterable[Point3]', diameter: float, *, direction=None, extent='through', depth=None, tip_angle=math.radians(118), face=None, head=None, head_diameter=0.0, head_depth=0.0, head_angle=math.radians(90), thread=None, thread_depth=None, thread_modelled=True, left_handed=False, tolerance=None) -> tuple[Solid, HoleReport]
@@ -3387,7 +3454,7 @@ solid.recognize(tolerance: 'float | None' = None) -> tuple[Solid, RecognizeRepor
 ```
 This solid with its free-form surfaces and edge curves given their analytic kind, beside a `RecognizeReport` of what was taken and left, as a new `Solid`; this one is left as it was. A NURBS, revolved, extruded or swept surface that is a plane, cylinder, cone, sphere or torus within `tolerance` of every sample of its faces and every point of their edges becomes exactly that; an edge curve that is a line, circle or ellipse within it likewise, over the same stretch run the same way. So a file that stored its analytic faces as NURBS — a `.3dm` above all, and many STEP and SAT exports — comes back as it was made, and verbs that read a face's kind (a hole's axis, a fillet's radius) work on it.
 
-Faces and edges keep their numbers, so a face or edge picked before is the same one after. The faces of one surface are taken together or not at all. A face given only by trims in its old surface's parameters (`.3dm`, IGES) is lifted to space edges first. Volume and area move by no more than the tolerance allows.
+Faces and edges keep their numbers, so a face or edge picked before is the same one after. The faces of one surface are taken together or not at all. A face given only by trims in its old surface's parameters (`.3dm`, IGES) is lifted to space edges first. Volume and area move by no more than the tolerance allows. Opening a file can do this for every body it hands out: the reader's open options take a recognize tolerance, off by default.
 
 `tolerance` `None`, NaN, infinite, zero or negative takes the default, `1e-6` of the body's extent; the report shows what was used. Not the file's declared tolerance: at a STEP file's usual 0.01, a fillet's blend reads as a torus and the body's area moves by parts in a thousand. In the browser the reader module's `Scene.recognized` returns the report only: recognise the body through the blacksmith module's `Solid.recognize`. A solid that cannot be read raises `BuildError`.
 
@@ -3516,6 +3583,11 @@ Solid.sheet_contour(path: 'Iterable[Point2]', width: float, rule: 'SheetRule', f
 A contour flange: the open path `path` (points in `frame`'s plane, the sheet seen edge on) swept `width` along the frame's z, each corner a bend of the rule's radius. A path of fewer than two points, a corner too tight for the bend, or a width not positive raises `BuildError`.
 
 ```python
+Solid.sheet_lofted_flange(a: 'Iterable[Point3]', b: 'Iterable[Point3]', rule: 'SheetRule', tolerance: 'float | None' = None) -> Solid
+```
+A lofted flange between the open polylines `a` and `b` (points, at least two each), the sheet's top face — Fusion's Lofted Flange, press-brake style: the strip between them is cut into facets (neighbours in one plane merged), every crease a bend of the rule's radius, so the part reads and unfolds like any other. Sample an arc into as many points as facets wanted (a square-to-round is a square's sides and a sampled circle). The sheet lies under the facets' normal, along `a` crossed with towards `b`: reverse both to put it on the other side. Each facet is cut back by its bends' set-backs and each bend zone ends square a little inside its facets, so the outline steps in at each end of a crease. Fewer than two points, a repeated point, a facet with no area, or a facet its bends' set-backs leave nothing of (fewer facets or a smaller radius) raises `BuildError`.
+
+```python
 solid.sheet_flange(edges: 'Iterable[Edge | int]', angle: float, length: float, rule: 'SheetRule', offsets: 'tuple[float, float] | None' = None, tolerance: 'float | None' = None) -> Solid
 ```
 Edge flanges on `edges` (edges of a broad face of a sheet body), each turned `angle` radians (> 0 up, towards the side the edge's face looks) and `length` high outside, bent at the rule's radius. `offsets` none for flanges the full length of their edges, else how far in each starts from its edge's two ends, the rule's bend relief cut there. Two flanges meeting at a corner are mitred with the rule's gap. An edge not on a broad face's rim, a body that is not sheet metal, an angle out of range or a length shorter than the bend raises `BuildError`.
@@ -3523,7 +3595,7 @@ Edge flanges on `edges` (edges of a broad face of a sheet body), each turned `an
 ```python
 solid.sheet_hem(edges: 'Iterable[Edge | int]', kind: str, length: float, rule: 'SheetRule', gap: float = 0.0, angle: float = 0.0, tolerance: 'float | None' = None) -> Solid
 ```
-Hems on `edges`: `kind` `flat` (the lip folded flat on the sheet), `open` (folded back with a gap), `rolled` (rolled round through `angle`, 0: 1.5 pi) or `teardrop`; `length` the lip, `gap` the gap inside (0: the thickness). What `Solid.sheet_flange()` refuses raises `BuildError` here too.
+Hems on `edges`: `kind` `flat` (the lip folded flat on the sheet), `open` (folded back with a gap), `rolled` (rolled round through `angle`, 0: 1.5 pi), `teardrop`, `rope` (curled round a rod `gap` across until it comes back down to the sheet) or `double` (folded twice and pressed flat, three layers); `length` the lip (a rope hem has none), `gap` the gap inside (0: the thickness). What `Solid.sheet_flange()` refuses raises `BuildError` here too.
 
 ```python
 solid.sheet_fold(face: int, line: 'tuple[Point3, Point3]', angle: float, rule: 'SheetRule', tolerance: 'float | None' = None) -> Solid
@@ -3601,6 +3673,11 @@ solid.unroll(faces: 'Iterable[int] | None' = None, curves: 'Iterable[NurbsCurve]
 Faces `faces` (none: all) laid flat in the xy plane, as an `Unrolled` — Rhino's `Unroller`. Planes, cylinders and cones unroll exactly, any other surface whose Gaussian curvature vanishes within `tolerance` by its own flattening. Faces sharing an edge stay joined unless joined they would overlap (or `explode`), the largest face placed first. `curves` follow onto the flat, in pieces where they cross a cut, and `points` to their spots. A face that is not developable is left out and reported, never stretched. A face out of range, or no developable face, raises `BuildError`.
 
 ```python
+solid.squish(faces: 'Iterable[int] | None' = None, curves: 'Iterable[NurbsCurve]' = (), points: 'Iterable[Point3]' = (), explode: bool = False, deformation: str = 'free', preserve_boundary: bool = True, tolerance: 'float | None' = None) -> Squished
+```
+Faces `faces` (none: all) laid flat in the xy plane with the least distortion, developable or not, as a `Squished` — Rhino's `Squisher`, the companion to `Solid.unroll()`. Faces sharing an edge flatten together unless `explode`; a group whose faces are all developable is laid exactly as `Solid.unroll()` lays it, the others are meshed finely and relaxed (a conformal start, then an energy over each triangle's stretch). `deformation` reads from the flat to the shape, as Rhino's: `"free"`, `"stretch_mostly"` and `"stretch_only"` (flat lengths at most their 3D lengths: the pattern stretches to cover the shape), `"compress_mostly"` and `"compress_only"` (at least); *only* holds in every triangle in every direction. `preserve_boundary` (on by default) keeps the outline's length. `curves` follow onto the flat (in pieces where they leave the faces), `points` to their spots. A face out of range, a bad deformation, or faces that close on themselves (a closed surface has no edge to open from) raises `BuildError`.
+
+```python
 solid.regions() -> list[Region]
 ```
 The regions of space this solid's faces bound, as `Region` values — Rhino's `GetRegions`, computed on demand from the faces' order round every edge. **Region 0 is the infinite one**, the outside; the finite ones follow in a fixed order, so the same body gives the same list. An ordinary solid has two (the outside, in front of every face, and the inside, behind them), a `Solid.merge()` one per cell, a solid with a cavity three (the cavity is a region of its own).
@@ -3630,6 +3707,26 @@ solid.fillet_law(edges: Iterable[Edge | int], law: 'Sequence[tuple[float, float]
 Round a chain of spline edges (`Edge` values or their indices) with the radius following a law: `law` is the radius at stations along the chain, each `(share, radius)` — the share of the chain's arc length from its start, 0 to 1 — run through smoothly by a monotone cubic, so the radius never swings past its stations, and held flat before the first station and after the last. `[(0, 4), (1, 12)]` grows from 4 at one end to 12 at the other, as a car's shoulder fillet does. The edges must run end to end into one open chain, each running on tangent into the next; the chain runs the way the first edge's curve does. Where the faces either side change from one edge to the next they must meet smooth along a seam through the vertex between, and the fillets meet on one shared end there. `tolerance` is the fillet surfaces' fit. Straight or circular edges, a branching or closed chain, or edges meeting at an angle raises `BuildError`.
 
 ```python
+solid.fillet_chord(edges: Iterable[Edge | int], chord: float, tolerance: 'float | None' = 1e-06) -> Solid
+```
+Round the given edges (`Edge` values or their indices) with a rolling ball sized so the chord between its rails — the straight line across the fillet from one face to the other — is `chord` long: Rhino's distance-between-rails rail type, Fusion's chord-length fillet. It reaches every edge `Solid.fillet()` reaches. Straight edges and partial arcs share one radius per call, so edges whose faces meet at different angles raises `BuildError` — round them in calls of their own; a whole rim takes its own radius; along a spline edge between NURBS faces the radius varies so the chord holds, and a crease that folds or flattens raises `BuildError`. A box's edge rounded by chord `c` is the fillet of `c/√2`. `tolerance` is the fillet surfaces' fit.
+
+```python
+solid.fillet_asymmetric(edges: Iterable[Edge | int], face: int, distance: float, distance_other: float, tolerance: 'float | None' = 1e-06) -> Solid
+```
+Round the given edges (`Edge` values or their indices) with two set-backs: each edge is cut back `distance` along face `face` (an index; every edge must border it) and `distance_other` along its other face, and the section between is the exact conic tangent to both faces — an elliptic arc, the rolling-ball circle when the distances are equal (then it is `Solid.fillet()` at `d·tan(θ/2)`, Rhino's distance-from-edge rail type). Fusion's asymmetric fillet. Straight edges between planes, convex or concave, ending square or oblique against planes, joined end to end in a line, or two meeting at a convex corner with matching sections (a box's top rim, mitred). Circular edges and rims, spline edges, curved end faces, a chain running into a tangent arc and corners where the sections differ raises `BuildError`.
+
+```python
+solid.fillet_full_round(side: int, centre: int, other_side: int, tolerance: 'float | None' = 1e-06) -> Solid
+```
+A full round: face `centre` (an index) replaced by a round tangent to faces `side` and `other_side` either side of it — Fusion's full round fillet. A rib's flat top between two parallel walls becomes a half cylinder; a tube's top, a ring between two coaxial walls, becomes a half torus. The radius is not given but solved from the three faces: sides `w` apart give `w/2`. `centre` must be a plane and each side must share an edge with it; a face index past the solid's faces, the same face as both sides, a tapered rib, a disc top, curved end faces and side faces lower than the round raises `BuildError`.
+
+```python
+solid.fillet_rule(faces: Iterable[int], radius: float, between: Iterable[int] = (), rule: str = 'all', tolerance: 'float | None' = 1e-06) -> Solid
+```
+`Solid.fillet()` at `radius` of the edges a rule picks — Fusion's rule fillet. With `between` empty every edge with a face in `faces` (indices) is a candidate, otherwise every edge between a face in `faces` and one in `between`; of those `rule` keeps the convex and the concave ones (`all`, the default), the concave ones only (`concave`, the valleys) or the convex ones only (`convex`, the ridges), classed at the solid's own angular tolerance. Smooth edges, and edges convex along part of their length and concave along another, are never picked. No faces, a face index past the solid's faces, an unknown rule, nothing picked, or anything the fillet itself refuses raises `BuildError`.
+
+```python
 solid.chamfer(edges: Iterable[Edge | int], distance: float, tolerance: 'float | None' = 1e-06) -> Solid
 ```
 A flat bevel instead of a round: each edge cut back `distance` along both its faces.
@@ -3643,6 +3740,16 @@ Hollow the solid to walls `thickness` thick — inward for a positive thickness,
 solid.thicken(thickness: float, tolerance: 'float | None' = 1e-06, progress: Progress = None) -> Solid
 ```
 A sheet made a solid `thickness` thick: its faces, their twins moved `thickness` along the faces' normals (against them for a negative thickness), and a wall round every open edge. Two faces of a folded sheet meet on their offsets' mitre; a closed sheet thickens to a hollow. Free-form (NURBS) faces offset by a fit held to `tolerance`. A thickness a face cannot take — a radius used up, a free-form offset folding over — raises `BuildError`.
+
+```python
+solid.offset(distance: float, tolerance: 'float | None' = None) -> Solid
+```
+This solid offset by `distance`: every face moved along its outward normal — outward for a positive distance, inward for a negative one — and the moved faces' new neighbours meeting at sharp joins, on their offsets' intersection (no rounded joins). A closed solid grows or shrinks to the solid its moved skin bounds; an open sheet moves to its twin, its rims left open. Each face keeps the colour, id and attributes of the face it was moved from, however far it moved; edges are matched by position. A face the offset uses up is gone, its neighbours meeting sharp. Free-form faces are fitted within `tolerance` (none: the solid's effective tolerance). A distance that is 0, NaN or infinite, a face that folds over, or a skin the offset leaves open raises `BuildError`.
+
+```python
+solid.offset_face(face: int, distance: float, tolerance: 'float | None' = None) -> Solid
+```
+Face `face` alone, as an open sheet moved `distance` along its outward normal (against it for a negative distance), still facing this solid's way, in the face's own colour: `Solid.face_sheet()` then `Solid.offset()`. A face closed on itself — a sphere's only face — gives a closed solid. `tolerance` as for `Solid.offset()`. A face this solid has not, a distance that is 0, NaN or infinite, or an offset that folds over raises `BuildError`.
 
 #### Asking
 
@@ -4162,6 +4269,16 @@ Solid.open_all(path: FilePath) -> list[Solid]
 ```
 Every body a CAD file draws, as solids placed where it draws them: one per placement, so a part placed twice is two solids.
 
+```python
+Solid.from_mesh(positions: 'Iterable[Point3] | Iterable[float] | numpy.ndarray', indices: 'Iterable[tuple[int, int, int]] | Iterable[int] | numpy.ndarray', *, weld_tolerance=0.0, angle_tolerance=0.0, distance_tolerance=0.0, mode='prismatic') -> tuple[Solid, FromMeshReport]
+```
+A triangle mesh — `positions` (three numbers a vertex) and `indices` (three a triangle) — as a solid and a `FromMeshReport`: OCCT's `BRepBuilderAPI_MakeShapeOnMesh`, Rhino's `Brep.CreateFromMesh`, Fusion's faceted `MeshConvertFeatures`. Vertices within `weld_tolerance` are welded (default `1e-6` times the bounding-box diagonal) and every triangle edge two triangles share becomes one B-rep edge. A watertight, orientable mesh comes back as a **closed solid**: stray triangles reoriented to agree with their neighbours, each shell turned outward (or inward, where it lies inside another: a void), so the volume is positive. Anything else comes back as an **open shell**, the report saying why — its holes, boundary edges and edges three or more triangles share — rather than guessing. `mode` says how far the triangles are grouped. `planes`: neighbouring triangles whose normals agree within `angle_tolerance` (radians, default 1 degree) and that lie on one plane within `distance_tolerance` (default `1e-5` times the diagonal) become one planar face, with inner loops for holes and straight runs of its outline as single line edges, its vertices snapped onto the planes they lie on: a box's mesh is 6 faces and 12 edges, and curved regions stay faceted. `prismatic` (the default) merges the planes the same way and fits the curved regions with cylinders, cones, spheres and tori, what fits nothing staying faceted; it is never worse than `planes`, whose body comes back where its own is not closed while the mesh was, holds the mesh's volume less well, or has more faces. `faceted` gives one face per triangle, as OCCT. No triangles, an index out of range, a coordinate that is not finite, a negative tolerance or an unknown mode raises `BuildError`.
+
+```python
+Solid.from_mesh_node(node: 'cadaclysm.Node', *, weld_tolerance=0.0, angle_tolerance=0.0, distance_tolerance=0.0, mode='prismatic') -> tuple[Solid, FromMeshReport]
+```
+`Solid.from_mesh()` on a reader `Node`'s triangles — a loaded STL or OBJ, or any node with a mesh — in the node's own frame, not placed. Its double-precision mesh (`Node.mesh64`) is copied out first; the scene can be closed afterwards.
+
 #### Output
 
 ```python
@@ -4278,6 +4395,20 @@ This assembly with its mechanism posed, as a new assembly; this one is left as i
 assembly.parts() -> list[str]
 ```
 The placement path of every solid under this assembly, at any depth: depth first, placements in order, the placement names down the tree joined by `/`, a `/` or `\` inside a name escaped with `\`, as `Assembly.pose()`'s keys are (`"a\/b/x"` for part `x` of a sub-assembly placed as `a/b`). The index `Assembly.swept_clash()`'s rows use. Empty for an assembly that places no solid.
+
+```python
+assembly.part_placements() -> list[tuple[float, ...]]
+```
+Where every solid under this assembly sits in the world, in `Assembly.parts()`' order: twelve numbers a part — origin, x axis, y axis, z axis, as every frame argument — its placement frames composed from the top down. Empty for an assembly that places no solid.
+
+A list of 12-float tuples.
+
+```python
+assembly.posed_placements(values: Mapping[JointKey, float | Sequence[float]] | Iterable[tuple[JointKey, float | Sequence[float]]] | None = None, state: JointKey | None = None, ground: str | None = None) -> list[tuple[float, ...]]
+```
+Where every solid sits with the mechanism posed: what `Assembly.pose()` with the same arguments then `Assembly.part_placements()` give, number for number, without making the posed assembly — the call to make once per frame of an animation. `values`, `state` and `ground` as `Assembly.pose()` takes them; every refusal of `Assembly.pose()` raises `BuildError`, worded `posed_placements:`.
+
+A list of 12-float tuples.
 
 ```python
 assembly.swept_clash(keyframes: Iterable[Mapping[JointKey, float | Sequence[float]] | Iterable[tuple[JointKey, float | Sequence[float]]]], clearance: float = 0.0, tolerance: 'float | None' = 0.05, resolution: float = 0.001, max_steps: int = 100000, allowed: Iterable[tuple[int, int]] = (), ground: str | None = None, joined: bool = False) -> list[SweptClash]
@@ -4809,6 +4940,21 @@ nurbsCurve.offset_on_sheet(solid: 'Solid', distance: float, tolerance: 'float | 
 This curve, lying on the sheet `solid` (any of its faces, within ten times `tolerance`), offset `distance` along it: each sample walked that far across the sheet, square to the curve — left of its run seen from the outward side for a positive distance — over the seams of a joined sheet and onto the surface continued past its edge, and fitted within `tolerance`, each side of a crease apart. `fit_error` is the larger of the fit's error and the distance off the sheet. A curve that does not lie on the sheet raises `BuildError`.
 
 ```python
+nurbsCurve.offset(distance: float, direction: 'Point3', tolerance: 'float | None' = None) -> NurbsCurve
+```
+This curve moved `distance` in space, square to its tangent and to `direction`, as Rhino's Curve.Offset: to the right of its run seen from the tip of `direction` for a positive distance, to the left for a negative one. A line, or a circular arc in a plane square to `direction`, offsets exactly (`fit_error` 0); anything else is fitted within `tolerance` (none: the effective tolerance), `fit_error` bounding the distance from the exact offset. A closed smooth curve offsets to a closed curve; a distance of 0 is a copy. A zero direction, a distance that is not finite, a corner (a kink the offset would tear at: offset a `Profile` for corner styles), a curve running along `direction`, or an offset that folds over (an arc's radius used up, a turn tighter than `distance`) raises `BuildError`.
+
+```python
+nurbsCurve.offset_normal_to_sheet(solid: 'Solid', distance: float, tolerance: 'float | None' = None) -> NurbsCurve
+```
+This curve, lying on the sheet `solid` (within ten times `tolerance`), moved `distance` along the sheet's normal at each of its points — off the sheet the way its faces face for a positive distance — as Rhino's OffsetNormalToSurface, and fitted within `tolerance` (none: the inputs' effective tolerance); `fit_error` bounds the distance from the exact offset. A curve off the sheet, one crossing a crease (faces whose normals differ by more than a degree), a distance that is not finite, or an offset that folds over raises `BuildError`.
+
+```python
+nurbsCurve.offset_tangent_to_sheet(solid: 'Solid', distance: float, tolerance: 'float | None' = None) -> NurbsCurve
+```
+This curve, lying on the sheet `solid` (within ten times `tolerance`), moved `distance` in the sheet's tangent plane, square to the curve — along the sheet's normal crossed with the curve's tangent for a positive distance, straight rather than walked across the sheet as `NurbsCurve.offset_on_sheet()` does — as Rhino's OffsetTangentToSurface. Fitted within `tolerance` (none: the inputs' effective tolerance); `fit_error` bounds the distance from the exact offset. A curve off the sheet, one crossing a crease, a distance that is not finite, or an offset that folds over raises `BuildError`, as for `NurbsCurve.offset_normal_to_sheet()`.
+
+```python
 nurbsCurve.pull_back(solid: 'Solid', face: int, tolerance: 'float | None' = 0.001) -> NurbsCurve
 ```
 This curve, lying on face `face` of `solid` within `tolerance`, read back into the face's surface parameters, as Rhino's Pullback: a **uv curve** — a curve in the z = 0 plane whose x is `u` and y is `v` — over this curve's own domain, its point at `t` paired with this curve's at `t`. The face is its whole surface; its trims are not read. Exact where the curve runs along a parameter line and in a plane, fitted elsewhere. Across a periodic surface's seam the uv curve runs on rather than jumping a period; where the curve ends at a pole (a sphere's, a cone's apex) it meets the pole line square, and where it passes over one it gains a run along the pole line, so past that point its parameter no longer pairs with this curve's. `fit_error` is the deviation reached. A curve standing off the surface past the tolerance raises `BuildError`, naming where and how far.
@@ -5066,7 +5212,7 @@ How smoothly the curve runs through its own knots (a closed curve's seam among t
 ```python
 nurbsCurve.fit_error  (attribute)
 ```
-On a curve from `NurbsCurve.fit()`, `NurbsCurve.fair()`, `NurbsCurve.faired()`, `NurbsCurve.spiral()`, `NurbsCurve.face_isocurves()`, a `SectionCurve`, `NurbsCurve.project_to_face()`, `NurbsCurve.pull_to_face()` or one of the curves on a face (`NurbsCurve.pull_back()`, `NurbsCurve.push_up()`, `NurbsCurve.fit_to_face()`, `NurbsCurve.through_on_face()`, `NurbsCurve.through_uv_on_face()`, `NurbsCurve.short_path()`), the largest distance found between it and what it was fitted to; `None` on any other.
+On a curve from `NurbsCurve.fit()`, `NurbsCurve.fair()`, `NurbsCurve.faired()`, `NurbsCurve.spiral()`, `NurbsCurve.face_isocurves()`, a `SectionCurve`, `NurbsCurve.project_to_face()`, `NurbsCurve.pull_to_face()`, an offset (`NurbsCurve.offset()`, `NurbsCurve.offset_normal_to_sheet()`, `NurbsCurve.offset_tangent_to_sheet()`) or one of the curves on a face (`NurbsCurve.pull_back()`, `NurbsCurve.push_up()`, `NurbsCurve.fit_to_face()`, `NurbsCurve.through_on_face()`, `NurbsCurve.through_uv_on_face()`, `NurbsCurve.short_path()`), the largest distance found between it and what it was fitted to; `None` on any other.
 
 ### HealthReport
 
@@ -5838,6 +5984,11 @@ Pattern.along(curve: 'NurbsCurve', count: int, spacing: 'float | None' = None, o
 ```
 `count` instances along a `NurbsCurve` by arc length from its start, `spacing` apart, or spread over its whole length with both ends occupied (`spacing` `None`). `orient` `"fixed"` translates each copy; `"path"` also turns it by the curve's rotation-minimising frame from the first instance's.
 
+```python
+Pattern.mirror(plane: FrameLike) -> list[Transform]
+```
+Two instances: the original (the identity) and its reflection across `plane`, its z the normal, as `Transform.mirror()`. Through `Solid.pattern()` it mirrors a body (the copy turned so it stays closed and outward); through `Solid.pattern_feature()` it mirrors a feature.
+
 ### Continuity
 
 ```python
@@ -6352,6 +6503,122 @@ unrolled.cuts  (attribute)
 ```
 The shared edges cut, as pairs of source faces.
 
+### FromMeshReport
+
+```python
+class FromMeshReport
+```
+
+What `Solid.from_mesh()` made of a mesh, as plain data.
+
+```python
+fromMeshReport.closed  (attribute)
+```
+Whether the result is a closed solid: every edge shared by two triangles, every shell orientable. Otherwise it is an open shell.
+
+```python
+fromMeshReport.faces  (attribute)
+```
+The result's faces.
+
+```python
+fromMeshReport.edges  (attribute)
+```
+The result's edges.
+
+```python
+fromMeshReport.vertices  (attribute)
+```
+The result's vertices, after welding.
+
+```python
+fromMeshReport.holes  (attribute)
+```
+Holes in the mesh: connected runs of boundary edges.
+
+```python
+fromMeshReport.boundary_edges  (attribute)
+```
+Triangle edges only one triangle has.
+
+```python
+fromMeshReport.non_manifold_edges  (attribute)
+```
+Triangle edges three or more triangles share; never repaired.
+
+```python
+fromMeshReport.flipped  (attribute)
+```
+Triangles whose winding the result reverses: to agree with their neighbours, or with a whole shell turned outward (or inward, for a void).
+
+```python
+fromMeshReport.dropped  (attribute)
+```
+Triangles dropped as degenerate after welding (a repeated corner, no area).
+
+```python
+fromMeshReport.planes  (attribute)
+```
+Merged plane faces: those of more than one triangle (a lone triangle's face is not counted).
+
+```python
+fromMeshReport.cylinders  (attribute)
+```
+Faces fitted with a cylinder (the `prismatic` mode).
+
+```python
+fromMeshReport.cones  (attribute)
+```
+Faces fitted with a cone (the `prismatic` mode).
+
+```python
+fromMeshReport.spheres  (attribute)
+```
+Faces fitted with a sphere (the `prismatic` mode).
+
+```python
+fromMeshReport.tori  (attribute)
+```
+Faces fitted with a torus (the `prismatic` mode).
+
+### Squished
+
+```python
+class Squished
+```
+
+Faces of a solid squished flat — what `Solid.squish()` returns, read at once.
+
+```python
+squished.sheet  (attribute)
+```
+The flat faces as one open `Solid` in the xy plane.
+
+```python
+squished.faces  (attribute)
+```
+Each flat face's source face.
+
+```python
+squished.distortion  (attribute)
+```
+Each flat face's distortion, flat over 3D: its `area` ratio per mesh triangle and its `length` ratio per mesh edge, each as min, max and mean (weighted by the 3D area or length). A face laid exactly has lengths 1.
+
+```python
+squished.exact  (attribute)
+```
+The source faces laid exactly, as `Solid.unroll()` lays them.
+
+```python
+squished.curves  (attribute)
+```
+Each curve given, as its pieces on the flat (`NurbsCurve` values).
+
+```python
+squished.points  (attribute)
+```
+Each point given at its spot on the flat; none where it lies on no face squished.
+
 ### FacePoint
 
 ```python
@@ -6512,6 +6779,169 @@ minimumRadius.samples  (attribute)
 ```
 The grid stations read inside the trims (0 where a closed form answered).
 
+### GearProfile
+
+```python
+class GearProfile
+```
+
+A gear's profile and its report — what `Profile.gear_involute()`, `Profile.gear_wheel_cycloidal()` and `Profile.gear_pinion_cycloidal()` return. Frozen.
+
+```python
+gearProfile.profile  (attribute)
+```
+The gear's closed outline, a `Profile`.
+
+```python
+gearProfile.pitch_radius  (attribute)
+```
+The pitch radius, `module teeth / 2`.
+
+```python
+gearProfile.base_radius  (attribute)
+```
+The involute's base circle, `pitch_radius cos(pressure_angle)`; `None` for cycloidal gearing.
+
+```python
+gearProfile.tip_radius  (attribute)
+```
+The largest radius on the profile.
+
+```python
+gearProfile.root_radius  (attribute)
+```
+The smallest radius on the profile.
+
+```python
+gearProfile.thickness  (attribute)
+```
+The tooth (leaf) thickness on the pitch circle, as an arc length.
+
+```python
+gearProfile.undercut  (attribute)
+```
+Involute only: whether the gear's cutter would undercut it. The undercut is not drawn: the flank starts on the base or root circle.
+
+### Naca
+
+```python
+class Naca
+```
+
+A NACA 4- or 5-digit airfoil by its numbers, fractions of the chord, built exactly from the textbook formulas (Abbott & von Doenhoff): `Naca.parse()` a code (`"0012"`, `"2412"`, `"23012"`, `"23112"`), or `Naca.four()` and `Naca.five()` by value — a 4.5 % camber is `four(0.045, 0.4, 0.12)`. The thickness is laid off normal to the camber line. The leading edge is at the origin, the chord along +x, the upper surface toward +y, and every curve runs from the upper trailing edge round the leading edge to the lower one. `closed_te` (the default) closes the trailing edge on one point `(chord, 0)`; open, it gapes `0.021 thickness chord`. Frozen.
+
+```python
+naca.series  (attribute)
+```
+4 or 5.
+
+```python
+naca.camber  (attribute)
+naca.lift  (attribute)
+```
+A 4-digit section's maximum `camber` and a 5-digit one's design `lift` coefficient (`0.15 L`); the other is 0.
+
+```python
+naca.position  (attribute)
+```
+Where the camber peaks along the chord; 0.05 to 0.25 by 0.05 on a 5-digit section.
+
+```python
+naca.thickness  (attribute)
+```
+The largest thickness.
+
+```python
+naca.reflex  (attribute)
+```
+A 5-digit section's reflexed camber line (the third digit 1); false otherwise.
+
+```python
+Naca.parse(code: str) -> Naca
+```
+The airfoil a 4- or 5-digit code names. A code that is not 4 or 5 digits, a 5-digit position outside 1 to 5, a third digit not 0 or 1, reflex at position 1, a thickness outside (0, 40 %] or camber with no position raises `BuildError` (`naca_parse: ...`).
+
+```python
+Naca.four(camber: float, position: float, thickness: float) -> Naca
+```
+A 4-digit section: maximum `camber` at `position`, `thickness`.
+
+```python
+Naca.five(lift: float, position: float, thickness: float, reflex: bool = False) -> Naca
+```
+A 5-digit section: design `lift` coefficient, maximum camber at `position`, `thickness`, the camber line `reflex`ed or not.
+
+```python
+naca.points(chord: float, count: int = 101, closed_te: bool = True) -> list[tuple[float, float]]
+```
+`count` (odd, 7 to 100 000; 101 by default) exact points at `chord`, cosine-spaced on each surface, from the upper trailing edge to the leading edge (the middle point, `(0, 0)`) and on to the lower trailing edge. A chord not positive, a count even or out of range, or numbers out of range raises `BuildError` (`naca_points: ...`).
+
+```python
+naca.spline(chord: float, controls: int = 32, closed_te: bool = True) -> tuple[list[tuple[float, float]], float]
+```
+The `controls` (8 to 200; 32 by default) control points of an open clamped cubic on uniform knots — the spline a page editor without knots of its own draws, as `curve.naca` does — from the upper trailing edge round to the lower, least-squares fitted to cosine-spaced exact points, and its error: the largest distance from 2 001 exact points to the curve. Refuses as `Naca.points()` does, or for `controls` out of range (`naca_spline: ...`).
+
+```python
+naca.profile(chord: float, closed_te: bool = True, tolerance: 'float | None' = None) -> tuple[Profile, float]
+```
+A closed `Profile` at `chord` and the largest distance found between it and the airfoil: one cubic NURBS within `tolerance` (`None`: `1e-5 chord`) from the upper trailing edge round to the lower, and a line closing an open trailing edge. Refuses as `Naca.points()` does, for a tolerance not positive, or for a fit that misses the tolerance, saying by how much (`profile_naca: ...`).
+
+### Settle
+
+```python
+class Settle
+```
+
+Where the follower came to rest — what `contact_settle` returns. Frozen.
+
+```python
+settle.value  (attribute)
+```
+The follower's resting angle, in radians; never penetrating.
+
+```python
+settle.contact  (attribute)
+```
+Where it touches the driver, a `SettleContact`; `None` where it stopped at the limit.
+
+```python
+settle.recoiled  (attribute)
+```
+Whether it started penetrating and was pushed back against the direction.
+
+```python
+settle.steps  (attribute)
+```
+The gap evaluations spent.
+
+### SettleContact
+
+```python
+class SettleContact
+```
+
+Where a `Settle` touches. Frozen.
+
+```python
+settleContact.point  (attribute)
+```
+The midpoint of the closest pair, in the common plane.
+
+```python
+settleContact.normal  (attribute)
+```
+The unit contact normal, from the driver toward the follower.
+
+```python
+settleContact.driver  (attribute)
+```
+The driver's touching `(loop, segment)`: loop 0 the outer, 1.. the holes in order; the segment an index into that loop's.
+
+```python
+settleContact.follower  (attribute)
+```
+The follower's touching `(loop, segment)`.
+
 ### AreaProperties
 
 ```python
@@ -6577,6 +7007,38 @@ class Deviation(NamedTuple)
 ```
 
 How far apart two profiles' outlines run, as a named tuple: what `Profile.deviation()` returns. `max_distance` is the largest distance from a point of either outline to the other, reached between `max_a` on the profile asked and `max_b` on the other; `min_distance` the smallest (0 where they meet), between `min_a` and `min_b`. Points are (x, y); every figure within the tolerance asked of the true one.
+
+### Polygon
+
+```python
+class Polygon(NamedTuple)
+```
+
+A regular polygon added to a sketch, as `Sketch.add_polygon()` returns it: plain data. `centre` is the centre point's id, `circumcircle` and `incircle` the two construction circles', `corners` the corner points' ids and `sides` the side lines' ids (side `k` runs corner `k` to corner `k + 1`).
+
+### Chamfer
+
+```python
+class Chamfer(NamedTuple)
+```
+
+What `Sketch.chamfer()` and `Sketch.chamfer_angle()` added, as plain data: `line` the new line's id, `points` the ids of its two ends (on `a`, then on `b`), `corner` the old corner point, kept as the virtual sharp, and `dimensions` the two driving dimensions (along `a`, then along `b` or the angle).
+
+### SketchPattern
+
+```python
+class SketchPattern(NamedTuple)
+```
+
+What `Sketch.pattern_rectangular()` and `Sketch.pattern_circular()` added, as plain data: `copies` one list of entity ids per copy (the source excluded, each in the order of the source entities; rectangular copies row by row, the first direction fastest), `steps` the construction lines of a circular pattern (two, none for a rectangular one) and `dimensions` the driving dimensions (rectangular: the first step's horizontal and vertical distances, then the second's where it is used; circular: the step angle).
+
+### SketchMirror
+
+```python
+class SketchMirror(NamedTuple)
+```
+
+What `Sketch.mirror()` added, as plain data: `copies` one entity id per source entity, in their order (for a point on the line, the point itself), and `constraints` the constraints holding the copies to their sources (symmetric about the line, equal radius for circles and arcs, point on line for a shared point).
 
 ### PatchReport
 
@@ -6971,6 +7433,26 @@ Up to `times` copies of the inner knot `t` along `direction` removed, each only 
 nurbsSurface.extend(side: str, length: float) -> NurbsSurface
 ```
 The surface continued `length` past `side` (`"u_start"`, `"u_end"`, `"v_start"` or `"v_end"`; Rhino's `Surface.Extend`) along its own end polynomials — curvature-continuous, every old `(u, v)` keeping its point, the domain grown on that side. Another side, or a length that is not positive and finite, raises `BuildError`.
+
+```python
+nurbsSurface.merge(other: 'NurbsSurface', tolerance: 'float | None' = 1e-06) -> NurbsSurface
+```
+This surface and `other` joined along a side they share into one surface, as Rhino's MergeSurfaces: a side of each, any of the four either way along, must be the same curve within `tolerance` (1e-6 by default; `None` or 0: the two nets' effective tolerance); `other` is turned to continue this one across it, this one keeping its parameters and the shared row of control points. Every point of either is a point of the result; knots at the joint are removed as far as it allows, so two halves of one smooth surface come back as that surface. A side collapsed to a point (a pole) is never the shared side. No side shared, sides that meet only in part, or a shared side parametrised differently raises `BuildError`.
+
+```python
+nurbsSurface.tween(other: 'NurbsSurface', count: int) -> list[NurbsSurface]
+```
+`count` surfaces evenly between this surface and `other`, as Rhino's CreateTweenSurfaces on matched nets: surface `i` at the fraction `(i + 1) / (count + 1)`, both reparametrised to `[0, 1]` each way and made compatible exactly (degrees elevated, knots merged), their homogeneous nets blended; `u` goes with `u` and `v` with `v`, as given. A `count` of 0 raises `BuildError`.
+
+```python
+nurbsSurface.offset(distance: float, tolerance: 'float | None' = None) -> NurbsSurface
+```
+This surface moved `distance` along its normal, as Rhino's Surface.Offset, over the same domain: its point at `(u, v)` within `tolerance` (none: the effective tolerance) of this one's point there moved `distance` along the normal. A plane offsets exactly (`fit_error` 0); any other surface is refitted, `fit_error` bounding the distance from the exact offset. The result holds the offset's values, not a reference back to this surface. A distance that is not finite, a surface with no normal somewhere, or an offset that folds over (a curvature radius used up) raises `BuildError`.
+
+```python
+nurbsSurface.fit_error  (attribute)
+```
+On a surface from `NurbsSurface.offset()`, the largest distance found between it and the exact offset; `None` on any other.
 
 ```python
 nurbsSurface.second_derivatives(u: float, v: float) -> tuple[tuple[float, float, float], ...]
@@ -7946,6 +8428,183 @@ rTree.close() -> None
 ```
 Free this handle now. Leaving a `with` block or the garbage collector does the same.
 
+### PolygonSet
+
+```python
+class PolygonSet
+```
+
+Any number of straight-sided polygons in the plane, each an outer ring and holes: the 2D geometry of a floor plan. The booleans (`PolygonSet.union()`, `PolygonSet.intersection()`, `PolygonSet.difference()`, `PolygonSet.union_all()`), the buffer (`PolygonSet.buffer()`, and `PolygonSet.buffer_polyline()` for lines), the measures, and the questions a layout asks over and over — where points are, whether a line or another set lies inside or touches, how far apart things are, which parts of a line a set covers. `PolygonSet()` is the empty set; its length is how many polygons it holds.
+
+Points are `(x, y)` pairs. **A set made from rings keeps them as written** — either winding, the first corner first, nothing re-cut (`PolygonSet.cleaned()` is the one that untangles). **A set a verb makes has its rings as GEOS (and so shapely) makes them**: outer rings clockwise, holes counter-clockwise, each starting where GEOS's overlay starts it, the polygons in GEOS's order — so code ported from shapely that walks rings (numbering walls by them, say) gets the same answers. The buffer is built as GEOS builds it, corner rule for corner rule, for the same reason.
+
+Sides are decided exactly: which side of an edge a point is, and so whether two edges cross, is never rounded; only corners where two edges cross are. **A set keeps an index for point and line questions**, built the first time one is asked, so a fixed set — a room — answers thousands of them cheaply. Sets are immutable: every verb returns a new one. Native library only for now: under Pyodide `PolygonSet` refuses in words. Close it when done, or let the language's scope do it; see Lifetimes.
+
+```python
+PolygonSet.from_rings(outer: 'Iterable[Point2]', holes: 'Iterable[Iterable[Point2]]' = ()) -> PolygonSet
+```
+One polygon: `outer` and its `holes`, each a sequence of `(x, y)` points, kept as written (a repeated closing point dropped). A ring of fewer than 3 points or a coordinate not finite raises `BuildError`.
+
+```python
+PolygonSet.from_polygons(polygons: 'Iterable[tuple[Iterable[Point2], Iterable[Iterable[Point2]]]]') -> PolygonSet
+```
+A set of `(outer, holes)` polygons, kept as written. Overlapping polygons are allowed: every verb treats the set as their union. Refusals as `PolygonSet.from_rings()`.
+
+```python
+PolygonSet.union_all(sets: 'Iterable[PolygonSet]') -> PolygonSet
+```
+Everything in any of `sets`, merged in one pass (shapely's `unary_union`). A single polygon comes back as it is.
+
+```python
+PolygonSet.buffer_polyline(points: 'Iterable[Point2]', distance: float, quad_segs: int = 16, join: str = 'round', mitre_limit: float = 5.0, cap: str = 'round') -> PolygonSet
+```
+The region within `distance` (> 0) of the polyline `points`. `join` as `PolygonSet.buffer()`; the ends `cap`ped `"round"`, `"flat"` (square across the end) or `"square"` (carried on by the distance). One point with a round cap is a disc. A distance not positive, an unknown join or cap, or a coordinate not finite raises `BuildError`.
+
+```python
+polygonSet.polygons: list[tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]]  (property)
+```
+The polygons as `[(outer, [hole, ...]), ...]`, each ring a list of `(x, y)` with no closing point repeated.
+
+```python
+polygonSet.is_empty: bool  (property)
+```
+Whether the set holds no polygon.
+
+```python
+polygonSet.cleaned() -> PolygonSet
+```
+The set re-cut into valid polygons: crossings resolved, overlaps merged — what the rings wind round at least once. Shapely's `buffer(0)`: a simple ring keeps its first corner first.
+
+```python
+polygonSet.union(other: 'PolygonSet') -> PolygonSet
+```
+Everything in either set.
+
+```python
+polygonSet.intersection(other: 'PolygonSet') -> PolygonSet
+```
+What the two sets share.
+
+```python
+polygonSet.difference(other: 'PolygonSet') -> PolygonSet
+```
+This set with `other` taken away.
+
+```python
+polygonSet.symmetric_difference(other: 'PolygonSet') -> PolygonSet
+```
+What is in exactly one of the two.
+
+```python
+polygonSet.intersection_area(other: 'PolygonSet') -> float
+```
+`intersection(other).area`, without building the intersection: the cheap form of the test a layout makes most.
+
+```python
+polygonSet.difference_area(other: 'PolygonSet') -> float
+```
+`difference(other).area`, without building the difference.
+
+```python
+polygonSet.buffer(distance: float, quad_segs: int = 16, join: str = 'round', mitre_limit: float = 5.0) -> PolygonSet
+```
+The set grown by `distance` (shrunk where it is negative; 0 cleans it). Corners that open up are joined `"round"` (an arc of `quad_segs` segments a quarter turn, 16 by default), `"mitre"` (out to where the moved edges meet, squared off past `mitre_limit` times the distance) or `"bevel"`. Shrinking past a part's half-width removes it; growing past a gap closes it. An unknown join, `quad_segs` outside 1 to 1024 or a distance not finite raises `BuildError`.
+
+```python
+polygonSet.transformed(a: float, b: float, d: float, e: float, xoff: float = 0.0, yoff: float = 0.0) -> PolygonSet
+```
+Every corner mapped by `x' = a x + b y + xoff`, `y' = d x + e y + yoff` (shapely's `affine_transform` order), rings kept in their order.
+
+```python
+polygonSet.area: float  (property)
+```
+The area, holes taken off.
+
+```python
+polygonSet.perimeter: float  (property)
+```
+The length of every ring, holes included.
+
+```python
+polygonSet.bounds: tuple[float, float, float, float] | None  (property)
+```
+`(min x, min y, max x, max y)`, or `None` for the empty set.
+
+```python
+polygonSet.centroid: tuple[float, float] | None  (property)
+```
+The centre of area as `(x, y)`, or `None` for a set with no area.
+
+```python
+polygonSet.locate(points: 'Iterable[Point2]') -> list[int]
+```
+Where each of `points` is: 1 inside, 0 on the outline, -1 outside. A coordinate not finite raises `BuildError`.
+
+```python
+polygonSet.contains_point(point: 'Point2') -> bool
+```
+Whether `point` is strictly inside: one on the outline is not.
+
+```python
+polygonSet.contains(other: 'PolygonSet') -> bool
+```
+Whether `other` lies in this set: none of it outside, some of it inside. **Flush against the outline counts**, as shapely's `contains` has it; an empty set is in nothing.
+
+```python
+polygonSet.intersects(other: 'PolygonSet') -> bool
+```
+Whether the two sets share any point, outlines included.
+
+```python
+polygonSet.contains_polyline(points: 'Iterable[Point2]') -> bool
+```
+Whether the polyline `points` lies in the set: none of it outside, some of it strictly inside — one lying wholly along the outline is not.
+
+```python
+polygonSet.intersects_polyline(points: 'Iterable[Point2]') -> bool
+```
+Whether the polyline `points` meets the set anywhere, outline included.
+
+```python
+polygonSet.distance(other: 'PolygonSet') -> float
+```
+The least distance between the two sets, 0 where they meet.
+
+```python
+polygonSet.distance_to_polyline(points: 'Iterable[Point2]') -> float
+```
+The least distance to the polyline `points`, 0 where they meet; one point is a polyline too.
+
+```python
+polygonSet.distance_to_point(point: 'Point2') -> float
+```
+The least distance to `point`, 0 inside or on the set.
+
+```python
+polygonSet.boundary_distance(point: 'Point2') -> float
+```
+The least distance from the set's outline to `point`, inside or out.
+
+```python
+PolygonSet.from_profile(profile: 'Profile', tolerance: 'float | None' = None) -> PolygonSet
+```
+A `Profile` flattened to a set: every arc and free-form side walked in steps that keep it within `tolerance` (`None`: the profile's effective tolerance) — the outline `Profile.polylines()` draws — its outer loop and holes kept as they run. A loop that does not close, or a tolerance that is not positive, raises `BuildError`.
+
+```python
+polygonSet.to_profiles() -> list[Profile]
+```
+Each polygon as a straight-sided `Profile` with its holes — the outer loop counter-clockwise, holes clockwise — ready to extrude, revolve or combine exactly: a floor plan's walls, say.
+
+```python
+polygonSet.clip_polyline(points: 'Iterable[Point2]') -> list[list[tuple[float, float]]]
+```
+The parts of the polyline `points` that lie in the set, outline included, as polylines in the line's own order.
+
+```python
+polygonSet.close() -> None
+```
+Free this handle now. Leaving a `with` block or the garbage collector does the same.
+
 ### Interpolator
 
 ```python
@@ -8415,6 +9074,11 @@ Node `id`'s value as a `Garment`: a `garment.garment` node, or any node that eva
 document.revision: int  (property)
 ```
 A counter that moves once with every change to the document's state — an apply, an undo or redo, a branch made, switched to or deleted, a preview frame, a batch's end — and never with an evaluation, a save or a read. A new or loaded document starts at 1. A page keys what it read on it and asks again only when it moved.
+
+```python
+document.clear_history() -> None
+```
+Starts the history again from the document as it is: one root commit holding it, so an undo has nothing to take back and a redo nothing to put back; every branch but `main` is gone. The nodes and results are untouched. An app calls it after New or Open, so its first undo never empties the document. Refused while a batch, a preview or a probe is open.
 
 ```python
 document.nodes(ids: 'Sequence[str] | None' = None) -> list[dict[str, Any]]
@@ -9216,6 +9880,56 @@ sketch.diameter(circle: int, value: float, driving: bool = True) -> int
 The circle or arc `circle`'s diameter `value`.
 
 ```python
+sketch.smooth(a: int, b: int) -> int
+```
+Two curves joined end to end with matching tangent and curvature (G2): each a line, an arc or a free curve, at least one a free curve, meeting at an end (one point, or held together by a coincident). A free curve must be clamped at that end; two arcs, or a line and an arc, are refused, as there is no curvature to match. Kind `"smooth"`.
+
+```python
+sketch.translated(a: int, b: int, from_: int, to: int) -> int
+```
+The point `b` held at the point `a` moved by the step from the point `from_` to the point `to` (`b - a = to - from_`): what a rectangular pattern holds each copied point with. Kind `"translated"`.
+
+```python
+sketch.rotated(a: int, b: int, centre: int, from_: int, to: int) -> int
+```
+The point `b` held at the point `a` turned about the point `centre` by the turn that takes `from_` to `to`: what a circular pattern holds each copied point with. `from_` or `to` the same point as `centre` is refused. Kind `"rotated"`.
+
+```python
+sketch.add_polygon(centre: Point2, vertex: Point2, sides: int) -> Polygon
+```
+A regular polygon of `sides` (3 to 1024) about the point `centre`, its corner 0 at `vertex`, as a `Polygon`: the sides held equal, with a construction circumcircle through the corners and a construction incircle tangent to side 0, both about the one centre point. Four degrees of freedom are left (centre, size, rotation); dimension either circle to size it. `centre` and `vertex` must be apart. A refusal leaves the sketch as it was.
+
+```python
+sketch.chamfer(a: int, b: int, da: float, db: float) -> Chamfer
+```
+Cuts the corner where the lines `a` and `b` meet, `da` along `a` and `db` along `b` from the corner, as a `Chamfer`. The two lines are trimmed to the new ends and a new line joins them; the old corner stays as a construction point (the virtual sharp, on both lines) with the two distances as driving dimensions, so the degrees of freedom are unchanged. The lines must meet at an end and not be parallel, neither a reference, each distance positive and shorter than its line, and no tangent or smooth held at that end. A length dimension on a trimmed line now measures the trimmed line. A refusal, or a solve that fails, leaves the sketch as it was.
+
+```python
+sketch.chamfer_angle(a: int, b: int, da: float, angle: float) -> Chamfer
+```
+As `Sketch.chamfer()`, with `da` along `a` and `angle` (radians) the interior angle at the new point on `a` between `a` and the chamfer; the second dimension is that angle. The angle must leave a chamfer shorter than `b` allows.
+
+```python
+sketch.pattern_rectangular(entities, d1: Point2, n1: int, d2: Point2 = (0, 0), n2: int = 1) -> SketchPattern
+```
+Copies `entities` (any kinds) into a grid of `n1` by `n2` instances, the source counted, `d1` and `d2` each an (x, y) step, as a `SketchPattern`. Each copied point is held to the one before it by `Sketch.translated()`; the first step along each direction is set by driving horizontal and vertical distances, so `set_value` on one respaces the whole grid and a fully constrained sketch stays so. Construction flags are copied. `n1`, `n2` at least 1, `n1 * n2` at least 2 and at most 10 000 instances; an entity dead or given twice is refused, and the sketch left as it was.
+
+```python
+sketch.pattern_circular(entities, centre: int, count: int, step: float) -> SketchPattern
+```
+Copies `entities` round the point `centre`: `count` instances (at least 2, the source counted), each turned `step` radians counter-clockwise from the last, as a `SketchPattern`. Each copied point is held by `Sketch.rotated()`; two construction lines from the centre and a driving angle dimension carry the step, so `set_value` on it respaces the copies. A first point of the source on `centre`, or a step of 0, is refused and the sketch left as it was.
+
+```python
+sketch.mirror(entities, line: int) -> SketchMirror
+```
+Copies `entities` (any kinds) reflected across the line `line`, as a `SketchMirror`. Each copied point is held to its source by `Sketch.symmetric()` about the line, a copied circle or arc by `Sketch.equal_radius()`; a point on the line is shared, not copied, and held by `Sketch.point_on_line()` unless it is one of the line's ends. Construction flags are copied and the sketch is solved. `line` must be a line and not among `entities`; a refusal leaves the sketch as it was.
+
+```python
+sketch.auto_constrain(tolerance: float = 0.0, dimensions: bool = False) -> list[int]
+```
+Adds the constraints the geometry already satisfies within `tolerance` (0 or `None` takes 1e-6 of the sketch's extent), as the new constraint ids, ascending: coincident ends, horizontal and vertical lines, tangents at joined ends, parallel, perpendicular, concentric, equal radius and length, midpoints and points on lines and circles. A candidate is kept only where it removes a degree of freedom without being redundant or conflicting. With `dimensions`, driving dimensions at the measured values follow (radii, lengths, angles, an anchor and the distances to it) until nothing is left free. One diagnosis runs per candidate: fine for hand-sized sketches. A failed solve leaves the sketch as it was.
+
+```python
 sketch.constraints() -> list[int]
 ```
 The live constraint ids, ascending.
@@ -9424,7 +10138,7 @@ A garment: patterns (a closed outline, a fabric, a grain and a seam allowance, p
 
 A refused call raises the kernel's error with the call's name first (`garment_add_seam: unknown pattern 9`). The lists the library lends are copied before a call returns, so they survive later edits. Close it when done, or let the language's scope do it; see Lifetimes.
 
-A garment is also a `Document` node's value: `garment.fabric`, `garment.pattern`, `garment.seam` and `garment.garment` nodes evaluate to one, read with `Document.result_garment()`.
+A garment is also a `Document` node's value: `garment.fabric`, `garment.pattern`, `garment.seam` and `garment.garment` nodes evaluate to one, read with `Document.result_garment()`. A `garment.pattern` node may set `particle_distance`, its own cloth mesh spacing in the outline's units (unset, the piece meshes at the cloth's `particle_distance`); a garment built with `add_pattern` meshes every piece at the cloth's. The meshes are not graded, so two pieces sewn together may differ in spacing by at most 2x, which keeps every triangle at 15 degrees or more; a wider seam is refused, naming both pieces.
 
 ```python
 Garment.FABRIC_PARAMS = 20
@@ -9598,15 +10312,17 @@ A seam read back by `Garment.seam()`, as a named tuple: pattern `a`'s arc-length
 class Cloth
 ```
 
-A cloth: a `Garment` simulated on an avatar. The garment's patterns are meshed and arranged round the avatar; each `step` then sews and drapes at once: the seam pairs pull together and weld while gravity pulls the cloth down. Gravity acts from the first frame, so a garment is usually sewn with it off and draped after: create the cloth with `gravity=(0, 0, 0)` (in C, the options `gravity.x`, `gravity.y` and `gravity.z`, indices 4 to 6, at 0), step about 60 frames until `status().welded_pairs` reaches `status().seam_pairs`, then `set_options` back to the defaults and step on to drape. Units are grams, millimetres and seconds, as the garment's.
+A cloth: a `Garment` simulated on an avatar. The garment's patterns are meshed and arranged round the avatar; each `step` then sews and drapes at once: the seam pairs pull together and weld while gravity pulls the cloth down. Gravity acts from the first frame, so a garment is usually sewn with it off and draped after: create the cloth with `gravity=(0, 0, 0)` (in C, the options `gravity.x`, `gravity.y` and `gravity.z`, indices 4 to 6, at 0), step about 60 frames until `status().welded_pairs` reaches `status().seam_pairs`, then `set_options` back to the defaults and step on to drape. Each seam pair closes at most at `sewing_speed`; a pair that stops closing short of the weld distance (where three or four pieces meet, the welded neighbours' tension can hold it there) gets a pull that grows over a few frames until it welds. Units are grams, millimetres and seconds, as the garment's.
 
 `avatar` is `None` (no body: the cloth only falls), the bytes of a binary or ASCII STL file, or `(positions, indices)`: xyz triples and index triples. `options` overrides `Cloth.default_options()` by the kernel's own names. The cloth does not keep the garment: a later edit to it changes nothing until `Cloth.remesh_pattern()`. Close it when done, or let the language's scope do it; see Lifetimes.
 
-The options are twenty numbers, in the order of `Cloth.OPTION_FIELDS`: `particle_distance`, `frame_dt`, `substeps`, `iterations`, `gravity.x`, `gravity.y`, `gravity.z`, `damping`, `local_damping`, `air_drag`, `air_lift`, `air_density`, `sewing_stiffness`, `sewing_speed`, `weld_distance`, `avatar_thickness`, `self_thickness`, `self_stiffness`, `self_collision` and `drag_stiffness`. The gravity components are the dotted names `gravity.x`, `gravity.y` and `gravity.z`; `options` and `set_options` also take all three as one `gravity=(x, y, z)`, as in `set_options(gravity=(0, 0, 0))` (not both spellings at once). `particle_distance` is the mesh spacing in mm and is fixed once the cloth exists. `self_thickness` is the *minimum* contact thickness of the cloth against itself: a fabric thicker than it separates at its own thickness, a thinner one at this, and it must stay below `weld_distance` so that seams still close.
+The options are twenty numbers, in the order of `Cloth.OPTION_FIELDS`: `particle_distance`, `frame_dt`, `substeps`, `iterations`, `gravity.x`, `gravity.y`, `gravity.z`, `damping`, `local_damping`, `air_drag`, `air_lift`, `air_density`, `sewing_stiffness`, `sewing_speed`, `weld_distance`, `avatar_thickness`, `self_thickness`, `self_stiffness`, `self_collision` and `drag_stiffness`. The gravity components are the dotted names `gravity.x`, `gravity.y` and `gravity.z`; `options` and `set_options` also take all three as one `gravity=(x, y, z)`, as in `set_options(gravity=(0, 0, 0))` (not both spellings at once). `particle_distance` is the default mesh spacing in mm and is fixed once the cloth exists; a `garment.pattern` node's own `particle_distance` meshes that piece finer or coarser, and a seam between two spacings is sampled at the finer one on both sides. `self_thickness` is the *minimum* contact thickness of the cloth against itself: a fabric thicker than it separates at its own thickness, a thinner one at this, and it must stay below `weld_distance` so that seams still close. A seam pair whose two points come within `weld_distance` merges them into one; where three or more pieces meet, a pair sharing a point with one that merges, or with one merged already, merges within twice it, so the corner closes whole.
 
 A blown-up simulation does not raise: read `Cloth.status()`. `non_finite` counts the particles whose position or velocity is not finite, `dropped` the self-collision elements that were too large or not finite to be hashed, and `max_speed` is the fastest finite particle in mm/s; a healthy cloth has `non_finite` and `dropped` at zero.
 
 The lists the library lends (positions, triangles, links) are borrowed from the cloth in the C ABI and stay valid only until the next call on the same cloth; this wrapper copies them before a call returns, so they survive `step` and `Cloth.remesh_pattern()`, which can change the vertex and triangle counts: read the lists again afterwards. A refused call raises the kernel's error with the call's name first (`cloth_pin: vertex 9999 is not a sim vertex (2731 vertices)`).
+
+On the GPU: in the browser, a WebGPU `View` steps a cloth on the graphics card and writes its vertices straight into what it draws — `showCloth(cloth)` shows and uploads it, `stepCloth(id, frames)` steps it, `clothPositions(id)` and `clothHealth(id)` read it back (promises), and `pinCloth`, `unpinCloth`, `dragCloth` and `setClothOptions` edit it; `clothGpu` is false on WebGL2, where the cloth stays on the CPU. Not in this wrapper yet: the GPU cloth is the web View's only, the View's C ABI and the other wrappers come later. By default the GPU also runs the intersection analysis that untangles a cloth caught through itself, as the CPU does; `showCloth(cloth, {gia: false})` turns it off on the GPU, a little faster (a T-shirt drapes at about 31 fps against 30). `showCloth(cloth, {colours})` paints each sim vertex its own colour (one RGB in 0..1 per vertex, in the cloth's vertex order — a garment's pieces in their fabrics' colours), kept as the GPU moves the vertices.
 
 ```python
 Cloth.OPTION_FIELDS = ('particle_distance', 'frame_dt', 'substeps', 'iterations', 'gravity.x', 'gravity.y', 'gravity.z', 'damping', 'local_damping', 'air_drag', 'air_lift', 'air_density', 'sewing_stiffness', 'sewing_speed', 'weld_distance', 'avatar_thickness', 'self_thickness', 'self_stiffness', 'self_collision', 'drag_stiffness')

@@ -12,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -210,6 +212,215 @@ func TestLineColoursDrawAndClear(t *testing.T) {
 	}
 	if n := greens(); n != 0 {
 		t.Fatalf("%d green pixels after clearing", n)
+	}
+}
+
+// 1.31's clip planes on the real library: a capped, hatched plane read back with its normal
+// made unit length, a plain one with the defaults, a refusal that changes nothing, a clear.
+func TestClipPlanesRoundTrip(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	v, err := view.Offscreen(160, 120, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer v.Close()
+	if view.ClipPlanes != 6 {
+		t.Fatalf("%d slots", view.ClipPlanes)
+	}
+	if p, err := v.ClipPlane(0); p != nil || err != nil {
+		t.Fatalf("a new view's slot 0: %+v, %v", p, err)
+	}
+	red, black := [3]float32{1, 0, 0}, [3]float32{0, 0, 0}
+	want := view.NewClipPlane([3]float64{1, 2, 3}, [3]float64{0, 0, 2})
+	want.Cap, want.Hatch = &red, &black
+	want.HatchAngle, want.HatchSpacing, want.HatchWidth = 30, 0.5, 2
+	if err := v.SetClipPlane(0, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := v.ClipPlane(0)
+	if err != nil || got == nil {
+		t.Fatalf("slot 0: %+v, %v", got, err)
+	}
+	want.Normal = [3]float64{0, 0, 1}
+	if got.Point != want.Point || got.Normal != want.Normal || got.Cap == nil || *got.Cap != red ||
+		got.Hatch == nil || *got.Hatch != black || got.HatchAngle != 30 || got.HatchSpacing != 0.5 || got.HatchWidth != 2 {
+		t.Fatalf("slot 0: %+v", got)
+	}
+	plain := view.NewClipPlane([3]float64{0, 0, 0}, [3]float64{1, 0, 0})
+	if err := v.SetClipPlane(5, plain); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := v.ClipPlane(5); err != nil || got == nil || *got != plain {
+		t.Fatalf("slot 5: %+v, %v, want the defaults %+v", got, err, plain)
+	}
+	hatchOnly := view.NewClipPlane([3]float64{0, 0, 0}, [3]float64{1, 0, 0})
+	hatchOnly.Hatch = &black
+	if got := message(v.SetClipPlane(5, hatchOnly)); !strings.Contains(got, "cadaclysm_view_set_clip_plane") || !strings.Contains(got, "hatch") {
+		t.Fatalf("a hatch without a cap: %q", got)
+	}
+	if got, _ := v.ClipPlane(5); got == nil || *got != plain {
+		t.Fatalf("a refused plane changed slot 5: %+v", got)
+	}
+	if got := message(v.SetClipPlane(6, plain)); !strings.Contains(got, "slot 6") {
+		t.Fatalf("slot 6: %q", got)
+	}
+	if _, err := v.ClipPlane(6); err == nil {
+		t.Fatal("slot 6 read")
+	}
+	if err := v.ClearClipPlane(0); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := v.ClipPlane(0); p != nil || err != nil {
+		t.Fatalf("a cleared slot 0: %+v, %v", p, err)
+	}
+	if err := v.ClearClipPlane(0); err != nil {
+		t.Fatalf("clearing an empty slot: %v", err)
+	}
+}
+
+// 1.33's textures switch on the real library: on by default, off once set off, on again.
+func TestTexturesRoundTrip(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	v, err := view.Offscreen(160, 120, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer v.Close()
+	if on, err := v.Textures(); err != nil || !on {
+		t.Fatalf("textures default on: %v, %v", on, err)
+	}
+	if err := v.SetTextures(false); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := v.Textures(); err != nil || on {
+		t.Fatalf("textures set off: %v, %v", on, err)
+	}
+	if err := v.SetTextures(true); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := v.Textures(); err != nil || !on {
+		t.Fatalf("textures back on: %v, %v", on, err)
+	}
+}
+
+// 1.32's clip sets on the real library: an outlined plane read back (width 0 as 1), an
+// outline width above 100 refused, the mode pair (mode 3 refused), viewport 0's own plane
+// round trip, and inherit dropping it.
+func TestClipSetsRoundTrip(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	v, err := view.Offscreen(160, 120, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer v.Close()
+	if view.ClipViewports != 8 || view.ClipIntersection != 0 || view.ClipCutaway != 1 || view.ClipInherit != 2 {
+		t.Fatalf("%d viewports, modes %d %d %d", view.ClipViewports, view.ClipIntersection, view.ClipCutaway, view.ClipInherit)
+	}
+	red, grey := [3]float32{1, 0, 0}, [3]float32{0.5, 0.5, 0.5}
+	outlined := view.NewClipPlane([3]float64{0, 0, 1}, [3]float64{0, 0, 1})
+	outlined.Cap, outlined.Outline, outlined.OutlineWidth = &grey, &red, 0
+	if err := v.SetClipPlane(0, outlined); err != nil {
+		t.Fatal(err)
+	}
+	got, err := v.ClipPlane(0)
+	if err != nil || got == nil || got.Outline == nil || *got.Outline != red || got.OutlineWidth != 1 {
+		t.Fatalf("slot 0's outline: %+v, %v", got, err)
+	}
+	plain := view.NewClipPlane([3]float64{0, 0, 0}, [3]float64{1, 0, 0})
+	if err := v.SetClipPlane(1, plain); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := v.ClipPlane(1); err != nil || got == nil || got.Outline != nil || got.OutlineWidth != 1 {
+		t.Fatalf("slot 1 without an outline: %+v, %v", got, err)
+	}
+	wide := plain
+	wide.Outline, wide.OutlineWidth = &red, 200
+	if got := message(v.SetClipPlane(2, wide)); got != "cadaclysm_view_set_clip_plane: outline width 200 is above 100 points" {
+		t.Fatalf("outline width 200: %q", got)
+	}
+	if m, err := v.ClipMode(); err != nil || m != view.ClipIntersection {
+		t.Fatalf("the default mode: %v, %v", m, err)
+	}
+	if err := v.SetClipMode(view.ClipCutaway); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := v.ClipMode(); err != nil || m != view.ClipCutaway || m.String() != "cutaway" {
+		t.Fatalf("the cutaway: %v, %v", m, err)
+	}
+	if got := message(v.SetClipMode(3)); got != "cadaclysm_view_set_clip_mode: mode 3 is not a clip mode (0 intersection, 1 cutaway)" {
+		t.Fatalf("mode 3: %q", got)
+	}
+	if got := message(v.SetClipMode(view.ClipInherit)); got != "cadaclysm_view_set_clip_mode: mode 2 (inherit) is a viewport's" {
+		t.Fatalf("inherit view-wide: %q", got)
+	}
+	if m, _ := v.ClipMode(); m != view.ClipCutaway {
+		t.Fatalf("a refused mode changed the mode: %v", m)
+	}
+	if err := v.SetClipMode(view.ClipIntersection); err != nil {
+		t.Fatal(err)
+	}
+	// Viewport 0 (the window: no viewports set) given a plane of its own.
+	if m, err := v.ViewportClipMode(0); err != nil || m != view.ClipInherit {
+		t.Fatalf("viewport 0 at first: %v, %v", m, err)
+	}
+	if p, err := v.ViewportClipPlane(0, 0); p != nil || err != nil {
+		t.Fatalf("viewport 0's slot 0 with no set: %+v, %v", p, err)
+	}
+	blue, white := [3]float32{0, 0, 1}, [3]float32{1, 1, 1}
+	own := view.NewClipPlane([3]float64{0, 0, 0}, [3]float64{0, 3, 0})
+	own.Cap, own.Outline, own.OutlineWidth = &blue, &white, 2
+	if err := v.SetViewportClipPlane(0, 4, own); err != nil {
+		t.Fatal(err)
+	}
+	got, err = v.ViewportClipPlane(0, 4)
+	if err != nil || got == nil || got.Normal != [3]float64{0, 1, 0} || got.Cap == nil || *got.Cap != blue ||
+		got.Outline == nil || *got.Outline != white || got.OutlineWidth != 2 {
+		t.Fatalf("viewport 0's slot 4: %+v, %v", got, err)
+	}
+	if p, err := v.ViewportClipPlane(0, 0); p != nil || err != nil {
+		t.Fatalf("viewport 0's empty slot 0: %+v, %v", p, err)
+	}
+	if m, err := v.ViewportClipMode(0); err != nil || m != view.ClipIntersection {
+		t.Fatalf("viewport 0's own mode: %v, %v", m, err)
+	}
+	if err := v.SetViewportClipMode(0, view.ClipCutaway); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := v.ViewportClipMode(0); m != view.ClipCutaway {
+		t.Fatalf("viewport 0's cutaway: %v", m)
+	}
+	if got := message(v.SetViewportClipPlane(1, 0, plain)); got != "cadaclysm_view_set_viewport_clip_plane: no viewport 1 (there are 1)" {
+		t.Fatalf("viewport 1: %q", got)
+	}
+	if _, err := v.ViewportClipPlane(0, 6); err == nil {
+		t.Fatal("viewport 0's slot 6 read")
+	}
+	if err := v.ClearViewportClipPlane(0, 4); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := v.ViewportClipPlane(0, 4); p != nil || err != nil {
+		t.Fatalf("viewport 0's cleared slot 4: %+v, %v", p, err)
+	}
+	if m, _ := v.ViewportClipMode(0); m != view.ClipCutaway {
+		t.Fatalf("clearing a plane dropped viewport 0's set: %v", m)
+	}
+	if err := v.SetViewportClipPlane(0, 4, plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.SetViewportClipMode(0, view.ClipInherit); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := v.ViewportClipMode(0); m != view.ClipInherit {
+		t.Fatalf("inherit kept viewport 0's set: %v", m)
+	}
+	if p, err := v.ViewportClipPlane(0, 4); p != nil || err != nil {
+		t.Fatalf("viewport 0's slot 4 after inherit: %+v, %v", p, err)
 	}
 }
 
@@ -967,19 +1178,19 @@ func TestPumpWithNoWindowWaits(t *testing.T) {
 	}
 }
 
-// The loader binds 117 calls of cadaclysm_view.h 1.28 (all but 1.14's analysis calls,
-// 1.19's KMS pair and 1.12's texture targets): a 1.27 library (no drafting styles) is refused
-// before any call is bound, in Python's words; 1.28 and later 1.x are taken.
-func TestTheLoaderNeedsViewABI128(t *testing.T) {
-	for _, ok := range []uint32{0x1001C, 0x1001D} {
+// The loader binds 136 calls of cadaclysm_view.h 1.33 (all but 1.14's analysis calls,
+// 1.19's KMS pair and 1.12's texture targets): a 1.32 library (no textures switch) is
+// refused before any call is bound, in Python's words; 1.33 and later 1.x are taken.
+func TestTheLoaderNeedsViewABI133(t *testing.T) {
+	for _, ok := range []uint32{0x10021, 0x10022} {
 		if err := view.CheckABIForTest(ok, "lib"); err != nil {
 			t.Fatalf("%#x refused: %v", ok, err)
 		}
 	}
 	for version, want := range map[uint32]string{
-		0x1001B: "lib: view ABI 1.27, this SDK needs 1.28 or a later 1.x",
-		0x1001A: "lib: view ABI 1.26, this SDK needs 1.28 or a later 1.x",
-		0x2001C: "lib: view ABI 2.28, this SDK needs 1.28 or a later 1.x",
+		0x10020: "lib: view ABI 1.32, this SDK needs 1.33 or a later 1.x",
+		0x1001C: "lib: view ABI 1.28, this SDK needs 1.33 or a later 1.x",
+		0x20021: "lib: view ABI 2.33, this SDK needs 1.33 or a later 1.x",
 	} {
 		if got := message(view.CheckABIForTest(version, "lib")); got != want {
 			t.Fatalf("%#x: %s, want %s", version, got, want)
@@ -1117,9 +1328,10 @@ func TestTheAnchorsAreTheHeadersAlignCodes(t *testing.T) {
 	}
 }
 
-// CadaclysmViewInputEvent as the header lays it out: 272 bytes, no implicit padding.
+// CadaclysmViewInputEvent as the header lays it out: 272 bytes, no implicit padding; 424 since
+// 1.30 (its tail: TestPickingAndSnappingWire).
 func TestTheInputEventIsTheHeaders126Layout(t *testing.T) {
-	want := [21]uintptr{0, 4, 8, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 96, 136, 224, 268, 272}
+	want := [21]uintptr{0, 4, 8, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 96, 136, 224, 268, 424}
 	if got := viewrig.InputEventLayout(); got != want {
 		t.Fatalf("CadaclysmViewInputEvent offsets and size: %v, want %v", got, want)
 	}
@@ -1222,7 +1434,7 @@ func TestNextEventReadsEachKindByTheHeadersNumbers(t *testing.T) {
 	if _, ok, err := v.NextEvent(); ok || err != nil {
 		t.Fatalf("an empty queue: %v %v", ok, err)
 	}
-	if calls, size := viewrig.EventCalls(); calls != 16 || size != 272 {
+	if calls, size := viewrig.EventCalls(); calls != 16 || size != 424 { // 1.30's event
 		t.Fatalf("%d next_event calls, the struct's size %d", calls, size)
 	}
 	viewrig.RefuseEvents("cadaclysm_view_next_event: CadaclysmViewInputEvent.size is 8; this library needs at least 272")
@@ -2169,11 +2381,11 @@ func TestAPickCarriesClicksAndThePointOnlyWhereSet(t *testing.T) {
 }
 
 func TestTheSnapStructIsTheHeaders(t *testing.T) {
-	want := [12]uintptr{88, 4, 8, 32, 36, 40, 44, 48, 60, 72, 80, 84}
+	want := [12]uintptr{232, 4, 8, 32, 36, 40, 44, 48, 60, 72, 80, 84}
 	if got := view.SnapLayoutForTest(); got != want {
 		t.Fatalf("CadaclysmViewSnap: size and offsets %v, want %v", got, want)
 	}
-	if view.SnapVertex != 1 || view.SnapFace != 32 || view.SnapPlane != 128 || view.SnapAll != 0xFF {
+	if view.SnapVertex != 1 || view.SnapFace != 32 || view.SnapPlane != 128 || view.SnapAll != 0xFFF || view.SnapDefault != 0x4FF {
 		t.Fatal("the snap kinds' bits moved")
 	}
 	if got := (view.SnapVertex | view.SnapEdge).String(); got != "vertex|edge" {
@@ -2219,7 +2431,8 @@ func TestSnapSettingsAndAnswersReachTheLibrary(t *testing.T) {
 		Tangent: [3]float32{1, 0, 0}, DistancePx: 2.5})
 	s, err := v.Snap(10, 20, 1)
 	want := view.Snap{Kind: view.SnapVertex, Point: [3]float64{-1, 1, 0}, Item: 3, Node: 4, Face: 5, Edge: 2, HasEdge: true,
-		Tangent: [3]float32{1, 0, 0}, DistancePx: 2.5}
+		Tangent: [3]float32{1, 0, 0}, DistancePx: 2.5} // 1.30: Label "" as the rig leaves it, unlocked, no guides
+	// A Snap is a value: == compares what was snapped.
 	if err != nil || s != want {
 		t.Fatalf("the vertex snap: %+v %v, want %+v", s, err, want)
 	}
@@ -3583,5 +3796,529 @@ func TestRunPicksCarryTheLabelOnlyWhereTheLibraryWritesIt(t *testing.T) {
 		if err != nil || (cam.Pick == nil) != old || (!old && cam.Pick.ViewportLabel != 5) {
 			t.Fatalf("run (old library %v): %+v %v", old, cam.Pick, err)
 		}
+	}
+}
+
+// ---- view ABI 1.29: live geometry and glyphs ----
+
+// headerDefine reads `#define NAME <n>` out of the view header itself, so a constant is
+// pinned to the header and never to a table read through itself.
+func headerDefine(t *testing.T, name string) uint32 {
+	t.Helper()
+	text, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "cadaclysm-view-capi", "include", "cadaclysm_view.h"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^#define ` + regexp.QuoteMeta(name) + ` (\d+)`).FindSubmatch(text)
+	if m == nil {
+		t.Fatalf("%s is not defined in cadaclysm_view.h", name)
+	}
+	n, _ := strconv.ParseUint(string(m[1]), 10, 32)
+	return uint32(n)
+}
+
+// The twelve kinds, by name, in the header's order.
+var glyphKindNames = []string{"ARROW", "TICK", "CROSS", "SQUARE", "TRIANGLE", "PARALLEL", "PERPENDICULAR", "COINCIDENT", "TANGENT", "FIXED", "HORIZONTAL", "VERTICAL"}
+var glyphKinds = []view.GlyphKind{view.GlyphArrow, view.GlyphTick, view.GlyphCross, view.GlyphSquare, view.GlyphTriangle,
+	view.GlyphParallel, view.GlyphPerpendicular, view.GlyphCoincident, view.GlyphTangent, view.GlyphFixed, view.GlyphHorizontal,
+	view.GlyphVertical}
+
+// Every Glyph constant is the header's number, read from the header text (a test file cannot
+// import C).
+func TestTheGlyphKindsAreTheHeadersNumbers(t *testing.T) {
+	if len(glyphKinds) != len(glyphKindNames) || len(glyphKinds) != 12 {
+		t.Fatalf("%d kinds, %d names", len(glyphKinds), len(glyphKindNames))
+	}
+	for k, name := range glyphKindNames {
+		if want := headerDefine(t, "CADACLYSM_VIEW_GLYPH_"+name); uint32(glyphKinds[k]) != want {
+			t.Fatalf("Glyph %s is %d, the header's is %d", name, glyphKinds[k], want)
+		}
+	}
+}
+
+// What reaches the library: counts in units, NULL for no normals and no dir, the kind as the
+// header's number, the colour presence; a count that is not whole units is refused first.
+func TestTheLiveCallsSendTheHeadersNumbers(t *testing.T) {
+	rig(t, "last_error", "create", "destroy", "show_points", "set_lines", "set_curves", "set_points", "set_mesh_positions",
+		"show_glyphs")
+	v, err := view.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	item, err := v.ShowPoints([]float32{0, 0, 0}, nil, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := item.ID()
+	viewrig.Reset()
+	must0(t, item.SetLines([]float32{0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1}))
+	must0(t, item.SetLines(nil))
+	must0(t, item.SetCurves(make([]float32, 32)))
+	must0(t, item.SetPoints([]float32{0, 0, 0, 1, 1, 1, 2, 2, 2}))
+	must0(t, item.SetMeshPositions([]float32{0, 0, 0, 1, 0, 0, 0, 1, 0}, nil))
+	must0(t, item.SetMeshPositions([]float32{0, 0, 0, 1, 0, 0, 0, 1, 0}, []float32{0, 0, 1, 0, 0, 1, 0, 0, 1}))
+	want := fmt.Sprintf("lines %d 2; lines %d 0; curves %d 2; points %d 3; mesh %d 3 none; mesh %d 3 normals", id, id, id, id, id, id)
+	if got := viewrig.StyleLog(); got != want {
+		t.Fatalf("the library saw %q, want %q", got, want)
+	}
+	viewrig.Reset()
+	for _, err := range []error{item.SetLines([]float32{0, 0, 0}), item.SetCurves([]float32{0}), item.SetPoints([]float32{0, 0}),
+		item.SetMeshPositions([]float32{0, 0}, nil), item.SetMeshPositions([]float32{0, 0, 0}, []float32{0, 0})} {
+		if err == nil {
+			t.Fatal("a count that is not whole units was accepted")
+		}
+	}
+	if got := viewrig.StyleLog(); got != "" {
+		t.Fatalf("a refused set reached the library: %q", got)
+	}
+	// Every kind, as the header's number; no dir is NULL.
+	for k, name := range glyphKindNames {
+		viewrig.Reset()
+		g, err := v.ShowGlyphs([]float32{0, 0, 0}, glyphKinds[k], 12, nil, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if want := fmt.Sprintf("glyphs 1 %d 12 dir=nil colour=nil", headerDefine(t, "CADACLYSM_VIEW_GLYPH_"+name)); viewrig.StyleLog() != want || g.ID() != 21 {
+			t.Fatalf("%s: %q (id %d), want %q", name, viewrig.StyleLog(), g.ID(), want)
+		}
+	}
+	viewrig.Reset()
+	if _, err := v.ShowGlyphs([]float32{0, 0, 0, 1, 0, 0}, view.GlyphTick, 16, [3]float32{1, 0, 0}, []float32{1, 0, 0, 0, 1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "glyphs 2 1 16 dir=given colour=1,0,0"; viewrig.StyleLog() != want {
+		t.Fatalf("with colour and dir: %q, want %q", viewrig.StyleLog(), want)
+	}
+	viewrig.Reset()
+	if _, err := v.ShowGlyphs([]float32{0, 0}, view.GlyphCross, 12, nil, nil); err == nil {
+		t.Fatal("two numbers accepted as a point")
+	}
+	if _, err := v.ShowGlyphs([]float32{0, 0, 0}, view.GlyphCross, 12, nil, []float32{1, 0}); err == nil {
+		t.Fatal("a short dir accepted")
+	}
+	if _, err := v.ShowGlyphs([]float32{0, 0, 0}, view.GlyphCross, 12, "notacolour", nil); err == nil {
+		t.Fatal("colour text the library does not know accepted")
+	}
+	if got := viewrig.StyleLog(); got != "" {
+		t.Fatalf("a refused show reached the library: %q", got)
+	}
+}
+
+// 1.29 on the real library: the four sets in place, the point states kept by index, the
+// count refusals, and a glyph picking as its node (on its own small view: a large solid in a
+// shared one would hide glyphs at the origin).
+func TestLiveGeometryAndGlyphs(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	v, err := view.Offscreen(96, 96, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer v.Close()
+	line := must(v.ShowLines([]float32{-1, 0, 0, 1, 0, 0}, nil))
+	must0(t, line.SetLines([]float32{-1, 1, 0, 1, 1, 0, -1, -1, 0, 1, -1, 0}))
+	must0(t, line.SetLines(nil))
+	if err := line.SetCurves(make([]float32, 16)); err == nil || !strings.Contains(err.Error(), "is not a curves item") {
+		t.Fatalf("set_curves on a lines item: %v", err)
+	}
+	curve := must(v.ShowCurves([]float32{0, 0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 1, 3, 0, 0, 1}, nil))
+	must0(t, curve.SetCurves([]float32{0, 1, 0, 1, 1, 1, 0, 1, 2, 1, 0, 1, 3, 1, 0, 1}))
+	pts := must(v.ShowPoints([]float32{0, 0, 0, 1, 0, 0}, nil, 9))
+	must0(t, pts.SetPoints([]float32{0, 1, 0, 1, 1, 0}))
+	must0(t, pts.SetPointStates([]string{"selected", "normal"}))
+	// A new count keeps the states by index: it succeeds, and a one-state list then fits.
+	must0(t, pts.SetPoints([]float32{0, 0, 0}))
+	must0(t, pts.SetPointStates([]string{"selected"}))
+	mesh := must(v.ShowMesh(view.Mesh{Positions: []float32{-1, -1, 0, 1, -1, 0, 0, 1, 0}, Indices: []uint32{0, 1, 2}}))
+	must0(t, mesh.SetMeshPositions([]float32{-1, -1, 1, 1, -1, 1, 0, 1, 1}, nil))
+	if err := mesh.SetMeshPositions([]float32{0, 0, 0, 1, 0, 0}, nil); err == nil || !strings.Contains(err.Error(), "positions has 2 vertices") {
+		t.Fatalf("a wrong vertex count: %v", err)
+	}
+	crosses := must(v.ShowGlyphs([]float32{-1, 0, 0, 1, 0, 0}, view.GlyphCross, 16, "red", []float32{1, 0, 0, 0, 1, 0}))
+	frame(t, v)
+	hit, second := false, false
+	for y := uint32(40); y < 56; y += 2 {
+		for x := uint32(0); x < 96; x += 2 {
+			p, err := v.Pick(x, y, 0)
+			if err == nil && p.Item == crosses.ID() {
+				hit = true
+				if p.Node == 1 {
+					second = true
+				}
+			}
+		}
+	}
+	if !hit {
+		t.Fatal("a glyph did not pick")
+	}
+	if _, err := v.ShowGlyphs([]float32{0, 0, 0}, view.GlyphKind(99), 12, nil, nil); err == nil || !strings.Contains(err.Error(), "99") {
+		t.Fatalf("a kind past 11: %v", err)
+	}
+	if !second {
+		t.Fatal("a glyph did not pick as its node: node 1 never answered")
+	}
+}
+
+// ---- view ABI 1.30: picking and snapping ----
+
+// The 1.30 wire, rigged: the layouts (through the rig's C), the snap kinds' and hit kinds'
+// numbers against the header text, the aperture, PickRect's count rule and kinds, none sent as
+// NULL (a cleared base, an empty label, no points), the refusals made before the library, the
+// pick buffer starting at segment UINT32_MAX, the event tail and the guide cap.
+func TestPickingAndSnappingWire(t *testing.T) {
+	if got, want := viewrig.Layout130(), [12]uintptr{52, 44, 48, 232, 88, 136, 88, 424, 224, 272, 328, 12}; got != want {
+		t.Fatalf("1.30 layouts (pick size, segment, distance_px; snap size, label, guides; event snap; event size, camera, pick_segment, snap_guides; rect hit) %v, want %v", got, want)
+	}
+	for name, k := range map[string]view.SnapKind{"END": view.SnapEnd, "INTERSECTION": view.SnapIntersection, "POINT": view.SnapPoint,
+		"ALIGNMENT": view.SnapAlignment, "ALL": view.SnapAll, "DEFAULT": view.SnapDefault} {
+		if want := headerDefine(t, "CADACLYSM_VIEW_SNAP_"+name); uint32(k) != want {
+			t.Fatalf("Snap%s is %d, the header's is %d", name, k, want)
+		}
+	}
+	if got := (view.SnapEnd | view.SnapIntersection | view.SnapPoint | view.SnapAlignment).String(); got != "end|intersection|point|alignment" {
+		t.Fatalf("the 1.30 kinds' names: %q", got)
+	}
+	hitKinds := []view.HitKind{view.HitFace, view.HitNode, view.HitSegment, view.HitEdge, view.HitPoint}
+	hitNames := []string{"FACE", "NODE", "SEGMENT", "EDGE", "POINT"}
+	for k, name := range hitNames {
+		if want := headerDefine(t, "CADACLYSM_VIEW_HIT_"+name); uint32(hitKinds[k]) != want {
+			t.Fatalf("Hit%s is %d, the header's is %d", name, hitKinds[k], want)
+		}
+		if got := hitKinds[k].String(); got != strings.ToLower(name) {
+			t.Fatalf("Hit%s names itself %q", name, got)
+		}
+	}
+	rig(t, "last_error", "create", "destroy", "show_lines", "set_pick_aperture", "pick_rect", "set_snap_base", "set_snap_points",
+		"pick_result", "snap_result", "next_event")
+	v, err := view.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	item := must(v.ShowLines([]float32{0, 0, 0, 1, 0, 0}, nil))
+	id := item.ID()
+	viewrig.Reset()
+	// PickRect: each kind decoded; 64 first, then a buffer of the total.
+	raw := make([][3]uint32, 5)
+	for k := range raw {
+		raw[k] = [3]uint32{7, uint32(hitKinds[k]), uint32(k)}
+	}
+	viewrig.SetRectHits(raw)
+	hits, err := v.PickRect(0, 0, 8, 8, true, 0)
+	if err != nil || len(hits) != 5 {
+		t.Fatalf("PickRect: %v %v", hits, err)
+	}
+	for k, h := range hits {
+		if h != (view.RectHit{Item: 7, Kind: hitKinds[k], Index: uint32(k)}) {
+			t.Fatalf("hit %d: %+v", k, h)
+		}
+	}
+	raw = make([][3]uint32, 70)
+	for k := range raw {
+		raw[k] = [3]uint32{9, uint32(view.HitSegment), uint32(k)}
+	}
+	viewrig.SetRectHits(raw)
+	all, err := v.PickRect(1, 2, -3, 4, false, 2)
+	if err != nil || len(all) != 70 || all[69].Index != 69 {
+		t.Fatalf("PickRect past the first buffer: %d hits, %v", len(all), err)
+	}
+	if want := "rect 0 0 0 8 8 crossing 64; rect 2 1 2 -3 4 window 64; rect 2 1 2 -3 4 window 70"; viewrig.StyleLog() != want {
+		t.Fatalf("pick_rect asked %q, want %q", viewrig.StyleLog(), want)
+	}
+	viewrig.SetRectHits(nil)
+	if none, err := v.PickRect(0, 0, 8, 8, true, 0); err != nil || len(none) != 0 {
+		t.Fatalf("no hits: %v %v", none, err)
+	}
+	viewrig.Say("cadaclysm_view_pick_rect: viewport 3 does not exist")
+	if _, err := v.PickRect(0, 0, 8, 8, true, 3); message(err) != "cadaclysm_view_pick_rect: viewport 3 does not exist" || !isViewError(err) {
+		t.Fatalf("a refused PickRect: %v", err)
+	}
+	viewrig.Say("")
+	// None as NULL: the cleared base, the empty label, no points.
+	viewrig.Reset()
+	must0(t, v.SetPickAperture(6))
+	must0(t, v.SetSnapBase([]float64{1, 2, 3}, 15))
+	must0(t, v.SetSnapBase(nil, 15))
+	must0(t, item.SetSnapPoints([]float64{0.5, 0.5, 0.01}, "hole"))
+	must0(t, item.SetSnapPoints([]float64{1, 2, 3, 4, 5, 6}, ""))
+	must0(t, item.SetSnapPoints(nil, ""))
+	want := fmt.Sprintf("aperture 6; base 1 2 3 15; base NULL 15; points %d given 1 'hole'; points %d given 2 NULL; points %d NULL 0 NULL", id, id, id)
+	if got := viewrig.StyleLog(); got != want {
+		t.Fatalf("the library saw %q, want %q", got, want)
+	}
+	// Refused before the library, as view errors.
+	viewrig.Reset()
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{v.SetSnapBase([]float64{1, 2}, 15), "3 numbers, not 2"},
+		{item.SetSnapPoints([]float64{0, 0, 0}, "a\x00b"), "a NUL character cannot be shown"},
+		{item.SetSnapPoints([]float64{0, 0}, ""), "three numbers a point, not 2"},
+	} {
+		if !strings.Contains(message(c.err), c.want) || !isViewError(c.err) {
+			t.Fatalf("refusal %q: %v", c.want, c.err)
+		}
+	}
+	if got := viewrig.StyleLog(); got != "" {
+		t.Fatalf("a refused call reached the library: %q", got)
+	}
+	// The pick buffer starts at segment UINT32_MAX; a pick that leaves it has no segment, and
+	// one that writes it reads its segment and distance.
+	viewrig.SetPick(3, 0, 0, 1, false, [3]float32{})
+	if p, landed, err := v.LastPick(); err != nil || !landed || p.HasSegment || p.Segment != 0 || p.DistancePx != 0 {
+		t.Fatalf("a pick with no segment: %+v %v", p, err)
+	}
+	if seen := viewrig.PickSegmentSeen(); seen != 0xFFFFFFFF {
+		t.Fatalf("LastPick's buffer starts at segment %d", seen)
+	}
+	viewrig.SetPickSegment(2, 1.5)
+	if p, _, err := v.LastPick(); err != nil || !p.HasSegment || p.Segment != 2 || p.DistancePx != 1.5 {
+		t.Fatalf("a wire pick: %+v %v", p, err)
+	}
+	// A Pick is a value: two answers for the same segment compare equal with ==, and equal the
+	// literal (a pointer would compare where each was kept).
+	first, _, _ := v.LastPick()
+	second, _, _ := v.LastPick()
+	if want := (view.Pick{Item: 3, Clicks: 1, ViewportLabel: -1, Segment: 2, HasSegment: true, DistancePx: 1.5}); first != second || first != want {
+		t.Fatalf("two wire picks of segment 2 compared by value: %+v, %+v, want %+v", first, second, want)
+	}
+	// A snap answer's tail, and a guide_count past 2 read as 2 guides.
+	guides := [12]float64{0, 0, 0, 1, 1, 0, 2, 2, 0, 3, 3, 0}
+	viewrig.SetSnapAnswer(viewrig.Answer{Kind: uint32(view.SnapPoint), Item: 3, Edge: 0xFFFFFFFF})
+	viewrig.SetSnapTail("hole", true, 90, 3, guides)
+	if s, landed, err := v.LastSnap(); err != nil || !landed || s.Label != "hole" || !s.Locked || s.LockedAngle != 90 ||
+		s.GuideCount != 2 || s.Guides[1] != [2][3]float64{{2, 2, 0}, {3, 3, 0}} {
+		t.Fatalf("a snap's tail, guide_count 3: %+v %v", s, err)
+	}
+	// A Snap is a value: two answers compare equal with ==, and equal the literal.
+	a, _, _ := v.LastSnap()
+	b, _, _ := v.LastSnap()
+	wantSnap := view.Snap{Kind: view.SnapPoint, Item: 3, Label: "hole", Locked: true, LockedAngle: 90,
+		Guides: [2][2][3]float64{{{0, 0, 0}, {1, 1, 0}}, {{2, 2, 0}, {3, 3, 0}}}, GuideCount: 2}
+	if a != b || a != wantSnap {
+		t.Fatalf("two snaps compared by value: %+v, %+v, want %+v", a, b, wantSnap)
+	}
+	// The event tail: a face pick has no segment; a wire pick's segment and distance; a snap's
+	// label, lock and guides, at most two.
+	two := uint32(2)
+	viewrig.QueueEvents(
+		viewrig.Event{Kind: 8, PickItem: 3, PickClicks: 1},
+		viewrig.Event{Kind: 8, PickItem: 3, PickClicks: 1, PickSegment: &two, PickDistance: 1.5},
+		viewrig.Event{Kind: 9, SnapKind: uint32(view.SnapPoint), SnapEdge: 0xFFFFFFFF, SnapLabel: "hole", SnapLocked: true, SnapAngle: 90,
+			SnapGuideCount: 1, SnapGuides: guides},
+		viewrig.Event{Kind: 9, SnapKind: uint32(view.SnapPoint), SnapEdge: 0xFFFFFFFF, SnapLabel: "hole", SnapGuideCount: 3, SnapGuides: guides},
+	)
+	var got []view.InputEvent
+	for i := 0; i < 4; i++ {
+		e, ok, err := v.NextEvent()
+		if err != nil || !ok {
+			t.Fatalf("event %d: %v %v", i, ok, err)
+		}
+		got = append(got, e)
+	}
+	if p := got[0].Pick; p == nil || p.HasSegment || p.DistancePx != 0 {
+		t.Fatalf("a face pick's event: %+v", p)
+	}
+	if p := got[1].Pick; p == nil || !p.HasSegment || p.Segment != 2 || p.DistancePx != 1.5 {
+		t.Fatalf("a wire pick's event: %+v", p)
+	}
+	if s := got[2].Snap; s == nil || s.Kind != view.SnapPoint || s.Label != "hole" || !s.Locked || s.LockedAngle != 90 ||
+		s.GuideCount != 1 || s.Guides[0] != [2][3]float64{{0, 0, 0}, {1, 1, 0}} || s.Guides[1] != [2][3]float64{} {
+		t.Fatalf("a snap event's tail: %+v", s)
+	}
+	if s := got[3].Snap; s == nil || s.Locked || s.LockedAngle != 0 || s.GuideCount != 2 {
+		t.Fatalf("a snap event's guide_count 3: %+v", s)
+	}
+	if label, segment := viewrig.EventBufferSeen(); label != -1 || segment != 0xFFFFFFFF {
+		t.Fatalf("NextEvent's buffer starts at label %d, segment %d: not the none values", label, segment)
+	}
+}
+
+// isViewError is whether err is the view package's own error type.
+func isViewError(err error) bool {
+	var ve *view.Error
+	return errors.As(err, &ve)
+}
+
+// 1.30 on the real library, the P3 scene on a 96x96 view of its own, its input queued through
+// the testing hook: the aperture, the pick sweep (a wire's segment, a face's none), the click's
+// pick event and LastPick, PickRect with 80 short lines, a labelled snap point (an empty label
+// answering "point" as NULL does) and its hover event and LastSnap, the points cleared, the
+// label refusal, the angle lock and its clearing.
+func TestPickingAndSnapping(t *testing.T) {
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	t.Setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", "1")
+	v, err := view.Offscreen(96, 96, nil)
+	os.Unsetenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT")
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	defer v.Close()
+	must0(t, v.SetLayer(view.LayerGrid, false))
+	square := must(v.ShowMesh(view.Mesh{Positions: []float32{-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0},
+		Indices: []uint32{0, 1, 2, 0, 2, 3}, RGB: "red"}))
+	line := must(v.ShowLines([]float32{-0.8, 0, 0.01, 0.8, 0, 0.01}, "white"))
+	must0(t, line.SetSnapPoints([]float64{0.5, 0.5, 0.01}, "hole"))
+	must0(t, v.Standard("top"))
+	must0(t, v.Frame())
+	must0(t, v.SetPickAperture(0))
+	if err := v.SetPickAperture(-1); !strings.Contains(message(err), "is not a finite size of 0 or more points") || !isViewError(err) {
+		t.Fatalf("SetPickAperture(-1): %v", err)
+	}
+	// The sweep: column 48, rows 36..59.
+	wire, face, yLine := false, false, uint32(0)
+	for y := uint32(36); y < 60; y++ {
+		p := must(v.Pick(48, y, 0))
+		if p.Item == line.ID() && p.HasSegment && p.Segment == 0 && p.DistancePx <= 4 {
+			if !wire {
+				yLine = y
+			}
+			wire = true
+		}
+		if p.Item == square.ID() && !p.HasSegment && p.DistancePx == 0 {
+			face = true
+		}
+	}
+	if !wire || !face {
+		t.Fatalf("the sweep: a wire pick with segment 0 %v, a face pick with none %v", wire, face)
+	}
+	// The event path: a click on the line queues a pick event with its segment; LastPick the same.
+	drain(v)
+	must(v.Input(view.Event{Kind: view.EventDown, X: 48, Y: float32(yLine), TimeMS: 30000}))
+	must(v.Input(view.Event{Kind: view.EventUp, X: 48, Y: float32(yLine), TimeMS: 30010}))
+	var clicked *view.Pick
+	for i := 0; i < 200 && clicked == nil; i++ {
+		must0(t, v.Draw())
+		for e, ok, _ := v.NextEvent(); ok; e, ok, _ = v.NextEvent() {
+			if e.Kind == view.InputEventPick && e.Pick != nil {
+				clicked = e.Pick
+			}
+		}
+	}
+	if clicked == nil || clicked.Item != line.ID() || !clicked.HasSegment || clicked.Segment != 0 {
+		t.Fatalf("a pick event's segment: %+v", clicked)
+	}
+	if p, landed, err := v.LastPick(); err != nil || !landed || p.Item != line.ID() || !p.HasSegment || p.Segment != 0 {
+		t.Fatalf("LastPick's segment: %+v %v", p, err)
+	}
+	// PickRect over the whole view, with 80 short lines: more hits than its first buffer.
+	var many []float32
+	for i := 0; i < 80; i++ {
+		x := float32(-0.9 + 1.8*float64(i)/79)
+		many = append(many, x, -0.6, 0.01, x, -0.5, 0.01)
+	}
+	lines80 := must(v.ShowLines(many, "green"))
+	hits := must(v.PickRect(0, 0, 96, 96, true, 0))
+	lineHit, squareHit, short := false, false, 0
+	for _, h := range hits {
+		lineHit = lineHit || h == view.RectHit{Item: line.ID(), Kind: view.HitSegment, Index: 0}
+		squareHit = squareHit || h == view.RectHit{Item: square.ID(), Kind: view.HitNode, Index: 0}
+		if h.Item == lines80.ID() {
+			short++
+		}
+	}
+	if !lineHit || !squareHit || short != 80 {
+		t.Fatalf("PickRect: the line %v, the square as a node %v, %d of the 80 short lines", lineHit, squareHit, short)
+	}
+	if window := must(v.PickRect(0, 0, 96, 96, false, 0)); len(window) > len(hits) {
+		t.Fatalf("a window answers more than a crossing: %d > %d", len(window), len(hits))
+	}
+	if _, err := v.PickRect(0, 0, float32(math.NaN()), 10, true, 0); !strings.Contains(message(err), "cadaclysm_view_pick_rect") || !isViewError(err) {
+		t.Fatalf("a rectangle that is not finite: %v", err)
+	}
+	must0(t, lines80.Remove())
+	// A labelled snap point, by the default kinds: rows 0..47, columns 48..95, step 2.
+	must0(t, v.SetSnap(view.SnapDefault, 0, true))
+	findPoint := func() (view.Snap, uint32, uint32, bool) {
+		for y := uint32(0); y < 48; y += 2 {
+			for x := uint32(48); x < 96; x += 2 {
+				if s := must(v.Snap(x, y, 0)); s.Kind == view.SnapPoint {
+					return s, x, y, true
+				}
+			}
+		}
+		return view.Snap{}, 0, 0, false
+	}
+	point, px, py, found := findPoint()
+	if !found || point.Label != "hole" || point.Locked || point.GuideCount != 0 {
+		t.Fatalf("a snap point's label: %+v (found %v)", point, found)
+	}
+	// The event path: a hover over the point queues a snap event with its label; LastSnap the same.
+	drain(v)
+	v.LastSnap()
+	must(v.Input(view.Event{Kind: view.EventMove, X: float32(px), Y: float32(py), TimeMS: 40000}))
+	var hovered *view.Snap
+	for i := 0; i < 200 && hovered == nil; i++ {
+		must0(t, v.Draw())
+		for e, ok, _ := v.NextEvent(); ok; e, ok, _ = v.NextEvent() {
+			if e.Kind == view.InputEventSnap && e.Snap != nil && e.Snap.Kind == view.SnapPoint {
+				hovered = e.Snap
+			}
+		}
+	}
+	if hovered == nil || hovered.Label != "hole" {
+		t.Fatalf("a snap event's label: %+v", hovered)
+	}
+	if s, landed, err := v.LastSnap(); err != nil || !landed || s.Label != "hole" {
+		t.Fatalf("LastSnap's label: %+v %v", s, err)
+	}
+	// An empty label goes as NULL: the library answers "point", as for no label (D15).
+	must0(t, line.SetSnapPoints([]float64{0.5, 0.5, 0.01}, ""))
+	if s := must(v.Snap(px, py, 0)); s.Kind != view.SnapPoint || s.Label != "point" {
+		t.Fatalf("an empty label: %+v", s)
+	}
+	must0(t, line.SetSnapPoints(nil, ""))
+	if s := must(v.Snap(px, py, 0)); s.Kind == view.SnapPoint {
+		t.Fatalf("the cleared points still snap: %+v", s)
+	}
+	if err := line.SetSnapPoints([]float64{0, 0, 0}, strings.Repeat("x", 32)); !strings.Contains(message(err), "at most 31") || !isViewError(err) {
+		t.Fatalf("a 32-byte label: %v", err)
+	}
+	// The lock: face snaps turn onto 45-degree steps about the origin, the lock's ray their guide.
+	must0(t, v.SetSnapBase([]float64{0, 0, 0}, 45))
+	must0(t, v.SetSnap(view.SnapFace|view.SnapPlane, 0, true))
+	sweep := func() []view.Snap {
+		var out []view.Snap
+		for y := uint32(8); y < 40; y += 8 {
+			for x := uint32(56); x < 88; x += 8 {
+				if s := must(v.Snap(x, y, 0)); s.Kind != 0 {
+					out = append(out, s)
+				}
+			}
+		}
+		return out
+	}
+	locked := sweep()
+	for _, s := range locked {
+		if s.Kind != view.SnapPlane || !s.Locked || math.Mod(float64(s.LockedAngle), 45) != 0 || s.GuideCount != 1 {
+			t.Fatalf("the lock turns face snaps onto 45-degree steps: %+v", s)
+		}
+	}
+	if len(locked) == 0 {
+		t.Fatal("the locked sweep snapped nothing")
+	}
+	// Clearing passes a NULL point: the same sweep is no longer locked (a zeroed point would
+	// lock about the origin).
+	must0(t, v.SetSnapBase(nil, 15))
+	unlocked := sweep()
+	if len(unlocked) == 0 {
+		t.Fatal("the cleared sweep snapped nothing")
+	}
+	for _, s := range unlocked {
+		if s.Locked || s.GuideCount != 0 {
+			t.Fatalf("the cleared lock still turns: %+v", s)
+		}
+	}
+	must0(t, v.SetSnap(0, 0, true))
+}
+
+// drain reads every queued input event.
+func drain(v *view.View) {
+	for _, ok, _ := v.NextEvent(); ok; _, ok, _ = v.NextEvent() {
 	}
 }

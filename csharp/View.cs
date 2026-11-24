@@ -71,6 +71,8 @@ internal unsafe struct RawViewPick
     public fixed float Point[3];
     public uint Overlay;
     public int ViewportLabel;
+    public uint Segment;
+    public float DistancePx;
 }
 
 /// <summary>CadaclysmViewEventPick: the pick inside an input event, CadaclysmViewPick as 1.26 laid the
@@ -113,6 +115,39 @@ public readonly record struct OccludedStyle(float Dash = 6f, float Gap = 4f, flo
     public OccludedStyle() : this(6f, 4f, 0.5f, null) { }
 }
 
+internal unsafe struct RawClipPlane
+{
+    public uint Size;
+    public uint Cap;
+    public fixed double Point[3];
+    public fixed double Normal[3];
+    public fixed float CapColour[3];
+    public uint Hatch;
+    public fixed float HatchColour[3];
+    public float HatchAngle;
+    public float HatchSpacing;
+    public float HatchWidth;
+    // 1.32: the cut's outline.
+    public uint Outline;
+    public fixed float OutlineColour[3];
+    public float OutlineWidth;
+    public uint Reserved;
+}
+
+/// <summary>A clip plane as <see cref="View.ClipPlane(uint)"/> answers it (view ABI 1.31): what lies on the side
+/// `Normal` (unit length) points to is hidden; `Cap` (3 numbers in 0..1, or null) fills the cut of every body and
+/// `Hatch` (likewise, only with a cap) lines it at `HatchAngle` degrees from the plane's first axis, `HatchSpacing`
+/// apart in model units (0: automatic, a fiftieth of the scene's size), `HatchWidth` points wide -- the defaults
+/// where there is no hatch. 1.32: `Outline` (3 numbers in 0..1, or null) draws the cut as a line `OutlineWidth`
+/// points wide (1 where there is no outline).</summary>
+public readonly record struct ClipPlane(double[] Point, double[] Normal, float[]? Cap = null, float[]? Hatch = null,
+    float HatchAngle = 45f, float HatchSpacing = 0f, float HatchWidth = 1f, float[]? Outline = null, float OutlineWidth = 1f);
+
+/// <summary>How a clip set's planes combine (CADACLYSM_VIEW_CLIP_*, view ABI 1.32): Intersection (the default) draws
+/// where every plane keeps, Cutaway hides only where every plane hides; Inherit is a viewport's: no set of its own,
+/// the view-wide one.</summary>
+public enum ClipMode : uint { Intersection = 0, Cutaway = 1, Inherit = 2 }
+
 /// <summary>The colour every edge, curve or isocurve draws in (<see cref="View.EdgeColour()"/>,
 /// <see cref="View.CurveColour()"/>, <see cref="View.IsocurveColour()"/>): <c>Colour</c> (3 numbers in
 /// 0..1), or each part's own colour where <c>FromPart</c>.</summary>
@@ -140,6 +175,38 @@ internal unsafe struct RawViewSnap
     public double Radius;
     public float DistancePx;
     public uint Clicks;
+    public fixed byte Label[32];
+    public uint Locked;
+    public float LockedAngle;
+    public uint GuideCount;
+    public uint Pad0;
+    public fixed double Guides[12];
+}
+
+/// <summary>CadaclysmViewEventSnap: the snap inside an input event, CadaclysmViewSnap as 1.22 laid it out
+/// (88 bytes); the 1.30 fields are the event's own Snap* tail.</summary>
+internal unsafe struct RawViewEventSnap
+{
+    public uint Size;
+    public uint Kind;
+    public fixed double Point[3];
+    public uint Item;
+    public uint Node;
+    public uint Face;
+    public uint Edge;
+    public fixed float Tangent[3];
+    public fixed float Axis[3];
+    public double Radius;
+    public float DistancePx;
+    public uint Clicks;
+}
+
+/// <summary>CadaclysmViewRectHit (1.30): one thing in a rectangle, an array element with no size.</summary>
+internal struct RawViewRectHit
+{
+    public uint Item;
+    public uint Kind;
+    public uint Index;
 }
 
 internal struct RawViewSnapSettings
@@ -305,7 +372,8 @@ internal struct RawViewStats
     public uint Pad1;
 }
 
-// CadaclysmViewInputEvent, 1.26: 272 bytes, padded explicitly, every field at its natural alignment.
+// CadaclysmViewInputEvent, 1.26: 272 bytes, padded explicitly, every field at its natural alignment; 1.30 grew
+// its tail to 424 (its snap frozen at the 1.22 88 bytes, so camera stays at 224).
 internal unsafe struct RawViewInputEvent
 {
     public uint Size;
@@ -325,9 +393,17 @@ internal unsafe struct RawViewInputEvent
     public uint Pad0;
     public fixed byte Key[32];
     public RawViewEventPick Pick;
-    public RawViewSnap Snap;
+    public RawViewEventSnap Snap;
     public RawViewCamera Camera;
     public int PickViewportLabel;
+    public uint PickSegment;
+    public float PickDistancePx;
+    public fixed byte SnapLabel[32];
+    public uint SnapLocked;
+    public float SnapLockedAngle;
+    public uint SnapGuideCount;
+    public uint Pad1;
+    public fixed double SnapGuides[12];
 }
 
 // 1.10, bound only: nothing in this file fills one yet (C#'s viewport-camera API comes later).
@@ -474,9 +550,45 @@ internal static unsafe class ViewNative
     internal static extern bool cadaclysm_view_set_point_style(ViewHandle view, uint item, uint shape, [MarshalAs(UnmanagedType.I1)] bool hollow);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_point_states(ViewHandle view, uint item, byte* states, nuint count);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_lines(ViewHandle view, uint item, float* segments, nuint count);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_curves(ViewHandle view, uint item, float* beziers, nuint count);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_points(ViewHandle view, uint item, float* positions, nuint count);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_mesh_positions(ViewHandle view, uint item, float* positions, float* normals, nuint count);
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_show_glyphs(ViewHandle view, float* at, float* dir, nuint count, uint kind, float sizePt, float* colour);
     [DllImport(Lib)] internal static extern void cadaclysm_view_set_point_state_colours(ViewHandle view, float* hover, float* selected, float* first);
+    // 1.30: picking and snapping.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_pick_aperture(ViewHandle view, float aperturePt);
+    [DllImport(Lib)] internal static extern nuint cadaclysm_view_pick_rect(ViewHandle view, uint viewport, float x, float y, float w, float h,
+        [MarshalAs(UnmanagedType.I1)] bool crossing, RawViewRectHit* out_, nuint capacity);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_snap_points(ViewHandle view, uint item, float* xyz, nuint count, byte* label);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_snap_base(ViewHandle view, float* xyz, float stepDeg);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_viewport_label(ViewHandle view, uint viewport, byte* text, float* colour);
+    // 1.31: clip planes.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_clip_plane(ViewHandle view, uint slot, RawClipPlane* plane);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_clip_plane(ViewHandle view, uint slot, RawClipPlane* out_);
+    // 1.32: clip sets.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_clip_mode(ViewHandle view, uint mode);
+    [DllImport(Lib)]
+    internal static extern uint cadaclysm_view_clip_mode(ViewHandle view);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_viewport_clip_plane(ViewHandle view, uint viewport, uint slot, RawClipPlane* plane);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_viewport_clip_plane(ViewHandle view, uint viewport, uint slot, RawClipPlane* out_);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_viewport_clip_mode(ViewHandle view, uint viewport, uint mode);
+    [DllImport(Lib)]
+    internal static extern uint cadaclysm_view_viewport_clip_mode(ViewHandle view, uint viewport);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_viewport_border(ViewHandle view, uint viewport, float* colour);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -548,6 +660,11 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_lighting(ViewHandle view, uint lighting);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_lighting(ViewHandle view);
+    // 1.33: textures.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_textures(ViewHandle view, [MarshalAs(UnmanagedType.I1)] bool on);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_textures(ViewHandle view);
     // 1.10: the viewport cameras (bound; C#'s own API for them comes later).
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_viewport_camera(ViewHandle view, uint viewport, RawViewViewportCamera* camera);
@@ -699,8 +816,8 @@ public static unsafe class ViewLibrary
     }
 
     /// <summary>Why the library at `path`, answering `version` from cadaclysm_view_abi_version, is
-    /// refused -- null when this wrapper takes it (1.28 or a later 1.x).</summary>
-    internal const uint AbiMinor = 28;
+    /// refused -- null when this wrapper takes it (1.33 or a later 1.x).</summary>
+    internal const uint AbiMinor = 33;
 
     internal static string? AbiRefusal(string path, uint version)
     {
@@ -715,6 +832,12 @@ public static unsafe class ViewLibrary
         // show_overlay_image, move_overlay, screen text, the pick's overlay flag. 1.25: stats. 1.26: next_event and close.
         // 1.27: play_animation, timeline_remove, set_item_visible, set_node_ghosts and the timeline event.
         // 1.28: the drafting styles and the pick's viewport label.
+        // 1.29: live geometry (set_lines, set_curves, set_points, set_mesh_positions) and show_glyphs.
+        // 1.30: picking and snapping -- set_pick_aperture, pick_rect, set_snap_points, set_snap_base, the pick's
+        // segment, the snap's label, lock and guides, and the input event's tail.
+        // 1.31: set_clip_plane and clip_plane.
+        // 1.32: the clip plane's outline, set_clip_mode, clip_mode and viewports' own clip sets.
+        // 1.33: set_textures and textures.
         return major != 1 || minor < AbiMinor ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.{AbiMinor} or a later 1.x" : null;
     }
 
@@ -987,8 +1110,21 @@ public sealed unsafe class Machining : Item
 /// library read no depth (a machining stock, the terminal library). Overlay (1.24): the item is an
 /// overlay -- it was over the pixel, so nothing of the scene beneath it was picked (Face is a text
 /// overlay's line, else 0). ViewportLabel (1.28): the viewport whose label was under the pixel (Item 0
-/// then), else -1.</summary>
-public sealed record Pick(uint Item, uint Node, uint Face, uint Clicks = 1, float[]? Point = null, bool Overlay = false, int ViewportLabel = -1);
+/// then), else -1. Segment (1.30): a lines item's segment, a curves item's Bezier, a kernel solid's or read scene's
+/// kernel edge index -- null for a face, a point, a glyph, a label or an overlay; DistancePx, how far the cursor was
+/// from the wire (0 for a face).</summary>
+public sealed record Pick(uint Item, uint Node, uint Face, uint Clicks = 1, float[]? Point = null, bool Overlay = false, int ViewportLabel = -1,
+    uint? Segment = null, float DistancePx = 0);
+
+/// <summary>One thing in a rectangle (view ABI 1.30, <see cref="View.PickRect"/>): its Item, its Kind -- "face" (numbered
+/// as a pick numbers it), "node" (an item with no face ranges), "segment" (a lines item's segment or a curves item's
+/// Bezier), "edge" (a kernel solid's or read scene's kernel edge index) or "point" (a point's or glyph's index) -- and
+/// that Index.</summary>
+public sealed record RectHit(uint Item, string Kind, uint Index);
+
+/// <summary>A guide a snap answer drew (view ABI 1.30): From a trail point or the lock's base To the snapped point,
+/// world coordinates.</summary>
+public sealed record SnapGuide(double[] From, double[] To);
 
 /// <summary>Where an overlay hangs in the window (view ABI 1.24): a corner, the middle of an edge, or
 /// the centre. An overlay's offset is measured inward from it: x away from the left edge for the left
@@ -1023,10 +1159,10 @@ public sealed class OverlayStyle
 }
 
 /// <summary>An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the
-/// window, drawn over everything, untouched by the camera. Remove, UserLayer and, for text, SetText and
-/// Colour work as on any item; the item calls that mean nothing for an overlay -- Colour on a shape or
-/// an image, Placement, Xray, the edge, curve and node colours, Frame -- throw a ViewException saying it
-/// is an overlay.</summary>
+/// window, drawn over everything, untouched by the camera. Remove, UserLayer, Colour (a shape's fill
+/// and stroke, or text's glyphs, in place) and, for text, SetText work as on any item; the item calls
+/// that mean nothing for an overlay -- Colour on an image, Placement, Xray, the edge, curve and node
+/// colours, Frame -- throw a ViewException saying it is an overlay.</summary>
 public sealed unsafe class Overlay : Item
 {
     internal Overlay(View view, uint id, object? shown, Anchor anchor) : base(view, id, shown) { Anchor = anchor; }
@@ -1050,9 +1186,13 @@ public sealed unsafe class Overlay : Item
 /// "grid" or "plane"), the Point snapped to (x, y, z, in the coordinates the items were shown in), the item, node
 /// and face it lies on (0 for a grid or plane snap), its Edge (null for a face, grid or plane snap), the edge's
 /// unit Tangent there, a circular edge's unit Axis and Radius (centre and quadrant), how many pixels the cursor
-/// was from it, and Clicks: 0 for <c>View.Snap</c> and a hover, 1 for a click's snap, 2 for a double click's.</summary>
+/// was from it, and Clicks: 0 for <c>View.Snap</c> and a hover, 1 for a click's snap, 2 for a double click's.
+/// 1.30: the kinds "end", "intersection", "point" and "alignment" too; Edge is a lines item's segment, a curves item's
+/// Bezier or a kernel solid's kernel edge index; Label, the point's label for a "point" snap, else the kind's name;
+/// LockedAngle, the angle in degrees where the lock (<see cref="View.SetSnapBase"/>) turned the point, else null; and
+/// Guides, the 0-2 guides drawn (an alignment's, or the lock's ray).</summary>
 public sealed record Snap(string Kind, double[] Point, uint Item, uint Node, uint Face, uint? Edge, float[] Tangent,
-    float[] Axis, double Radius, float DistancePx, uint Clicks);
+    float[] Axis, double Radius, float DistancePx, uint Clicks, string Label, float? LockedAngle, SnapGuide[] Guides);
 
 /// <summary>One binding of an animation's target to what it moves (view ABI 1.27, <see cref="View.PlayAnimation"/>):
 /// the <see cref="Animation"/>'s Target name, the item shown, and Node -- a node of that item (its subtree moves
@@ -1242,6 +1382,59 @@ public unsafe class Item
             Ok(ViewNative.cadaclysm_view_set_point_states(View.Live("cadaclysm_view_set_point_states"), Id, p, (nuint)states.Length));
     }
 
+    private unsafe void SetFloats(string call, float[] values, int per, string what, Func<ViewHandle, float[], nuint, bool> send)
+    {
+        if (values.Length % per != 0) throw new ViewException($"{what} takes {per} numbers each, not {values.Length}");
+        Ok(send(View.Live(call), values, (nuint)(values.Length / per)));
+    }
+
+    /// <summary>Replaces a ShowLines item's segments (six floats each) under the same id: colour,
+    /// layer, dash, placement and on top kept, the camera not re-framed.</summary>
+    public unsafe void SetLines(float[] segments) =>
+        SetFloats("cadaclysm_view_set_lines", segments, 6, "SetLines", (h, a, n) => { fixed (float* p = View.NonNull(a)) return ViewNative.cadaclysm_view_set_lines(h, Id, p, n); });
+
+    /// <summary>Replaces a curves item's curves (sixteen floats each: four x, y, z, w control points).</summary>
+    public unsafe void SetCurves(float[] beziers) =>
+        SetFloats("cadaclysm_view_set_curves", beziers, 16, "SetCurves", (h, a, n) => { fixed (float* p = View.NonNull(a)) return ViewNative.cadaclysm_view_set_curves(h, Id, p, n); });
+
+    /// <summary>Replaces a points item's points (three floats each). The same count keeps the point
+    /// states; a new count keeps them by index, new points normal.</summary>
+    public unsafe void SetPoints(float[] positions) =>
+        SetFloats("cadaclysm_view_set_points", positions, 3, "SetPoints", (h, a, n) => { fixed (float* p = View.NonNull(a)) return ViewNative.cadaclysm_view_set_points(h, Id, p, n); });
+
+    /// <summary>Moves a ShowMesh item's vertices (as many as it was shown with), its triangles kept.
+    /// <paramref name="normals"/> the same length, or null to recompute them.</summary>
+    public unsafe void SetMeshPositions(float[] positions, float[]? normals = null)
+    {
+        if (normals is not null && normals.Length != positions.Length)
+            throw new ViewException($"SetMeshPositions has {positions.Length / 3} positions but {normals.Length / 3} normals");
+        SetFloats("cadaclysm_view_set_mesh_positions", positions, 3, "SetMeshPositions", (h, a, n) =>
+        {
+            fixed (float* p = View.NonNull(a)) fixed (float* nr = normals)
+                return ViewNative.cadaclysm_view_set_mesh_positions(h, Id, p, nr, n);
+        });
+    }
+
+    /// <summary>Points a "point" snap lands on (view ABI 1.30): three numbers each, in the coordinates the item was shown
+    /// in, moving with its node 0, each answering `label` (at most 31 bytes of UTF-8; null or "": "point"). No points
+    /// clear them; they also go with the item's removal. Null goes to the library as NULL, never as "".</summary>
+    /// <remarks>A count not a multiple of three and a label holding a NUL are refused before the call; the library
+    /// refuses text, glyph, image and machining items, a label past 31 bytes and a value that is not finite with its own
+    /// reason. The terminal and render view libraries refuse it.</remarks>
+    public unsafe void SetSnapPoints(double[] xyz, string? label = null)
+    {
+        if (xyz is null) throw new ViewException("SetSnapPoints: points, not null (none clears them)");
+        if (xyz.Length % 3 != 0) throw new ViewException($"SetSnapPoints takes 3 numbers each, not {xyz.Length}");
+        if (label is not null && label.Contains('\0')) throw new ViewException($"snap point label \"{label}\": a NUL character cannot be shown (the C string ends there)");
+        var points = new float[xyz.Length];
+        for (var i = 0; i < xyz.Length; i++) points[i] = (float)xyz[i];
+        byte[]? utf8 = label is null ? null : System.Text.Encoding.UTF8.GetBytes(label + "\0");
+        var h = View.Live("cadaclysm_view_set_snap_points");
+        fixed (float* p = points)
+        fixed (byte* l = utf8)
+            Ok(ViewNative.cadaclysm_view_set_snap_points(h, Id, points.Length == 0 ? null : p, (nuint)(points.Length / 3), l));
+    }
+
     /// <summary>Draws the item after every other, depth testing off; picked ahead of what is under it.</summary>
     public void SetOnTop(bool on = true) =>
         Ok(ViewNative.cadaclysm_view_set_on_top(View.Live("cadaclysm_view_set_on_top"), Id, on));
@@ -1343,12 +1536,17 @@ public sealed unsafe class View : IDisposable
         ["right"] = 5, ["bottom-left"] = 6, ["bottom"] = 7, ["bottom-right"] = 8,
     };
     internal static readonly Dictionary<string, uint> OccludedModes = new() { ["off"] = 0, ["solid"] = 1, ["dashed"] = 2 };
-    /// <summary>The CADACLYSM_VIEW_SNAP_* bits by the names SetSnap takes and Snap.Kind reports; "all" is every one (1.22).</summary>
+    /// <summary>The CADACLYSM_VIEW_SNAP_* bits by the names SetSnap takes and Snap.Kind reports (1.22; 1.30 added "end",
+    /// "intersection", "point" and "alignment"); "all" is every one, "default" the library's default (all but END,
+    /// INTERSECTION and ALIGNMENT, which are opt-in).</summary>
     internal static readonly Dictionary<string, uint> SnapKinds = new()
     {
         ["vertex"] = 1, ["midpoint"] = 2, ["centre"] = 4, ["quadrant"] = 8, ["edge"] = 16, ["face"] = 32, ["grid"] = 64, ["plane"] = 128,
-        ["all"] = 0xFF,
+        ["end"] = 1u << 8, ["intersection"] = 1u << 9, ["point"] = 1u << 10, ["alignment"] = 1u << 11,
+        ["all"] = 0xFFF, ["default"] = 0x4FF,
     };
+    /// <summary>The CADACLYSM_VIEW_HIT_* kinds of a <see cref="RectHit"/> by name (1.30).</summary>
+    internal static readonly Dictionary<string, uint> HitKinds = new() { ["face"] = 1, ["node"] = 2, ["segment"] = 3, ["edge"] = 4, ["point"] = 5 };
     private const uint SnapNoEdge = 0xFFFFFFFF;   // CadaclysmViewSnap.edge where the snap is on no edge
     internal static readonly Dictionary<string, uint> Finishes = new() { ["gloss"] = 0, ["satin"] = 1, ["matte"] = 2 };
     /// <summary>A shown solid's material (CADACLYSM_VIEW_MATERIAL_*, 1.21).</summary>
@@ -1636,6 +1834,30 @@ public sealed unsafe class View : IDisposable
         var h = Live("cadaclysm_view_show_lines");
         fixed (float* s = NonNull(segments)) fixed (float* c = rgb)
             return NewItem(ViewNative.cadaclysm_view_show_lines(h, s, (uint)segments.Length / 6, c), null);
+    }
+
+    /// <summary>The glyph kinds, in the header's order (CADACLYSM_VIEW_GLYPH_*).</summary>
+    public static readonly string[] GlyphKinds =
+        { "arrow", "tick", "cross", "square", "triangle", "parallel", "perpendicular", "coincident", "tangent", "fixed", "horizontal", "vertical" };
+
+    /// <summary><see cref="ShowGlyphs(float[], string, float, float[], float[])"/> with the colour as text.</summary>
+    public Item ShowGlyphs(float[] at, string kind, float sizePt, string colour, float[]? dir = null) =>
+        ShowGlyphs(at, kind, sizePt, ViewNative.Colour(colour), dir);
+
+    /// <summary>Drafting symbols of one <paramref name="kind"/> (see <see cref="GlyphKinds"/>) at the
+    /// points <paramref name="at"/> (three floats each), <paramref name="sizePt"/> points across at any
+    /// zoom, in <paramref name="rgb"/> (null: the edge colour), turned to <paramref name="dir"/>
+    /// (three floats a point, as projected on the screen; null: unturned). Glyph i is node i.</summary>
+    public Item ShowGlyphs(float[] at, string kind, float sizePt = 12f, float[]? rgb = null, float[]? dir = null)
+    {
+        int code = Array.IndexOf(GlyphKinds, kind);
+        if (code < 0) throw new ViewException($"show glyphs: '{kind}' is not a glyph kind ({string.Join(", ", GlyphKinds)})");
+        if (at.Length % 3 != 0) throw new ViewException($"ShowGlyphs takes three numbers a point, not {at.Length}");
+        if (dir is not null && dir.Length != at.Length) throw new ViewException($"ShowGlyphs has {at.Length / 3} points but {dir.Length / 3} directions");
+        Exact(rgb, 3, "ShowGlyphs rgb");
+        var h = Live("cadaclysm_view_show_glyphs");
+        fixed (float* a = NonNull(at)) fixed (float* d = dir) fixed (float* c = rgb)
+            return NewItem(ViewNative.cadaclysm_view_show_glyphs(h, a, d, (nuint)(at.Length / 3), (uint)code, sizePt, c), null);
     }
 
     /// <summary><see cref="ShowPoints(float[], float[], float)"/> with the colour as text.</summary>
@@ -2114,6 +2336,15 @@ public sealed unsafe class View : IDisposable
         set => Ok(ViewNative.cadaclysm_view_set_lighting(Live("cadaclysm_view_set_lighting"), Named(LightingKinds, value, "lighting")));
     }
 
+    /// <summary>Whether a textured material draws its texture (view ABI 1.33), as Python's View.textures:
+    /// true by default; false draws each part in its colour. The terminal and render-view libraries take it
+    /// and draw colours either way.</summary>
+    public bool Textures
+    {
+        get => ViewNative.cadaclysm_view_textures(Live("cadaclysm_view_textures"));
+        set => Ok(ViewNative.cadaclysm_view_set_textures(Live("cadaclysm_view_set_textures"), value));
+    }
+
     // CADACLYSM_VIEW_LAYER_EDGES, _CURVES and _ISOCURVES: the layers the line colours take.
     internal const uint LayerEdges = 1, LayerCurves = 2, LayerIsocurves = 3;
 
@@ -2232,6 +2463,149 @@ public sealed unsafe class View : IDisposable
         }
     }
 
+    /// <summary>The number of clip-plane slots (CADACLYSM_VIEW_CLIP_PLANES, view ABI 1.31).</summary>
+    public const uint ClipPlanes = 6;
+
+    /// <summary>Sets clip-plane slot `slot` (0..5, view ABI 1.31): what lies on the side `normal` points to is hidden, in
+    /// every viewport; a point is drawn only where every set plane keeps it. `cap` fills the cut of every body, `hatch`
+    /// (only with a cap) lines it at `hatchAngle` degrees, `hatchSpacing` apart in model units (0: automatic), each
+    /// `hatchWidth` points wide (see <see cref="global::Cadaclysm.Views.ClipPlane"/>). Clips the surfaces, edges, curves,
+    /// lines, points, glyphs, picks and snaps; not the grid, text, images, overlays or the machining stock.</summary>
+    /// <remarks>Other than three numbers for the point or normal is refused before the call; the library refuses a slot
+    /// past the last, a zero or not finite normal, a colour outside 0..1, a hatch without a cap, a negative spacing and a
+    /// width above 100 points with its own reason. The terminal and render view libraries draw no clip planes and refuse
+    /// every plane. 1.32: `outline` draws the cut as a line `outlineWidth` points wide (0: 1; the library refuses a
+    /// width above 100 points); a viewport with a clip set of its own (SetViewportClipPlane) draws with that
+    /// instead.</remarks>
+    public void SetClipPlane(uint slot, double[] point, double[] normal, Colour? cap = null, Colour? hatch = null,
+        float hatchAngle = 45f, float hatchSpacing = 0f, float hatchWidth = 1f, Colour? outline = null, float outlineWidth = 1f)
+    {
+        var h = Live("cadaclysm_view_set_clip_plane");
+        var raw = RawPlane(point, normal, cap, hatch, hatchAngle, hatchSpacing, hatchWidth, outline, outlineWidth);
+        Ok(ViewNative.cadaclysm_view_set_clip_plane(h, slot, &raw));
+    }
+
+    /// <summary>Sets clip-plane slot `slot` from a <see cref="global::Cadaclysm.Views.ClipPlane"/> (as
+    /// <see cref="ClipPlane(uint)"/> answers one).</summary>
+    public void SetClipPlane(uint slot, ClipPlane plane) =>
+        SetClipPlane(slot, plane.Point, plane.Normal, plane.Cap, plane.Hatch, plane.HatchAngle, plane.HatchSpacing, plane.HatchWidth,
+            plane.Outline, plane.OutlineWidth);
+
+    private static RawClipPlane RawPlane(double[] point, double[] normal, Colour? cap, Colour? hatch,
+        float hatchAngle, float hatchSpacing, float hatchWidth, Colour? outline, float outlineWidth)
+    {
+        Exact(point ?? throw new ViewException("clip plane point: 3 numbers, not null"), 3, "clip plane point");
+        Exact(normal ?? throw new ViewException("clip plane normal: 3 numbers, not null"), 3, "clip plane normal");
+        float[]? capRgb = global::Cadaclysm.Views.Colour.Given(cap) && !cap!.Value.IsNone ? cap.Value.Rgb("clip plane cap") : null;
+        float[]? hatchRgb = global::Cadaclysm.Views.Colour.Given(hatch) && !hatch!.Value.IsNone ? hatch.Value.Rgb("clip plane hatch") : null;
+        float[]? outlineRgb = global::Cadaclysm.Views.Colour.Given(outline) && !outline!.Value.IsNone ? outline.Value.Rgb("clip plane outline") : null;
+        var raw = new RawClipPlane
+        {
+            Size = (uint)sizeof(RawClipPlane), Cap = capRgb is null ? 0u : 1u, Hatch = hatchRgb is null ? 0u : 1u,
+            HatchAngle = hatchAngle, HatchSpacing = hatchSpacing, HatchWidth = hatchWidth,
+            Outline = outlineRgb is null ? 0u : 1u, OutlineWidth = outlineWidth,
+        };
+        for (int i = 0; i < 3; i++)
+        {
+            raw.Point[i] = point[i];
+            raw.Normal[i] = normal[i];
+            if (capRgb is not null) raw.CapColour[i] = capRgb[i];
+            if (hatchRgb is not null) raw.HatchColour[i] = hatchRgb[i];
+            if (outlineRgb is not null) raw.OutlineColour[i] = outlineRgb[i];
+        }
+        return raw;
+    }
+
+    private static ClipPlane PlaneOf(in RawClipPlane raw)
+    {
+        var point = new[] { raw.Point[0], raw.Point[1], raw.Point[2] };
+        var normal = new[] { raw.Normal[0], raw.Normal[1], raw.Normal[2] };
+        float[]? capRgb = raw.Cap != 0 ? new[] { raw.CapColour[0], raw.CapColour[1], raw.CapColour[2] } : null;
+        float[]? outlineRgb = raw.Outline != 0 ? new[] { raw.OutlineColour[0], raw.OutlineColour[1], raw.OutlineColour[2] } : null;
+        float outlineWidth = raw.Outline != 0 ? raw.OutlineWidth : 1f;
+        if (raw.Hatch == 0) return new ClipPlane(point, normal, capRgb, Outline: outlineRgb, OutlineWidth: outlineWidth);
+        return new ClipPlane(point, normal, capRgb, new[] { raw.HatchColour[0], raw.HatchColour[1], raw.HatchColour[2] },
+            raw.HatchAngle, raw.HatchSpacing, raw.HatchWidth, outlineRgb, outlineWidth);
+    }
+
+    /// <summary>Empties clip-plane slot `slot` (view ABI 1.31); an empty slot stays so. Every view library takes it.</summary>
+    /// <remarks>The library refuses a slot past the last with its own reason.</remarks>
+    public void ClearClipPlane(uint slot) =>
+        Ok(ViewNative.cadaclysm_view_set_clip_plane(Live("cadaclysm_view_set_clip_plane"), slot, null));
+
+    /// <summary>Clip-plane slot `slot` (view ABI 1.31) as set, the normal of unit length; null for an empty slot (always,
+    /// on the terminal and render view libraries).</summary>
+    /// <remarks>The library refuses a slot past the last with its own reason.</remarks>
+    public ClipPlane? ClipPlane(uint slot)
+    {
+        var raw = new RawClipPlane { Size = (uint)sizeof(RawClipPlane) };
+        if (!ViewNative.cadaclysm_view_clip_plane(Live("cadaclysm_view_clip_plane"), slot, &raw))
+        {
+            var why = ViewNative.LastError();
+            if (why.EndsWith("is empty", StringComparison.Ordinal)) return null;
+            throw ViewNative.Failure();
+        }
+        return PlaneOf(raw);
+    }
+
+    /// <summary>How the view-wide clip planes combine (view ABI 1.32): <see cref="global::Cadaclysm.Views.ClipMode.Intersection"/> (the
+    /// default) or <see cref="global::Cadaclysm.Views.ClipMode.Cutaway"/>; the library refuses Inherit (a viewport's). The terminal and
+    /// render view libraries refuse a cutaway.</summary>
+    public global::Cadaclysm.Views.ClipMode ClipMode
+    {
+        get => (global::Cadaclysm.Views.ClipMode)ViewNative.cadaclysm_view_clip_mode(Live("cadaclysm_view_clip_mode"));
+        set => Ok(ViewNative.cadaclysm_view_set_clip_mode(Live("cadaclysm_view_set_clip_mode"), (uint)value));
+    }
+
+    /// <summary>Sets slot `slot` of viewport `viewport`'s own clip set (view ABI 1.32), as <c>SetClipPlane</c> sets the
+    /// view-wide one, in that viewport only: the first gives it a set of its own (every other slot empty, mode
+    /// intersection), which it then draws, picks and snaps with instead of the view-wide planes. With no viewports
+    /// set, viewport 0 is the window.</summary>
+    /// <remarks>The library refuses what SetClipPlane refuses, a viewport past the last and one past 7 with its own
+    /// reason.</remarks>
+    public void SetViewportClipPlane(uint viewport, uint slot, double[] point, double[] normal, Colour? cap = null, Colour? hatch = null,
+        float hatchAngle = 45f, float hatchSpacing = 0f, float hatchWidth = 1f, Colour? outline = null, float outlineWidth = 1f)
+    {
+        var h = Live("cadaclysm_view_set_viewport_clip_plane");
+        var raw = RawPlane(point, normal, cap, hatch, hatchAngle, hatchSpacing, hatchWidth, outline, outlineWidth);
+        Ok(ViewNative.cadaclysm_view_set_viewport_clip_plane(h, viewport, slot, &raw));
+    }
+
+    /// <summary>Sets slot `slot` of viewport `viewport`'s own clip set from a <see cref="global::Cadaclysm.Views.ClipPlane"/>.</summary>
+    public void SetViewportClipPlane(uint viewport, uint slot, ClipPlane plane) =>
+        SetViewportClipPlane(viewport, slot, plane.Point, plane.Normal, plane.Cap, plane.Hatch, plane.HatchAngle, plane.HatchSpacing,
+            plane.HatchWidth, plane.Outline, plane.OutlineWidth);
+
+    /// <summary>Empties slot `slot` of viewport `viewport`'s own clip set (view ABI 1.32); the viewport keeps a set of
+    /// its own (<see cref="SetViewportClipMode"/> with Inherit drops it).</summary>
+    public void ClearViewportClipPlane(uint viewport, uint slot) =>
+        Ok(ViewNative.cadaclysm_view_set_viewport_clip_plane(Live("cadaclysm_view_set_viewport_clip_plane"), viewport, slot, null));
+
+    /// <summary>Slot `slot` of viewport `viewport`'s own clip set (view ABI 1.32), as <see cref="ClipPlane(uint)"/>
+    /// answers the view-wide one; null for an empty slot or where the viewport has no set of its own (it draws with
+    /// the view-wide planes).</summary>
+    public ClipPlane? ViewportClipPlane(uint viewport, uint slot)
+    {
+        var raw = new RawClipPlane { Size = (uint)sizeof(RawClipPlane) };
+        if (!ViewNative.cadaclysm_view_viewport_clip_plane(Live("cadaclysm_view_viewport_clip_plane"), viewport, slot, &raw))
+        {
+            var why = ViewNative.LastError();
+            if (why.EndsWith("is empty", StringComparison.Ordinal) || why.EndsWith("has no clip planes of its own", StringComparison.Ordinal)) return null;
+            throw ViewNative.Failure();
+        }
+        return PlaneOf(raw);
+    }
+
+    /// <summary>Sets viewport `viewport`'s clip mode (view ABI 1.32): Intersection or Cutaway sets its own set's mode,
+    /// giving it a set of its own if it had none; Inherit drops its set, back to the view-wide one.</summary>
+    /// <remarks>The library refuses a viewport past the last (past 7 for Inherit) with its own reason.</remarks>
+    public void SetViewportClipMode(uint viewport, global::Cadaclysm.Views.ClipMode mode) =>
+        Ok(ViewNative.cadaclysm_view_set_viewport_clip_mode(Live("cadaclysm_view_set_viewport_clip_mode"), viewport, (uint)mode));
+
+    /// <summary>Viewport `viewport`'s clip mode (view ABI 1.32): its own set's, or Inherit where it has none.</summary>
+    public global::Cadaclysm.Views.ClipMode ViewportClipMode(uint viewport) =>
+        (global::Cadaclysm.Views.ClipMode)ViewNative.cadaclysm_view_viewport_clip_mode(Live("cadaclysm_view_viewport_clip_mode"), viewport);
+
     public bool NeedsDraw => ViewNative.cadaclysm_view_needs_draw(Live("cadaclysm_view_needs_draw"));
 
     /// <summary>What the view has drawn (cadaclysm_view_stats, 1.25): FramesDrawn counts only frames
@@ -2253,7 +2627,7 @@ public sealed unsafe class View : IDisposable
         if (!_drawn) Draw();
         var h = Live("cadaclysm_view_request_pick_in");
         Void("cadaclysm_view_request_pick_in", v => ViewNative.cadaclysm_view_request_pick_in(v, viewport, x, y));
-        var output = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1 };
+        var output = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1, Segment = uint.MaxValue };
         var waiting = "";
         for (var i = 0; i < 200; i++)
         {
@@ -2274,7 +2648,7 @@ public sealed unsafe class View : IDisposable
     /// <remarks>A failure other than "no answer yet" throws the library's own message.</remarks>
     public bool LastPick(out Pick? pick)
     {
-        var output = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1 };
+        var output = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1, Segment = uint.MaxValue };
         if (ViewNative.cadaclysm_view_pick_result(Live("cadaclysm_view_pick_result"), &output))
         {
             pick = PickOf(output);
@@ -2287,11 +2661,13 @@ public sealed unsafe class View : IDisposable
     }
 
     /// <summary><see cref="SetSnap(string[], float, bool)"/> with the library's default aperture and the marker drawn:
-    /// "all", or any of the kinds' names; no names is "all", as Python's <c>set_snap()</c>; null switches snapping off.</summary>
+    /// "default", "all", or any of the kinds' names; no names is "default", as Python's <c>set_snap()</c>; null switches snapping off.</summary>
     public void SetSnap(params string[]? kinds) => SetSnap(kinds, 0f, true);
 
-    /// <summary>What a snap may land on: "all", or any of "vertex", "midpoint", "centre" (a circular edge's),
-    /// "quadrant", "edge", "face", "grid" and "plane"; no names is "all", and null switches snapping off, as a view starts.
+    /// <summary>What a snap may land on: "default", "all", or any of "vertex", "midpoint", "centre" (a circular edge's),
+    /// "quadrant", "edge", "face", "grid", "plane", and (1.30) "end", "intersection", "point" (the points
+    /// <see cref="Item.SetSnapPoints"/> gave) and "alignment"; no names is "default" (the first eight and "point"), and
+    /// null switches snapping off, as a view starts.
     /// `aperturePx` is how far from the cursor a point kind may lie (0: the library's default, 10 points; otherwise
     /// 2..32), `marker` whether the view draws the marker at the snap. Once on, a mouse hovering over a view in its
     /// own window snaps, and so does a click (<see cref="LastSnap"/> reads them); <see cref="Snap(uint, uint, uint)"/>
@@ -2301,7 +2677,7 @@ public sealed unsafe class View : IDisposable
     public void SetSnap(string[]? kinds, float aperturePx, bool marker = true)
     {
         uint bits = 0;
-        if (kinds is { Length: 0 }) bits = SnapKinds["all"];
+        if (kinds is { Length: 0 }) bits = SnapKinds["default"];
         foreach (var name in kinds ?? Array.Empty<string>()) bits |= Named(SnapKinds, name, "snap kind");
         var raw = new RawViewSnapSettings { Size = (uint)sizeof(RawViewSnapSettings), Kinds = bits, AperturePx = aperturePx, Marker = marker ? 1u : 0u };
         Ok(ViewNative.cadaclysm_view_set_snap(Live("cadaclysm_view_set_snap"), &raw));
@@ -2372,14 +2748,89 @@ public sealed unsafe class View : IDisposable
 
     /// <summary>A CadaclysmViewSnap as the answer: null for kind 0 (nothing snapped); Edge null where the snap is on
     /// no edge (Python's `_snap_dict`).</summary>
-    internal static Snap? SnapOf(RawViewSnap raw)
+    internal static Snap? SnapOf(RawViewSnap raw) =>
+        raw.Kind == 0 ? null : SnapOf(raw.Kind, raw.Point, raw.Item, raw.Node, raw.Face, raw.Edge, raw.Tangent, raw.Axis, raw.Radius,
+            raw.DistancePx, raw.Clicks, raw.Label, raw.Locked, raw.LockedAngle, raw.GuideCount, raw.Guides);
+
+    /// <summary>An input event's snap: the frozen 1.22 fields, and the 1.30 ones from the event's own tail.</summary>
+    internal static Snap? SnapOf(RawViewInputEvent raw) =>
+        raw.Snap.Kind == 0 ? null : SnapOf(raw.Snap.Kind, raw.Snap.Point, raw.Snap.Item, raw.Snap.Node, raw.Snap.Face, raw.Snap.Edge,
+            raw.Snap.Tangent, raw.Snap.Axis, raw.Snap.Radius, raw.Snap.DistancePx, raw.Snap.Clicks,
+            raw.SnapLabel, raw.SnapLocked, raw.SnapLockedAngle, raw.SnapGuideCount, raw.SnapGuides);
+
+    private static Snap SnapOf(uint kind, double* point, uint item, uint node, uint face, uint edge, float* tangent, float* axis,
+        double radius, float distancePx, uint clicks, byte* label, uint locked, float lockedAngle, uint guideCount, double* guides)
     {
-        var kind = raw.Kind;
-        return kind == 0 ? null : new Snap(SnapKinds.FirstOrDefault(k => k.Value == kind && k.Key != "all").Key ?? kind.ToString(),
-            new[] { raw.Point[0], raw.Point[1], raw.Point[2] }, raw.Item, raw.Node, raw.Face,
-            raw.Edge == SnapNoEdge ? null : (uint?)raw.Edge,
-            new[] { raw.Tangent[0], raw.Tangent[1], raw.Tangent[2] }, new[] { raw.Axis[0], raw.Axis[1], raw.Axis[2] },
-            raw.Radius, raw.DistancePx, raw.Clicks);
+        var n = 0;
+        while (n < 32 && label[n] != 0) n++;
+        var drawn = new SnapGuide[Math.Min(guideCount, 2u)];
+        for (var g = 0; g < drawn.Length; g++)
+            drawn[g] = new SnapGuide(new[] { guides[6 * g], guides[6 * g + 1], guides[6 * g + 2] },
+                new[] { guides[6 * g + 3], guides[6 * g + 4], guides[6 * g + 5] });
+        return new Snap(SnapKinds.FirstOrDefault(k => k.Value == kind && k.Key != "all" && k.Key != "default").Key ?? kind.ToString(),
+            new[] { point[0], point[1], point[2] }, item, node, face,
+            edge == SnapNoEdge ? null : (uint?)edge,
+            new[] { tangent[0], tangent[1], tangent[2] }, new[] { axis[0], axis[1], axis[2] },
+            radius, distancePx, clicks, System.Text.Encoding.UTF8.GetString(label, n), locked != 0 ? lockedAngle : null, drawn);
+    }
+
+    /// <summary>The angle lock (view ABI 1.30): snaps that land on no point kind turn about `point` (world, three numbers)
+    /// onto the nearest multiple of `stepDeg` (0 &lt; step &lt;= 180), in the work plane's directions or the plane facing
+    /// the eye; the answer is kind "plane" with its LockedAngle and the lock's ray as its guide. Null clears it (a NULL
+    /// point goes to the library, the step ignored).</summary>
+    /// <remarks>Other than three numbers is refused before the call; the library refuses a point that is not finite and a
+    /// step out of range with its own reason. The terminal and render view libraries refuse it.</remarks>
+    public void SetSnapBase(double[]? point, float stepDeg = 15)
+    {
+        var h = Live("cadaclysm_view_set_snap_base");
+        if (point is null)
+        {
+            Ok(ViewNative.cadaclysm_view_set_snap_base(h, null, stepDeg));
+            return;
+        }
+        Exact(point, 3, "snap base");
+        var xyz = new[] { (float)point[0], (float)point[1], (float)point[2] };
+        fixed (float* p = xyz) Ok(ViewNative.cadaclysm_view_set_snap_base(h, p, stepDeg));
+    }
+
+    /// <summary>How far a pick reaches for lines, curves, points and glyphs (view ABI 1.30), in points (times the screen
+    /// density): 0 restores the default, 4; others clamp to 1..32. Faces are always the pixel's. The terminal and render
+    /// view libraries keep it, but their picks are face picks.</summary>
+    /// <remarks>The library refuses a negative size or one that is not finite with its own reason.</remarks>
+    public void SetPickAperture(float points) =>
+        Ok(ViewNative.cadaclysm_view_set_pick_aperture(Live("cadaclysm_view_set_pick_aperture"), points));
+
+    /// <summary>What lies in a rectangle of `viewport` (view ABI 1.30; device pixels from its top left, a negative `w` or
+    /// `h` flipping it), CPU only: with `crossing`, everything with a visible part inside, else what lies wholly inside
+    /// and is visible. Hidden things come only drawn x-ray or on top; text, images, overlays, viewport labels, machining
+    /// stocks and isocurves are left out. Every hit, sorted by item, kind and index (see <see cref="RectHit"/>); an
+    /// exact item shown with no mesh has edges here, no faces. A rectangle wholly off the viewport, and a lost device,
+    /// answer none.</summary>
+    /// <remarks>The library refuses a rectangle that is not finite and an unknown viewport with its own reason; the
+    /// render view library refuses the call.</remarks>
+    public RectHit[] PickRect(float x, float y, float w, float h, bool crossing = true, uint viewport = 0)
+    {
+        var v = Live("cadaclysm_view_pick_rect");
+        var buf = new RawViewRectHit[64];
+        nuint n;
+        fixed (RawViewRectHit* p = buf) n = ViewNative.cadaclysm_view_pick_rect(v, viewport, x, y, w, h, crossing, p, (nuint)buf.Length);
+        if (n == 0)
+        {
+            var why = ViewNative.LastError();   // this call's own refusal: the library cleared the error first
+            if (why.Length > 0) throw new ViewException(why);
+        }
+        if (n > (nuint)buf.Length)
+        {
+            buf = new RawViewRectHit[(int)n];   // the count rule: asked again with a buffer of the total
+            fixed (RawViewRectHit* p = buf) n = ViewNative.cadaclysm_view_pick_rect(v, viewport, x, y, w, h, crossing, p, (nuint)buf.Length);
+        }
+        var hits = new RectHit[(int)Math.Min(n, (nuint)buf.Length)];
+        for (var i = 0; i < hits.Length; i++)
+        {
+            var kind = buf[i].Kind;
+            hits[i] = new RectHit(buf[i].Item, HitKinds.FirstOrDefault(k => k.Value == kind).Key ?? kind.ToString(), buf[i].Index);
+        }
+        return hits;
     }
 
     public void Draw() { Ok(ViewNative.cadaclysm_view_draw(Live("cadaclysm_view_draw"))); _drawn = true; }
@@ -2393,7 +2844,7 @@ public sealed unsafe class View : IDisposable
     {
         if (Environment.CurrentManagedThreadId != _thread) throw new ViewException("cadaclysm_view_next_event: a view belongs to the thread that made it");
         if (_handle.IsClosed) throw new ViewException("cadaclysm_view_next_event: the view is closed");
-        var raw = new RawViewInputEvent { Size = (uint)sizeof(RawViewInputEvent) };
+        var raw = NewInputEvent();
         if (ViewNative.cadaclysm_view_next_event(_handle, &raw))
         {
             e = EventOf(raw, _yUp);
@@ -2447,7 +2898,7 @@ public sealed unsafe class View : IDisposable
             if (state == 2 && closedOn is null) throw new ViewException("run: the window closed with no close event");
         }
         // The answer the last click left for LastPick, taken as Run() takes it; else the last pick event's.
-        var raw = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1 };
+        var raw = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1, Segment = uint.MaxValue };
         if (ViewNative.cadaclysm_view_pick_result(_handle, &raw)) picked = PickOf(raw);
         MarkClosed();
         return closedOn with { Pick = picked };
@@ -2455,6 +2906,11 @@ public sealed unsafe class View : IDisposable
 
     /// <summary>The CADACLYSM_VIEW_INPUT_EVENT_* kinds by number, and the CADACLYSM_VIEW_MOD_* bits (1.26).</summary>
     internal const uint ModShift = 1, ModCtrl = 2, ModAlt = 4, ModMeta = 8;
+
+    /// <summary>The buffer next_event fills: its size, and the tail at the none values (no viewport label, no segment),
+    /// which is what an older library that leaves the tail alone answers.</summary>
+    internal static RawViewInputEvent NewInputEvent() =>
+        new() { Size = (uint)sizeof(RawViewInputEvent), PickViewportLabel = -1, PickSegment = uint.MaxValue };
 
     /// <summary>A CadaclysmViewInputEvent as its record.</summary>
     internal static ViewInputEvent EventOf(RawViewInputEvent raw, bool yUp)
@@ -2470,8 +2926,8 @@ public sealed unsafe class View : IDisposable
             4 => new WheelEvent(raw.X, raw.Y, raw.WheelY, shift, ctrl, alt, meta),
             5 or 6 => new KeyEvent(KeyName(raw), raw.Kind == 5, shift, ctrl, alt, meta, raw.Repeat != 0),
             7 => new ResizeEvent(raw.Width, raw.Height),
-            8 => new PickEvent(PickOf(raw.Pick, raw.PickViewportLabel)),
-            9 => new SnapEvent(SnapOf(raw.Snap)),
+            8 => new PickEvent(PickOf(raw.Pick, raw.PickViewportLabel, raw.PickSegment, raw.PickDistancePx)),
+            9 => new SnapEvent(SnapOf(raw)),
             10 => new CloseEvent(CameraOf(new[] { raw.Camera.Eye[0], raw.Camera.Eye[1], raw.Camera.Eye[2] },
                 new[] { raw.Camera.Target[0], raw.Camera.Target[1], raw.Camera.Target[2] },
                 new[] { raw.Camera.Up[0], raw.Camera.Up[1], raw.Camera.Up[2] }, raw.Camera.Orthographic != 0, null, yUp)),
@@ -2493,7 +2949,7 @@ public sealed unsafe class View : IDisposable
     {
         var h = Live("cadaclysm_view_run");
         var cam = new RawViewCamera { Size = (uint)sizeof(RawViewCamera) };
-        var pick = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1 };
+        var pick = new RawViewPick { Size = (uint)sizeof(RawViewPick), ViewportLabel = -1, Segment = uint.MaxValue };
         Ok(ViewNative.cadaclysm_view_run(h, &cam, &pick));
         MarkClosed();
         float[] eye = { cam.Eye[0], cam.Eye[1], cam.Eye[2] }, target = { cam.Target[0], cam.Target[1], cam.Target[2] }, up = { cam.Up[0], cam.Up[1], cam.Up[2] };
@@ -2504,12 +2960,15 @@ public sealed unsafe class View : IDisposable
     /// has_point (Python's `_pick_dict`).</summary>
     internal static Pick? PickOf(RawViewPick raw) =>
         raw.Item == 0 && raw.ViewportLabel < 0 ? null : new Pick(raw.Item, raw.Node, raw.Face, raw.Clicks,
-            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null, raw.Overlay != 0, raw.ViewportLabel);
+            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null, raw.Overlay != 0, raw.ViewportLabel,
+            raw.Segment == SnapNoEdge ? null : raw.Segment, raw.DistancePx);
 
-    /// <summary>An input event's pick (CadaclysmViewEventPick) as the answer, as PickOf reads a pick.</summary>
-    internal static Pick? PickOf(RawViewEventPick raw, int label) =>
+    /// <summary>An input event's pick (CadaclysmViewEventPick) as the answer, as PickOf reads a pick; the label, segment
+    /// and distance are the event's own tail.</summary>
+    internal static Pick? PickOf(RawViewEventPick raw, int label, uint segment, float distancePx) =>
         raw.Item == 0 && label < 0 ? null : new Pick(raw.Item, raw.Node, raw.Face, raw.Clicks,
-            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null, raw.Overlay != 0, label);
+            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null, raw.Overlay != 0, label,
+            segment == SnapNoEdge ? null : segment, distancePx);
 
     /// <summary>The buffer a frame of `width` x `height` is read into: a size nobody can allocate is the wrapper's error.</summary>
     internal static byte[] FrameBuffer(ulong width, ulong height)

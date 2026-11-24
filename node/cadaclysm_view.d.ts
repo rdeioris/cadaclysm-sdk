@@ -32,18 +32,29 @@ export interface TextOptions { mode?: 'label' | 'world'; size?: number; colour?:
 export function loadFont(font: Uint8Array | ArrayBuffer | string): number;
 export function _release(obj: unknown): void;
 export function _reset(): void;
+export const _GLYPH_KINDS: readonly GlyphKind[];
 export const OPEN: 1;
 export const CLOSED: 2;
+/** The number of clip-plane slots (view ABI 1.31, CADACLYSM_VIEW_CLIP_PLANES). */
+export const CLIP_PLANES: 6;
+/** The viewports that may have a clip set of their own (view ABI 1.32, CADACLYSM_VIEW_CLIP_VIEWPORTS). */
+export const CLIP_VIEWPORTS: 8;
+/** How a clip set's planes combine (view ABI 1.32): drawn where every plane keeps, or hidden only where every plane hides. */
+export type ClipMode = 'intersection' | 'cutaway';
 
 export interface ViewOptions { title?: string; width?: number; height?: number; surfaces?: 'exact' | 'triangles'; up?: 'z' | 'y'; backend?: number; }
 export interface NativeWindow { kind: 'win32' | 'xlib' | 'xcb' | 'wayland' | 'appkit'; window?: unknown; windowId?: number | bigint; display?: unknown; width: number; height: number; }
 export type ViewName = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom' | 'iso';
 export interface ShowOptions { view?: ViewName | [azimuth: number, elevation: number]; azimuth?: number; elevation?: number; zoom?: number; up?: 'z' | 'y'; edges?: boolean; width?: number; height?: number; title?: string; tolerance?: number; rgb?: Colour; }
 /** A pick answer: `clicks` 2 for a double click, else 1; `point` where the ray met the model, null where no depth was read. */
-export interface Pick { item: number; node: number; face: number; clicks: number; point: [number, number, number] | null; /** 1.24: the item is an overlay, picked before anything beneath it. */ overlay: boolean; /** 1.28: the viewport whose label was under the pixel (item is 0 then), or -1 for none. */ viewportLabel: number; }
+export interface Pick { item: number; node: number; face: number; clicks: number; point: [number, number, number] | null; /** 1.24: the item is an overlay, picked before anything beneath it. */ overlay: boolean; /** 1.28: the viewport whose label was under the pixel (item is 0 then), or -1 for none. */ viewportLabel: number; /** 1.30: the wire hit's segment (a lines item's segment, a curves item's Bezier, a kernel solid's edge index), null for a face, a point, a glyph or a label. */ segment: number | null; /** 1.30: from the cursor to the hit in device pixels; 0 for a face. */ distancePx: number; }
+/** 1.30: what `View.pickRect` found: its item, what it is ('face' as the pick numbers it, 'node' of an item with no face ranges, 'segment' of a lines or curves item, 'edge' of a kernel solid or read scene, 'point' of a points or glyphs item) and its index. */
+export interface RectHit { item: number; /** A kind a later library adds comes as its number, in text ('6'). */ kind: 'face' | 'node' | 'segment' | 'edge' | 'point' | (string & {}); index: number; }
 /** Where an overlay hangs in the window (view ABI 1.24); its offset is measured inward from it. */
 export type PointShape = 'disc' | 'ring' | 'square' | 'diamond';
 export type PointState = 'normal' | 'hover' | 'selected' | 'first';
+/** 1.29: a glyph's kind (`View.showGlyphs`), numbered 0..11 as the header's CADACLYSM_VIEW_GLYPH_*. */
+export type GlyphKind = 'arrow' | 'tick' | 'cross' | 'square' | 'triangle' | 'parallel' | 'perpendicular' | 'coincident' | 'tangent' | 'fixed' | 'horizontal' | 'vertical';
 export type Anchor = 'top-left' | 'top' | 'top-right' | 'left' | 'centre' | 'center' | 'right' | 'bottom-left' | 'bottom' | 'bottom-right';
 /** `View.showOverlay`'s style: an outline by default -- `stroke` a colour or 'none' (unset: the profile's own colour, else white); `fill` only where given, a colour or 'none'. Neither is refused. */
 export interface OverlayStyle { fill?: ColourAlpha | 'none' | null; stroke?: ColourAlpha | 'none' | null; strokeWidth?: number; order?: number; }
@@ -51,10 +62,10 @@ export interface OverlayStyle { fill?: ColourAlpha | 'none' | null; stroke?: Col
 export interface OverlayTextOptions { size?: number; colour?: Colour; box?: ColourAlpha | null; padding?: number; font?: number; order?: number; }
 /** `View.showOverlayImage`'s options: the size drawn (0: its own), the opacity, the overlay order. */
 export interface OverlayImageOptions { drawWidth?: number; drawHeight?: number; opacity?: number; order?: number; }
-/** What a snap lands on (view ABI 1.22). */
-export type SnapKind = 'vertex' | 'midpoint' | 'centre' | 'quadrant' | 'edge' | 'face' | 'grid' | 'plane';
+/** What a snap lands on (view ABI 1.22; 1.30 added 'end', 'intersection', 'point' and 'alignment'). */
+export type SnapKind = 'vertex' | 'midpoint' | 'centre' | 'quadrant' | 'edge' | 'face' | 'grid' | 'plane' | 'end' | 'intersection' | 'point' | 'alignment';
 /** A snap answer: the point snapped to, in the coordinates the items were shown in; `edge` null for a face, grid or plane snap; `clicks` 0 for snap() and a hover, 1 or 2 for a click's. */
-export interface Snap { kind: SnapKind; point: [number, number, number]; item: number; node: number; face: number; edge: number | null; tangent: [number, number, number]; axis: [number, number, number]; radius: number; distancePx: number; clicks: number; }
+export interface Snap { kind: SnapKind; point: [number, number, number]; item: number; node: number; face: number; edge: number | null; tangent: [number, number, number]; axis: [number, number, number]; radius: number; distancePx: number; clicks: number; /** 1.30: a 'point' snap's label, else the kind's name. */ label: string; /** 1.30: the lock's angle in degrees (0..360) where `setSnapBase` turned the point, else null. */ lockedAngle: number | null; /** 1.30: 0 to 2 guides, each `[from, to]` in world coordinates: alignment guides or the lock's ray. */ guides: Array<[[number, number, number], [number, number, number]]>; }
 export interface Camera { eye: number[]; target: number[]; up: number[]; orthographic: boolean; azimuth: number; elevation: number; pick: Pick | null; }
 /** What every input event carries (view ABI 1.26): the library's own clock (only differences mean anything), and how many events a full queue (1024) dropped just before this one. */
 interface InputEventBase { timeMs: number; dropped: number; }
@@ -103,6 +114,16 @@ export class Item {
   setPointStyle(style?: { shape?: PointShape; hollow?: boolean }): void;
   /** 1.28: one state a point, by name or by number 0..3; one entry per point. */
   setPointStates(states: Iterable<PointState | number>): void;
+  /** 1.29: replaces a lines item's segments (six numbers each) in place; an empty list empties it. */
+  setLines(segments: ArrayLike<number>): void;
+  /** 1.29: replaces a curves item's Beziers (sixteen numbers each) in place. */
+  setCurves(beziers: ArrayLike<number>): void;
+  /** 1.29: replaces a points item's positions (three numbers each); the point states stay by index. */
+  setPoints(positions: ArrayLike<number>): void;
+  /** 1.29: moves a mesh item's vertices in place (same count); null normals are recomputed. */
+  setMeshPositions(positions: ArrayLike<number>, normals?: ArrayLike<number> | null): void;
+  /** 1.30: points a 'point' snap lands on (`[[x, y, z], ...]` or flat), each answering `label` (at most 31 bytes; null or '': 'point'); none clears them. */
+  setSnapPoints(points: ArrayLike<number> | ReadonlyArray<ArrayLike<number>>, label?: string | null): void;
   /** 1.28: draws the item after every other with depth testing off, picked ahead of what is under it (refused for overlays, text, images, exact-surface and curve items). */
   setOnTop(on?: boolean): void;
   /** How its lines and points draw where a surface hides them: 'off' (an item shows with it until set), 'solid' or 'dashed'. */
@@ -165,6 +186,32 @@ export class Machining extends Item {
 }
 
 export interface OccludedStyle { dash: number; gap: number; dim: number; colour: [number, number, number] | null; }
+/** A clip plane as `View.setClipPlane` takes it (view ABI 1.31): absent keys take their defaults (no cap, no hatch, angle 45, spacing 0 = automatic, width 1). */
+export interface ClipPlaneOptions {
+  point: ArrayLike<number>;
+  normal: ArrayLike<number>;
+  cap?: Colour | null;
+  hatch?: Colour | null;
+  hatchAngle?: number;
+  hatchSpacing?: number;
+  hatchWidth?: number;
+  /** 1.32: a colour drawing the cut as a line, capped or not (none by default). */
+  outline?: Colour | null;
+  /** 1.32: the outline's width in points (1; 0 reads back 1; at most 100). */
+  outlineWidth?: number;
+}
+/** A clip plane as `View.clipPlane` reads it back: the normal of unit length, a zero width resolved to 1; with no hatch the angle, spacing and width are the defaults; with no outline its width is 1. */
+export interface ClipPlane {
+  point: [number, number, number];
+  normal: [number, number, number];
+  cap: [number, number, number] | null;
+  hatch: [number, number, number] | null;
+  hatchAngle: number;
+  hatchSpacing: number;
+  hatchWidth: number;
+  outline: [number, number, number] | null;
+  outlineWidth: number;
+}
 /** The colour every edge, curve or isocurve draws in: one colour, or each part's own where `fromPart`. */
 export interface LineColour { colour: [number, number, number]; fromPart: boolean; }
 export class View {
@@ -180,6 +227,8 @@ export class View {
   surfaces: 'exact' | 'triangles';
   /** How plain parts are lit (view ABI 1.9): 'headlight' (the default) or 'studio'. */
   lighting: 'headlight' | 'studio';
+  /** Whether parts whose material has a base-colour texture (a glTF's) draw it -- true, the default -- or their colour (view ABI 1.33). */
+  textures: boolean;
   /** How every 'dashed' item's hidden lines and points look, view-wide (view ABI 1.20): dash and gap in points (6, 4), dim the coverage kept (0.5), one colour or null. Set a partial style (unset keys take the default) or null for the defaults. */
   get occludedStyle(): OccludedStyle;
   set occludedStyle(style: Partial<Omit<OccludedStyle, 'colour'>> & { colour?: Colour | null } | null);
@@ -227,6 +276,8 @@ export class View {
   /** One line per track at the clock's time. */
   status(): string[];
   showCurves(beziers: ArrayLike<number>, rgb?: Colour | null): Item;
+  /** 1.29: drafting glyphs of one `kind` at each of `at` (three numbers each), `sizePt` points across (1 to 128, default 12), in `colour` (null: the edge colour), turned to `dir` (three numbers a glyph as projected on the screen; null: unturned). Glyph i picks as node i. */
+  showGlyphs(at: ArrayLike<number>, options: { kind: GlyphKind; sizePt?: number; colour?: Colour | null; dir?: ArrayLike<number> | null }): Item;
   /** A 2D shape over the window (view ABI 1.24): a profile, profiles, or Beziers (16 numbers each), in pixels, hung `x`, `y` pixels inward from `anchor`. */
   showOverlay(shape: Profile | Profile[] | ArrayLike<number>, anchor: Anchor, x: number, y: number, style?: OverlayStyle): Overlay;
   /** Text over the window (view ABI 1.24): its box hangs from `anchor` by the same point, `x`, `y` pixels inward. */
@@ -262,8 +313,8 @@ export class View {
   pick(x: number, y: number, viewport?: number): Pick | null;
   /** The newest pick answer that landed (a click, a double click), without waiting: undefined while none has, null for a click on nothing; each read once. */
   lastPick(): Pick | null | undefined;
-  /** What a snap may land on (view ABI 1.22): 'all' (the default), one kind, several, or null to switch snapping off. A view starts with snapping off. */
-  setSnap(kinds?: 'all' | SnapKind | SnapKind[] | null, options?: { aperturePx?: number; marker?: boolean }): void;
+  /** What a snap may land on (view ABI 1.22): 'default' (the default: the first eight and 'point'), 'all', one kind, several, or null to switch snapping off. A view starts with snapping off. */
+  setSnap(kinds?: 'default' | 'all' | SnapKind | SnapKind[] | null, options?: { aperturePx?: number; marker?: boolean }): void;
   /** The snap under pixel (x, y) of `viewport`, drawing until it lands; null where nothing snaps (always, while snapping is off). */
   snap(x: number, y: number, viewport?: number): Snap | null;
   /** The newest snap that landed (a hover, a click), without waiting: undefined while none has, null for one that found nothing; each read once. */
@@ -272,6 +323,30 @@ export class View {
   clearSnap(): void;
   /** The plane 'grid' and 'plane' snaps land on, in place of the ground grid; null puts the ground grid back. */
   setWorkPlane(origin: ArrayLike<number> | null, xAxis?: ArrayLike<number>, normal?: ArrayLike<number>, step?: number): void;
+  /** 1.30: the angle lock: snaps on no point kind turn about `point` onto multiples of `stepDeg` (default 15); null clears it. */
+  setSnapBase(point: ArrayLike<number> | null, stepDeg?: number): void;
+  /** 1.30: how far a pick reaches for lines, curves, points and glyphs, in points; 0 restores the default, 4. */
+  setPickAperture(points: number): void;
+  /** 1.30: what lies in a rectangle of `viewport` (device pixels), crossing by default; every hit, sorted by item, kind and index. */
+  pickRect(x: number, y: number, w: number, h: number, options?: { crossing?: boolean; viewport?: number }): RectHit[];
+  /** 1.31: sets clip-plane slot `slot` (0..5), view-wide: the side `normal` points to is hidden; an optional cap fills the cut, hatched where `hatch`. null clears. */
+  setClipPlane(slot: number, plane: ClipPlaneOptions | null): void;
+  /** 1.31: clears clip-plane slot `slot`. */
+  clearClipPlane(slot: number): void;
+  /** 1.31: clip-plane slot `slot` as set, or null for an empty slot. */
+  clipPlane(slot: number): ClipPlane | null;
+  /** 1.32: how the view-wide planes combine; 'intersection' by default. */
+  clipMode: ClipMode;
+  /** 1.32: sets slot `slot` of viewport `viewport`'s own clip set (the first plane gives it a set of its own). null clears the slot. */
+  setViewportClipPlane(viewport: number, slot: number, plane: ClipPlaneOptions | null): void;
+  /** 1.32: clears slot `slot` of viewport `viewport`'s own clip set; the set stays its own. */
+  clearViewportClipPlane(viewport: number, slot: number): void;
+  /** 1.32: slot `slot` of viewport `viewport`'s own clip set, or null for an empty slot or a viewport with no set of its own. */
+  viewportClipPlane(viewport: number, slot: number): ClipPlane | null;
+  /** 1.32: viewport `viewport`'s own set's mode; null (or 'inherit') drops its set, back to the view-wide one. */
+  setViewportClipMode(viewport: number, mode: ClipMode | 'inherit' | null): void;
+  /** 1.32: viewport `viewport`'s own set's mode, or null where it inherits the view-wide set. */
+  viewportClipMode(viewport: number): ClipMode | null;
   draw(): void;
   /** Blocks until the window is closed; the camera it ended on and the last pick. */
   run(): Camera;

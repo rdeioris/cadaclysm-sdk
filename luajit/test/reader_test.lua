@@ -31,6 +31,12 @@ return function(t)
     t.eq(names["stl-ascii"], "stl")
     t.eq(labels.stl, "STL (binary)")
     t.eq(labels["stl-ascii"], "STL (ASCII)")
+    t.eq(names["3mf"], "3mf")
+    t.eq(labels["3mf"], "3D Manufacturing Format")
+    t.eq(names.ply, "ply")
+    t.eq(labels.ply, "PLY (binary)")
+    t.eq(names["ply-ascii"], "ply")
+    t.eq(labels["ply-ascii"], "PLY (ASCII)")
   end)
 
   t.test("formats list every reader with its extensions", function()
@@ -84,6 +90,55 @@ return function(t)
     t.eq(scene.nodes[1].mesh.index_count, 36)
     scene:close()
     t.raises(function() scene:forget_meshes() end, "closed")
+  end)
+
+  t.test("a glTF reads its PBR materials and encoded images; a scad cube has neither", function()
+    local quad = cadaclysm.open(t.fixture("samples/textured-quad.glb"))
+    local materials, names = {}, {}
+    for _, node in ipairs(quad.nodes) do
+      local m = node.material
+      if m and not materials[m.name] then materials[m.name] = m; names[#names + 1] = m.name end
+    end
+    table.sort(names)
+    t.eq(table.concat(names, ","), "Checker,Plain")
+    local checker = materials.Checker
+    t.eq(getmetatable(checker), cadaclysm.Material)
+    t.eq(checker.base_color[1], 1); t.eq(checker.base_color[2], 0.5)
+    t.eq(checker.base_color[3], 0.25); t.eq(checker.base_color[4], 1)
+    t.eq(checker.metallic, 0)
+    t.eq(checker.roughness, 0.5)
+    t.eq(checker.alpha_mode, "mask")
+    t.eq(checker.alpha_cutoff, 0.25)
+    t.eq(checker.double_sided, true)
+    t.eq(checker.base_color_image, 0)
+    t.eq(checker.base_color_uv_set, 0)
+    t.eq(checker.uv_offset[1], 0.5); t.eq(checker.uv_offset[2], 0)
+    t.eq(checker.uv_rotation, 0)
+    t.eq(checker.uv_scale[1], 2); t.eq(checker.uv_scale[2], 2)
+    t.eq(checker.wrap_u, "clamp_to_edge")
+    t.eq(checker.wrap_v, "mirrored_repeat")
+    t.eq(checker.mag_filter, "linear")
+    t.eq(checker.min_filter, "linear")
+    t.eq(materials.Plain.base_color_image, nil)
+    t.eq(materials.Plain.alpha_mode, "opaque")
+
+    t.eq(quad.image_count, 1)
+    local image = quad:image(0)
+    t.eq(getmetatable(image), cadaclysm.Image)
+    t.eq(image.mime, "image/png")
+    t.eq(image.name, "checker")
+    t.eq(type(image.data), "string")
+    t.eq(#image.data, 75)
+    t.eq(image.data:sub(1, 4), "\137PNG")
+    t.raises(function() quad:image(1) end, "image 1 of 1")
+    t.raises(function() quad:image(-1) end, "image %-1 of 1")
+    quad:close()
+
+    local cube = cadaclysm.open(t.fixture("samples/cube.scad"))
+    t.eq(cube.image_count, 0)
+    for _, node in ipairs(cube.nodes) do t.eq(node.material, nil) end
+    t.raises(function() cube:image(0) end, "image 0 of 0")
+    cube:close()
   end)
 
   -- cube.scad is a mesh with no brep in the Reader flavour and an exact box where the reader
@@ -625,6 +680,26 @@ return function(t)
       t.eq(quarter.tolerance, 0.25)
       again:release()
       scene:close()
+    end)
+
+    t.test("recognize_tolerance hands out analytic bodies", function()
+      -- unasked the ball is still NURBS; asked, every body arrives already analytic
+      local path = t.fixture("crates/cadaclysm-acis/tests/fixtures/rhino/box-union-sphere.3dm")
+      if not path then return end
+      for _, case in ipairs({ { 0, true }, { 1e-6, false } }) do
+        local scene = cadaclysm.open(path, nil, nil, nil, nil, case[1])
+        local back, report = breps_of(scene)[1]:recognize()
+        local kinds = {}
+        for _, f in ipairs(report.faces) do kinds[f.kind] = true end
+        if case[2] then
+          t.ok(kinds.sphere, "unasked: a sphere still to take")
+        else
+          t.eq(#report.faces, 0, "asked: already analytic")
+        end
+        back:release()
+        scene:close()
+      end
+      t.raises(function() cadaclysm.open(path, nil, nil, nil, nil, -1) end, "recognize_tolerance")
     end)
 
     t.test("the recognize decoder reads every column of distinct rows", function()
@@ -1266,7 +1341,7 @@ return function(t)
   end)
 
   t.test("ffi types are the header's", function()
-    t.eq(ffi.sizeof("CadaclysmOpenOptions"), ffi.abi("64bit") and 104 or ffi.sizeof("CadaclysmOpenOptions"))
+    t.eq(ffi.sizeof("CadaclysmOpenOptions"), ffi.abi("64bit") and 112 or ffi.sizeof("CadaclysmOpenOptions"))
     t.eq(ffi.sizeof("CadaclysmMesh"), ffi.abi("64bit") and 48 or ffi.sizeof("CadaclysmMesh"))
   end)
 

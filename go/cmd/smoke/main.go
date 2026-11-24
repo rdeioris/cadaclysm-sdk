@@ -1015,12 +1015,15 @@ func kernel(license string) {
 	curveSheets()
 	draft()
 	sheetMetal()
+	squish()
+	fromMesh()
 	curvesAsObjects()
 	measure()
 	rtree()
 	interpolatorAndMerge()
 	animation()
 	rtreeRays()
+	polygonSets()
 	healthKernel()
 	plate, err := blacksmith.XY().Extrude(outline, 6).Solid()
 	if err != nil {
@@ -1752,6 +1755,36 @@ func sheetMetal() {
 	_, err = cube.FlatPattern(0, rule, math.NaN())
 	check(err != nil && strings.HasPrefix(err.Error(), "flat_pattern: "), fmt.Sprintf("a cube's flat pattern: %v", err))
 
+	// Python's test_sheet_metal_a_hem_a_fold_and_a_contour (rope and double hems).
+	rope, err := plate.SheetHem(edges[:1], "rope", 0, rule, 2, 0, math.NaN())
+	must(err)
+	ropeInfo, err := rope.SheetInfo(nil, math.NaN())
+	must(err)
+	check(len(ropeInfo.Bends) == 2, fmt.Sprintf("a rope hem has %d bends, not its curl's two halves", len(ropeInfo.Bends)))
+	twice, err := plate.SheetHem(edges[:1], "double", 8, rule, 0, 0, math.NaN())
+	must(err)
+	twiceInfo, err := twice.SheetInfo(nil, math.NaN())
+	must(err)
+	check(len(twiceInfo.Bends) == 2, fmt.Sprintf("a double hem has %d bends, not 2", len(twiceInfo.Bends)))
+
+	// Python's test_sheet_metal_a_lofted_flange_unfolds: a three-sided hopper.
+	loftBottom := [][3]float64{{-10, -10, 0}, {10, -10, 0}, {10, 10, 0}, {-10, 10, 0}}
+	rim := [][3]float64{{-15, -15, 20}, {15, -15, 20}, {15, 15, 20}, {-15, 15, 20}}
+	hopper, err := blacksmith.SheetLoftedFlange(loftBottom, rim, rule, math.NaN())
+	must(err)
+	hopperInfo, err := hopper.SheetInfo(nil, math.NaN())
+	must(err)
+	check(len(hopperInfo.Bends) == 2, fmt.Sprintf("the hopper has %d bends, not 2", len(hopperInfo.Bends)))
+	hopperFlat, err := hopper.FlatPattern(hopperInfo.FixedFace, rule, math.NaN())
+	must(err)
+	defer hopperFlat.Close()
+	hopperOutline, err := hopperFlat.Profile()
+	must(err)
+	hopperAgain, err := blacksmith.FoldFlat(hopperOutline, hopperFlat.FoldBends, rule, &hopperFlat.Frame, math.NaN())
+	must(err)
+	check(near(volume(hopperAgain), volume(hopper)), fmt.Sprintf("the hopper folded back %v, not %v", volume(hopperAgain), volume(hopper)))
+	_, err = blacksmith.SheetLoftedFlange([][3]float64{{0, 0, 0}}, rim, rule, math.NaN())
+	check(err != nil && strings.HasPrefix(err.Error(), "sheet_lofted_flange: "), fmt.Sprintf("a one-point profile: %v", err))
 	// Rips, join and corner breaks on the plate: a rip 40 long and 0.5 wide through the 1 thick
 	// wall; the four thickness edges (on neither broad face) rounded 3 and two chamfered 2.
 	ripped, err := plate.SheetRipPoints(top, [3]float64{0, -20, 0}, [3]float64{0, 20, 0}, 0.5, math.NaN())
@@ -1778,7 +1811,7 @@ func sheetMetal() {
 	check(near(volume(chamfered), 2400-4), fmt.Sprintf("chamfered volume %v, want 2396", volume(chamfered)))
 	_, err = plate.SheetJoin(corners[0], corners[0], rule, math.NaN())
 	check(err != nil && strings.HasPrefix(err.Error(), "sheet_join: "), fmt.Sprintf("an edge joined to itself: %v", err))
-	fmt.Printf("sheet metal: a tray of %d bends read, laid flat (%d entities), folded back; a plate ripped, rounded and chamfered; a cylinder unrolled; refusals\n", len(info.Bends), plain)
+	fmt.Printf("sheet metal: a tray of %d bends read, laid flat (%d entities), folded back; a plate ripped, rounded and chamfered; a cylinder unrolled; refusals; rope + double hems; a lofted hopper\n", len(info.Bends), plain)
 }
 
 // curvesAsObjects is NurbsCurveSpiral, the lengths by fraction, the two divisions, Mass,
@@ -1933,6 +1966,193 @@ func curvesAsObjects() {
 		check(r.err != nil && errors.As(r.err, &be) && strings.HasPrefix(r.err.Error(), r.name+": "), fmt.Sprintf("expected a refusal by %s, got %v", r.name, r.err))
 	}
 	fmt.Println("curves as objects: a helix, lengths by fraction, divisions, a line's mass, a box face's isocurve, a section and five contours; refusals")
+}
+
+// squish is Solid.Squish at parity with the C ABI's squish_abi.rs: a half ball (a sphere r 5
+// less the half below z = 0) squished apart -- the disk laid exactly, the dome with its
+// distortion -- the dome alone compress-only with a point following, and both faces joined
+// refused (they close on themselves).
+func squish() {
+	must := func(err error) {
+		if err != nil {
+			fail("squish: " + err.Error())
+		}
+	}
+	check := func(ok bool, why string) {
+		if !ok {
+			fail("squish: " + why)
+		}
+	}
+	ball, err := blacksmith.Sphere(5)
+	must(err)
+	block, err := blacksmith.Cuboid(20, 20, 10)
+	must(err)
+	below, err := block.Translate(0, 0, -5)
+	must(err)
+	half, err := ball.Cut(below, 0)
+	must(err)
+	n, err := half.Faces()
+	must(err)
+	check(n == 2, fmt.Sprintf("the half ball has %d faces, not 2", n))
+	apart, err := half.Squish(nil, nil, nil, true, blacksmith.SquishFree, true, 0)
+	must(err)
+	check(len(apart.Faces) == 2 && len(apart.Distortion) == 2 && len(apart.Exact) == 1,
+		fmt.Sprintf("faces %v, exact %v, %d distortions", apart.Faces, apart.Exact, len(apart.Distortion)))
+	sheetFaces, err := apart.Sheet.Faces()
+	must(err)
+	check(sheetFaces == 2, fmt.Sprintf("the sheet has %d faces, not 2", sheetFaces))
+	disk := 1
+	if apart.Faces[0] == apart.Exact[0] {
+		disk = 0
+	}
+	dome := 1 - disk
+	check(math.Abs(apart.Distortion[disk].AreaMean-1) < 1e-6, fmt.Sprintf("the disk's area mean %v, not 1", apart.Distortion[disk].AreaMean))
+	// The dome's rim kept: its area near half the dome's, every triangle the right way up.
+	d := apart.Distortion[dome]
+	check(d.AreaMin > 0 && d.AreaMin <= d.AreaMean && d.AreaMean <= d.AreaMax && d.AreaMean >= 0.45 && d.AreaMean <= 0.7,
+		fmt.Sprintf("the dome's distortion %+v", d))
+
+	pole, err := half.Squish([]int{apart.Faces[dome]}, nil, [][3]float64{{0, 0, 5}, {50, 50, 50}}, false, blacksmith.SquishCompressOnly, false, 0)
+	must(err)
+	check(len(pole.Distortion) == 1 && pole.Distortion[0].LengthMin >= 1, fmt.Sprintf("compress only, but %+v", pole.Distortion))
+	check(len(pole.Points) == 2 && len(pole.Curves) == 0, fmt.Sprintf("points %d, curves %d", len(pole.Points), len(pole.Curves)))
+	check(pole.Points[0] != nil && math.Abs(pole.Points[0][2]) < 1e-9, fmt.Sprintf("the pole: %v", pole.Points[0]))
+	check(pole.Points[1] == nil, fmt.Sprintf("the point off the dome: %v", pole.Points[1]))
+
+	_, err = half.Squish(nil, nil, nil, false, blacksmith.SquishFree, true, 0)
+	var be *blacksmith.BuildError
+	check(err != nil && errors.As(err, &be) && strings.HasPrefix(err.Error(), "squish: ") && strings.Contains(err.Error(), "closed"),
+		fmt.Sprintf("both faces squished: %v", err))
+	fmt.Printf("squish: a half ball apart (disk exact, dome area mean %.4g), the dome compress-only (length min %.4g) with a point; refusal\n",
+		d.AreaMean, pole.Distortion[0].LengthMin)
+}
+
+// fromMesh is blacksmith.FromMesh at parity with Python's test_from_mesh_*: a unit cube's 12
+// triangles made a box (prismatic, planes and faceted), less a triangle an open shell, a stray
+// index and an unknown mode refused; a bored block's mesh back with a cylinder (from_mesh.rs's
+// a_bore_comes_back_a_cylinder); and a STEP cube's node read back through the reader's mesh
+// (FromMeshNode).
+func fromMesh() {
+	must := func(err error) {
+		if err != nil {
+			fail("from_mesh: " + err.Error())
+		}
+	}
+	check := func(ok bool, why string) {
+		if !ok {
+			fail("from_mesh: " + why)
+		}
+	}
+	positions := [][3]float64{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}
+	triangles := [][3]uint32{{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5}, {2, 3, 7},
+		{2, 7, 6}, {3, 0, 4}, {3, 4, 7}}
+	cube, r, err := blacksmith.FromMesh(positions, triangles, blacksmith.FromMeshOptions{})
+	must(err)
+	check(r == blacksmith.FromMeshReport{Closed: true, Faces: 6, Edges: 12, Vertices: 8, Planes: 6}, fmt.Sprintf("the cube gave %+v", r))
+	faces, err := cube.Faces()
+	must(err)
+	edges, err := cube.Edges()
+	must(err)
+	mass, err := cube.Mass(0)
+	must(err)
+	check(faces == 6 && len(edges) == 12 && math.Abs(mass.Volume-1) < 1e-9,
+		fmt.Sprintf("the cube is %d faces, %d edges, volume %v", faces, len(edges), mass.Volume))
+	cube.Close()
+
+	planes, r, err := blacksmith.FromMesh(positions, triangles, blacksmith.FromMeshOptions{Mode: blacksmith.FromMeshPlanes})
+	must(err)
+	check(r == blacksmith.FromMeshReport{Closed: true, Faces: 6, Edges: 12, Vertices: 8, Planes: 6}, fmt.Sprintf("planes gave %+v", r))
+	planes.Close()
+
+	faceted, r, err := blacksmith.FromMesh(positions, triangles, blacksmith.FromMeshOptions{AngleTolerance: math.NaN(), Mode: blacksmith.FromMeshFaceted})
+	must(err)
+	faces, err = faceted.Faces()
+	must(err)
+	check(r.Closed && r.Faces == 12 && r.Edges == 18 && r.Vertices == 8 && r.Planes == 0 && faces == 12, fmt.Sprintf("faceted gave %+v", r))
+	faceted.Close()
+
+	sheet, r, err := blacksmith.FromMesh(positions, triangles[1:], blacksmith.FromMeshOptions{})
+	must(err)
+	faces, err = sheet.Faces()
+	must(err)
+	check(!r.Closed && r.Holes == 1 && r.BoundaryEdges == 3 && r.NonManifoldEdges == 0 && faces == 6, fmt.Sprintf("less a triangle gave %+v", r))
+	sheet.Close()
+
+	var be *blacksmith.BuildError
+	_, _, err = blacksmith.FromMesh(positions, [][3]uint32{{0, 1, 8}}, blacksmith.FromMeshOptions{})
+	check(err != nil && errors.As(err, &be) && strings.HasPrefix(err.Error(), "from_mesh: a triangle index is out of range"),
+		fmt.Sprintf("a stray index: %v", err))
+	_, _, err = blacksmith.FromMesh(positions, nil, blacksmith.FromMeshOptions{})
+	check(err != nil && strings.HasPrefix(err.Error(), "from_mesh: no triangles"), fmt.Sprintf("no triangles: %v", err))
+	_, _, err = blacksmith.FromMesh(positions, triangles, blacksmith.FromMeshOptions{Mode: 3})
+	check(err != nil && errors.As(err, &be) && strings.HasPrefix(err.Error(), "from_mesh: mode 3 is not one of"), fmt.Sprintf("mode 3: %v", err))
+
+	// A 4 x 4 x 2 block less a radius-1 pin, meshed at 0.01: the bore comes back as cylinder
+	// faces, 6 planes besides (a plain cylinder's mesh has no ruling seam, so it stays planes).
+	block, err := blacksmith.Cuboid(4, 4, 2)
+	must(err)
+	pin, err := blacksmith.Cylinder(1, 4)
+	must(err)
+	pinAt, err := pin.Translate(0, 0, -2)
+	must(err)
+	bored, err := block.Cut(pinAt, 1e-4)
+	must(err)
+	mesh, err := bored.Mesh64(0.01)
+	must(err)
+	data, err := mesh.Copy()
+	must(err)
+	points := make([][3]float64, len(data.Positions)/3)
+	for i := range points {
+		points[i] = [3]float64{data.Positions[3*i], data.Positions[3*i+1], data.Positions[3*i+2]}
+	}
+	tris := make([][3]uint32, len(data.Indices)/3)
+	for i := range tris {
+		tris[i] = [3]uint32{data.Indices[3*i], data.Indices[3*i+1], data.Indices[3*i+2]}
+	}
+	back, r, err := blacksmith.FromMesh(points, tris, blacksmith.FromMeshOptions{})
+	must(err)
+	mass, err = back.Mass(0)
+	must(err)
+	check(r.Closed && r.Planes == 6 && r.Cylinders >= 1 && r.Faces == 6+r.Cylinders && math.Abs(mass.Volume-(32-2*math.Pi)) < 0.01,
+		fmt.Sprintf("the bored block gave %+v, volume %v", r, mass.Volume))
+	for _, x := range []*blacksmith.Solid{back, bored, pinAt, pin, block} {
+		x.Close()
+	}
+
+	unit, err := blacksmith.Cuboid(1, 1, 1)
+	must(err)
+	step := filepath.Join(os.TempDir(), fmt.Sprintf("cadaclysm-smoke-go-from-mesh-%d.stp", os.Getpid()))
+	defer os.Remove(step)
+	must(unit.Step(step, "", "mm"))
+	unit.Close()
+	scene, err := cadaclysm.Open(step)
+	must(err)
+	defer scene.Close()
+	var node *cadaclysm.Node
+	for _, n := range scene.Nodes() {
+		m, err := n.Mesh64()
+		must(err)
+		if m != nil && m.IndexCount() > 0 {
+			node = n
+			break
+		}
+	}
+	check(node != nil, "the STEP cube has no meshed node")
+	read, r, err := blacksmith.FromMeshNode(node, blacksmith.FromMeshOptions{})
+	must(err)
+	mass, err = read.Mass(0)
+	must(err)
+	check(r.Closed && r.Faces == 6 && r.Edges == 12 && math.Abs(mass.Volume-1) < 1e-6, fmt.Sprintf("the STEP cube gave %+v", r))
+	read.Close()
+	readFaceted, r, err := blacksmith.FromMeshNode(node, blacksmith.FromMeshOptions{Mode: blacksmith.FromMeshFaceted})
+	must(err)
+	check(r.Closed && r.Faces == 12 && r.Edges == 18, fmt.Sprintf("the STEP cube faceted gave %+v", r))
+	readFaceted.Close()
+	readPlanes, r, err := blacksmith.FromMeshNode(node, blacksmith.FromMeshOptions{Mode: blacksmith.FromMeshPlanes})
+	must(err)
+	check(r.Closed && r.Faces == 6 && r.Edges == 12 && r.Planes == 6, fmt.Sprintf("the STEP cube planes gave %+v", r))
+	readPlanes.Close()
+	fmt.Println("from_mesh: a cube prismatic and planes (6 faces, 12 edges, volume 1) and faceted (12, 18), less a triangle open (1 hole, 3 boundary edges), refusals, a bored block's bore a cylinder; a STEP cube's node 6 faces, 12 edges")
 }
 
 // draft is Solid.Draft, DraftTwoSided, DraftAngleAt and DraftAnalysis against closed forms
@@ -8301,6 +8521,373 @@ func nurbsCurves() {
 		check(err != nil && strings.Contains(err.Error(), "has to cross the face"), fmt.Sprintf("fit_to_face: a short line refused as %v", err))
 	}
 
+	// 5d: offsets (spec section 8): a line and an arc exactly, a wavy bicubic within its
+	// tolerance, an arc on a quarter wall along and across it, a cube and its top face.
+	{
+		z := [3]float64{0, 0, 1}
+		line := curve([][3]float64{{0, 0, 0}, {10, 0, 0}}, 1, nil, nil)
+		defer line.Close()
+		o, err := line.Offset(2, z, 0)
+		must(err)
+		lo, hi := domain(o)
+		check(o.FitError != nil && *o.FitError == 0, fmt.Sprintf("offset: the line's fit error %v", o.FitError))
+		check(dist(point(o, lo), [3]float64{0, -2, 0}) <= 1e-12 && dist(point(o, hi), [3]float64{10, -2, 0}) <= 1e-12,
+			fmt.Sprintf("offset: the line runs %v to %v", point(o, lo), point(o, hi)))
+		o.Close()
+		arc := quarter()
+		defer arc.Close()
+		o, err = arc.Offset(1, z, 1e-6)
+		must(err)
+		check(o.FitError != nil && *o.FitError == 0, fmt.Sprintf("offset: the arc's fit error %v", o.FitError))
+		check(math.Abs(dist(point(o, 0.5), [3]float64{})-3) <= 1e-12, fmt.Sprintf("offset: the arc's mid point %v", point(o, 0.5)))
+		o.Close()
+		_, err = arc.Offset(-2, z, 1e-6)
+		refused(err, "nurbs_curve_offset: ")
+
+		var wavy [][3]float64
+		for i := 0; i < 4; i++ {
+			for j := 0; j < 4; j++ {
+				wavy = append(wavy, [3]float64{float64(i), float64(j), math.Sin(float64(i)) * math.Cos(float64(j)) / 4})
+			}
+		}
+		k := []float64{0, 0, 0, 0, 3, 3, 3, 3}
+		s, err := blacksmith.NewNurbsSurface(wavy, [2]int{4, 4}, 3, 3, nil, k, k)
+		must(err)
+		defer s.Close()
+		check(s.FitError == nil, "offset: a built surface carries a fit error")
+		so, err := s.Offset(0.2, 1e-6)
+		must(err)
+		check(so.FitError != nil && *so.FitError >= 0 && *so.FitError <= 1e-6, fmt.Sprintf("offset: the bicubic's fit error %v", so.FitError))
+		p, err := s.PointAt(1.5, 1.5)
+		must(err)
+		n, err := s.NormalAt(1.5, 1.5)
+		must(err)
+		q, err := so.PointAt(1.5, 1.5)
+		must(err)
+		check(dist(q, [3]float64{p[0] + 0.2*n[0], p[1] + 0.2*n[1], p[2] + 0.2*n[2]}) <= 1e-6, fmt.Sprintf("offset: the bicubic at (1.5, 1.5) reads %v", q))
+		so.Close()
+
+		h := math.Sqrt(0.5)
+		quarterWall, err := blacksmith.NewNurbsSurface([][3]float64{{2, 0, 0}, {2, 0, 5}, {2, 2, 0}, {2, 2, 5}, {0, 2, 0}, {0, 2, 5}}, [2]int{3, 2}, 2, 1,
+			[]float64{1, 1, h, h, 1, 1}, []float64{0, 0, 0, 1, 1, 1}, []float64{0, 0, 1, 1})
+		must(err)
+		defer quarterWall.Close()
+		wall, err := quarterWall.ToSheet()
+		must(err)
+		defer wall.Close()
+		onWall := curve([][3]float64{{2, 0, 2}, {2, 2, 2}, {0, 2, 2}}, 2, []float64{1, h, 1}, nil)
+		defer onWall.Close()
+		rings := func(c *blacksmith.NurbsCurve, r, zz float64, what string) {
+			check(c.FitError != nil && *c.FitError <= 1e-6, fmt.Sprintf("%s: fit error %v", what, c.FitError))
+			a, b := domain(c)
+			for i := 0; i <= 20; i++ {
+				p := point(c, a+(b-a)*float64(i)/20)
+				check(math.Abs(math.Hypot(p[0], p[1])-r) <= 2e-6 && math.Abs(p[2]-zz) <= 2e-6, fmt.Sprintf("%s: %v is off r %v, z %v", what, p, r, zz))
+			}
+		}
+		up, err := onWall.OffsetNormalToSheet(wall, 1, 1e-6)
+		must(err)
+		rings(up, 3, 2, "offset_normal_to_sheet")
+		up.Close()
+		along, err := onWall.OffsetTangentToSheet(wall, 1, 1e-6)
+		must(err)
+		rings(along, 2, 3, "offset_tangent_to_sheet")
+		along.Close()
+
+		cube, err := blacksmith.Cuboid(10, 10, 10)
+		must(err)
+		defer cube.Close()
+		for _, c := range []struct{ d, volume float64 }{{1, 1728}, {-1, 512}} {
+			moved, err := cube.Offset(c.d, 1e-6)
+			must(err)
+			m, err := moved.Mass(0)
+			must(err)
+			check(math.Abs(m.Volume-c.volume) <= 1e-6, fmt.Sprintf("offset %v: volume %v", c.d, m.Volume))
+			moved.Close()
+		}
+		top, err := cube.OffsetFace(1, 1, 1e-6)
+		must(err)
+		defer top.Close()
+		faces, err := top.Faces()
+		must(err)
+		m, err := top.Mass(0)
+		must(err)
+		b, err := top.Bounds64()
+		must(err)
+		check(faces == 1 && math.Abs(m.Area-100) <= 1e-6 && math.Abs(b.Min[2]-6) <= 1e-9 && math.Abs(b.Max[2]-6) <= 1e-9,
+			fmt.Sprintf("offset_face: %d faces, area %v, z %v..%v", faces, m.Area, b.Min[2], b.Max[2]))
+		_, err = cube.Offset(0, 0)
+		refused(err, "solid_offset: ")
+		_, err = cube.OffsetFace(1, 0, 0)
+		refused(err, "solid_offset_face: ")
+	}
+
+	// 5e: face split: a box's top split by a line across it, on its face and on every face it
+	// lies on; a sphere along its silhouette.
+	{
+		cube, err := blacksmith.Cuboid(10, 10, 10)
+		must(err)
+		defer cube.Close()
+		across := curve([][3]float64{{-8, -2, 5}, {8, 3, 5}}, 1, nil, nil)
+		defer across.Close()
+		for _, faces := range [][]int{nil, {1}, {-1}} {
+			split, err := cube.SplitFaces([]*blacksmith.NurbsCurve{across}, faces, 0)
+			must(err)
+			n, err := split.Faces()
+			must(err)
+			m, err := split.Mass(0)
+			must(err)
+			check(n == 7 && m.Closed && math.Abs(m.Volume-1000) <= 1e-6 && math.Abs(m.Area-600) <= 1e-6,
+				fmt.Sprintf("split_faces %v: %d faces, closed %v, volume %v, area %v", faces, n, m.Closed, m.Volume, m.Area))
+			tops := 0
+			for f := 0; f < n; f++ {
+				p, err := split.FaceInnerPoint(f)
+				must(err)
+				if math.Abs(p.Point[2]-5) < 1e-9 {
+					tops++
+				}
+			}
+			check(tops == 2, fmt.Sprintf("split_faces %v: %d faces on the top", faces, tops))
+			split.Close()
+		}
+		_, err = cube.SplitFaces(nil, nil, 0)
+		refused(err, "split_faces: ")
+		_, err = cube.SplitFaces([]*blacksmith.NurbsCurve{across}, []int{1, 2}, 0)
+		refused(err, "split_faces: ")
+		const r = 5.0
+		ball, err := blacksmith.Sphere(r)
+		must(err)
+		defer ball.Close()
+		halves, err := ball.SplitAlongSilhouette([3]float64{0, 0, 1}, 0)
+		must(err)
+		defer halves.Close()
+		n, err := halves.Faces()
+		must(err)
+		m, err := halves.Mass(0)
+		must(err)
+		check(n == 2 && m.Closed && math.Abs(m.Area-4*math.Pi*r*r) <= 1e-6*m.Area,
+			fmt.Sprintf("split_along_silhouette: %d faces, closed %v, area %v", n, m.Closed, m.Area))
+		_, err = cube.SplitAlongSilhouette([3]float64{0, 0, 1}, 0)
+		refused(err, "split_along_silhouette: ")
+	}
+
+	// 5f: surface edits: untrim, unstitch, ruled faces off edges, a seam moved, sheets and
+	// surfaces merged, and tweens; paint and ids follow the face each result face comes from.
+	{
+		red := [3]float64{1, 0, 0}
+		patch := func(x0, x1, z float64) *blacksmith.NurbsSurface {
+			p, err := blacksmith.NewNurbsSurface([][3]float64{{x0, 0, z}, {x0, 1, z}, {x1, 0, z}, {x1, 1, z}}, [2]int{2, 2}, 1, 1, nil, nil, nil)
+			must(err)
+			return p
+		}
+		faces := func(s *blacksmith.Solid) int {
+			n, err := s.Faces()
+			must(err)
+			return n
+		}
+		mass := func(s *blacksmith.Solid) blacksmith.Mass {
+			m, err := s.Mass(0)
+			must(err)
+			return m
+		}
+		colour := func(s *blacksmith.Solid, f int) [3]float64 {
+			c, _, err := s.FaceColour(f)
+			must(err)
+			return c
+		}
+		id := func(s *blacksmith.Solid, f int) uint64 {
+			v, _, err := s.FaceID(f)
+			must(err)
+			return v
+		}
+		plain, err := blacksmith.Cuboid(10, 10, 10)
+		must(err)
+		defer plain.Close()
+		blue, err := plain.Coloured(0, 0, 1)
+		must(err)
+		defer blue.Close()
+		redTop, err := blue.ColouredFace(1, 1, 0, 0)
+		must(err)
+		defer redTop.Close()
+		cube, err := redTop.Track()
+		must(err)
+		defer cube.Close()
+		for _, which := range []blacksmith.Untrim{blacksmith.UntrimHoles, blacksmith.UntrimOuter, blacksmith.UntrimAll} {
+			out, err := cube.Untrim(1, which, 0)
+			must(err)
+			m := mass(out)
+			check(faces(out) == 6 && m.Closed && math.Abs(m.Volume-1000) <= 1e-6,
+				fmt.Sprintf("untrim %d: %d faces, closed %v, volume %v", which, faces(out), m.Closed, m.Volume))
+			check(colour(out, 1) == red && id(out, 1) == id(cube, 1), fmt.Sprintf("untrim %d: the top lost its paint or id", which))
+			out.Close()
+		}
+		bore, err := blacksmith.Cylinder(2, 20)
+		must(err)
+		defer bore.Close()
+		drill, err := bore.Translate(0, 0, -10)
+		must(err)
+		defer drill.Close()
+		bored, err := cube.Cut(drill, 0.05)
+		must(err)
+		defer bored.Close()
+		top := -1
+		for f := 0; f < faces(bored); f++ {
+			p, err := bored.FaceInnerPoint(f)
+			must(err)
+			if math.Abs(p.Point[2]-5) < 1e-9 {
+				top = f
+			}
+		}
+		open, err := bored.Untrim(top, blacksmith.UntrimHoles, 0)
+		must(err)
+		defer open.Close()
+		topSheet, err := open.FaceSheet(top)
+		must(err)
+		defer topSheet.Close()
+		check(faces(open) == faces(bored) && !mass(open).Closed && math.Abs(mass(topSheet).Area-100) <= 1e-6,
+			fmt.Sprintf("untrim holes: %d faces, top area %v", faces(open), mass(topSheet).Area))
+
+		sheets, err := cube.Unstitch(nil, false)
+		must(err)
+		check(len(sheets) == 6, fmt.Sprintf("unstitch: %d sheets", len(sheets)))
+		for _, s := range sheets {
+			check(faces(s) == 1 && math.Abs(mass(s).Area-100) <= 1e-6, "unstitch: a sheet not one 10 x 10 face")
+			s.Close()
+		}
+		alone, err := cube.Unstitch([]int{1}, false)
+		must(err)
+		check(len(alone) == 2 && faces(alone[0]) == 1 && faces(alone[1]) == 5 && colour(alone[0], 0) == red,
+			fmt.Sprintf("unstitch top: %d bodies", len(alone)))
+		for _, s := range alone {
+			s.Close()
+		}
+		together, err := cube.Unstitch([]int{1, 2}, true)
+		must(err)
+		check(len(together) == 2 && faces(together[0]) == 2 && faces(together[1]) == 4, fmt.Sprintf("unstitch together: %d bodies", len(together)))
+		for _, s := range together {
+			s.Close()
+		}
+
+		edges, err := cube.Edges()
+		must(err)
+		edge := -1
+		for _, e := range edges {
+			for _, f := range e.Faces {
+				if f == 1 && edge < 0 {
+					edge = e.Index
+				}
+			}
+		}
+		ruled, err := cube.RuledFromEdges([]int{edge}, blacksmith.RulingNormal, 2, 0, nil, false, 0)
+		must(err)
+		defer ruled.Close()
+		other, err := cube.RuledFromEdges([]int{edge}, blacksmith.RulingNormal, 2, 0, nil, true, 0)
+		must(err)
+		defer other.Close()
+		check(faces(ruled) == 1 && math.Abs(mass(ruled).Area-20) <= 1e-6, fmt.Sprintf("ruled_from_edges: area %v", mass(ruled).Area))
+		check((colour(ruled, 0) == red) != (colour(other, 0) == red), "ruled_from_edges: both faces took one colour")
+		up, err := cube.RuledFromEdges([]int{edge}, blacksmith.RulingDirection, 3, 0, &[3]float64{0, 0, 1}, false, 0)
+		must(err)
+		defer up.Close()
+		check(math.Abs(mass(up).Area-30) <= 1e-6, fmt.Sprintf("ruled_from_edges direction: area %v", mass(up).Area))
+		_, err = cube.RuledFromEdges([]int{0}, blacksmith.RulingDirection, 1, 0, nil, false, 0)
+		refused(err, "ruled_from_edges: ")
+
+		const r, ht = 2.0, 5.0
+		can, err := blacksmith.Cylinder(r, ht)
+		must(err)
+		defer can.Close()
+		wall := -1
+		for f := 0; f < faces(can); f++ {
+			p, err := can.FaceInnerPoint(f)
+			must(err)
+			if math.Abs(math.Hypot(p.Point[0], p.Point[1])-r) < 1e-9 && p.Point[2] > 0 && p.Point[2] < ht {
+				wall = f
+			}
+		}
+		paintedCan, err := can.ColouredFace(wall, 1, 0, 0)
+		must(err)
+		defer paintedCan.Close()
+		painted, err := paintedCan.Track()
+		must(err)
+		defer painted.Close()
+		reseamed, err := painted.ChangeSeam(wall, 1.0, true, 0)
+		must(err)
+		defer reseamed.Close()
+		check(faces(reseamed) == faces(can) && math.Abs(mass(reseamed).Volume-math.Pi*r*r*ht) <= 1e-9*math.Pi*r*r*ht,
+			fmt.Sprintf("change_seam: %d faces, volume %v", faces(reseamed), mass(reseamed).Volume))
+		check(colour(reseamed, wall) == red && id(reseamed, wall) == id(painted, wall), "change_seam: the wall lost its paint or id")
+
+		left, right := patch(0, 1, 0), patch(1, 2, 0)
+		defer left.Close()
+		defer right.Close()
+		merged, err := left.Merge(right, 1e-6)
+		must(err)
+		defer merged.Close()
+		u, v, err := merged.Domain()
+		must(err)
+		corner, err := merged.PointAt(u[1], v[1])
+		must(err)
+		check(dist(corner, [3]float64{2, 1, 0}) <= 1e-12, fmt.Sprintf("merge: the far corner is %v", corner))
+		leftSheet, err := left.ToSheet()
+		must(err)
+		defer leftSheet.Close()
+		redSheet, err := leftSheet.Coloured(1, 0, 0)
+		must(err)
+		defer redSheet.Close()
+		rightSheet, err := right.ToSheet()
+		must(err)
+		defer rightSheet.Close()
+		sheet, err := redSheet.MergeSurfaces(rightSheet, 0)
+		must(err)
+		defer sheet.Close()
+		check(faces(sheet) == 1 && math.Abs(mass(sheet).Area-2) <= 1e-9 && colour(sheet, 0) == red,
+			fmt.Sprintf("merge_surfaces: %d faces, area %v", faces(sheet), mass(sheet).Area))
+		high := patch(0, 1, 4)
+		defer high.Close()
+		tweens, err := left.Tween(high, 3)
+		must(err)
+		check(len(tweens) == 3, fmt.Sprintf("tween: %d surfaces", len(tweens)))
+		for i, t := range tweens {
+			p, err := t.PointAt(0.5, 0.5)
+			must(err)
+			check(math.Abs(p[2]-float64(i+1)) <= 1e-12, fmt.Sprintf("tween: surface %d at z %v", i, p[2]))
+			t.Close()
+		}
+
+		far := patch(5, 6, 0)
+		defer far.Close()
+		farSheet, err := far.ToSheet()
+		must(err)
+		defer farSheet.Close()
+		_, err = plain.Untrim(99, blacksmith.UntrimAll, 0)
+		refused(err, "untrim: ")
+		_, err = plain.Unstitch([]int{99}, false)
+		refused(err, "unstitch: ")
+		_, err = plain.Unstitch([]int{1, 1}, false)
+		refused(err, "unstitch: ")
+		_, err = plain.RuledFromEdges(nil, blacksmith.RulingNormal, 1, 0, nil, false, 0)
+		refused(err, "ruled_from_edges: ")
+		_, err = plain.RuledFromEdges([]int{999}, blacksmith.RulingNormal, 1, 0, nil, false, 0)
+		refused(err, "ruled_from_edges: ")
+		_, err = plain.RuledFromEdges([]int{0}, blacksmith.RulingNormal, 0, 0, nil, false, 0)
+		refused(err, "ruled_from_edges: ")
+		_, err = plain.RuledFromEdges([]int{0}, blacksmith.RulingDirection, 1, 0, &[3]float64{0, 0, 0}, false, 0)
+		refused(err, "ruled_from_edges: ")
+		_, err = plain.ChangeSeam(99, 1, true, 0)
+		refused(err, "change_seam: ")
+		_, err = plain.ChangeSeam(1, 1, true, 0)
+		refused(err, "change_seam: ")
+		_, err = plain.MergeSurfaces(leftSheet, 0)
+		refused(err, "merge_surfaces: ")
+		_, err = leftSheet.MergeSurfaces(farSheet, 0)
+		refused(err, "merge_surfaces: ")
+		_, err = left.Merge(far, 1e-6)
+		refused(err, "nurbs_surface_merge: ")
+		_, err = left.Tween(far, 0)
+		refused(err, "nurbs_surface_tween: ")
+	}
+
 	// 6: refusals name the call.
 	cube, err := blacksmith.Cuboid(1, 1, 1)
 	must(err)
@@ -8866,6 +9453,15 @@ func curveSheets() {
 		must(err)
 		check(pr.Instances == 2 && pr.Booleans == 1 && near(volume(bodies), 28800, 1e-6), fmt.Sprintf("pattern: %+v, volume %g", pr, volume(bodies)))
 
+		mirrored, err := blacksmith.PatternMirror(blacksmith.Frame{5, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0})
+		must(err)
+		check(len(mirrored) == 2 && mirrored[0].Rows() == blacksmith.TransformIdentity().Rows(), fmt.Sprintf("pattern_mirror %v", mirrored))
+		if len(mirrored) == 2 {
+			mp := mirrored[1].Point([3]float64{7, 1, 2})
+			check(math.Abs(mp[0]-3) < 1e-12 && math.Abs(mp[1]-1) < 1e-12 && math.Abs(mp[2]-2) < 1e-12, fmt.Sprintf("pattern_mirror maps (7, 1, 2) to %v", mp))
+		}
+		_, err = blacksmith.PatternMirror(blacksmith.Frame{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0})
+		refused(err, "pattern_mirror")
 		ring, err := blacksmith.PatternCircular([3]float64{}, [3]float64{0, 0, 1}, 6, 2*math.Pi, false, nil)
 		must(err)
 		check(len(ring) == 6 && math.Abs(ring[1].Rows()[0]-0.5) < 1e-12, fmt.Sprintf("pattern_circular %v", ring))
@@ -8991,6 +9587,133 @@ func curveSheets() {
 		exact(err, "hole_threaded: the diameter 9 is not in the thread's band [6.491, 7.188]")
 		_, err = rod.ThreadRecord(3)
 		exact(err, "thread_record: face 3 is not one of the solid's 3")
+	}
+
+	// 6b++: gear profiles -- clockwork plan 1's hand-computed figures: I1 an involute m 1 z 20 on
+	// every default, I5 the centre distance plain and shifted, C2 a cycloidal pinion's leaf, and a
+	// 3-tooth involute refused.
+	{
+		deref := func(v *float64) any {
+			if v == nil {
+				return nil
+			}
+			return *v
+		}
+		g, err := blacksmith.GearInvolute(1, 20, blacksmith.GearInvoluteOptions{})
+		must(err)
+		check(math.Abs(g.PitchRadius-10) <= 1e-9 && g.BaseRadius != nil && math.Abs(*g.BaseRadius-9.396926208) <= 1e-9 &&
+			math.Abs(g.TipRadius-11) <= 1e-9 && math.Abs(g.RootRadius-8.75) <= 1e-9 && math.Abs(g.Thickness-1.570796327) <= 1e-6 && !g.Undercut,
+			fmt.Sprintf("gear_involute I1: %+v (base %v)", *g, deref(g.BaseRadius)))
+		g.Profile.Close()
+		a0, err := blacksmith.GearCentreDistanceInvolute(1, 20, 40, blacksmith.GearCentreDistanceOptions{})
+		must(err)
+		check(math.Abs(a0-30) <= 1e-9, fmt.Sprintf("gear_centre_distance_involute I5: %v", a0))
+		quarterShift := 0.25
+		a1, err := blacksmith.GearCentreDistanceInvolute(1, 20, 40, blacksmith.GearCentreDistanceOptions{ShiftFirst: &quarterShift, ShiftSecond: &quarterShift})
+		must(err)
+		check(a1 > 30.4 && a1 < 30.5, fmt.Sprintf("gear_centre_distance_involute I5 shifted: %v", a1))
+		pinion, err := blacksmith.GearPinionCycloidal(1, 8, 60, blacksmith.GearPinionCycloidalOptions{})
+		must(err)
+		check(math.Abs(pinion.Thickness-1.05) <= 1e-6 && pinion.BaseRadius == nil && !pinion.Undercut,
+			fmt.Sprintf("gear_pinion_cycloidal C2: %+v (base %v)", *pinion, deref(pinion.BaseRadius)))
+		pinion.Profile.Close()
+		wheel, err := blacksmith.GearWheelCycloidal(1, 60, 8, blacksmith.GearWheelCycloidalOptions{})
+		must(err)
+		check(math.Abs(wheel.PitchRadius-30) <= 1e-9 && wheel.BaseRadius == nil && wheel.TipRadius > wheel.PitchRadius,
+			fmt.Sprintf("gear_wheel_cycloidal: %+v (base %v)", *wheel, deref(wheel.BaseRadius)))
+		wheel.Profile.Close()
+		_, err = blacksmith.GearInvolute(1, 3, blacksmith.GearInvoluteOptions{})
+		refused(err, "profile_gear_involute: ")
+		_, err = blacksmith.GearPinionCycloidal(1, 8, 60, blacksmith.GearPinionCycloidalOptions{Tip: "pointy"})
+		refused(err, "profile_gear_pinion_cycloidal: tip must be one of")
+		fmt.Println("blacksmith gears: I1, I5, C2 and the refusal ok")
+	}
+
+	// 6b++a: NACA airfoils -- 2412 parsed, seven points with the leading edge (the middle one) at
+	// the origin and the closed trailing edge one point, A1 0012's half-thickness at mid-chord
+	// (Abbott & von Doenhoff 0.05294), the spline and the profile, and the refusals.
+	{
+		n, err := blacksmith.NacaParse("2412")
+		must(err)
+		check(n == blacksmith.NacaFour(0.02, 0.4, 0.12), fmt.Sprintf("naca_parse 2412: %+v", n))
+		five, err := blacksmith.NacaParse("23112")
+		must(err)
+		check(five == blacksmith.NacaFive(0.3, 0.15, 0.12, true), fmt.Sprintf("naca_parse 23112: %+v", five))
+		seven, err := n.Points(1, 7, true)
+		must(err)
+		check(len(seven) == 7 && seven[3] == [2]float64{0, 0} && seven[0] == [2]float64{1, 0} && seven[6] == [2]float64{1, 0} &&
+			seven[1][1] > 0 && seven[5][1] < 0, fmt.Sprintf("naca_points A5: %v", seven))
+		thin, err := blacksmith.NacaParse("0012")
+		must(err)
+		mid, err := thin.Points(1, 201, false)
+		must(err)
+		check(math.Abs(mid[50][0]-0.5) <= 1e-15 && math.Abs(mid[50][1]-0.052940252) <= 1e-9, fmt.Sprintf("naca_points A1: %v", mid[50]))
+		wingCode, err := blacksmith.NacaParse("4412")
+		must(err)
+		controls, serr, err := wingCode.Spline(50, 32, true)
+		must(err)
+		check(len(controls) == 32 && controls[0] == [2]float64{50, 0} && serr > 0 && serr < 1e-4*50,
+			fmt.Sprintf("naca_spline: %d controls, first %v, error %v", len(controls), controls[0], serr))
+		wing, perr, err := wingCode.Profile(50, false, nil)
+		must(err)
+		area, err := wing.AreaProperties(0)
+		must(err)
+		check(perr > 0 && perr <= 5e-4 && area.Area > 0, fmt.Sprintf("profile_naca: error %v, area %v", perr, area.Area))
+		wing.Close()
+		_, err = blacksmith.NacaParse("26012")
+		var nacaErr *blacksmith.BuildError
+		check(err != nil && errors.As(err, &nacaErr) && err.Error() == "naca_parse: 5-digit positions are 1 to 5",
+			fmt.Sprintf("naca_parse 26012: %v", err))
+		_, err = n.Points(0, 101, true)
+		refused(err, "naca_points: ")
+		_, _, err = n.Spline(1, 7, true)
+		refused(err, "naca_spline: ")
+		negative := -1.0
+		_, _, err = n.Profile(1, true, &negative)
+		refused(err, "profile_naca: ")
+		fmt.Println("blacksmith naca: A1, A5, the spline, the profile and the refusals ok")
+	}
+
+	// 6b+++: contact settle -- clockwork plan 3's hand-computed figures: a driver disc of radius 1
+	// at (3, 0) about (5, 0) held at pi, a follower disc at (2, 0) about the origin. S1 clockwise
+	// from pi to pi/3, S5 counter-clockwise to the limit 3 pi/2, S6 recoiled from pi/6, the
+	// default tolerance, and a direction 0 refused.
+	{
+		unit, err := blacksmith.Circle(1)
+		must(err)
+		sd, err := unit.Translate(3, 0)
+		must(err)
+		sf, err := unit.Translate(2, 0)
+		must(err)
+		dp, fp := [2]float64{5, 0}, [2]float64{0, 0}
+		tight, limit, named := 1e-11, 1.5*math.Pi, 2e-9*math.Sqrt2
+		h := math.Sqrt(3) / 2
+		s1, err := blacksmith.ContactSettle(sd, dp, math.Pi, sf, fp, math.Pi, -1, blacksmith.ContactSettleOptions{Tolerance: &tight})
+		must(err)
+		k := s1.Contact
+		check(math.Abs(s1.Value-math.Pi/3) <= 1e-9 && !s1.Recoiled && s1.Steps > 0 && k != nil &&
+			math.Abs(k.Point[0]-1.5) <= 1e-9 && math.Abs(k.Point[1]-h) <= 1e-9 &&
+			math.Abs(k.Normal[0]+0.5) <= 1e-9 && math.Abs(k.Normal[1]-h) <= 1e-9 && k.Driver[0] == 0 && k.Follower[0] == 0,
+			fmt.Sprintf("contact_settle S1: %+v (contact %+v)", s1, k))
+		s5, err := blacksmith.ContactSettle(sd, dp, math.Pi, sf, fp, math.Pi, 1, blacksmith.ContactSettleOptions{Limit: &limit, Tolerance: &tight})
+		must(err)
+		check(s5.Value == 1.5*math.Pi && s5.Contact == nil && !s5.Recoiled, fmt.Sprintf("contact_settle S5: %+v", s5))
+		s6, err := blacksmith.ContactSettle(sd, dp, math.Pi, sf, fp, math.Pi/6, -1, blacksmith.ContactSettleOptions{Tolerance: &tight})
+		must(err)
+		check(math.Abs(s6.Value-math.Pi/3) <= 1e-9 && s6.Contact != nil && s6.Recoiled, fmt.Sprintf("contact_settle S6: %+v", s6))
+		sDefault, err := blacksmith.ContactSettle(sd, dp, math.Pi, sf, fp, math.Pi, -1, blacksmith.ContactSettleOptions{})
+		must(err)
+		sNamed, err := blacksmith.ContactSettle(sd, dp, math.Pi, sf, fp, math.Pi, -1, blacksmith.ContactSettleOptions{Tolerance: &named})
+		must(err)
+		check(sDefault.Value == sNamed.Value && sDefault.Steps == sNamed.Steps && sDefault.Recoiled == sNamed.Recoiled &&
+			sDefault.Contact != nil && sNamed.Contact != nil && *sDefault.Contact == *sNamed.Contact,
+			fmt.Sprintf("contact_settle default tolerance: %+v != %+v", sDefault, sNamed))
+		_, err = blacksmith.ContactSettle(sd, dp, math.Pi, sf, fp, math.Pi, 0, blacksmith.ContactSettleOptions{})
+		refused(err, "contact_settle: ")
+		sf.Close()
+		sd.Close()
+		unit.Close()
+		fmt.Println("blacksmith contact settle: S1, S5, S6, the default and the refusal ok")
 	}
 
 	// 6c: curves on a sheet -- a ring on a square offset along it, split along it, parted by a panel gap.
@@ -9289,6 +10012,66 @@ func curveSheets() {
 	_, err = cube.FilletLaw([]int{0}, law, 1e-6)
 	refused(err, "fillet: ")
 	check(strings.Contains(err.Error(), "a radius law rounds only spline edges"), err.Error())
+	// A box edge by chord and by two set-backs: the closed forms of a quarter round and a quarter conic.
+	cbox := solid(blacksmith.Cuboid(40, 30, 20))
+	cedges, err := cbox.Edges()
+	must(err)
+	var cedge blacksmith.Edge
+	for _, e := range cedges {
+		if e.Kind == "line" && len(e.Faces) == 2 {
+			cedge = e
+			break
+		}
+	}
+	check(len(cedge.Faces) == 2, "a box has no line edge")
+	cl, err := cbox.EdgeLength(cedge.Index, 1e-9)
+	must(err)
+	quarter, cr := 1-math.Pi/4, 4/math.Sqrt2
+	cvol := func(s *blacksmith.Solid) float64 {
+		m, err := s.Mass(1e-6)
+		must(err)
+		return m.Volume
+	}
+	wantC := 24000 - cl.Length*cr*cr*quarter
+	chorded := cvol(solid(cbox.FilletChord([]int{cedge.Index}, 4, 1e-6)))
+	check(math.Abs(chorded-wantC) <= 1e-6*wantC, fmt.Sprintf("fillet_chord: volume %v, want %v", chorded, wantC))
+	wantA := 24000 - cl.Length*6*2*quarter
+	asym := cvol(solid(cbox.FilletAsymmetric([]int{cedge.Index}, cedge.Faces[0], 6, 2, 1e-6)))
+	check(math.Abs(asym-wantA) <= 1e-6*wantA, fmt.Sprintf("fillet_asymmetric: volume %v, want %v", asym, wantA))
+	_, err = cbox.FilletChord([]int{cedge.Index}, 0, 1e-6)
+	refused(err, "fillet: ")
+	check(strings.Contains(err.Error(), "the chord must be positive"), err.Error())
+	_, err = cbox.FilletAsymmetric([]int{cedge.Index}, cedge.Faces[0], 6, 0, 1e-6)
+	refused(err, "fillet: ")
+	check(strings.Contains(err.Error(), "distances must be positive"), err.Error())
+	// A box's top full-rounded between its long sides (a half cylinder of radius 3), and a plate
+	// and boss's ridges rounded by rule: material away.
+	rib := solid(blacksmith.Cuboid(40, 6, 12))
+	ribTop, err := rib.SelectFace(blacksmith.Normal([3]float64{0, 0, 1}))
+	must(err)
+	ribFront, err := rib.SelectFace(blacksmith.Normal([3]float64{0, -1, 0}))
+	must(err)
+	ribBack, err := rib.SelectFace(blacksmith.Normal([3]float64{0, 1, 0}))
+	must(err)
+	wantF := 40*6*12 - 40*9*(2-math.Pi/2)
+	fullRound := cvol(solid(rib.FilletFullRound(ribFront, ribTop, ribBack, 1e-6)))
+	check(math.Abs(fullRound-wantF) <= 1e-3*wantF, fmt.Sprintf("fillet_full_round: volume %v, want %v", fullRound, wantF))
+	ribFaces, err := rib.Faces()
+	must(err)
+	_, err = rib.FilletFullRound(ribFront, ribFaces+3, ribBack, 1e-6)
+	check(err != nil && strings.Contains(err.Error(), "no such face"), fmt.Sprintf("fillet_full_round: a face past the last gave %v", err))
+	bossed := solid(solid(blacksmith.Cuboid(40, 30, 5)).Join(solid(solid(blacksmith.Cylinder(6, 8)).Translate(0, 0, 2.5)), blacksmith.DefaultTolerance))
+	bossedFaces, err := bossed.Faces()
+	must(err)
+	every := make([]int, bossedFaces)
+	for i := range every {
+		every[i] = i
+	}
+	before := cvol(bossed)
+	ridged := cvol(solid(bossed.FilletRule(every, 1, nil, blacksmith.EdgeRuleConvex, 0.05)))
+	check(ridged < before, fmt.Sprintf("fillet_rule: convex at r 1 left volume %v from %v", ridged, before))
+	_, err = rib.FilletRule([]int{0, 1, 2, 3, 4, 5}, 1, nil, blacksmith.EdgeRuleConcave, 1e-6)
+	check(err != nil && strings.Contains(err.Error(), "no edge between the faces matches the rule"), fmt.Sprintf("fillet_rule: a box's valleys gave %v", err))
 
 	// records of a plain solid
 	check(cube.SheetError() == nil && cube.PatchReport() == nil, "a plain solid has a sheet error or a patch report")
@@ -11833,4 +12616,73 @@ func rhino3dmSmoke() {
 		fail(fmt.Sprintf("3dm: the assembly reads back as %d solids", len(placed)))
 	}
 	fmt.Printf("3dm: %d bytes, read back to 6 faces and 6000 mm3; an assembly of 3 placements\n", len(data))
+}
+
+// polygonSets: Python's test_polygon_set_*, trimmed to what proves the marshalling: rings in
+// and out, a boolean, a buffer and its style refusal, the questions, the way to and from a
+// profile, and the handle's lifetime.
+func polygonSets() {
+	check := func(ok bool, why string) {
+		if !ok {
+			fail("polygon_set: " + why)
+		}
+	}
+	set := func(s *blacksmith.PolygonSet, err error) *blacksmith.PolygonSet {
+		if err != nil {
+			fail("polygon_set: " + err.Error())
+		}
+		return s
+	}
+	num := func(v float64, err error) float64 {
+		if err != nil {
+			fail("polygon_set: " + err.Error())
+		}
+		return v
+	}
+	yes := func(v bool, err error) bool {
+		if err != nil {
+			fail("polygon_set: " + err.Error())
+		}
+		return v
+	}
+	box := func(x0, y0, x1, y1 float64) *blacksmith.PolygonSet {
+		return set(blacksmith.PolygonSetFromRings([][2]float64{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}, nil))
+	}
+	big, small := box(0, 0, 10, 10), box(4, 4, 6, 6)
+	defer big.Close()
+	defer small.Close()
+	room := set(big.Difference(small))
+	defer room.Close()
+	polys, err := room.Polygons()
+	check(err == nil && len(polys) == 1 && len(polys[0].Holes) == 1 && polys[0].Outer[0] == [2]float64{0, 10} &&
+		polys[0].Holes[0][0] == [2]float64{6, 4}, fmt.Sprintf("the holed room's rings %v (%v)", polys, err))
+	check(num(room.Area()) == 96 && num(room.Perimeter()) == 48, "the room's area and perimeter")
+	where, err := room.Locate([][2]float64{{1, 1}, {4, 5}, {5, 5}})
+	check(err == nil && slices.Equal(where, []int{1, 0, -1}), fmt.Sprintf("locate %v (%v)", where, err))
+	corner := box(0, 0, 1, 1)
+	defer corner.Close()
+	check(yes(room.Contains(corner)) && !yes(room.ContainsPolyline([][2]float64{{1, 5}, {9, 5}})), "contains")
+	check(num(room.DistanceToPolyline([][2]float64{{13, 0}, {13, 10}})) == 3 && num(room.BoundaryDistance([2]float64{1, 1})) == 1, "distances")
+	clipped, err := room.ClipPolyline([][2]float64{{-1, 5}, {11, 5}})
+	check(err == nil && len(clipped) == 2 && clipped[1][1] == [2]float64{10, 5}, fmt.Sprintf("clip_polyline %v (%v)", clipped, err))
+	dumbbell := set(blacksmith.PolygonSetUnionAll([]*blacksmith.PolygonSet{box(0, 0, 4, 4), box(4, 1.5, 8, 2.5), box(8, 0, 12, 4)}))
+	defer dumbbell.Close()
+	shrunk := set(dumbbell.Buffer(-1, blacksmith.PolygonSetQuadSegs, "round", blacksmith.PolygonSetMitreLimit))
+	defer shrunk.Close()
+	check(math.Abs(num(shrunk.Area())-8.088436436788012) <= 1e-9, "the dumbbell shrunk")
+	_, err = room.Buffer(1, blacksmith.PolygonSetQuadSegs, "wobbly", blacksmith.PolygonSetMitreLimit)
+	check(err != nil && err.Error() == "polygon_set_buffer: join must be one of 'round', 'mitre', 'miter', 'bevel', not 'wobbly'",
+		fmt.Sprintf("a wobbly join: %v", err))
+	profiles, err := room.ToProfiles()
+	check(err == nil && len(profiles) == 1, fmt.Sprintf("to_profiles: %d (%v)", len(profiles), err))
+	back := set(blacksmith.PolygonSetFromProfile(profiles[0], 1e-3))
+	defer back.Close()
+	profiles[0].Close()
+	check(num(back.Area()) == 96, "the room there and back")
+	room.Close()
+	_, err = room.Area()
+	check(errors.Is(err, blacksmith.ErrClosed), fmt.Sprintf("area after close: %v", err))
+	n, err := shrunk.Len()
+	check(err == nil && n == 2, fmt.Sprintf("the dumbbell shrunk to %d polygons (%v)", n, err))
+	fmt.Printf("polygon_set: room %g, dumbbell shrunk to %d polygons\n", num(big.DifferenceArea(small)), n)
 }

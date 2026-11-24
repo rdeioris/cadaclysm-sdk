@@ -130,6 +130,11 @@ func withDoubles<R>(_ a: [Double], _ body: (UnsafePointer<Double>) -> R) -> R {
 func withBytes<R>(_ a: [UInt8], _ body: (UnsafePointer<UInt8>) -> R) -> R {
     a.withUnsafeBufferPointer { body(a.isEmpty ? UnsafePointer(standInU8) : $0.baseAddress!) }
 }
+/// An optional float array as a C `const float *`: NULL for nil (an empty array is non-NULL).
+func withNormals<R>(_ a: [Float]?, _ body: (UnsafePointer<Float>?) -> R) -> R {
+    guard let a else { return body(nil) }
+    return withFloats(a) { body($0) }
+}
 /// An optional colour as a C `const float *`: NULL for nil.
 func withColour<R>(_ c: [Float]?, _ body: (UnsafePointer<Float>?) -> R) -> R {
     guard let c else { return body(nil) }
@@ -333,6 +338,79 @@ public struct OccludedStyle: Equatable {
     }
 }
 
+/// One clip-plane slot (`View.setClipPlane`, 1.31), as Python's `ClipPlane`: what lies on the
+/// side `normal` points to is hidden. `cap` fills the cut of every body (0..1 RGB, nil: none);
+/// `hatch` draws parallel lines on the cap (needs `cap`): `hatchAngle` in degrees from the
+/// plane's first axis, `hatchSpacing` in the scene's units (0: automatic, a fiftieth of the
+/// scene's size), `hatchWidth` in points. 1.32: `outline` draws the cut as a line (0..1 RGB,
+/// nil: none), `outlineWidth` points wide (0: 1, at most 100).
+public struct ClipPlane: Equatable {
+    public var point: SIMD3<Double>
+    public var normal: SIMD3<Double>
+    public var cap: SIMD3<Float>?
+    public var hatch: SIMD3<Float>?
+    public var hatchAngle: Float
+    public var hatchSpacing: Float
+    public var hatchWidth: Float
+    public var outline: SIMD3<Float>?
+    public var outlineWidth: Float
+    public init(point: SIMD3<Double>, normal: SIMD3<Double>, cap: SIMD3<Float>? = nil, hatch: SIMD3<Float>? = nil,
+                hatchAngle: Float = 45, hatchSpacing: Float = 0, hatchWidth: Float = 1,
+                outline: SIMD3<Float>? = nil, outlineWidth: Float = 1) {
+        self.point = point; self.normal = normal; self.cap = cap; self.hatch = hatch
+        self.hatchAngle = hatchAngle; self.hatchSpacing = hatchSpacing; self.hatchWidth = hatchWidth
+        self.outline = outline; self.outlineWidth = outlineWidth
+    }
+
+    /// The library's struct (120 bytes: the loader needs 1.32).
+    var raw: CadaclysmViewClipPlane {
+        var raw = CadaclysmViewClipPlane()
+        raw.size = UInt32(MemoryLayout<CadaclysmViewClipPlane>.size)
+        raw.point = (point.x, point.y, point.z)
+        raw.normal = (normal.x, normal.y, normal.z)
+        if let c = cap {
+            raw.cap = 1
+            raw.cap_colour = (c.x, c.y, c.z)
+        }
+        if let h = hatch {
+            raw.hatch = 1
+            raw.hatch_colour = (h.x, h.y, h.z)
+        }
+        raw.hatch_angle = hatchAngle
+        raw.hatch_spacing = hatchSpacing
+        raw.hatch_width = hatchWidth
+        if let o = outline {
+            raw.outline = 1
+            raw.outline_colour = (o.x, o.y, o.z)
+        }
+        raw.outline_width = outlineWidth
+        return raw
+    }
+
+    /// A library's answer.
+    init(_ raw: CadaclysmViewClipPlane) {
+        self.init(point: SIMD3(raw.point.0, raw.point.1, raw.point.2),
+                  normal: SIMD3(raw.normal.0, raw.normal.1, raw.normal.2))
+        if raw.cap != 0 { cap = SIMD3(raw.cap_colour.0, raw.cap_colour.1, raw.cap_colour.2) }
+        if raw.hatch != 0 {
+            hatch = SIMD3(raw.hatch_colour.0, raw.hatch_colour.1, raw.hatch_colour.2)
+            hatchAngle = raw.hatch_angle
+            hatchSpacing = raw.hatch_spacing
+            hatchWidth = raw.hatch_width
+        }
+        if raw.outline != 0 {
+            outline = SIMD3(raw.outline_colour.0, raw.outline_colour.1, raw.outline_colour.2)
+            outlineWidth = raw.outline_width
+        }
+    }
+}
+
+/// How a clip set's planes combine (`View.setClipMode`, 1.32), the `CADACLYSM_VIEW_CLIP_*`
+/// modes as raw values: `intersection` (the default) draws where every plane keeps, `cutaway`
+/// hides only where every plane hides (two planes cut a quarter away). `inherit` is a
+/// viewport's: no set of its own, the view-wide one.
+public enum ClipMode: UInt32, CaseIterable, Sendable { case intersection = 0, cutaway = 1, inherit = 2 }
+
 /// A points item's marker (`Item.setPointStyle`, 1.28): the `CADACLYSM_VIEW_POINT_*` shapes
 /// as raw values.
 public enum PointShape: UInt32, CaseIterable, Sendable { case disc = 0, ring = 1, square = 2, diamond = 3 }
@@ -341,32 +419,44 @@ public enum PointShape: UInt32, CaseIterable, Sendable { case disc = 0, ring = 1
 /// as raw values.
 public enum PointState: UInt8, CaseIterable, Sendable { case normal = 0, hover = 1, selected = 2, first = 3 }
 
+/// A glyph's kind (`View.showGlyphs`, 1.29): the `CADACLYSM_VIEW_GLYPH_*` kinds as raw values.
+public enum GlyphKind: UInt32, CaseIterable, Sendable {
+    case arrow = 0, tick, cross, square, triangle, parallel, perpendicular, coincident, tangent, fixed, horizontal, vertical
+}
+
 /// What is under a pixel: the item, the scene node (or a solid's 0) and the face; `clicks` 2
 /// for a double click's pick, else 1; `point` where the ray met the model, in the coordinates
 /// the items were shown in -- nil where the library read no depth (no hit, a machining stock,
 /// the terminal library). `overlay` (1.24): the item is an overlay -- it was over the pixel,
 /// so nothing of the scene beneath it was picked (`face` a text overlay's line, else 0).
 /// `viewportLabel` (1.28): the viewport whose label (`View.setViewportLabel`) was over the
-/// pixel -- `item` is then 0 -- else nil.
+/// pixel -- `item` is then 0 -- else nil. `segment` and `distancePx` (1.30): a line, curve,
+/// point or glyph within the pick aperture (`View.setPickAperture`) answers how many pixels it
+/// lay from the cursor, and a wire its piece -- a lines item's segment, a curves item's Bezier,
+/// a kernel solid's or read scene's kernel edge index; nil (and 0) for a face, a label or an
+/// overlay, nil for a point or glyph (whose index is `node`).
 public struct ViewPick: Equatable {
     public let item: UInt32, node: UInt32, face: UInt32
     public let clicks: UInt32
     public let point: SIMD3<Float>?
     public let overlay: Bool
     public let viewportLabel: Int?
+    public let segment: UInt32?
+    public let distancePx: Float
     init(item: UInt32, node: UInt32, face: UInt32, clicks: UInt32, point: SIMD3<Float>?, overlay: Bool,
-         viewportLabel: Int? = nil) {
+         viewportLabel: Int? = nil, segment: UInt32? = nil, distancePx: Float = 0) {
         self.item = item; self.node = node; self.face = face; self.clicks = clicks; self.point = point
-        self.overlay = overlay; self.viewportLabel = viewportLabel
+        self.overlay = overlay; self.viewportLabel = viewportLabel; self.segment = segment; self.distancePx = distancePx
     }
 }
 
-/// A raw pick for the library to fill: its size set and `viewport_label` -1 (no label hit),
-/// so a library that writes no label answers none.
+/// A raw pick for the library to fill: its size set, `viewport_label` -1 (no label hit) and
+/// `segment` UINT32_MAX (1.30: no segment), so a library that writes neither answers none.
 func rawPick() -> CadaclysmViewPick {
     var p = CadaclysmViewPick()
     p.size = UInt32(MemoryLayout<CadaclysmViewPick>.size)
     p.viewport_label = -1
+    p.segment = UInt32.max
     return p
 }
 
@@ -377,28 +467,41 @@ func pickHit(_ p: CadaclysmViewPick) -> Bool { p.item != 0 || p.viewport_label >
 func pickOf(_ p: CadaclysmViewPick) -> ViewPick {
     ViewPick(item: p.item, node: p.node, face: p.face, clicks: p.clicks,
              point: p.has_point != 0 ? SIMD3(p.point.0, p.point.1, p.point.2) : nil, overlay: p.overlay != 0,
-             viewportLabel: p.viewport_label >= 0 ? Int(p.viewport_label) : nil)
+             viewportLabel: p.viewport_label >= 0 ? Int(p.viewport_label) : nil,
+             segment: p.segment == UInt32.max ? nil : p.segment, distancePx: p.distance_px)
 }
 
 /// An input event's pick (`CadaclysmViewEventPick`, the 1.26 layout, which has no label) as
-/// `pickOf` reads a pick, with the event's own `pick_viewport_label` as `label`.
-func pickOf(_ p: CadaclysmViewEventPick, label: Int32) -> ViewPick {
+/// `pickOf` reads a pick, with the event's own `pick_viewport_label` as `label` and its 1.30
+/// `pick_segment` and `pick_distance_px`.
+func pickOf(_ p: CadaclysmViewEventPick, label: Int32, segment: UInt32 = UInt32.max, distancePx: Float = 0) -> ViewPick {
     ViewPick(item: p.item, node: p.node, face: p.face, clicks: p.clicks,
              point: p.has_point != 0 ? SIMD3(p.point.0, p.point.1, p.point.2) : nil, overlay: p.overlay != 0,
-             viewportLabel: label >= 0 ? Int(label) : nil)
+             viewportLabel: label >= 0 ? Int(label) : nil,
+             segment: segment == UInt32.max ? nil : segment, distancePx: distancePx)
 }
 
 /// What a snap may land on, and what it landed on: Python's names, the `CADACLYSM_VIEW_SNAP_*`
-/// bits as raw values. `centre` is a circular edge's centre.
+/// bits as raw values. `centre` is a circular edge's centre. 1.30 added `end` (a lines or
+/// curves item's piece ends), `intersection` (where two edges cross), `point` (an item's
+/// `setSnapPoints`) and `alignment` (the guides through recent point snaps).
 public enum SnapKind: UInt32, CaseIterable, Sendable {
     case vertex = 1, midpoint = 2, centre = 4, quadrant = 8, edge = 16, face = 32, grid = 64, plane = 128
+    case end = 256, intersection = 512, point = 1024, alignment = 2048
+
+    /// The kinds a view starts with (`CADACLYSM_VIEW_SNAP_DEFAULT`, 1.30): the 1.22 eight and
+    /// `point`; `end`, `intersection` and `alignment` are opt-in.
+    public static let defaultKinds: Set<SnapKind> = [.vertex, .midpoint, .centre, .quadrant, .edge, .face, .grid, .plane, .point]
 }
 
 /// What a snap found, as Python's `Snap`: its `kind`, the `point` snapped to, in world
 /// coordinates, the item, node and face it lies on, its `edge` (nil for a face, grid or plane
 /// snap), the edge's unit `tangent` there, a circular edge's `axis` and `radius` (zeros
 /// otherwise), how many pixels the cursor was from it, and `clicks`: 0 for `snap` and a hover,
-/// 1 for a click's snap, 2 for a double click's.
+/// 1 for a click's snap, 2 for a double click's. 1.30: `label`, a `point` snap's label, else the
+/// kind's lowercase name; `lockedAngle`, in degrees in 0..<360, where the angle lock
+/// (`View.setSnapBase`) turned the answer, else nil; `guides`, 0 to 2 world segments: the
+/// alignment guides from their trail points, or the lock's ray from its base.
 public struct ViewSnap: Equatable {
     public let kind: SnapKind
     public let point: SIMD3<Double>
@@ -408,15 +511,61 @@ public struct ViewSnap: Equatable {
     public let radius: Double
     public let distancePx: Float
     public let clicks: UInt32
+    public let label: String
+    public let lockedAngle: Float?
+    public let guides: [SnapGuide]
+    init(kind: SnapKind, point: SIMD3<Double>, item: UInt32, node: UInt32, face: UInt32, edge: UInt32?,
+         tangent: SIMD3<Float>, axis: SIMD3<Float>, radius: Double, distancePx: Float, clicks: UInt32,
+         label: String = "", lockedAngle: Float? = nil, guides: [SnapGuide] = []) {
+        self.kind = kind; self.point = point; self.item = item; self.node = node; self.face = face; self.edge = edge
+        self.tangent = tangent; self.axis = axis; self.radius = radius; self.distancePx = distancePx; self.clicks = clicks
+        self.label = label; self.lockedAngle = lockedAngle; self.guides = guides
+    }
+}
+
+/// One snap guide (1.30): a world segment `from` a trail point (or the lock's base) `to` the
+/// snapped point, three numbers each.
+public struct SnapGuide: Equatable, Sendable {
+    public let from: [Double]
+    public let to: [Double]
+    public init(from: [Double], to: [Double]) { self.from = from; self.to = to }
 }
 
 /// A library's snap answer as a ViewSnap; nil for kind 0 (nothing snapped).
 func snapOf(_ s: CadaclysmViewSnap) -> ViewSnap? {
     guard let kind = SnapKind(rawValue: s.kind) else { return nil }
+    let label = withUnsafeBytes(of: s.label) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+    let g = withUnsafeBytes(of: s.guides) { Array($0.bindMemory(to: Double.self)) }
+    let guides = (0..<Int(min(s.guide_count, 2))).map { i in SnapGuide(from: Array(g[6 * i ..< 6 * i + 3]), to: Array(g[6 * i + 3 ..< 6 * i + 6])) }
     return ViewSnap(kind: kind, point: SIMD3(s.point.0, s.point.1, s.point.2), item: s.item, node: s.node, face: s.face,
                     edge: s.edge == UInt32.max ? nil : s.edge, tangent: SIMD3(s.tangent.0, s.tangent.1, s.tangent.2),
                     axis: SIMD3(s.axis.0, s.axis.1, s.axis.2), radius: s.radius, distancePx: s.distance_px,
-                    clicks: s.clicks)
+                    clicks: s.clicks, label: label, lockedAngle: s.locked != 0 ? s.locked_angle : nil, guides: guides)
+}
+
+/// An input event's snap as `snapOf` reads a snap: the frozen 1.22 head
+/// (`CadaclysmViewEventSnap`) with the event's own 1.30 `snap_*` tail.
+func snapOf(_ e: CadaclysmViewInputEvent) -> ViewSnap? {
+    var s = CadaclysmViewSnap()
+    s.size = UInt32(MemoryLayout<CadaclysmViewSnap>.size)
+    s.kind = e.snap.kind; s.point = e.snap.point; s.item = e.snap.item; s.node = e.snap.node; s.face = e.snap.face
+    s.edge = e.snap.edge; s.tangent = e.snap.tangent; s.axis = e.snap.axis; s.radius = e.snap.radius
+    s.distance_px = e.snap.distance_px; s.clicks = e.snap.clicks
+    s.label = e.snap_label; s.locked = e.snap_locked; s.locked_angle = e.snap_locked_angle
+    s.guide_count = e.snap_guide_count; s.guides = e.snap_guides
+    return snapOf(s)
+}
+
+/// What a `RectHit` is (`CADACLYSM_VIEW_HIT_*`, 1.30): a face (numbered as a pick numbers it),
+/// a node of an item with no face ranges, a lines item's segment or a curves item's Bezier, a
+/// kernel solid's or read scene's edge (its kernel edge index), a point's or glyph's index.
+public enum HitKind: UInt32, CaseIterable, Sendable { case face = 1, node, segment, edge, point }
+
+/// One thing in a rectangle (`View.pickRect`, 1.30): its item, what it is and its index.
+public struct RectHit: Equatable, Sendable {
+    public let item: UInt32
+    public let kind: HitKind
+    public let index: UInt32
 }
 
 /// Where run()/view() left the camera (azimuth and elevation as ShowOptions takes them), and
@@ -605,9 +754,74 @@ public class Item {
     }
     /// Draws the item after every other, through whatever is in front of it (1.28); false
     /// takes it back. Refused for an overlay, text, an image, a machining stock, or a body
-    /// shown with exact surfaces or exact parts.
+    /// shown with exact surfaces (a `showCurves` item is accepted since 1.29: its exact edges
+    /// draw on top).
     public func setOnTop(_ on: Bool = true) throws {
         try ok("cadaclysm_view_set_on_top") { t, v in t.pointee.set_on_top!(v, id, on) }
+    }
+    /// The points it snaps to as `SnapKind.point` (1.30), three numbers each, in the coordinates
+    /// it was shown in, moving with its node 0; `label` (at most 31 bytes of UTF-8) is what the
+    /// snap answers, nil (or "") answering "point". An empty array clears them. Any item that
+    /// snaps takes them; text, glyph, image and machining items are refused, as are a label past
+    /// 31 bytes and a value that is not finite. A count not in threes and a label holding a NUL
+    /// are refused here, before the call.
+    public func setSnapPoints(_ xyz: [Double], label: String? = nil) throws {
+        if xyz.count % 3 != 0 { throw ViewError("set_snap_points: three numbers a point, not \(xyz.count)") }
+        if let label, label.unicodeScalars.contains("\0") {
+            throw ViewError("snap point label \(quoted(label)): a NUL character cannot be shown (the C string ends there)")
+        }
+        let points = xyz.map { Float($0) }
+        try ok("cadaclysm_view_set_snap_points") { t, v in
+            points.withUnsafeBufferPointer { p in
+                let at = points.isEmpty ? nil : p.baseAddress  // none: NULL with a count of 0
+                guard let label else { return t.pointee.set_snap_points!(v, id, at, points.count / 3, nil) }
+                return label.withCString { t.pointee.set_snap_points!(v, id, at, points.count / 3, $0) }
+            }
+        }
+    }
+    /// Replaces a `showLines` item's segments under the same id (1.29), six floats (two points)
+    /// each; colour, layer, dash, placement and on top kept, the camera not re-framed. An empty
+    /// array empties it. Refused for an item that is not a lines item, or a value not finite.
+    public func setLines(_ segments: [Float]) throws {
+        if segments.count % 6 != 0 { throw ViewError("set_lines: two points a segment (6 numbers), not \(segments.count)") }
+        try ok("cadaclysm_view_set_lines") { t, v in
+            withFloats(segments) { t.pointee.set_lines!(v, id, $0, segments.count / 6) }  // empty: non-NULL, count 0
+        }
+    }
+    /// Replaces a `showCurves` item's Beziers under the same id (1.29), sixteen floats (four
+    /// x, y, z, w control points) each. Refused for an item that is not a curves item, a value
+    /// not finite or a weight not positive.
+    public func setCurves(_ beziers: [Float]) throws {
+        if beziers.count % 16 != 0 {
+            throw ViewError("set_curves takes four x, y, z, w control points (16 numbers) a curve, not \(beziers.count)")
+        }
+        try ok("cadaclysm_view_set_curves") { t, v in
+            withFloats(beziers) { t.pointee.set_curves!(v, id, $0, beziers.count / 16) }
+        }
+    }
+    /// Replaces a `showPoints` item's positions under the same id (1.29), three floats each. A
+    /// new count keeps the states, node colours, highlights and hidden flags by index, the new
+    /// points normal. Refused for an item that is not a points item.
+    public func setPoints(_ positions: [Float]) throws {
+        if positions.count % 3 != 0 { throw ViewError("set_points: three numbers a point, not \(positions.count)") }
+        try ok("cadaclysm_view_set_points") { t, v in
+            withFloats(positions) { t.pointee.set_points!(v, id, $0, positions.count / 3) }
+        }
+    }
+    /// Moves a `showMesh` item's vertices (shown without edges) under the same id (1.29):
+    /// `positions`, three floats a vertex, as many vertices as it was shown with, in the same
+    /// order; `normals` (nil: recomputed) one a vertex. Colour, paint, look and placement kept.
+    /// Refused for another count, or an item shown with edges.
+    public func setMeshPositions(_ positions: [Float], normals: [Float]? = nil) throws {
+        if positions.count % 3 != 0 { throw ViewError("set_mesh_positions: three numbers a vertex, not \(positions.count)") }
+        if let normals, normals.count != positions.count {
+            throw ViewError("set_mesh_positions: \(normals.count) normal numbers for \(positions.count) position numbers")
+        }
+        try ok("cadaclysm_view_set_mesh_positions") { t, v in
+            withFloats(positions) { p in
+                withNormals(normals) { t.pointee.set_mesh_positions!(v, id, p, $0, positions.count / 3) }
+            }
+        }
     }
     /// An item's finish under the lighting.
     public enum Finish: UInt32, Sendable { case gloss = 0, satin = 1, matte = 2 }
@@ -851,8 +1065,9 @@ func inputEventOf(_ e: CadaclysmViewInputEvent, yUp: Bool) -> ViewInputEvent {
     case Int(CADACLYSM_VIEW_INPUT_EVENT_KEY_UP): kind = .keyUp(typed)
     case Int(CADACLYSM_VIEW_INPUT_EVENT_RESIZE): kind = .resize(width: e.width, height: e.height)
     case Int(CADACLYSM_VIEW_INPUT_EVENT_PICK):
-        kind = .pick(e.pick.item != 0 || e.pick_viewport_label >= 0 ? pickOf(e.pick, label: e.pick_viewport_label) : nil)
-    case Int(CADACLYSM_VIEW_INPUT_EVENT_SNAP): kind = .snap(snapOf(e.snap))
+        kind = .pick(e.pick.item != 0 || e.pick_viewport_label >= 0
+            ? pickOf(e.pick, label: e.pick_viewport_label, segment: e.pick_segment, distancePx: e.pick_distance_px) : nil)
+    case Int(CADACLYSM_VIEW_INPUT_EVENT_SNAP): kind = .snap(snapOf(e))
     case Int(CADACLYSM_VIEW_INPUT_EVENT_CLOSE): kind = .close(camera(e.camera, rawPick(), yUp: yUp))
     case Int(CADACLYSM_VIEW_INPUT_EVENT_TIMELINE): kind = .timeline
     default: kind = .other(e.kind)
@@ -1259,6 +1474,26 @@ public final class View {
         let c = try paint("cadaclysm_view_show_points", rgb)
         return try add("cadaclysm_view_show_points", owner: nil) { t, v in
             withFloats(positions) { p in withColour(c) { t.pointee.show_points!(v, p, n, $0, sizePx) } }
+        }
+    }
+    /// Drafting symbols of one `kind` at `at` (three floats each), as one item (1.29): `sizePt`
+    /// points across (1 to 128; device pixels at the host's screen density, which hosts that set one scale) at any zoom, in `colour` (nil: the
+    /// edge colour), turned to `dir` (three floats a glyph, as projected on the screen; nil:
+    /// all unturned; an arrow points along it). Glyph `i` picks as the item and node `i`. The
+    /// terminal library and the render view library draw no glyphs and refuse it.
+    public func showGlyphs(_ at: [Float], kind: GlyphKind, sizePt: Float = 12, colour: (any Colour)? = nil,
+                           dir: [Float]? = nil) throws -> Item {
+        if at.count % 3 != 0 { throw ViewError("show_glyphs: three numbers a glyph, not \(at.count)") }
+        if let dir, dir.count != at.count {
+            throw ViewError("show_glyphs: dir is three numbers a glyph (\(at.count / 3) glyphs), not \(dir.count)")
+        }
+        let c = try paint("cadaclysm_view_show_glyphs", colour)
+        return try add("cadaclysm_view_show_glyphs", owner: nil) { t, v in
+            withFloats(at) { a in
+                withNormals(dir) { d in
+                    withColour(c) { t.pointee.show_glyphs!(v, a, d, at.count / 3, kind.rawValue, sizePt, $0) }
+                }
+            }
         }
     }
     /// A CAM job on a stock, paused at its start, as Python's `View.show_machining`: `programs`
@@ -1863,6 +2098,123 @@ public final class View {
         let colour = raw.has_colour != 0 ? SIMD3<Float>(raw.colour.0, raw.colour.1, raw.colour.2) : nil
         return OccludedStyle(dash: raw.dash, gap: raw.gap, dim: raw.dim, colour: colour)
     }
+    /// The number of clip-plane slots (`CADACLYSM_VIEW_CLIP_PLANES`, 1.31).
+    public static let clipPlanes = UInt32(CADACLYSM_VIEW_CLIP_PLANES)
+    /// Sets clip-plane slot `slot` (0..<`View.clipPlanes`): a point is drawn only where every
+    /// set plane keeps it. Refused, changing nothing, for a slot past the last, a zero or
+    /// non-finite normal, a colour outside 0..1, a hatch without a cap, or a bad angle, spacing
+    /// or width. The terminal library draws no clip planes and refuses one.
+    public func setClipPlane(_ slot: UInt32, _ plane: ClipPlane) throws {
+        var raw = plane.raw
+        try ok("cadaclysm_view_set_clip_plane") { t, v in t.pointee.set_clip_plane!(v, slot, &raw) }
+    }
+    /// `setClipPlane` with the defaults as parameter defaults: no cap, no hatch, angle 45,
+    /// spacing 0 (automatic), width 1; no outline, outline width 1.
+    public func setClipPlane(_ slot: UInt32, point: SIMD3<Double>, normal: SIMD3<Double>, cap: SIMD3<Float>? = nil,
+                             hatch: SIMD3<Float>? = nil, hatchAngle: Float = 45, hatchSpacing: Float = 0,
+                             hatchWidth: Float = 1, outline: SIMD3<Float>? = nil, outlineWidth: Float = 1) throws {
+        try setClipPlane(slot, ClipPlane(point: point, normal: normal, cap: cap, hatch: hatch,
+                                         hatchAngle: hatchAngle, hatchSpacing: hatchSpacing, hatchWidth: hatchWidth,
+                                         outline: outline, outlineWidth: outlineWidth))
+    }
+    /// Empties clip-plane slot `slot`; an empty slot stays empty.
+    public func clearClipPlane(_ slot: UInt32) throws {
+        try ok("cadaclysm_view_set_clip_plane") { t, v in t.pointee.set_clip_plane!(v, slot, nil) }
+    }
+    /// Clip-plane slot `slot`, nil where it is empty: as set, but with the normal of unit length
+    /// and a zero width as 1; without a hatch (outline), its fields are the defaults (45, 0, 1;
+    /// 1). A slot past the last is refused.
+    public func clipPlane(_ slot: UInt32) throws -> ClipPlane? {
+        let (t, v) = try live("cadaclysm_view_clip_plane")
+        var raw = CadaclysmViewClipPlane()
+        raw.size = UInt32(MemoryLayout<CadaclysmViewClipPlane>.size)
+        if !t.pointee.clip_plane!(v, slot, &raw) {
+            if slot >= View.clipPlanes { throw libraryError(t) }
+            return nil  // an empty slot
+        }
+        return ClipPlane(raw)
+    }
+    /// The number of viewports that may have a clip set of their own
+    /// (`CADACLYSM_VIEW_CLIP_VIEWPORTS`, 1.32).
+    public static let clipViewports = UInt32(CADACLYSM_VIEW_CLIP_VIEWPORTS)
+    /// How the view-wide planes combine (1.32): `.intersection` (the default) or `.cutaway`.
+    /// `.inherit` is a viewport's, refused here. The terminal library takes `.intersection` and
+    /// refuses `.cutaway`.
+    public func setClipMode(_ mode: ClipMode) throws {
+        try ok("cadaclysm_view_set_clip_mode") { t, v in t.pointee.set_clip_mode!(v, mode.rawValue) }
+    }
+    /// How the view-wide planes combine (1.32).
+    public func clipMode() throws -> ClipMode {
+        let (t, v) = try live("cadaclysm_view_clip_mode")
+        return ClipMode(rawValue: t.pointee.clip_mode!(v)) ?? .intersection
+    }
+    /// Turns material textures on or off (1.33; on by default): off, a textured part draws its
+    /// base colour factor alone. The terminal and render-view libraries accept it and draw
+    /// colours either way.
+    public func setTextures(_ on: Bool) throws {
+        try ok("cadaclysm_view_set_textures") { t, v in t.pointee.set_textures!(v, on) }
+    }
+    /// Whether material textures are drawn (1.33).
+    public func textures() throws -> Bool {
+        let (t, v) = try live("cadaclysm_view_textures")
+        return t.pointee.textures!(v)
+    }
+    /// Sets slot `slot` of viewport `viewport`'s own clip set (1.32), as `setClipPlane` sets the
+    /// view-wide one, in that viewport only: the first gives the viewport a set of its own
+    /// (every other slot empty, mode `.intersection`), which it draws, picks and snaps with
+    /// instead of the view-wide set. With no viewports set, viewport 0 is the window. A viewport
+    /// past the last (or past `View.clipViewports` - 1) is refused, as is what `setClipPlane`
+    /// refuses.
+    public func setViewportClipPlane(_ viewport: UInt32, _ slot: UInt32, _ plane: ClipPlane) throws {
+        var raw = plane.raw
+        try ok("cadaclysm_view_set_viewport_clip_plane") { t, v in
+            t.pointee.set_viewport_clip_plane!(v, viewport, slot, &raw)
+        }
+    }
+    /// `setViewportClipPlane` with `setClipPlane`'s parameter defaults.
+    public func setViewportClipPlane(_ viewport: UInt32, _ slot: UInt32, point: SIMD3<Double>, normal: SIMD3<Double>,
+                                     cap: SIMD3<Float>? = nil, hatch: SIMD3<Float>? = nil, hatchAngle: Float = 45,
+                                     hatchSpacing: Float = 0, hatchWidth: Float = 1, outline: SIMD3<Float>? = nil,
+                                     outlineWidth: Float = 1) throws {
+        try setViewportClipPlane(viewport, slot, ClipPlane(point: point, normal: normal, cap: cap, hatch: hatch,
+                                                           hatchAngle: hatchAngle, hatchSpacing: hatchSpacing,
+                                                           hatchWidth: hatchWidth, outline: outline,
+                                                           outlineWidth: outlineWidth))
+    }
+    /// Empties slot `slot` of viewport `viewport`'s own set (1.32); the set stays the
+    /// viewport's (`setViewportClipMode(viewport, .inherit)` drops it).
+    public func clearViewportClipPlane(_ viewport: UInt32, _ slot: UInt32) throws {
+        try ok("cadaclysm_view_set_viewport_clip_plane") { t, v in
+            t.pointee.set_viewport_clip_plane!(v, viewport, slot, nil)
+        }
+    }
+    /// Slot `slot` of viewport `viewport`'s own set (1.32), as `clipPlane` answers the
+    /// view-wide one; nil where the slot is empty or the viewport has no set of its own (it
+    /// draws with the view-wide planes). A slot past the last is refused.
+    public func viewportClipPlane(_ viewport: UInt32, _ slot: UInt32) throws -> ClipPlane? {
+        let (t, v) = try live("cadaclysm_view_viewport_clip_plane")
+        var raw = CadaclysmViewClipPlane()
+        raw.size = UInt32(MemoryLayout<CadaclysmViewClipPlane>.size)
+        if !t.pointee.viewport_clip_plane!(v, viewport, slot, &raw) {
+            if slot >= View.clipPlanes { throw libraryError(t) }
+            return nil  // an empty slot, or no set of its own
+        }
+        return ClipPlane(raw)
+    }
+    /// Viewport `viewport`'s clip mode (1.32): `.intersection` or `.cutaway` sets its own set's
+    /// mode, giving it a set of its own if it had none (with no planes: that viewport is then
+    /// not clipped while the others are); `.inherit` drops its set, back to the view-wide one.
+    public func setViewportClipMode(_ viewport: UInt32, _ mode: ClipMode) throws {
+        try ok("cadaclysm_view_set_viewport_clip_mode") { t, v in
+            t.pointee.set_viewport_clip_mode!(v, viewport, mode.rawValue)
+        }
+    }
+    /// Viewport `viewport`'s clip mode (1.32): its own set's, or `.inherit` where it has none
+    /// (and for a viewport past the last).
+    public func viewportClipMode(_ viewport: UInt32) throws -> ClipMode {
+        let (t, v) = try live("cadaclysm_view_viewport_clip_mode")
+        return ClipMode(rawValue: t.pointee.viewport_clip_mode!(v, viewport)) ?? .inherit
+    }
     /// Milliseconds until `needsDraw` turns true by itself (a resting frame refining the
     /// picture); 0 when one is owed now, nil when none is coming.
     public func wakeMs() throws -> UInt32? {
@@ -1900,13 +2252,13 @@ public final class View {
         if !said.isEmpty && !said.hasSuffix("no pick result") { throw ViewError(said) }
         return (false, nil)
     }
-    /// What a snap may land on: every kind (the default), some, or nil (or none) to switch
-    /// snapping off, as a view starts. `aperturePx` is how far from the cursor a point kind may
-    /// lie (0: the library's default, 10 points); `marker` whether the view draws the marker at
-    /// the snap. Once on, a mouse hovering over a view in its own window snaps, and so does a
-    /// click (`lastSnap` reads them); `snap` asks one at any pixel. Where kinds compete, a
-    /// corner beats the face it sits on.
-    public func setSnap(_ kinds: Set<SnapKind>? = Set(SnapKind.allCases), aperturePx: Float = 0, marker: Bool = true) throws {
+    /// What a snap may land on: the default kinds (`SnapKind.defaultKinds`, the default), every
+    /// kind (`Set(SnapKind.allCases)`), some, or nil (or none) to switch snapping off, as a view
+    /// starts. `aperturePx` is how far from the cursor a point kind may lie (0: the library's
+    /// default, 10 points); `marker` whether the view draws the marker at the snap. Once on, a
+    /// mouse hovering over a view in its own window snaps, and so does a click (`lastSnap` reads
+    /// them); `snap` asks one at any pixel. Where kinds compete, a corner beats the face it sits on.
+    public func setSnap(_ kinds: Set<SnapKind>? = SnapKind.defaultKinds, aperturePx: Float = 0, marker: Bool = true) throws {
         var raw = CadaclysmViewSnapSettings()
         raw.size = UInt32(MemoryLayout<CadaclysmViewSnapSettings>.size)
         raw.kinds = (kinds ?? []).reduce(0) { $0 | $1.rawValue }
@@ -1943,6 +2295,53 @@ public final class View {
         if !said.isEmpty && !said.hasSuffix("no snap result") { throw ViewError(said) }
         return (false, nil)
     }
+    /// The angle lock (1.30): snaps that land on no point kind are turned about `point` (world,
+    /// three numbers) onto the nearest multiple of `stepDeg` (above 0, at most 180), in the
+    /// work plane's directions or the plane facing the eye; the answer is `plane` with its
+    /// `lockedAngle` and one guide from the base. nil clears it (`stepDeg` then ignored). A point
+    /// other than three numbers is refused here; one not finite, or a step out of range, by the
+    /// library.
+    public func setSnapBase(_ point: [Double]?, stepDeg: Float = 15) throws {
+        if let point, point.count != 3 { throw ViewError("set_snap_base: the base is 3 numbers, not \(point.count)") }
+        let xyz = point.map { $0.map { Float($0) } }
+        try ok("cadaclysm_view_set_snap_base") { t, v in
+            guard let xyz else { return t.pointee.set_snap_base!(v, nil, stepDeg) }  // NULL clears, never zeros
+            return xyz.withUnsafeBufferPointer { t.pointee.set_snap_base!(v, $0.baseAddress, stepDeg) }
+        }
+    }
+    /// How far a pick reaches for lines, points and glyphs (1.30), in points times the screen
+    /// density: 0 restores the default, 4; others clamp to 1..32. A negative size or one that
+    /// is not finite is refused. Faces are always the pixel under the cursor.
+    public func setPickAperture(_ points: Float) throws {
+        try ok("cadaclysm_view_set_pick_aperture") { t, v in t.pointee.set_pick_aperture!(v, points) }
+    }
+    /// What lies in a rectangle of `viewport` (1.30): `x`, `y`, `w`, `h` in device pixels from
+    /// its top left (a negative `w` or `h` flips it). With `crossing`, everything with a visible
+    /// part inside; else what lies wholly inside and is visible somewhere. Hidden things come
+    /// only drawn x-ray or on top; text, images, overlays, viewport labels, machining stocks and
+    /// isocurves are left out. Sorted by item, kind, index. CPU only: it draws nothing. A
+    /// rectangle that is not finite and an unknown viewport are the library's refusals; a kind
+    /// this module does not know (a later library's) is refused, not guessed.
+    public func pickRect(x: Float, y: Float, w: Float, h: Float, crossing: Bool = true, viewport: UInt32 = 0) throws -> [RectHit] {
+        let (t, v) = try live("cadaclysm_view_pick_rect")
+        var out = [CadaclysmViewRectHit](repeating: CadaclysmViewRectHit(), count: 64)
+        while true {
+            let total = out.withUnsafeMutableBufferPointer { t.pointee.pick_rect!(v, viewport, x, y, w, h, crossing, $0.baseAddress, $0.count) }
+            if total == 0 && !lastError(t).isEmpty { throw libraryError(t) }
+            if total <= out.count {
+                out.removeLast(out.count - total)
+                break
+            }
+            // More than the buffer held: ask again with room for them all, never a cut list.
+            out = [CadaclysmViewRectHit](repeating: CadaclysmViewRectHit(), count: total)
+        }
+        return try out.map { h in
+            guard let kind = HitKind(rawValue: h.kind) else {
+                throw ViewError("cadaclysm_view_pick_rect: the library answered hit kind \(h.kind), not a CADACLYSM_VIEW_HIT_* kind")
+            }
+            return RectHit(item: h.item, kind: kind, index: h.index)
+        }
+    }
     /// Hides the snap marker and drops any snap asked or answered and not yet read.
     public func clearSnap() throws {
         try act("cadaclysm_view_clear_snap") { t, v in t.pointee.clear_snap!(v) }
@@ -1976,6 +2375,7 @@ public final class View {
         var raw = CadaclysmViewInputEvent()
         raw.size = UInt32(MemoryLayout<CadaclysmViewInputEvent>.size)
         raw.pick_viewport_label = -1  // no label hit, until the library says otherwise
+        raw.pick_segment = UInt32.max  // 1.30: no segment, likewise
         if t.pointee.next_event!(v, &raw) { return inputEventOf(raw, yUp: yUp) }
         let said = lastError(t)
         if !said.isEmpty && !said.hasSuffix("no event") { throw ViewError(said) }

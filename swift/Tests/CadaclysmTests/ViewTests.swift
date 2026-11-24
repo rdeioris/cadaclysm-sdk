@@ -3,7 +3,7 @@
 // by its item), image() inside its silhouette, pick, save, a real pose and the rest pose, a
 // nested node and a root drawing less than their scene, Scene.close() releasing its items,
 // another thread's calls refused, colour text drawing its numbers' pixels and refused text
-// refused in the library's words, the loader's ABI 1.28, text (labels shown, changed, picked
+// refused in the library's words, the loader's ABI 1.29, text (labels shown, changed, picked
 // by line, coloured on their box; fonts loaded; refusals) -- and the wgpu library's table
 // rigged: show()/view()'s title and up axis, run()'s camera, pump's waits and count, input,
 // void-call refusals; ABI 1.8's pick (clicks, point), set_double_click_frames, focus and
@@ -117,10 +117,12 @@ private func rigPoints(_ t: UnsafeMutablePointer<CvlTable>) {
 
 // ---- view ABI 1.8, rigged: the pick's clicks and point, set_double_click_frames, focus, navigation
 
-/// A pick of nothing, as a library writes one: `viewport_label` -1 (1.28: no label hit).
+/// A pick of nothing, as a library writes one: `viewport_label` -1 (1.28: no label hit) and
+/// `segment` UINT32_MAX (1.30: no segment).
 private func noPick() -> CadaclysmViewPick {
     var p = CadaclysmViewPick()
     p.viewport_label = -1
+    p.segment = UInt32.max
     return p
 }
 private var spyPicked = noPick()
@@ -206,6 +208,42 @@ private func rigSnap(_ t: UnsafeMutablePointer<CvlTable>) {
     }
 }
 
+// ---- view ABI 1.30, rigged: what the picking and snapping calls are handed ------------------
+
+private var spyP3: [String] = []
+// The segment each pick buffer held on the way into a pick_result that leaves the tail alone.
+private var spySegmentsIn: [UInt32] = []
+// pick_rect answers how many these are and writes at most its capacity of them.
+private var spyRectHits: [CadaclysmViewRectHit] = []
+
+private func rigP3(_ t: UnsafeMutablePointer<CvlTable>) {
+    t.pointee.set_snap_base = { _, p, step in
+        spyP3.append(p == nil ? "base nil \(step)" : "base \(p![0]) \(p![1]) \(p![2]) \(step)")
+        return true
+    }
+    t.pointee.set_snap_points = { _, _, xyz, count, label in
+        let points = xyz.map { p in "\((0..<count * 3).map { p[$0] })" } ?? "nil"
+        spyP3.append("points \(count) \(points) \(label.map { String(cString: $0) } ?? "nil")")
+        return true
+    }
+    t.pointee.set_pick_aperture = { _, pt in
+        spyP3.append("aperture \(pt)")
+        return true
+    }
+    t.pointee.pick_rect = { _, viewport, x, y, w, h, crossing, out, capacity in
+        spyP3.append("rect \(viewport) \(x) \(y) \(w) \(h) \(crossing) cap=\(capacity)")
+        if spySaid != nil { return 0 }
+        for i in 0..<min(capacity, spyRectHits.count) { out![i] = spyRectHits[i] }
+        return spyRectHits.count
+    }
+}
+
+/// The message of a refusal that is a ViewError; any other error, or none, says so instead.
+private func refused(_ body: () throws -> Void) -> String {
+    do { try body() } catch let e as ViewError { return "\(e)" } catch { return "not a ViewError: \(error)" }
+    return "<accepted>"
+}
+
 // ---- view ABI 1.26, rigged: the event queue, close and the pump run(onEvent) drives ----------
 
 // next_event pops spyEvents (empty: false, "no event"); close queues a CLOSE on (1, 2, 3); a pump
@@ -213,6 +251,8 @@ private func rigSnap(_ t: UnsafeMutablePointer<CvlTable>) {
 // pick_result answers spyPicked while spyLanded.
 private var spyEvents: [CadaclysmViewInputEvent] = []
 private var spyEventSizes: [UInt32] = []
+// The pick_segment each next_event buffer held on the way in (1.30).
+private var spyEventSegmentsIn: [UInt32] = []
 private var spyClosedWindows = 0
 private let noEvent = cstr("cadaclysm_view_next_event: no event")
 private let noPickResult = cstr("cadaclysm_view_pick_result: no pick result")
@@ -222,6 +262,7 @@ private func rawEvent(_ kind: UInt32, _ fill: (inout CadaclysmViewInputEvent) ->
     var e = CadaclysmViewInputEvent()
     e.kind = kind
     e.pick_viewport_label = -1  // 1.28: no label hit, as a library writes it
+    e.pick_segment = UInt32.max  // 1.30: no segment, likewise
     fill(&e)
     return e
 }
@@ -242,6 +283,7 @@ private func rigEvents(_ t: UnsafeMutablePointer<CvlTable>) {
     t.pointee.last_error = { spySaid }
     t.pointee.next_event = { _, out in
         spyEventSizes.append(out!.pointee.size)
+        spyEventSegmentsIn.append(out!.pointee.pick_segment)
         if spyEvents.isEmpty {
             spySaid = noEvent
             return false
@@ -527,7 +569,7 @@ final class ViewTests: XCTestCase {
     func testTheSnapStructsAreTheHeaders() {
         XCTAssertEqual(MemoryLayout<CadaclysmViewSnapSettings>.size, 16)
         XCTAssertEqual(MemoryLayout<CadaclysmViewSnapSettings>.offset(of: \CadaclysmViewSnapSettings.aperture_px), 8)
-        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.size, 88)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.size, 232)
         XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.point), 8)
         XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.item), 32)
         XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.edge), 44)
@@ -535,10 +577,17 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.axis), 60)
         XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.radius), 72)
         XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.clicks), 84)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.label), 88)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.locked), 120)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.locked_angle), 124)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.guide_count), 128)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.offset(of: \CadaclysmViewSnap.guides), 136)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewEventSnap>.size, 88)
         XCTAssertEqual(SnapKind.allCases.map(\.rawValue),
                        [CADACLYSM_VIEW_SNAP_VERTEX, CADACLYSM_VIEW_SNAP_MIDPOINT, CADACLYSM_VIEW_SNAP_CENTRE,
                         CADACLYSM_VIEW_SNAP_QUADRANT, CADACLYSM_VIEW_SNAP_EDGE, CADACLYSM_VIEW_SNAP_FACE,
-                        CADACLYSM_VIEW_SNAP_GRID, CADACLYSM_VIEW_SNAP_PLANE].map { UInt32($0) })
+                        CADACLYSM_VIEW_SNAP_GRID, CADACLYSM_VIEW_SNAP_PLANE, CADACLYSM_VIEW_SNAP_END,
+                        CADACLYSM_VIEW_SNAP_INTERSECTION, CADACLYSM_VIEW_SNAP_POINT, CADACLYSM_VIEW_SNAP_ALIGNMENT].map { UInt32($0) })
     }
 
     func testTheTerminalLoadsAndRefusesAnOffscreenView() throws {
@@ -1120,6 +1169,82 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(try view.occludedStyle(), OccludedStyle())
     }
 
+    /// 1.31's clip planes: a capped, hatched plane read back with its normal made unit length,
+    /// a plain one with the defaults, a refusal that changes nothing, a clear.
+    func testClipPlanesRoundTrip() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        XCTAssertEqual(View.clipPlanes, 6)
+        XCTAssertNil(try view.clipPlane(0), "a new view's slot 0")
+        try view.setClipPlane(0, point: SIMD3(1, 2, 3), normal: SIMD3(0, 0, 2), cap: SIMD3(1, 0, 0),
+                              hatch: SIMD3(0, 0, 0), hatchAngle: 30, hatchSpacing: 0.5, hatchWidth: 2)
+        XCTAssertEqual(try view.clipPlane(0),
+                       ClipPlane(point: SIMD3(1, 2, 3), normal: SIMD3(0, 0, 1), cap: SIMD3(1, 0, 0),
+                                 hatch: SIMD3(0, 0, 0), hatchAngle: 30, hatchSpacing: 0.5, hatchWidth: 2))
+        let plain = ClipPlane(point: SIMD3(0, 0, 0), normal: SIMD3(1, 0, 0))
+        try view.setClipPlane(5, plain)
+        XCTAssertEqual(try view.clipPlane(5), plain, "the defaults")
+        let refused = message { try view.setClipPlane(5, point: SIMD3(0, 0, 0), normal: SIMD3(1, 0, 0), hatch: SIMD3(0, 0, 0)) }
+        XCTAssertTrue(refused.contains("cadaclysm_view_set_clip_plane") && refused.contains("hatch"), refused)
+        XCTAssertEqual(try view.clipPlane(5), plain, "a refused plane changed slot 5")
+        XCTAssertTrue(message { try view.setClipPlane(6, plain) }.contains("slot 6"))
+        XCTAssertNotEqual(message { _ = try view.clipPlane(6) }, "<accepted>")
+        try view.clearClipPlane(0)
+        XCTAssertNil(try view.clipPlane(0), "a cleared slot 0")
+        try view.clearClipPlane(0)
+    }
+
+    /// 1.32's clip sets: an outlined plane read back (width 0 as 1), an outline width above 100
+    /// refused, the mode pair (mode 2 refused view-wide), viewport 0's own plane round trip, and
+    /// inherit dropping it.
+    func testClipSetsRoundTrip() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        XCTAssertEqual(View.clipViewports, 8)
+        XCTAssertEqual(ClipMode.allCases.map(\.rawValue), [0, 1, 2])
+        XCTAssertEqual(MemoryLayout<CadaclysmViewClipPlane>.size, 120)
+        try view.setClipPlane(0, point: SIMD3(0, 0, 1), normal: SIMD3(0, 0, 1), cap: SIMD3(0.5, 0.5, 0.5),
+                              outline: SIMD3(1, 0, 0), outlineWidth: 0)
+        XCTAssertEqual(try view.clipPlane(0),
+                       ClipPlane(point: SIMD3(0, 0, 1), normal: SIMD3(0, 0, 1), cap: SIMD3(0.5, 0.5, 0.5),
+                                 outline: SIMD3(1, 0, 0), outlineWidth: 1))
+        let plain = ClipPlane(point: SIMD3(0, 0, 0), normal: SIMD3(1, 0, 0))
+        try view.setClipPlane(1, plain)
+        XCTAssertEqual(try view.clipPlane(1), plain, "no outline")
+        XCTAssertEqual(message { try view.setClipPlane(2, point: SIMD3(0, 0, 0), normal: SIMD3(1, 0, 0),
+                                                       outline: SIMD3(0, 0, 0), outlineWidth: 200) },
+                       "cadaclysm_view_set_clip_plane: outline width 200 is above 100 points")
+        XCTAssertEqual(try view.clipMode(), .intersection)
+        try view.setClipMode(.cutaway)
+        XCTAssertEqual(try view.clipMode(), .cutaway)
+        XCTAssertEqual(message { try view.setClipMode(.inherit) },
+                       "cadaclysm_view_set_clip_mode: mode 2 (inherit) is a viewport's")
+        XCTAssertEqual(try view.clipMode(), .cutaway, "a refused mode changed the mode")
+        try view.setClipMode(.intersection)
+        // Viewport 0 (the window: no viewports set) given a plane of its own.
+        XCTAssertEqual(try view.viewportClipMode(0), .inherit)
+        XCTAssertNil(try view.viewportClipPlane(0, 0), "viewport 0 with no set of its own")
+        try view.setViewportClipPlane(0, 4, point: SIMD3(0, 0, 0), normal: SIMD3(0, 3, 0), cap: SIMD3(0, 0, 1),
+                                      outline: SIMD3(1, 1, 1), outlineWidth: 2)
+        XCTAssertEqual(try view.viewportClipPlane(0, 4),
+                       ClipPlane(point: SIMD3(0, 0, 0), normal: SIMD3(0, 1, 0), cap: SIMD3(0, 0, 1),
+                                 outline: SIMD3(1, 1, 1), outlineWidth: 2))
+        XCTAssertNil(try view.viewportClipPlane(0, 0), "viewport 0's empty slot 0")
+        XCTAssertEqual(try view.viewportClipMode(0), .intersection)
+        try view.setViewportClipMode(0, .cutaway)
+        XCTAssertEqual(try view.viewportClipMode(0), .cutaway)
+        XCTAssertEqual(message { try view.setViewportClipPlane(1, 0, plain) },
+                       "cadaclysm_view_set_viewport_clip_plane: no viewport 1 (there are 1)")
+        XCTAssertNotEqual(message { _ = try view.viewportClipPlane(0, 6) }, "<accepted>")
+        try view.clearViewportClipPlane(0, 4)
+        XCTAssertNil(try view.viewportClipPlane(0, 4), "viewport 0's cleared slot 4")
+        XCTAssertEqual(try view.viewportClipMode(0), .cutaway, "clearing a plane dropped the set")
+        try view.setViewportClipPlane(0, 4, plain)
+        try view.setViewportClipMode(0, .inherit)
+        XCTAssertEqual(try view.viewportClipMode(0), .inherit)
+        XCTAssertNil(try view.viewportClipPlane(0, 4), "viewport 0's slot 4 after inherit")
+    }
+
     /// 1.23's line colours: a view-wide colour read back, a segment's own curve colour drawn
     /// and cleared with nil.
     func testLineColoursDrawAndClear() throws {
@@ -1146,18 +1271,29 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(try greens(), 0, "nil: the view's colour again")
     }
 
-    /// The loader binds 117 calls of cadaclysm_view.h 1.28 (all but 1.14's analysis calls,
-    /// 1.19's KMS pair and 1.12's texture targets): a 1.27 library (no drafting styles) is refused
-    /// before any call is bound, in Python's words; 1.28 and later 1.x are taken.
-    func testTheLoaderNeedsViewABI128() throws {
-        try checkABIForTest(version: 0x1001C, path: "lib")
-        try checkABIForTest(version: 0x1001D, path: "lib")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x1001B, path: "lib") },
-                       "lib: view ABI 1.27, this SDK needs 1.28 or a later 1.x")
+    /// The loader binds 136 calls of cadaclysm_view.h 1.33 (all but 1.14's analysis calls,
+    /// 1.19's KMS pair and 1.12's texture targets): a 1.32 library (no textures switch) is
+    /// refused before any call is bound, in Python's words; 1.33 and later 1.x are taken.
+    func testTheLoaderNeedsViewABI133() throws {
+        try checkABIForTest(version: 0x10021, path: "lib")
+        try checkABIForTest(version: 0x10022, path: "lib")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x10020, path: "lib") },
+                       "lib: view ABI 1.32, this SDK needs 1.33 or a later 1.x")
         XCTAssertEqual(message { try checkABIForTest(version: 0x10019, path: "lib") },
-                       "lib: view ABI 1.25, this SDK needs 1.28 or a later 1.x")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x2001C, path: "lib") },
-                       "lib: view ABI 2.28, this SDK needs 1.28 or a later 1.x")
+                       "lib: view ABI 1.25, this SDK needs 1.33 or a later 1.x")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x20021, path: "lib") },
+                       "lib: view ABI 2.33, this SDK needs 1.33 or a later 1.x")
+    }
+
+    /// 1.33's textures switch on wgpu offscreen: on by default, off once set off, on again.
+    func testTexturesDefaultOnAndReadBackOff() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        XCTAssertTrue(try view.textures(), "on by default")
+        try view.setTextures(false)
+        XCTAssertFalse(try view.textures(), "off once set off")
+        try view.setTextures(true)
+        XCTAssertTrue(try view.textures(), "on again")
     }
 
     /// 1.25's stats on wgpu offscreen: the struct's layout; an offscreen view's frames are its
@@ -1197,7 +1333,7 @@ final class ViewTests: XCTestCase {
                                 UInt32(CADACLYSM_VIEW_ALIGN_BOTTOM_RIGHT)]
         let ours: [Anchor] = [.topLeft, .top, .topRight, .left, .centre, .right, .bottomLeft, .bottom, .bottomRight]
         XCTAssertEqual(ours.map { $0.rawValue }, header)
-        XCTAssertEqual(MemoryLayout<CadaclysmViewPick>.size, 44)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewPick>.size, 52)
         XCTAssertEqual(MemoryLayout<CadaclysmViewOverlay>.size, 80)
         XCTAssertEqual(MemoryLayout<CadaclysmViewOverlayImage>.size, 48)
     }
@@ -1594,6 +1730,71 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(message { try v.setViewportBorder(0, colour: [Float]([1, 0])) }, "colour: 3 or 4 numbers, not 2")
     }
 
+    /// 1.29's live geometry on wgpu offscreen: each setter replaces its item's data under the
+    /// same id; the count refusals read the library's words; glyphs pick as their node (on a
+    /// small view of their own, so no shape at the origin hides them); the kinds' raw values
+    /// are the header's CADACLYSM_VIEW_GLYPH_* numbers.
+    func testLiveGeometryAndGlyphs() throws {
+        XCTAssertEqual(GlyphKind.allCases.map(\.rawValue),
+                       [CADACLYSM_VIEW_GLYPH_ARROW, CADACLYSM_VIEW_GLYPH_TICK, CADACLYSM_VIEW_GLYPH_CROSS,
+                        CADACLYSM_VIEW_GLYPH_SQUARE, CADACLYSM_VIEW_GLYPH_TRIANGLE, CADACLYSM_VIEW_GLYPH_PARALLEL,
+                        CADACLYSM_VIEW_GLYPH_PERPENDICULAR, CADACLYSM_VIEW_GLYPH_COINCIDENT, CADACLYSM_VIEW_GLYPH_TANGENT,
+                        CADACLYSM_VIEW_GLYPH_FIXED, CADACLYSM_VIEW_GLYPH_HORIZONTAL, CADACLYSM_VIEW_GLYPH_VERTICAL].map { UInt32($0) })
+        XCTAssertEqual(GlyphKind.cross.rawValue, UInt32(CADACLYSM_VIEW_GLYPH_CROSS))
+        let v = try offscreen(64, 48)
+        defer { try? v.close() }
+        let line = try v.showLines([-1, 0, 0, 1, 0, 0])
+        try line.setLines([-1, 1, 0, 1, 1, 0, -1, -1, 0, 1, -1, 0])
+        try line.setLines([])
+        let curve = try v.showCurves([0, 0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 1, 3, 0, 0, 1])
+        try curve.setCurves([0, 1, 0, 1, 1, 1, 0, 1, 2, 1, 0, 1, 3, 1, 0, 1])
+        XCTAssertTrue(message { try line.setCurves([0, 0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 1, 3, 0, 0, 1]) }.contains("is not a curves item"))
+        let pts = try v.showPoints([0, 0, 0, 1, 0, 0], sizePx: 9)
+        try pts.setPoints([0, 1, 0, 1, 1, 0])
+        let mesh = try v.showMesh(positions: [-1, -1, 0, 1, -1, 0, 0, 1, 0], indices: [0, 1, 2])
+        try mesh.setMeshPositions([-1, -1, 1, 1, -1, 1, 0, 1, 1])
+        try mesh.setMeshPositions([-1, -1, 0, 1, -1, 0, 0, 1, 0], normals: [0, 0, 1, 0, 0, 1, 0, 0, 1])
+        // The count refusals, in the library's words and the wrapper's.
+        XCTAssertTrue(message { try mesh.setMeshPositions([0, 0, 0, 1, 0, 0]) }.contains("positions has 2 vertices; item"))
+        XCTAssertTrue(message { try mesh.setMeshPositions([-1, -1, 0, 1, -1, 0, 0, 1, 0], normals: [0, 0, 1]) }.contains("normal numbers"))
+        XCTAssertThrowsError(try line.setLines([0, 0, 0, 1]))
+        try pts.setPointStates([.selected, .normal])
+        try pts.setPoints([0, 0, 0])  // a new count keeps the states by index
+        try pts.setPointStates([.selected])
+        XCTAssertThrowsError(try v.showGlyphs([0, 0, 0], kind: .tick, sizePt: 500))
+        XCTAssertThrowsError(try v.showGlyphs([0, 0, 0, 1, 0, 0], kind: .arrow, dir: [1, 0, 0]))
+        // Glyphs pick as their node, on a small view of their own.
+        let g = try offscreen(96, 96)
+        defer { try? g.close() }
+        _ = try g.showGlyphs([0, 0, 0], kind: .square, sizePt: 24, colour: SIMD3<Float>(1, 0, 0))
+        let glyphs = try g.showGlyphs([-1, 0, 0, 1, 0, 0], kind: .cross, sizePt: 16, colour: "red", dir: [1, 0, 0, 0, 1, 0])
+        try g.frame()
+        var left: ViewPick?, right: ViewPick?
+        for x in stride(from: UInt32(0), to: 96, by: 2) {
+            for y in stride(from: UInt32(40), to: 56, by: 2) {
+                guard let p = try g.pick(x: x, y: y), p.item == glyphs.id else { continue }
+                if x < 48 { left = left ?? p } else { right = right ?? p }
+            }
+        }
+        XCTAssertEqual(left?.node, 0, "the left glyph picks as node 0")
+        XCTAssertEqual(right?.node, 1, "the right glyph picks as node 1")
+        // Each kind draws its own picture: no two of the twelve are the same image.
+        var pictures: [GlyphKind: [UInt8]] = [:]
+        for kind in GlyphKind.allCases {
+            let k = try offscreen(96, 96)
+            defer { try? k.close() }
+            _ = try k.showGlyphs([-1, 0, 0, 1, 0, 0], kind: kind, sizePt: 24, colour: "red", dir: [1, 0, 0, 1, 0, 0])
+            try k.frame()
+            try k.draw()
+            pictures[kind] = try k.image().rgba
+        }
+        for a in GlyphKind.allCases {
+            for b in GlyphKind.allCases where a.rawValue < b.rawValue {
+                XCTAssertNotEqual(pictures[a]!, pictures[b]!, "\(a) and \(b) draw the same picture")
+            }
+        }
+    }
+
     /// The point enums' raw values are the header's CADACLYSM_VIEW_POINT_* numbers (no GPU).
     func testThePointEnumsAreTheHeaders() {
         XCTAssertEqual(PointShape.allCases.map(\.rawValue),
@@ -1754,7 +1955,10 @@ final class ViewTests: XCTestCase {
         rigSnap(t)
 
         try view.setSnap()
-        XCTAssertEqual([spySnapSettings.size, spySnapSettings.kinds, spySnapSettings.marker], [16, 0xFF, 1], "every kind")
+        XCTAssertEqual([spySnapSettings.size, spySnapSettings.kinds, spySnapSettings.marker], [16, UInt32(CADACLYSM_VIEW_SNAP_DEFAULT), 1],
+                       "the default kinds")
+        try view.setSnap(Set(SnapKind.allCases))
+        XCTAssertEqual(spySnapSettings.kinds, UInt32(CADACLYSM_VIEW_SNAP_ALL), "every kind")
         XCTAssertEqual(spySnapSettings.aperture_px, 0)
         try view.setSnap([.vertex, .edge], aperturePx: 6, marker: false)
         XCTAssertEqual([spySnapSettings.kinds, spySnapSettings.marker], [0b1_0001, 0])
@@ -1775,7 +1979,8 @@ final class ViewTests: XCTestCase {
         spySnap.distance_px = 2.5
         let vertex = try view.snap(x: 10, y: 20, viewport: 1)
         XCTAssertEqual(vertex, ViewSnap(kind: .vertex, point: SIMD3(-1, 1, 0), item: 3, node: 4, face: 5, edge: 2,
-                                        tangent: SIMD3(1, 0, 0), axis: SIMD3(0, 0, 0), radius: 0, distancePx: 2.5, clicks: 0))
+                                        tangent: SIMD3(1, 0, 0), axis: SIMD3(0, 0, 0), radius: 0, distancePx: 2.5, clicks: 0,
+                                        label: "", lockedAngle: nil, guides: []))
         XCTAssertEqual(spySnapCalls, ["snap 1 10 20"])
         spySnap = CadaclysmViewSnap()
         spySnap.kind = UInt32(CADACLYSM_VIEW_SNAP_CENTRE)
@@ -2293,11 +2498,19 @@ final class ViewTests: XCTestCase {
 
     // ---- view ABI 1.26: input events
 
-    /// CadaclysmViewInputEvent is the header's 272 bytes with no implicit padding; the kinds,
-    /// modifier bits and pointer kinds are the header's numbers, written out here.
+    /// CadaclysmViewInputEvent is the header's 424 bytes (1.30) with no implicit padding, its
+    /// snap the frozen 88-byte one so `camera` stays at 224; the kinds, modifier bits and pointer
+    /// kinds are the header's numbers, written out here.
     func testTheInputEventIsTheHeaders126Layout() {
         typealias E = CadaclysmViewInputEvent
-        XCTAssertEqual(MemoryLayout<E>.size, 272)
+        XCTAssertEqual(MemoryLayout<E>.size, 424)
+        let tail: [Int?] = [
+            MemoryLayout<E>.offset(of: \E.pick_segment), MemoryLayout<E>.offset(of: \E.pick_distance_px),
+            MemoryLayout<E>.offset(of: \E.snap_label), MemoryLayout<E>.offset(of: \E.snap_locked),
+            MemoryLayout<E>.offset(of: \E.snap_locked_angle), MemoryLayout<E>.offset(of: \E.snap_guide_count),
+            MemoryLayout<E>.offset(of: \E.pad1), MemoryLayout<E>.offset(of: \E.snap_guides),
+        ]
+        XCTAssertEqual(tail, [272, 276, 280, 312, 316, 320, 324, 328])
         let offsets: [Int?] = [
             MemoryLayout<E>.offset(of: \E.size), MemoryLayout<E>.offset(of: \E.kind), MemoryLayout<E>.offset(of: \E.time_ms),
             MemoryLayout<E>.offset(of: \E.x), MemoryLayout<E>.offset(of: \E.y), MemoryLayout<E>.offset(of: \E.wheel_y),
@@ -2363,7 +2576,8 @@ final class ViewTests: XCTestCase {
         guard case .resize(let width, let height) = got[5].kind else { return XCTFail("resize: \(got[5].kind)") }
         XCTAssertEqual([width, height], [640, 480])
         guard case .pick(let hit) = got[6].kind else { return XCTFail("pick: \(got[6].kind)") }
-        XCTAssertEqual(hit, ViewPick(item: 3, node: 1, face: 2, clicks: 2, point: SIMD3(1, 2, 3), overlay: false))
+        XCTAssertEqual(hit, ViewPick(item: 3, node: 1, face: 2, clicks: 2, point: SIMD3(1, 2, 3), overlay: false,
+                                     viewportLabel: nil, segment: nil, distancePx: 0))
         guard case .pick(let miss) = got[7].kind else { return XCTFail("pick: \(got[7].kind)") }
         XCTAssertNil(miss, "a click on nothing")
         guard case .snap(let snap) = got[8].kind else { return XCTFail("snap: \(got[8].kind)") }
@@ -2378,7 +2592,7 @@ final class ViewTests: XCTestCase {
         guard case .other(let unknown) = got[11].kind else { return XCTFail("other: \(got[11].kind)") }
         XCTAssertEqual(unknown, 99, "a later kind is kept, not dropped")
         XCTAssertNil(try view.nextEvent())
-        XCTAssertTrue(spyEventSizes.allSatisfy { $0 == 272 }, "the 1.26 struct's size: \(spyEventSizes)")
+        XCTAssertTrue(spyEventSizes.allSatisfy { $0 == 424 }, "the 1.30 struct's size: \(spyEventSizes)")
 
         t.pointee.next_event = { _, _ in
             spySaid = cstr("cadaclysm_view_next_event: CadaclysmViewInputEvent.size is 8; this library needs at least 272")
@@ -2751,5 +2965,294 @@ final class ViewTests: XCTestCase {
         try view.draw()
         XCTAssertTrue(try view.events().allSatisfy { if case .timeline = $0.kind { return false } else { return true } },
                       "the clock still: none")
+    }
+
+    // ---- view ABI 1.30: picking and snapping
+
+    /// Through the table rigged: the new kinds' bits and the hit kinds are the header's
+    /// numbers on the wire; pickRect asks with 64, then again with the total; "none" crosses as
+    /// its C value (a NULL base, a NULL label, NULL points); a NUL label and a short base are
+    /// refused, as ViewErrors, before the call; a guide count past 2 reads 2 guides; the event's
+    /// tail carries the pick's segment and the snap's label, lock and guides.
+    func testPickingAndSnappingRigged() throws {
+        let view = try offscreen(32, 32)
+        defer { try? view.close() }
+        let t = view.library.table
+        let saved = t.pointee
+        defer { t.pointee = saved; spySaid = nil; spyP3 = []; spyRectHits = []; spyEvents = []; spyEventSizes = []; spySegmentsIn = [] }
+        rigSnap(t)
+        rigEvents(t)
+        rigP3(t)
+
+        // The snap kinds and the hit kinds, against the header's constants.
+        XCTAssertEqual([SnapKind.end, .intersection, .point, .alignment].map(\.rawValue),
+                       [CADACLYSM_VIEW_SNAP_END, CADACLYSM_VIEW_SNAP_INTERSECTION, CADACLYSM_VIEW_SNAP_POINT,
+                        CADACLYSM_VIEW_SNAP_ALIGNMENT].map { UInt32($0) })
+        XCTAssertEqual(HitKind.face.rawValue, UInt32(CADACLYSM_VIEW_HIT_FACE))
+        XCTAssertEqual(HitKind.node.rawValue, UInt32(CADACLYSM_VIEW_HIT_NODE))
+        XCTAssertEqual(HitKind.segment.rawValue, UInt32(CADACLYSM_VIEW_HIT_SEGMENT))
+        XCTAssertEqual(HitKind.edge.rawValue, UInt32(CADACLYSM_VIEW_HIT_EDGE))
+        XCTAssertEqual(HitKind.point.rawValue, UInt32(CADACLYSM_VIEW_HIT_POINT))
+        XCTAssertEqual(MemoryLayout<CadaclysmViewRectHit>.size, 12)
+        try view.setSnap([.end, .alignment])
+        XCTAssertEqual(spySnapSettings.kinds, UInt32(CADACLYSM_VIEW_SNAP_END) | UInt32(CADACLYSM_VIEW_SNAP_ALIGNMENT))
+        try view.setSnap(SnapKind.defaultKinds)
+        XCTAssertEqual(spySnapSettings.kinds, UInt32(CADACLYSM_VIEW_SNAP_DEFAULT))
+
+        // The count rule, and each header kind decoded.
+        let kinds = [CADACLYSM_VIEW_HIT_FACE, CADACLYSM_VIEW_HIT_NODE, CADACLYSM_VIEW_HIT_SEGMENT, CADACLYSM_VIEW_HIT_EDGE,
+                     CADACLYSM_VIEW_HIT_POINT].map { UInt32($0) }
+        spyRectHits = (0..<70).map { i in CadaclysmViewRectHit(item: 2, kind: kinds[i % 5], index: UInt32(i)) }
+        let hits = try view.pickRect(x: 1, y: 2, w: -3, h: 4)
+        XCTAssertEqual(hits.count, 70, "never a cut list")
+        XCTAssertEqual(hits.prefix(5).map(\.kind), [.face, .node, .segment, .edge, .point])
+        XCTAssertEqual(hits[69], RectHit(item: 2, kind: .point, index: 69))
+        XCTAssertEqual(spyP3, ["rect 0 1.0 2.0 -3.0 4.0 true cap=64", "rect 0 1.0 2.0 -3.0 4.0 true cap=70"])
+        spyP3 = []
+        spyRectHits = [CadaclysmViewRectHit(item: 5, kind: kinds[0], index: 2)]
+        XCTAssertEqual(try view.pickRect(x: 0, y: 0, w: 1, h: 1, crossing: false, viewport: 2), [RectHit(item: 5, kind: .face, index: 2)])
+        XCTAssertEqual(spyP3, ["rect 2 0.0 0.0 1.0 1.0 false cap=64"], "one call when the first buffer holds them")
+        spyRectHits = []
+        XCTAssertEqual(try view.pickRect(x: 0, y: 0, w: 1, h: 1), [], "0 with no error: nothing there")
+        spySaid = cstr("cadaclysm_view_pick_rect: the rectangle is not finite")
+        XCTAssertTrue(refused { _ = try view.pickRect(x: .nan, y: 0, w: 1, h: 1) }.hasSuffix("the rectangle is not finite"))
+        spySaid = nil
+
+        // None crosses as its C value; refusals come before the call, as ViewErrors.
+        let line = try view.showLines([0, 0, 0, 1, 0, 0])
+        spyP3 = []
+        try view.setSnapBase(nil)
+        try view.setSnapBase([1, 2, 3], stepDeg: 45)
+        try line.setSnapPoints([2, 0, 0])
+        try line.setSnapPoints([0.5, 0.5, 0.01], label: "hole")
+        try line.setSnapPoints([])
+        try view.setPickAperture(6.5)
+        XCTAssertEqual(spyP3, ["base nil 15.0", "base 1.0 2.0 3.0 45.0", "points 1 [2.0, 0.0, 0.0] nil", "points 1 [0.5, 0.5, 0.01] hole",
+                               "points 0 nil nil", "aperture 6.5"])
+        spyP3 = []
+        XCTAssertTrue(refused { try line.setSnapPoints([0, 0, 0], label: "a\0b") }.contains("a NUL character cannot be shown"))
+        XCTAssertTrue(refused { try view.setSnapBase([1, 2]) }.contains("3 numbers"))
+        XCTAssertTrue(refused { try line.setSnapPoints([0, 0]) }.contains("three numbers a point"))
+        XCTAssertEqual(spyP3, [], "refused before the library is called")
+
+        // A pick's segment: UINT32_MAX is none; a buffer starts there.
+        rig17(t)
+        spyPicked = noPick()
+        spyPicked.item = 3
+        XCTAssertNil(try XCTUnwrap(try view.pick(x: 1, y: 1)).segment, "UINT32_MAX: no segment")
+        spyPicked.segment = 2
+        spyPicked.distance_px = 1.5
+        let wire = try XCTUnwrap(try view.pick(x: 1, y: 1))
+        XCTAssertEqual(wire, ViewPick(item: 3, node: 0, face: 0, clicks: 0, point: nil, overlay: false, viewportLabel: nil,
+                                      segment: 2, distancePx: 1.5))
+        XCTAssertEqual(try view.lastPick().pick?.segment, 2, "lastPick")
+        spyPicked = noPick()
+        rigEvents(t)
+
+        // The guide cap, from a hand-filled answer.
+        var raw = CadaclysmViewSnap()
+        raw.kind = UInt32(CADACLYSM_VIEW_SNAP_PLANE)
+        withUnsafeMutableBytes(of: &raw.label) { b in for (i, c) in "plane".utf8.enumerated() { b[i] = c } }
+        raw.locked = 1
+        raw.locked_angle = 45
+        raw.guide_count = 3
+        raw.guides = (0, 0, 0, 1, 1, 0, 5, 0, 0, 1, 1, 0)
+        let capped = try XCTUnwrap(snapOf(raw))
+        XCTAssertEqual(capped.label, "plane")
+        XCTAssertEqual(capped.lockedAngle, 45)
+        XCTAssertEqual(capped.guides.count, 2, "a guide count of 3 reads 2 guides")
+        XCTAssertEqual(capped.guides.map(\.from), [[0, 0, 0], [5, 0, 0]])
+        XCTAssertEqual(capped.guides.map(\.to), [[1, 1, 0], [1, 1, 0]])
+        raw.locked = 0
+        XCTAssertNil(try XCTUnwrap(snapOf(raw)).lockedAngle, "locked 0: no angle")
+
+        // == is synthesized and sees every 1.30 field: a snap differing only in its label, its
+        // angle or one guide's end is another snap.
+        raw.locked = 1
+        let same = try XCTUnwrap(snapOf(raw))
+        XCTAssertEqual(same, capped)
+        let base = capped
+        func with(label: String? = nil, angle: Float?? = nil, guides: [SnapGuide]? = nil) -> ViewSnap {
+            ViewSnap(kind: base.kind, point: base.point, item: base.item, node: base.node, face: base.face, edge: base.edge,
+                     tangent: base.tangent, axis: base.axis, radius: base.radius, distancePx: base.distancePx, clicks: base.clicks,
+                     label: label ?? base.label, lockedAngle: angle ?? base.lockedAngle, guides: guides ?? base.guides)
+        }
+        XCTAssertEqual(with(), base)
+        XCTAssertNotEqual(with(label: "hole"), base, "the label takes part")
+        XCTAssertNotEqual(with(angle: .some(nil)), base, "the angle takes part")
+        XCTAssertNotEqual(with(guides: [base.guides[0], SnapGuide(from: [5, 0, 0], to: [1, 1, 9])]), base, "a guide's end takes part")
+        XCTAssertNotEqual(with(guides: [base.guides[0]]), base, "the guide count takes part")
+
+        // A library that leaves the pick's 1.30 tail as the caller filled it (as a 1.29 one
+        // does): every pick buffer starts at segment UINT32_MAX, so it reads as none.
+        t.pointee.pick_result = { _, out in
+            spySegmentsIn.append(out!.pointee.segment)
+            out!.pointee.item = 3
+            out!.pointee.clicks = 1
+            return true
+        }
+        spySegmentsIn = []
+        XCTAssertNil(try XCTUnwrap(try view.pick(x: 1, y: 1)).segment, "pick: an untouched tail is no segment")
+        let untouched = try view.lastPick()
+        XCTAssertTrue(untouched.landed)
+        XCTAssertNil(try XCTUnwrap(untouched.pick).segment, "lastPick: an untouched tail is no segment")
+        XCTAssertEqual(spySegmentsIn, [UInt32.max, UInt32.max], "each buffer handed over held UINT32_MAX")
+
+        // The event's tail.
+        spyEvents = [
+            rawEvent(8) { $0.pick.item = 7; $0.pick_segment = 0; $0.pick_distance_px = 2.5 },
+            rawEvent(8) { $0.pick.item = 7 },
+            rawEvent(9) {
+                $0.snap.kind = UInt32(CADACLYSM_VIEW_SNAP_POINT)
+                withUnsafeMutableBytes(of: &$0.snap_label) { b in for (i, c) in "hole".utf8.enumerated() { b[i] = c } }
+                $0.snap_locked = 1
+                $0.snap_locked_angle = 90
+                $0.snap_guide_count = 3
+            },
+        ]
+        let got = try view.events()
+        XCTAssertEqual(got.count, 3)
+        guard got.count == 3 else { return }
+        guard case .pick(let a) = got[0].kind, case .pick(let b) = got[1].kind, case .snap(let s) = got[2].kind else {
+            return XCTFail("\(got.map(\.kind))")
+        }
+        XCTAssertEqual(a?.segment, 0)
+        XCTAssertEqual(a?.distancePx, 2.5)
+        XCTAssertNil(b?.segment, "an untouched tail: no segment")
+        XCTAssertEqual(s?.label, "hole")
+        XCTAssertEqual(s?.lockedAngle, 90)
+        XCTAssertEqual(s?.guides.count, 2)
+        spyEvents = []
+        _ = try view.nextEvent()
+        XCTAssertEqual(spyEventSizes.last, 424)
+        XCTAssertEqual(spyEventSegmentsIn.last, UInt32.max, "nextEvent's buffer starts with no segment")
+    }
+
+    /// The P3 scene on the real library, by the house pixel recipe: a 96 x 96 view of its own,
+    /// the square as a mesh, a line along y = 0 a little above it with a snap point on it, the
+    /// top view framed, then sweeps -- never a fixed pixel.
+    func testPickingAndSnapping() throws {
+        XCTAssertEqual(MemoryLayout<CadaclysmViewPick>.size, 52)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewSnap>.size, 232)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewEventSnap>.size, 88)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewInputEvent>.size, 424)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewInputEvent>.offset(of: \CadaclysmViewInputEvent.camera), 224)
+        XCTAssertEqual(MemoryLayout<CadaclysmViewRectHit>.size, 12)
+        XCTAssertEqual(SnapKind.end.rawValue, UInt32(CADACLYSM_VIEW_SNAP_END))
+        XCTAssertEqual(SnapKind.intersection.rawValue, UInt32(CADACLYSM_VIEW_SNAP_INTERSECTION))
+        XCTAssertEqual(SnapKind.point.rawValue, UInt32(CADACLYSM_VIEW_SNAP_POINT))
+        XCTAssertEqual(SnapKind.alignment.rawValue, UInt32(CADACLYSM_VIEW_SNAP_ALIGNMENT))
+        XCTAssertEqual(HitKind.edge.rawValue, UInt32(CADACLYSM_VIEW_HIT_EDGE))
+        XCTAssertEqual(HitKind.segment.rawValue, UInt32(CADACLYSM_VIEW_HIT_SEGMENT))
+
+        cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", "1")
+        let made: View
+        do {
+            defer { cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", nil) }
+            made = try offscreen(96, 96)
+        }
+        let view = made
+        defer { try? view.close() }
+        try view.setLayer(UInt32(CADACLYSM_VIEW_LAYER_GRID), false)
+        let square = try view.showMesh(positions: [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], indices: [0, 1, 2, 0, 2, 3],
+                                       rgb: SIMD3<Float>(1, 0, 0))
+        let line = try view.showLines([-0.8, 0, 0.01, 0.8, 0, 0.01], rgb: SIMD3<Float>(1, 1, 1))
+        try line.setSnapPoints([0.5, 0.5, 0.01], label: "hole")
+        try view.standard("top")
+        try view.frame()
+        try view.setPickAperture(0)
+        XCTAssertTrue(refused { try view.setPickAperture(-1) }.contains("is not a finite size of 0 or more points"))
+
+        // The pick sweep: column 48, rows 36..59.
+        var picks: [(UInt32, ViewPick?)] = []
+        for y in UInt32(36)..<60 { picks.append((y, try view.pick(x: 48, y: y))) }
+        XCTAssertTrue(picks.contains { $0.1?.item == line.id && $0.1?.segment == 0 && ($0.1?.distancePx ?? 99) <= 4 },
+                      "a wire pick's segment: \(picks)")
+        XCTAssertTrue(picks.contains { $0.1?.item == square.id && $0.1?.segment == nil && $0.1?.distancePx == 0 },
+                      "a face pick has no segment: \(picks)")
+        let yLine = try XCTUnwrap(picks.first { $0.1?.item == line.id }).0
+
+        // The event path: a click on the line queues a pick event with its segment; lastPick has the same answer.
+        _ = try view.events()
+        let down = UInt32(CADACLYSM_VIEW_EVENT_DOWN), up = UInt32(CADACLYSM_VIEW_EVENT_UP)
+        _ = try view.input(kind: down, x: 48, y: Float(yLine), timeMS: 30000)
+        _ = try view.input(kind: up, x: 48, y: Float(yLine), timeMS: 30010)
+        var clicked: ViewPick?
+        for _ in 0..<200 where clicked == nil {
+            try view.draw()
+            for e in try view.events() { if case .pick(let p) = e.kind, let p { clicked = p } }
+        }
+        XCTAssertEqual(clicked?.item, line.id)
+        XCTAssertEqual(clicked?.segment, 0, "a pick event's segment")
+        let landed = try view.lastPick().pick
+        XCTAssertEqual(landed?.item, line.id)
+        XCTAssertEqual(landed?.segment, 0, "lastPick's segment")
+
+        // pickRect over the whole view, with 80 short lines: more hits than its first buffer.
+        var many: [Float] = []
+        for i in 0..<80 {
+            let x = -0.9 + 1.8 * Float(i) / 79
+            many.append(contentsOf: [x, -0.6, 0.01, x, -0.5, 0.01])
+        }
+        let lines80 = try view.showLines(many, rgb: SIMD3<Float>(0, 1, 0))
+        let hits = try view.pickRect(x: 0, y: 0, w: 96, h: 96)
+        XCTAssertTrue(hits.contains(RectHit(item: line.id, kind: .segment, index: 0)), "pickRect finds the line: \(hits)")
+        XCTAssertTrue(hits.contains(RectHit(item: square.id, kind: .node, index: 0)), "pickRect finds the square as a node: \(hits)")
+        XCTAssertEqual(hits.filter { $0.item == lines80.id }.count, 80, "pickRect past the first buffer")
+        XCTAssertTrue(refused { _ = try view.pickRect(x: 0, y: 0, w: .nan, h: 10) }.contains("cadaclysm_view_pick_rect"))
+        XCTAssertLessThanOrEqual(try view.pickRect(x: 0, y: 0, w: 96, h: 96, crossing: false).count, hits.count)
+        try lines80.remove()
+
+        // A labelled snap point, by the default kinds: rows 0..47, columns 48..95, step 2.
+        try view.setSnap()
+        var found: (ViewSnap, UInt32, UInt32)?
+        search: for y in stride(from: UInt32(0), to: 48, by: 2) {
+            for x in stride(from: UInt32(48), to: 96, by: 2) {
+                if let s = try view.snap(x: x, y: y), s.kind == .point {
+                    found = (s, x, y)
+                    break search
+                }
+            }
+        }
+        let (point, px, py) = try XCTUnwrap(found, "a snap in the top right quarter lands on the snap point")
+        XCTAssertEqual(point.label, "hole")
+        XCTAssertNil(point.lockedAngle)
+        XCTAssertEqual(point.guides.count, 0)
+
+        // The event path: a hover over the point queues a snap event with its label; lastSnap has the same answer.
+        _ = try view.events()
+        _ = try view.lastSnap()
+        _ = try view.input(kind: UInt32(CADACLYSM_VIEW_EVENT_MOVE), x: Float(px), y: Float(py), timeMS: 40000)
+        var hovered: ViewSnap?
+        for _ in 0..<200 where hovered == nil {
+            try view.draw()
+            for e in try view.events() { if case .snap(let s) = e.kind, let s, s.kind == .point { hovered = s } }
+        }
+        XCTAssertEqual(hovered?.label, "hole", "a snap event's label")
+        XCTAssertEqual(try view.lastSnap().snap?.label, "hole", "lastSnap's label")
+        try line.setSnapPoints([])
+        XCTAssertNotEqual(try view.snap(x: px, y: py)?.kind, .point, "the cleared points no longer snap")
+        XCTAssertTrue(refused { try line.setSnapPoints([0, 0, 0], label: String(repeating: "x", count: 32)) }.contains("at most 31"))
+
+        // The lock: face snaps turn onto 45-degree steps about the origin, the lock's ray their guide.
+        try view.setSnapBase([0, 0, 0], stepDeg: 45)
+        try view.setSnap([.face, .plane])
+        func sweep() throws -> [ViewSnap] {
+            var out: [ViewSnap] = []
+            for y in stride(from: UInt32(8), to: 40, by: 8) {
+                for x in stride(from: UInt32(56), to: 88, by: 8) { if let s = try view.snap(x: x, y: y) { out.append(s) } }
+            }
+            return out
+        }
+        let locked = try sweep()
+        XCTAssertFalse(locked.isEmpty)
+        XCTAssertTrue(locked.allSatisfy { $0.kind == .plane && $0.lockedAngle.map { $0.truncatingRemainder(dividingBy: 45) == 0 } == true && $0.guides.count == 1 },
+                      "the lock turns face snaps onto 45-degree steps: \(locked.map { ($0.kind, $0.lockedAngle) })")
+        // Clearing passes a NULL point: the same sweep is no longer locked (a zeroed point would lock about the origin).
+        try view.setSnapBase(nil)
+        let unlocked = try sweep()
+        XCTAssertFalse(unlocked.isEmpty, "the cleared sweep snaps")
+        XCTAssertEqual(unlocked.filter { $0.lockedAngle != nil || !$0.guides.isEmpty }.count, 0, "the cleared lock turns nothing")
+        try view.setSnap(nil)
     }
 }

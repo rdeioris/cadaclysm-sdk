@@ -479,6 +479,7 @@ type openConfig struct {
 	colours             bool
 	sourceMetresPerUnit float64
 	lightmapResolution  uint32
+	recognizeTolerance  float64
 }
 
 // WithLightmapResolution asks for a lightmap atlas that many texels on a side: one chart per
@@ -487,8 +488,16 @@ func WithLightmapResolution(texels uint32) Option {
 	return func(cfg *openConfig) { cfg.lightmapResolution = texels }
 }
 
+// WithRecognizeTolerance recognizes every B-rep body the scene hands out (Node.Brep) at
+// this tolerance, as Brep.Recognize would: NURBS planes, cylinders, cones, spheres and tori,
+// and line, circle and ellipse edge curves, come back exact. 0 (the default) is off; 1e-6
+// is the usual ask. Meshes are unchanged. A negative, NaN or infinite tolerance makes Open fail.
+func WithRecognizeTolerance(tolerance float64) Option {
+	return func(cfg *openConfig) { cfg.recognizeTolerance = tolerance }
+}
+
 // WithFormat names the kind of the bytes OpenMemory is given, as an extension would —
-// "step", "ifc", "igs", "brep", "3dm", "scad" — Python's own `format` argument. A leading
+// "step", "ifc", "igs", "brep", "3dm", "scad", "3mf", "ply" — Python's own `format` argument. A leading
 // dot is allowed and ignored. Without it OpenMemory takes the extension of the name it is
 // given. Open ignores it: a file on disk names its own kind.
 func WithFormat(format string) Option { return func(cfg *openConfig) { cfg.format = format } }
@@ -530,6 +539,7 @@ func buildOptions(cfg openConfig) C.CadaclysmOpenOptions {
 	}
 	opts.source_meters_per_unit = C.double(cfg.sourceMetresPerUnit)
 	opts.lightmap_resolution = C.uint32_t(cfg.lightmapResolution)
+	opts.recognize_tolerance = C.double(cfg.recognizeTolerance)
 	return opts
 }
 
@@ -3652,6 +3662,80 @@ func (n *Node) Colour() ([4]float32, bool) {
 	return out, true
 }
 
+// Material is a glTF PBR metallic-roughness material, plain data copied out of the scene
+// (Node.Material). BaseColor is the base colour factor, RGBA, in linear light. AlphaMode is
+// "opaque", "mask" or "blend"; AlphaCutoff matters under "mask" only. BaseColorImage is the
+// image the base colour texture reads (Scene.Image), or nil for an untextured material;
+// BaseColorUvSet picks the texture coordinates it reads (0 the mesh's UVs, 1 its lightmap
+// UVs) through KHR_texture_transform: uv' = UvOffset + R(UvRotation) * (UvScale * uv).
+// WrapU/WrapV are "repeat", "mirrored_repeat" or "clamp_to_edge"; MagFilter/MinFilter
+// "linear" or "nearest".
+type Material struct {
+	Name           string
+	BaseColor      [4]float32
+	Metallic       float32
+	Roughness      float32
+	AlphaMode      string
+	AlphaCutoff    float32
+	DoubleSided    bool
+	BaseColorImage *uint32
+	BaseColorUvSet uint32
+	UvOffset       [2]float32
+	UvRotation     float32
+	UvScale        [2]float32
+	WrapU          string
+	WrapV          string
+	MagFilter      string
+	MinFilter      string
+}
+
+var (
+	alphaModeWords = [...]string{"opaque", "mask", "blend"}
+	wrapWords      = [...]string{"repeat", "mirrored_repeat", "clamp_to_edge"}
+	filterWords    = [...]string{"linear", "nearest"}
+)
+
+// materialWord is words[code], or the code itself in decimal past the words this wrapper knows.
+func materialWord(words []string, code C.uint32_t) string {
+	if int(code) < len(words) {
+		return words[code]
+	}
+	return fmt.Sprint(uint32(code))
+}
+
+// Material is this node's PBR material (its own, else its shape's), or nil -- every part not
+// read from a glTF has none.
+func (n *Node) Material() *Material {
+	var raw C.CadaclysmMaterial
+	if !bool(C.cadaclysm_node_material(n.scene.h(), C.uint32_t(n.index), &raw)) {
+		return nil
+	}
+	m := &Material{
+		Name:           C.GoString(raw.name),
+		Metallic:       float32(raw.metallic),
+		Roughness:      float32(raw.roughness),
+		AlphaMode:      materialWord(alphaModeWords[:], raw.alpha_mode),
+		AlphaCutoff:    float32(raw.alpha_cutoff),
+		DoubleSided:    bool(raw.double_sided),
+		BaseColorUvSet: uint32(raw.base_color_uv_set),
+		UvOffset:       [2]float32{float32(raw.uv_offset[0]), float32(raw.uv_offset[1])},
+		UvRotation:     float32(raw.uv_rotation),
+		UvScale:        [2]float32{float32(raw.uv_scale[0]), float32(raw.uv_scale[1])},
+		WrapU:          materialWord(wrapWords[:], raw.wrap_u),
+		WrapV:          materialWord(wrapWords[:], raw.wrap_v),
+		MagFilter:      materialWord(filterWords[:], raw.mag_filter),
+		MinFilter:      materialWord(filterWords[:], raw.min_filter),
+	}
+	for i := range m.BaseColor {
+		m.BaseColor[i] = float32(raw.base_color[i])
+	}
+	if uint32(raw.base_color_image) != noneIndex {
+		image := uint32(raw.base_color_image)
+		m.BaseColorImage = &image
+	}
+	return m
+}
+
 // RawTransform is where this node's geometry sits, sixteen doubles in the ABI's own
 // column-major order — the order OpenGL and every engine write. Doubles, while the mesh
 // is floats, on purpose: a building at UTM coordinates baked into f32 world positions
@@ -4367,6 +4451,32 @@ func (s *Scene) Diagnostics() []string {
 	return out
 }
 
+// Image is one image a glTF material names, encoded as the file held it, copied out of the
+// scene: Data the PNG, JPEG, WebP or KTX2 bytes, Mime "image/png", "image/jpeg", "image/webp" or "image/ktx2" (for an image this
+// library does not read, what the file declared, and Data empty where it could not be read
+// at all), Name the file's name for it (empty where unnamed).
+type Image struct {
+	Data []byte
+	Mime string
+	Name string
+}
+
+// ImageCount is how many images the scene's materials name: valid indices for Image.
+func (s *Scene) ImageCount() uint32 { return uint32(C.cadaclysm_image_count(s.h())) }
+
+// Image is image i (Material.BaseColorImage names one); a CadaclysmError past the last.
+func (s *Scene) Image(i uint32) (*Image, error) {
+	var raw C.CadaclysmImage
+	if !bool(C.cadaclysm_image(s.h(), C.uint32_t(i), &raw)) {
+		return nil, &CadaclysmError{Message: fmt.Sprintf("image %d is past the last of %d", i, s.ImageCount())}
+	}
+	out := &Image{Mime: C.GoString(raw.mime), Name: C.GoString(raw.name), Data: []byte{}}
+	if raw.size > 0 && raw.bytes != nil {
+		out.Data = C.GoBytes(unsafe.Pointer(raw.bytes), C.int(raw.size))
+	}
+	return out, nil
+}
+
 // GeometryDiagnostics is what the reader built but the geometry stage could not
 // finish: a face that would not trim, a surface that would not mesh. Diagnostics is
 // what the file held that could not be read; this is what the geometry did.
@@ -4525,8 +4635,9 @@ func (s *Scene) ForgetMeshes() {
 	s.forgets++
 }
 
-// Save writes the whole scene to path: "glb" (binary glTF), "gltf" (text glTF) or "obj"
-// (Wavefront). Every placement of every shape, named and placed as the tree is, with a
+// Save writes the whole scene to path: "glb" (binary glTF), "gltf" (text glTF), "obj"
+// (Wavefront), "usda" (OpenUSD), "3mf" (3MF, every placement a build item), "ply" (binary)
+// or "ply-ascii" (PLY, every placement baked into one body). Every placement of every shape, named and placed as the tree is, with a
 // material per colour — where Node.SaveMesh writes one node's mesh on its own. Python's
 // default format is "glb"; this package has no defaults, so format is always given.
 func (s *Scene) Save(path, format string) error {

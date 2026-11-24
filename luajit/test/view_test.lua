@@ -430,6 +430,17 @@ return function(t)
   -- 1.10: a viewport given an ortho top camera reads back as one, a viewport-0 orbit pans it,
   -- camera() round-trips through set_camera(), the rects must match the count, a negative tap
   -- is refused.
+  t.test("1.33: textures default on, and read back off once set off", function()
+    local v = offscreen(32, 32)
+    if not v then return end
+    t.eq(v:textures(), true)
+    v:set_textures(false)
+    t.eq(v:textures(), false)
+    v:set_textures(true)
+    t.eq(v:textures(), true)
+    v:close()
+  end)
+
   t.test("1.10: a viewport's camera is set, read back, moved, aimed and pivoted", function()
     local v = offscreen(64, 48)
     if not v then return end
@@ -870,7 +881,7 @@ return function(t)
   t.test("1.28's drafting styles on the real library: dashes, point styles and states, marks, on top", function()
     local v = offscreen(64, 48)
     if not v then return end
-    t.ok(ffi.sizeof("CadaclysmViewPick") == 44 and ffi.sizeof("CadaclysmViewEventPick") == 40, "the 1.28 pick and the event's")
+    t.ok(ffi.sizeof("CadaclysmViewPick") == 52 and ffi.sizeof("CadaclysmViewEventPick") == 40, "the 1.30 pick and the event's")
     local line = v:show_lines({ -1, 0, 0, 1, 0, 0 })
     line:set_line_style(6, 4)
     line:set_line_style()
@@ -897,6 +908,98 @@ return function(t)
     v:set_viewport_label(0, nil)
     v:set_viewport_border(0, nil)
     t.raises(function() v:set_viewport_border(3, { 1, 0, 0 }) end)
+    v:close()
+  end)
+
+  t.test("1.29's live geometry and glyphs on the real library: set_lines, set_curves, set_points, set_mesh_positions, show_glyphs", function()
+    local v = offscreen(96, 96)
+    if not v then return end
+    local line = v:show_lines({ -1, 0, 0, 1, 0, 0 }, "#ff0000")
+    line:set_lines({ -1, 1, 0, 1, 1, 0, -1, -1, 0, 1, -1, 0 })
+    t.raises(function() line:set_lines({ 1, 2, 3, 4, 5 }) end, "set_lines takes 6 numbers each, not 5")
+    local pts = v:show_points({ 0, 0, 0, 1, 0, 0 }, nil, 9)
+    pts:set_points({ 0, 1, 0, 1, 1, 0 })
+    pts:set_point_states({ "selected", "normal" })
+    pts:set_points({ 0, 0, 0 })   -- a new count keeps the states by index (D4)
+    pts:set_point_states({ "selected" })
+    t.raises(function() pts:set_points({ 1, 2 }) end, "set_points takes 3 numbers each, not 2")
+    local bez = { -1, 0, 0, 1, -0.3, 0, 0, 1, 0.3, 0, 0, 1, 1, 0, 0, 1 }
+    local curves = v:show_curves(bez)
+    curves:set_curves(bez)
+    for i = 1, 16 do bez[#bez + 1] = bez[i] end
+    curves:set_curves(bez)
+    t.raises(function() curves:set_curves({ 1, 2, 3 }) end, "set_curves takes 16 numbers each, not 3")
+    local mesh = v:show_mesh({ positions = { -1, -1, 0, 1, -1, 0, 0, 1, 0 }, indices = { 0, 1, 2 } })
+    mesh:set_mesh_positions({ -1, -1, 1, 1, -1, 1, 0, 1, 1 })
+    mesh:set_mesh_positions({ -1, -1, 1, 1, -1, 1, 0, 1, 1 }, { 0, 0, 1, 0, 0, 1, 0, 0, 1 })
+    t.raises(function() mesh:set_mesh_positions({ 0, 0, 0, 1, 0, 0 }) end, "positions has 2 vertices")
+    t.raises(function() mesh:set_mesh_positions({ 0, 0, 0, 1, 0, 0, 0, 1, 0 }, { 0, 0, 1 }) end, "3 positions but 1 normals")
+    local gv = offscreen(96, 96)
+    local crosses = gv:show_glyphs({ -1, 0, 0, 1, 0, 0 }, "cross", 16, "#ff0000", { 1, 0, 0, 0, 1, 0 })
+    gv:frame()
+    local hit
+    for x = 8, 87, 3 do
+      for y = 42, 53, 2 do
+        local p = not hit and gv:pick(x, y) or nil
+        if p and p.item == crosses.id and p.node == 1 then hit = p end
+      end
+    end
+    t.ok(hit ~= nil, "a glyph picks as its node 1")
+    gv:close()
+    local arrow = v:show_glyphs({ 0, 0, 0 }, "arrow")
+    t.ok(arrow.id ~= 0, "an arrow with no dir")
+    t.raises(function() v:show_glyphs({ 0, 0, 0 }, "star") end, "show glyphs: 'star' is not a glyph kind")
+    t.raises(function() v:show_glyphs({ 0, 0, 0 }, "arrow", 12, nil, { 0, 0, 0, 1, 0, 0 }) end, "1 points but 2 directions")
+    t.raises(function() v:show_glyphs({ 0, 0, 0 }, "arrow", 12, "notacolour") end)
+    v:close()
+  end)
+
+  t.test("the glyph kinds are the header's numbers, by name and on the wire; a missing dir and colour reach the library as NULL", function()
+    local path = t.fixture("crates/cadaclysm-view-capi/include/cadaclysm_view.h")
+    local state = {}
+    local lib = colour_fake(state)
+    local sent = {}
+    lib.C.cadaclysm_view_show_glyphs = function(_, at, dir, n, kind, size, rgb)
+      sent = { n = tonumber(n), kind = tonumber(kind), size = size, dir = dir, rgb = rgb, at1 = at[3] }
+      return 21
+    end
+    lib.C.cadaclysm_view_set_mesh_positions = function(_, id, pos, nrm, n) sent.mesh = { nrm = nrm, n = tonumber(n) } return true end
+    lib.C.cadaclysm_view_set_lines = function(_, id, p, n) sent.lines = tonumber(n) return true end
+    lib.C.cadaclysm_view_set_curves = function(_, id, p, n) sent.curves = tonumber(n) return true end
+    lib.C.cadaclysm_view_set_points = function(_, id, p, n) sent.points = tonumber(n) return false end
+    lib.C.cadaclysm_view_show_points = function() return 17 end
+    view.use(lib)
+    local v = view.View.new({ width = 8, height = 8 })
+    local header
+    if path then
+      local f = assert(io.open(path, "rb"))
+      header = f:read("*a")
+      f:close()
+    end
+    t.eq(#view.GLYPH_KINDS, 12, "twelve kinds")
+    for i, name in ipairs(view.GLYPH_KINDS) do
+      if header then
+        t.eq(tonumber(header:match("#define CADACLYSM_VIEW_GLYPH_" .. name:upper() .. " (%d+)")), i - 1, "the header's " .. name)
+      end
+      local item = v:show_glyphs({ 0, 0, 0, 1, 2, 3 }, name)
+      t.eq(sent.kind, i - 1, "the wire carries " .. name)
+      t.eq(sent.n, 2, "two glyphs")
+      t.eq(sent.size, 12, "the default size")
+      t.ok(sent.dir == nil, "no dir is NULL, not a zeroed array")
+      t.ok(sent.rgb == nil, "no colour is NULL")
+    end
+    v:show_glyphs({ 0, 0, 0 }, "tick", 20, "red", { 1, 0, 0 })
+    t.ok(sent.dir ~= nil and sent.rgb ~= nil and sent.rgb[0] == 1 and sent.size == 20, "a dir and a colour reach the library")
+    local item = v:show_points({ 0, 0, 0 })
+    item:set_lines({})
+    t.eq(sent.lines, 0, "an empty list is a count of 0")
+    item:set_curves({ 0, 0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 1, 3, 0, 0, 1 })
+    t.eq(sent.curves, 1, "a curve")
+    item:set_mesh_positions({ 0, 0, 0, 1, 1, 1 })
+    t.ok(sent.mesh.nrm == nil and sent.mesh.n == 2, "no normals is NULL, the count in vertices")
+    state.error = "cadaclysm_view_set_points: refused"
+    local e = t.raises(function() item:set_points({ 0, 0, 0, 1, 1, 1 }) end, "cadaclysm_view_set_points: refused")
+    t.eq(sent.points, 2, "two points")
     v:close()
   end)
 
@@ -1080,8 +1183,8 @@ return function(t)
 
   -- ---- view ABI 1.8: the pick's clicks and point, the double-click opt-in, focus, navigation ----
 
-  t.test("CadaclysmViewPick is the header 1.28 layout: clicks 16, has_point 20, point 24, overlay 36, viewport_label 40, 44 bytes", function()
-    t.eq(ffi.sizeof("CadaclysmViewPick"), 44)
+  t.test("CadaclysmViewPick is the header 1.30 layout: clicks 16, has_point 20, point 24, overlay 36, viewport_label 40, 52 bytes", function()
+    t.eq(ffi.sizeof("CadaclysmViewPick"), 52)
     local at = {}
     for _, f in ipairs({ "size", "item", "node", "face", "clicks", "has_point", "point", "overlay", "viewport_label" }) do at[#at + 1] = ffi.offsetof("CadaclysmViewPick", f) end
     t.eq(table.concat(at, ","), "0,4,8,12,16,20,24,36,40")
@@ -1121,18 +1224,28 @@ return function(t)
       return { cadaclysm_view_abi_version = function() return version end }
     end
     local e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 8)) end, "view ABI 1.8")
-    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.28 or a later 1.x")
+    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.33 or a later 1.x")
     e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 28)) end, "view ABI 2.28")
-    t.eq(tostring(e), "stand-in: view ABI 2.28, this wrapper needs 1.28 or a later 1.x")
+    t.eq(tostring(e), "stand-in: view ABI 2.28, this wrapper needs 1.33 or a later 1.x")
     e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 25)) end, "view ABI 1.25")
-    t.eq(tostring(e), "stand-in: view ABI 1.25, this wrapper needs 1.28 or a later 1.x")
+    t.eq(tostring(e), "stand-in: view ABI 1.25, this wrapper needs 1.33 or a later 1.x")
     e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 26)) end, "view ABI 1.26")
-    t.eq(tostring(e), "stand-in: view ABI 1.26, this wrapper needs 1.28 or a later 1.x")
+    t.eq(tostring(e), "stand-in: view ABI 1.26, this wrapper needs 1.33 or a later 1.x")
     e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 27)) end, "view ABI 1.27")
-    t.eq(tostring(e), "stand-in: view ABI 1.27, this wrapper needs 1.28 or a later 1.x")
-    -- 1.28 passes the gate (this stand-in then fails a later check, never the version's).
-    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 28))
-    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.28 passes the version gate: " .. tostring(why))
+    t.eq(tostring(e), "stand-in: view ABI 1.27, this wrapper needs 1.33 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 28)) end, "view ABI 1.28")
+    t.eq(tostring(e), "stand-in: view ABI 1.28, this wrapper needs 1.33 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 29)) end, "view ABI 1.29")
+    t.eq(tostring(e), "stand-in: view ABI 1.29, this wrapper needs 1.33 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 30)) end, "view ABI 1.30")
+    t.eq(tostring(e), "stand-in: view ABI 1.30, this wrapper needs 1.33 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 31)) end, "view ABI 1.31")
+    t.eq(tostring(e), "stand-in: view ABI 1.31, this wrapper needs 1.33 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 32)) end, "view ABI 1.32")
+    t.eq(tostring(e), "stand-in: view ABI 1.32, this wrapper needs 1.33 or a later 1.x")
+    -- 1.33 passes the gate (this stand-in then fails a later check, never the version's).
+    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 33))
+    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.33 passes the version gate: " .. tostring(why))
   end)
 
   t.test("stats: the 1.25 layout; an offscreen view's frames are its images, each with its cost", function()
@@ -1335,6 +1448,82 @@ return function(t)
     v:set_occluded_style(false)
     local d = v:occluded_style()
     t.ok(d.colour == nil and d.dash == 6 and d.gap == 4 and math.abs(d.dim - 0.5) < 1e-6, "default")
+    v:close()
+  end)
+
+  t.test("clip planes: the 1.32 layout, set, read back, refusals as errors, clear", function()
+    t.eq(ffi.sizeof("CadaclysmViewClipPlane"), 120, "sizeof CadaclysmViewClipPlane")
+    t.eq(ffi.offsetof("CadaclysmViewClipPlane", "outline"), 96, "offsetof outline")
+    t.eq(ffi.offsetof("CadaclysmViewClipPlane", "outline_colour"), 100, "offsetof outline_colour")
+    t.eq(ffi.offsetof("CadaclysmViewClipPlane", "outline_width"), 112, "offsetof outline_width")
+    t.eq(ffi.offsetof("CadaclysmViewClipPlane", "reserved"), 116, "offsetof reserved")
+    t.eq(view.CLIP_PLANES, 6, "CLIP_PLANES")
+    local v = offscreen(64, 64)
+    if not v then return end
+    for k = 0, 5 do t.eq(v:clip_plane(k), nil, "slot " .. k .. " starts empty") end
+    v:set_clip_plane(0, { 1, 2, 3 }, { 0, 0, 2 })
+    local p = v:clip_plane(0)
+    t.ok(p.point[1] == 1 and p.point[3] == 3 and p.normal[3] == 1 and p.normal[1] == 0, "the normal comes back of unit length")
+    t.ok(p.cap == nil and p.hatch == nil and p.hatch_angle == 45 and p.hatch_spacing == 0 and p.hatch_width == 1, "defaults")
+    v:set_clip_plane(2, { 0, 0, 0 }, { 1, 0, 0 }, { cap = "#ff0000", hatch = { 0, 0, 1 }, hatch_angle = 30, hatch_spacing = 0.5, hatch_width = 0 })
+    p = v:clip_plane(2)
+    t.ok(p.cap[1] == 1 and p.cap[2] == 0 and p.hatch[3] == 1, "cap and hatch colours")
+    t.ok(p.hatch_angle == 30 and p.hatch_spacing == 0.5 and p.hatch_width == 1, "a zero width resolves to 1")
+    v:draw()
+    local e = t.raises(function() v:set_clip_plane(1, { 0, 0, 0 }, { 0, 0, 1 }, { hatch = "red" }) end, "hatch needs a cap")
+    t.ok(tostring(e):find("cadaclysm_view_set_clip_plane", 1, true), "the library's words: " .. tostring(e))
+    t.raises(function() v:set_clip_plane(0, { 0, 0, 0 }, { 0, 0, 0 }) end, "normal is zero")
+    t.eq(v:clip_plane(0).point[1], 1, "a refusal changed nothing")
+    t.eq(v:clip_plane(1), nil, "a refused slot stays empty")
+    t.raises(function() v:set_clip_plane(6, { 0, 0, 0 }, { 0, 0, 1 }) end, "slot 6")
+    t.raises(function() v:clip_plane(6) end, "slot 6")
+    v:clear_clip_plane(0)
+    v:clear_clip_plane(0)
+    t.eq(v:clip_plane(0), nil, "cleared")
+    t.ok(v:clip_plane(2) ~= nil, "the other slot kept")
+    v:close()
+  end)
+
+  t.test("clip sets: the outline, the cutaway, a viewport's own set and inheriting", function()
+    t.eq(view.CLIP_VIEWPORTS, 8, "CLIP_VIEWPORTS")
+    local v = offscreen(64, 64)
+    if not v then return end
+    v:set_clip_plane(0, { 0, 0, 0 }, { 0, 0, 1 }, { cap = "#808080", outline = { 1, 0, 0 }, outline_width = 0 })
+    local p = v:clip_plane(0)
+    t.ok(p.outline[1] == 1 and p.outline[2] == 0 and p.outline_width == 1, "a zero outline width reads back 1")
+    v:set_clip_plane(1, { 0, 0, 0 }, { 1, 0, 0 }, { outline = "#0000ff", outline_width = 3 })
+    p = v:clip_plane(1)
+    t.ok(p.cap == nil and p.outline[3] == 1 and p.outline_width == 3, "an outline with no cap")
+    t.eq(v:clip_plane(2), nil, "an empty slot")
+    local e = t.raises(function() v:set_clip_plane(1, { 0, 0, 0 }, { 1, 0, 0 }, { outline = "red", outline_width = 200 }) end,
+      "outline width 200 is above 100 points")
+    t.ok(tostring(e):find("cadaclysm_view_set_clip_plane", 1, true), "the library's words: " .. tostring(e))
+    t.eq(v:clip_plane(1).outline_width, 3, "a refusal changed nothing")
+    t.eq(v:clip_mode(), "intersection", "the default mode")
+    v:set_clip_mode("cutaway")
+    t.eq(v:clip_mode(), "cutaway", "the cutaway")
+    v:draw()
+    t.raises(function() v:set_clip_mode("inherit") end, "clip mode")
+    v:set_clip_mode("intersection")
+    t.eq(v:clip_mode(), "intersection", "back to the intersection")
+    t.eq(v:viewport_clip_mode(0), nil, "viewport 0 inherits")
+    t.eq(v:viewport_clip_plane(0, 0), nil, "and has no plane of its own")
+    v:set_viewport_clip_plane(0, 2, { 1, 2, 3 }, { 0, 2, 0 }, { outline = "#00ff00" })
+    p = v:viewport_clip_plane(0, 2)
+    t.ok(p.point[2] == 2 and p.normal[2] == 1 and p.outline[2] == 1 and p.outline_width == 1, "viewport 0's own plane")
+    t.eq(v:viewport_clip_mode(0), "intersection", "its own set's mode")
+    t.eq(v:viewport_clip_plane(0, 0), nil, "its other slots empty")
+    v:draw()
+    t.raises(function() v:set_viewport_clip_plane(1, 0, { 0, 0, 0 }, { 0, 0, 1 }) end, "no viewport 1")
+    v:set_viewport_clip_mode(0, "cutaway")
+    t.eq(v:viewport_clip_mode(0), "cutaway", "the viewport's cutaway")
+    v:clear_viewport_clip_plane(0, 2)
+    t.eq(v:viewport_clip_plane(0, 2), nil, "cleared")
+    t.eq(v:viewport_clip_mode(0), "cutaway", "a clear keeps the own set")
+    v:set_viewport_clip_mode(0, nil)
+    t.eq(v:viewport_clip_mode(0), nil, "inherit drops the own set")
+    t.ok(v:clip_plane(0) ~= nil, "the view-wide set is untouched")
+    t.raises(function() v:set_viewport_clip_mode(0, "union") end, "viewport clip mode")
     v:close()
   end)
 
@@ -1561,11 +1750,11 @@ return function(t)
     v:set_snap({ "vertex", "edge" }, { aperture_px = 6, marker = false })
     v:set_snap("face")
     v:set_snap(false)
-    t.eq(table.concat(seen, "; "), "settings 16 255 0 1; settings 16 17 6 0; settings 16 32 0 1; settings 16 0 0 1")
+    t.eq(table.concat(seen, "; "), "settings 16 1279 0 1; settings 16 17 6 0; settings 16 32 0 1; settings 16 0 0 1")
     local before = #seen
     local e = t.raises(function() v:set_snap({ "vertex", "corner" }) end, "snap kind")
     t.ok(is_view_error(e))
-    t.eq(tostring(e), 'snap kind "corner": one of vertex, midpoint, centre, quadrant, edge, face, grid, plane')
+    t.eq(tostring(e), 'snap kind "corner": one of vertex, midpoint, centre, quadrant, edge, face, grid, plane, end, intersection, point, alignment')
     t.eq(#seen, before, "refused before the library")
 
     answers = { "none", "none", { 1, 3, 7 } }
@@ -1654,7 +1843,7 @@ return function(t)
     v:set_snap(false)
     t.eq(v:snap(32, 24), nil, "false switches snapping off")
     local e = t.raises(function() v:set_snap({ "vertex", "corner" }) end, "snap kind")
-    t.ok(tostring(e):find('snap kind "corner": one of vertex, midpoint', 1, true), tostring(e))
+    t.ok(tostring(e):find('snap kind "corner": one of vertex, midpoint, centre, quadrant, edge, face, grid, plane, end, intersection, point, alignment', 1, true), tostring(e))
     v:close()
   end)
 
@@ -2030,15 +2219,18 @@ return function(t)
     return false
   end
 
-  t.test("CadaclysmViewInputEvent is the header 1.26 layout, 272 bytes; the kinds and modifier bits are the header's", function()
-    t.eq(ffi.sizeof("CadaclysmViewInputEvent"), 272)
+  t.test("CadaclysmViewInputEvent is the header 1.30 layout, 424 bytes; the kinds and modifier bits are the header's", function()
+    t.eq(ffi.sizeof("CadaclysmViewInputEvent"), 424)
     t.eq(ffi.sizeof("CadaclysmViewEventPick"), 40)
+    t.eq(ffi.sizeof("CadaclysmViewEventSnap"), 88)
     local at = {}
     for _, f in ipairs({ "size", "kind", "time_ms", "x", "y", "wheel_y", "button", "modifiers", "pointer", "pointer_id",
-      "width", "height", "repeat", "dropped", "pad0", "key", "pick", "snap", "camera", "pick_viewport_label" }) do
+      "width", "height", "repeat", "dropped", "pad0", "key", "pick", "snap", "camera", "pick_viewport_label",
+      "pick_segment", "pick_distance_px", "snap_label", "snap_locked", "snap_locked_angle", "snap_guide_count", "pad1",
+      "snap_guides" }) do
       at[#at + 1] = ffi.offsetof("CadaclysmViewInputEvent", f)
     end
-    t.eq(table.concat(at, ","), "0,4,8,16,20,24,28,32,36,40,44,48,52,56,60,64,96,136,224,268")
+    t.eq(table.concat(at, ","), "0,4,8,16,20,24,28,32,36,40,44,48,52,56,60,64,96,136,224,268,272,276,280,312,316,320,324,328")
     local n = 0
     for code, name in pairs(view._INPUT_EVENTS) do
       n = n + 1
@@ -2142,7 +2334,7 @@ return function(t)
     t.ok(got[9].snap and got[9].snap.kind == "vertex" and got[9].snap.edge == 4 and got[9].snap.clicks == 1, "the snap")
     t.eq(got[10].pointer, "pen")
     t.eq(v:next_event(), nil, "none left")
-    for _, size in ipairs(state.sizes) do t.eq(size, 272, "the 1.26 struct's size") end
+    for _, size in ipairs(state.sizes) do t.eq(size, 424, "the 1.30 struct's size") end
     -- A failure other than "no event" is the library's words.
     state.error = nil
     f.C.cadaclysm_view_next_event = function()
@@ -2484,4 +2676,271 @@ return function(t)
     for e in v:events() do t.ok(e.type ~= "timeline", "the clock still: none") end
     v:close()
   end)
+
+  -- ---- view ABI 1.30: picking and snapping ---------------------------------------------------
+  -- A block of its own: it adds no local to this function (LuaJIT allows 200).
+  do
+    -- `#define name N` read out of the header itself, never a table read back through the module.
+    local function header_text()
+      local path = t.fixture("crates/cadaclysm-view-capi/include/cadaclysm_view.h")
+      if not path then return nil end
+      local f = assert(io.open(path, "rb"))
+      local text = f:read("*a")
+      f:close()
+      return text
+    end
+    local function define(header, name)
+      local n = tonumber(header:match("#define " .. name .. " (%d+)"))
+      t.ok(n ~= nil, "the header defines no " .. name)
+      return n
+    end
+
+    t.test("1.30's layouts: the pick 52 bytes, the snap 232, the event 424 with its snap frozen at 88 and its camera at 224", function()
+      t.eq(ffi.sizeof("CadaclysmViewPick"), 52, "sizeof CadaclysmViewPick")
+      t.eq(ffi.offsetof("CadaclysmViewPick", "segment"), 44, "segment")
+      t.eq(ffi.offsetof("CadaclysmViewPick", "distance_px"), 48, "distance_px")
+      t.eq(ffi.sizeof("CadaclysmViewSnap"), 232, "sizeof CadaclysmViewSnap")
+      t.eq(ffi.offsetof("CadaclysmViewSnap", "label"), 88, "label")
+      t.eq(ffi.offsetof("CadaclysmViewSnap", "guides"), 136, "guides")
+      t.eq(ffi.sizeof("CadaclysmViewEventSnap"), 88, "sizeof CadaclysmViewEventSnap")
+      t.eq(ffi.sizeof("CadaclysmViewInputEvent"), 424, "sizeof CadaclysmViewInputEvent")
+      t.eq(ffi.offsetof("CadaclysmViewInputEvent", "camera"), 224, "camera")
+      t.eq(ffi.offsetof("CadaclysmViewInputEvent", "pick_segment"), 272, "pick_segment")
+      t.eq(ffi.offsetof("CadaclysmViewInputEvent", "snap_guides"), 328, "snap_guides")
+      t.eq(ffi.sizeof("CadaclysmViewRectHit"), 12, "sizeof CadaclysmViewRectHit")
+    end)
+
+    t.test("1.30's kinds are the header's numbers on the wire: the snap kinds and sets, the rectangle's hit kinds", function()
+      local header = header_text()
+      local state = {}
+      local f = fake(state)
+      local sent, rect = {}, {}
+      f.C.cadaclysm_view_set_snap = function(_, s) sent[#sent + 1] = tonumber(s.kinds) return true end
+      f.C.cadaclysm_view_pick_rect = function(_, vp, x, y, w, h, crossing, out, cap)
+        cap = tonumber(cap)
+        rect.caps = rect.caps or {}
+        rect.caps[#rect.caps + 1] = cap
+        for i = 1, math.min(cap, #rect.hits) do
+          out[i - 1].item, out[i - 1].kind, out[i - 1].index = rect.hits[i][1], rect.hits[i][2], rect.hits[i][3]
+        end
+        return #rect.hits
+      end
+      view.use(f)
+      local v = view.View.new({ width = 8, height = 8 })
+      for _, name in ipairs({ "end", "intersection", "point", "alignment" }) do
+        v:set_snap(name)
+        if header then t.eq(sent[#sent], define(header, "CADACLYSM_VIEW_SNAP_" .. name:upper()), "the wire carries " .. name) end
+      end
+      if header then
+        v:set_snap()
+        t.eq(sent[#sent], define(header, "CADACLYSM_VIEW_SNAP_DEFAULT"), "no kinds is the default")
+        v:set_snap("default")
+        t.eq(sent[#sent], define(header, "CADACLYSM_VIEW_SNAP_DEFAULT"), "\"default\"")
+        v:set_snap("all")
+        t.eq(sent[#sent], define(header, "CADACLYSM_VIEW_SNAP_ALL"), "\"all\"")
+        local names = { "face", "node", "segment", "edge", "point" }
+        rect.hits = {}
+        for i, name in ipairs(names) do rect.hits[i] = { 9, define(header, "CADACLYSM_VIEW_HIT_" .. name:upper()), i } end
+        local hits = v:pick_rect(0, 0, 8, 8)
+        t.eq(#hits, 5, "five hits")
+        for i, name in ipairs(names) do
+          t.ok(hits[i].item == 9 and hits[i].kind == name and hits[i].index == i, "the header's " .. name .. " reads as " .. name)
+        end
+      end
+      -- The count rule: a total past the first buffer is asked again with a buffer of the total.
+      rect.caps, rect.hits = {}, {}
+      for i = 1, 70 do rect.hits[i] = { 3, 3, i - 1 } end
+      local all = v:pick_rect(0, 0, 8, 8)
+      t.eq(#all, 70, "every hit, never a cut list")
+      t.eq(table.concat(rect.caps, ","), "64,70", "asked again with the total")
+      t.eq(all[70].index, 69, "the last hit")
+      view._reset()
+    end)
+
+    t.test("1.30's none values cross as C's: NULL label, NULL base, NULL points, UINT32_MAX segment, the event buffer", function()
+      local state = {}
+      local f = fake(state)
+      local seen = {}
+      f.C.cadaclysm_view_set_snap_base = function(_, xyz, step)
+        seen[#seen + 1] = xyz == nil and ("base NULL " .. step) or ("base %g %g %g %g"):format(xyz[0], xyz[1], xyz[2], step)
+        return true
+      end
+      f.C.cadaclysm_view_set_snap_points = function(_, id, xyz, n, label)
+        seen[#seen + 1] = ("points %d %s %s %s"):format(id, xyz == nil and "NULL" or ("%g,%g,%g"):format(xyz[0], xyz[1], xyz[2]),
+          tostring(tonumber(n)), label == nil and "NULL" or ffi.string(label))
+        return true
+      end
+      f.C.cadaclysm_view_set_pick_aperture = function(_, pt) seen[#seen + 1] = "aperture " .. pt return true end
+      f.C.cadaclysm_view_show_lines = function() return 5 end
+      local events = {}
+      f.C.cadaclysm_view_next_event = function(_, raw)
+        local e = table.remove(events, 1)
+        if not e then state.error = "cadaclysm_view_next_event: no event" return false end
+        state.error = ""
+        e(raw)
+        return true
+      end
+      view.use(f)
+      local v = view.View.new({ width = 8, height = 8 })
+      v:set_snap_base(nil)
+      v:set_snap_base({ 1, 2, 3 }, 45)
+      v:set_snap_base({ 0, 0, 0 })
+      v:set_pick_aperture(0)
+      local item = v:show_lines({ 0, 0, 0, 1, 0, 0 })
+      item:set_snap_points({ { 0.5, 0.5, 0 } })
+      item:set_snap_points({ 1, 2, 3 }, "hole")
+      item:set_snap_points({})
+      t.eq(table.concat(seen, "; "), "base NULL 15; base 1 2 3 45; base 0 0 0 15; aperture 0; points 5 0.5,0.5,0 1 NULL; "
+        .. "points 5 1,2,3 1 hole; points 5 NULL 0 NULL")
+      local before = #seen
+      t.ok(is_view_error(t.raises(function() v:set_snap_base({ 1, 2 }) end, "3 numbers, not 2")), "a ViewError")
+      local nul = t.raises(function() item:set_snap_points({ 0, 0, 0 }, "a\0b") end, "snap point label")
+      t.ok(is_view_error(nul) and tostring(nul):find("NUL", 1, true), "a ViewError naming the label: " .. tostring(nul))
+      t.ok(is_view_error(t.raises(function() item:set_snap_points({ 0, 0 }) end, "3 numbers each")), "a ViewError")
+      t.eq(#seen, before, "refused before the library")
+      -- The fake's pick_result writes no segment: the buffer's UINT32_MAX reads as none.
+      local hit = v:pick(1, 1)
+      t.ok(hit and hit.item == 7 and hit.segment == nil and hit.distance_px == 0, "no segment: nil")
+      -- The event's tail: a pick's segment and distance, a snap's label, lock and guides; a library that leaves
+      -- the tail alone answers the none values the buffer starts with.
+      events = {
+        function(raw) raw.kind = 8; raw.pick.item = 3; raw.pick_segment = 2; raw.pick_distance_px = 1.5 end,
+        function(raw) raw.kind = 8; raw.pick.item = 3 end,
+        function(raw)
+          raw.kind = 9; raw.snap.kind = bit.lshift(1, 10); raw.snap.item = 3; raw.snap.edge = 0xFFFFFFFF
+          ffi.copy(raw.snap_label, "hole")
+          raw.snap_locked, raw.snap_locked_angle, raw.snap_guide_count = 1, 90, 1
+          for i, g in ipairs({ 0, 0, 0, 1, 1, 0 }) do raw.snap_guides[i - 1] = g end
+        end,
+        -- The cap: a guide_count past 2 reads 2 guides, never past the 12 doubles.
+        function(raw) raw.kind = 9; raw.snap.kind = bit.lshift(1, 10); raw.snap_guide_count = 3 end,
+      }
+      local e1, e2, e3, e4 = v:next_event(), v:next_event(), v:next_event(), v:next_event()
+      t.eq(#e4.snap.guides, 2, "a snap event's guide_count 3 reads 2 guides")
+      f.C.cadaclysm_view_snap_result = function(_, out) out.kind = bit.lshift(1, 10); out.guide_count = 3 return true end
+      t.eq(#v:last_snap().guides, 2, "a snap's guide_count 3 reads 2 guides")
+      t.ok(e1.pick.segment == 2 and e1.pick.distance_px == 1.5, "a wire pick's event: its segment and distance")
+      t.ok(e2.pick.item == 3 and e2.pick.segment == nil and e2.pick.viewport_label == nil, "an untouched tail: the none values")
+      local s = e3.snap
+      t.ok(s.kind == "point" and s.label == "hole" and s.locked_angle == 90 and #s.guides == 1, "a snap event's tail")
+      t.ok(s.guides[1][1][1] == 0 and s.guides[1][2][1] == 1 and s.guides[1][2][2] == 1 and s.guides[1][2][3] == 0, "its guide")
+      view._reset()
+    end)
+
+    t.test("1.30 on the real library, the P3 scene: a line's segment picked, pick_rect past its buffer, a labelled snap point, the lock", function()
+      set_queue_input("1")
+      local made, gv = pcall(offscreen, 96, 96)
+      set_queue_input(nil)
+      if not made then error(gv, 0) end
+      if not gv then return end
+      gv:set_layer("grid", false)
+      local sq = gv:show_mesh({ positions = { -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0 }, indices = { 0, 1, 2, 0, 2, 3 }, rgb = { 1, 0, 0 } })
+      local line = gv:show_lines({ -0.8, 0, 0.01, 0.8, 0, 0.01 }, { 1, 1, 1 })
+      line:set_snap_points({ { 0.5, 0.5, 0.01 } }, "hole")
+      gv:standard("top")
+      gv:frame()
+      gv:set_pick_aperture(0)
+      local e = t.raises(function() gv:set_pick_aperture(-1) end, "is not a finite size of 0 or more points")
+      t.ok(is_view_error(e), "the library's refusal")
+      local on_line, on_square, y_line
+      for y = 36, 59 do
+        local p = gv:pick(48, y)
+        if p and p.item == line.id and p.segment == 0 and p.distance_px <= 4 then on_line = true; y_line = y_line or y end
+        if p and p.item == sq.id and p.segment == nil and p.distance_px == 0 then on_square = true end
+      end
+      t.ok(on_line, "a wire pick's segment")
+      t.ok(on_square, "a face pick has no segment")
+      -- The event path: a click on the line queues a pick event with its segment, and last_pick the same answer.
+      for _ in gv:events() do end
+      gv:input({ type = "pointer_down", x = 48, y = y_line, time_ms = 30000 })
+      gv:input({ type = "pointer_up", x = 48, y = y_line, time_ms = 30010 })
+      local ev
+      for _ = 1, 200 do
+        gv:draw()
+        for x in gv:events() do if x.type == "pick" and x.pick then ev = x.pick end end
+        if ev then break end
+      end
+      t.ok(ev and ev.item == line.id and ev.segment == 0, "a pick event's segment")
+      local last = gv:last_pick()
+      t.ok(last and last.item == line.id and last.segment == 0, "last_pick's segment")
+      -- pick_rect: 80 short lines, more hits than its first buffer.
+      local many = {}
+      for i = 0, 79 do
+        local x = -0.9 + 1.8 * i / 79
+        for _, c in ipairs({ x, -0.6, 0.01, x, -0.5, 0.01 }) do many[#many + 1] = c end
+      end
+      local lines80 = gv:show_lines(many, { 0, 1, 0 })
+      local hits = gv:pick_rect(0, 0, 96, 96)
+      local seg, node, n80 = false, false, 0
+      for _, h in ipairs(hits) do
+        if h.item == line.id and h.kind == "segment" and h.index == 0 then seg = true end
+        if h.item == sq.id and h.kind == "node" and h.index == 0 then node = true end
+        if h.item == lines80.id then n80 = n80 + 1 end
+      end
+      t.ok(seg, "pick_rect finds the line")
+      t.ok(node, "pick_rect finds the square as a node")
+      t.eq(n80, 80, "pick_rect past the first buffer")
+      t.ok(is_view_error(t.raises(function() gv:pick_rect(0, 0, 1 / 0, 10) end, "cadaclysm_view_pick_rect")), "a ViewError")
+      t.ok(is_view_error(t.raises(function() gv:pick_rect(0, 0, 0 / 0, 10) end, "pick_rect w: a number")), "a ViewError")
+      lines80:remove()
+      -- A labelled snap point, by the default kinds.
+      gv:set_snap()
+      local point, sx, sy
+      for y = 0, 47, 2 do
+        for x = 48, 95, 2 do
+          if not point then
+            local s = gv:snap(x, y)
+            if s and s.kind == "point" then point, sx, sy = s, x, y end
+          end
+        end
+      end
+      t.ok(point and point.label == "hole" and point.locked_angle == nil and #point.guides == 0, "a snap point's label")
+      -- The event path: a hover over the point queues a snap event with its label, and last_snap the same answer.
+      for _ in gv:events() do end
+      gv:last_snap()
+      gv:input({ type = "pointer_move", x = sx, y = sy, time_ms = 40000 })
+      local es
+      for _ = 1, 200 do
+        gv:draw()
+        for x in gv:events() do if x.type == "snap" and x.snap and x.snap.kind == "point" then es = x.snap end end
+        if es then break end
+      end
+      t.ok(es and es.label == "hole", "a snap event's label")
+      local ls = gv:last_snap()
+      t.ok(ls and ls.label == "hole", "last_snap's label")
+      line:set_snap_points({})
+      local cleared = gv:snap(sx, sy)
+      t.ok(not cleared or cleared.kind ~= "point", "the cleared points no longer snap")
+      t.ok(is_view_error(t.raises(function() line:set_snap_points({ { 0, 0, 0 } }, ("x"):rep(32)) end, "at most 31")), "a ViewError")
+      -- The lock: face snaps turn onto 45-degree steps about the origin, the lock's ray their guide.
+      gv:set_snap_base({ 0, 0, 0 }, 45)
+      gv:set_snap({ "face", "plane" })
+      local locked = 0
+      for y = 8, 39, 8 do
+        for x = 56, 87, 8 do
+          local s = gv:snap(x, y)
+          if s then
+            t.ok(s.kind == "plane" and s.locked_angle and s.locked_angle % 45 == 0 and #s.guides == 1, "a locked snap")
+            locked = locked + 1
+          end
+        end
+      end
+      t.ok(locked > 0, "some snaps were locked")
+      -- Clearing passes a NULL point (Global (c)): the same sweep is no longer locked. A zeroed point would lock about the origin.
+      gv:set_snap_base(nil)
+      local unlocked, still = 0, {}
+      for y = 8, 39, 8 do
+        for x = 56, 87, 8 do
+          local s = gv:snap(x, y)
+          if s then
+            unlocked = unlocked + 1
+            if s.locked_angle ~= nil or #s.guides > 0 then still[#still + 1] = s.kind .. " " .. tostring(s.locked_angle) end
+          end
+        end
+      end
+      t.ok(unlocked > 0 and #still == 0, "the cleared lock turns nothing: " .. table.concat(still, ", "))
+      gv:set_snap(false)
+      gv:close()
+    end)
+  end
 end

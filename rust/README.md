@@ -279,8 +279,11 @@ each `show()` has a window of its own.
 
 What a browser can't do refuses, naming the call: `View::new`, `offscreen`,
 `offscreen_with`, `in_window`, `pump`, `image`, `save`, `png`, `pixel`, `input`, `pick`,
-`last_pick`, `viewports`, `lod`, the viewport cameras, `show_image`, `show_scene`/`show_node`
-and the node calls, `finish`, machining and `use_library`. The timeline (`play`, `pause`,
+`lod`, `show_image`, `show_scene`/`show_node` and the node calls, `finish`,
+machining and `use_library`. `set_viewports` splits the canvas as it splits a window, each
+viewport drawn with its own matrices and layer mask, with `set_viewport_label` and
+`set_viewport_border`; a click picks in the viewport under it, with that viewport's camera
+(the web package's `kernel-view` and `view` builds draw them). The timeline (`play`, `pause`,
 `seek`, `set_loop`, `time`, `duration`, `playing`, `EventKind::Timeline` in `run_with`) and the
 animation calls (`play_animation`, `remove_track`, `set_visible`, `set_node_ghosts`) work as on
 the desktop; the web package's `kernel-view` build plays kernel animations.

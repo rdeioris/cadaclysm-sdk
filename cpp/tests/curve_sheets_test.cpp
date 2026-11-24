@@ -30,6 +30,7 @@ using bs::HoleReport;
 using bs::JoinedSheets;
 using bs::Mirrored;
 using bs::NurbsCurve;
+using bs::NurbsSurface;
 using bs::PatchBoundary;
 using bs::Pattern;
 using bs::Patterned;
@@ -354,6 +355,16 @@ static Result<void> holes_ribs_webs_and_patterns() {
     check(ring.size() == 6 && std::abs(ring[1].rows()[0] - 0.5) < 1e-12, "pattern_circular: " + std::to_string(ring.size()));
     std::vector<Transform> along = must(Pattern::along(line({0, 0, 0}, {30, 0, 0}), 4), "along");
     check(along.size() == 4 && std::abs(along[3].rows()[3] - 30) < 1e-9, "pattern_along: " + std::to_string(along.size()));
+    Frame at5 = must(Frame::make({5, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 0}), "YZ plane at x = 5");
+    std::vector<Transform> mirrored = must(Pattern::mirror(at5), "pattern_mirror");
+    check(mirrored.size() == 2 && mirrored[0].rows() == identity, "pattern_mirror: " + std::to_string(mirrored.size()) + ", the identity first");
+    if (mirrored.size() == 2) {
+        Vec3 image = mirrored[1].point({7, 1, 2});
+        check(std::abs(image[0] - 3) < 1e-12 && std::abs(image[1] - 1) < 1e-12 && std::abs(image[2] - 2) < 1e-12,
+              "pattern_mirror maps (7, 1, 2) to (" + num(image[0]) + ", " + num(image[1]) + ", " + num(image[2]) + ")");
+    }
+    const std::array<double, 12> flat = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0};
+    refused(Pattern::mirror(flat), "pattern_mirror: the plane's normal is zero", "", "pattern_mirror of a zero normal");
 
     Solid l = must(block(40, 30, 5, 20, 15, 2.5).join(block(5, 30, 40, 2.5, 15, 20)), "L");
     check(near(volume_of(l), 11250, 1e-6), "L volume " + num(volume_of(l)));
@@ -487,6 +498,202 @@ static Result<void> a_curve_fits_to_a_faces_own_parameter() {
     }
     NurbsCurve short_line = must(NurbsCurve::make({{3, 0, 1}, {3, 0, 4}}, 1), "short line");
     refused(short_line.fit_to_face(cyl, side), "nurbs_curve_fitted_to_face: ", "has to cross the face", "fit_to_face of a short line");
+    return {};
+}
+
+// 6f: offsets (spec section 8) -- a line and an arc exactly, a wavy bicubic within its
+// tolerance, an arc on a quarter wall along and across it, a cube and its top face
+static Result<void> offsets_of_curves_surfaces_and_solids() {
+    const Vec3 z{0, 0, 1};
+    NurbsCurve ten = line({0, 0, 0}, {10, 0, 0});
+    NurbsCurve moved = must(ten.offset(2, z), "offset of the line");
+    std::pair<double, double> span = must(moved.domain(), "domain");
+    check(moved.fit_error() && *moved.fit_error() == 0.0, "offset: the line's fit error");
+    check(dist3(must(moved.point(span.first), "point"), Vec3{0, -2, 0}) <= 1e-12 &&
+              dist3(must(moved.point(span.second), "point"), Vec3{10, -2, 0}) <= 1e-12,
+          "offset: the line's ends");
+    const double h = std::sqrt(0.5);
+    NurbsCurve arc = must(NurbsCurve::make({{2, 0, 0}, {2, 2, 0}, {0, 2, 0}}, 2, std::vector<double>{1, h, 1}), "arc");
+    NurbsCurve out = must(arc.offset(1, z, 1e-6), "offset of the arc");
+    check(out.fit_error() && *out.fit_error() == 0.0, "offset: the arc's fit error");
+    check(std::abs(dist3(must(out.point(0.5), "point"), Vec3{0, 0, 0}) - 3) <= 1e-12, "offset: the arc's mid point is not at r 3");
+    refused(arc.offset(-2, z, 1e-6), "nurbs_curve_offset: ", "", "offset of an arc used up");
+
+    std::vector<Vec3> wavy;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) wavy.push_back(Vec3{double(i), double(j), std::sin(double(i)) * std::cos(double(j)) / 4});
+    }
+    const std::vector<double> k{0, 0, 0, 0, 3, 3, 3, 3};
+    NurbsSurface s = must(NurbsSurface::make(wavy, {4, 4}, 3, 3, std::nullopt, k, k), "bicubic");
+    check(!s.fit_error(), "offset: a built surface carries a fit error");
+    NurbsSurface so = must(s.offset(0.2, 1e-6), "offset of the bicubic");
+    check(so.fit_error() && *so.fit_error() >= 0.0 && *so.fit_error() <= 1e-6, "offset: the bicubic's fit error");
+    Vec3 p = must(s.point_at(1.5, 1.5), "point_at");
+    Vec3 n = must(s.normal_at(1.5, 1.5), "normal_at");
+    check(dist3(must(so.point_at(1.5, 1.5), "point_at"), Vec3{p[0] + 0.2 * n[0], p[1] + 0.2 * n[1], p[2] + 0.2 * n[2]}) <= 1e-6,
+          "offset: the bicubic at (1.5, 1.5)");
+
+    NurbsSurface quarter = must(NurbsSurface::make({{2, 0, 0}, {2, 0, 5}, {2, 2, 0}, {2, 2, 5}, {0, 2, 0}, {0, 2, 5}}, {3, 2}, 2, 1,
+                                                   std::vector<double>{1, 1, h, h, 1, 1}, std::vector<double>{0, 0, 0, 1, 1, 1},
+                                                   std::vector<double>{0, 0, 1, 1}),
+                                "quarter wall");
+    Solid wall = must(quarter.to_sheet(), "to_sheet");
+    NurbsCurve on_wall = must(NurbsCurve::make({{2, 0, 2}, {2, 2, 2}, {0, 2, 2}}, 2, std::vector<double>{1, h, 1}), "arc on the wall");
+    NurbsCurve up = must(on_wall.offset_normal_to_sheet(wall, 1, 1e-6), "offset_normal_to_sheet");
+    NurbsCurve along = must(on_wall.offset_tangent_to_sheet(wall, 1, 1e-6), "offset_tangent_to_sheet");
+    check(up.fit_error() && *up.fit_error() <= 1e-6 && along.fit_error() && *along.fit_error() <= 1e-6, "offset: the wall's fit errors");
+    std::pair<double, double> up_span = must(up.domain(), "domain");
+    std::pair<double, double> along_span = must(along.domain(), "domain");
+    for (int i = 0; i <= 20; ++i) {
+        Vec3 q = must(up.point(up_span.first + (up_span.second - up_span.first) * i / 20), "point");
+        check(std::abs(std::hypot(q[0], q[1]) - 3) <= 2e-6 && std::abs(q[2] - 2) <= 2e-6, "offset_normal_to_sheet: off r 3, z 2 at " + num(i));
+        q = must(along.point(along_span.first + (along_span.second - along_span.first) * i / 20), "point");
+        check(std::abs(std::hypot(q[0], q[1]) - 2) <= 2e-6 && std::abs(q[2] - 3) <= 2e-6, "offset_tangent_to_sheet: off r 2, z 3 at " + num(i));
+    }
+
+    Solid cube = must(Solid::cuboid(10, 10, 10), "cuboid");
+    double grown = must(must(cube.offset(1, 1e-6), "offset +1").mass(), "mass").volume;
+    double shrunk = must(must(cube.offset(-1, 1e-6), "offset -1").mass(), "mass").volume;
+    check(std::abs(grown - 1728) <= 1e-6, "offset: the grown cube's volume " + num(grown));
+    check(std::abs(shrunk - 512) <= 1e-6, "offset: the shrunk cube's volume " + num(shrunk));
+    Solid top = must(cube.offset_face(1, 1, 1e-6), "offset_face");
+    std::pair<Vec3, Vec3> box = must(top.bounds64(), "bounds64");
+    check(top.faces() == 1 && std::abs(area_of(top) - 100) <= 1e-6, "offset_face: area " + num(area_of(top)));
+    check(std::abs(box.first[2] - 6) <= 1e-9 && std::abs(box.second[2] - 6) <= 1e-9, "offset_face: z " + num(box.first[2]) + ".." + num(box.second[2]));
+    refused(cube.offset(0), "solid_offset: ", "", "offset by 0");
+    refused(cube.offset_face(1, 0), "solid_offset_face: ", "", "offset_face by 0");
+    return {};
+}
+
+// 6g: face split (docs/superpowers/specs/2026-11-20-face-split-design.md) -- a box's top split by
+// a line across it, on its face and on every face it lies on; a sphere along its silhouette
+static Result<void> faces_split_along_curves_and_silhouettes() {
+    Solid cube = must(Solid::cuboid(10, 10, 10), "cuboid");
+    const std::vector<NurbsCurve> across = many(line({-8, -2, 5}, {8, 3, 5}));
+    for (const std::vector<std::optional<std::uint32_t>>& faces :
+         {std::vector<std::optional<std::uint32_t>>{}, std::vector<std::optional<std::uint32_t>>{1u},
+          std::vector<std::optional<std::uint32_t>>{std::nullopt}}) {
+        Solid out = must(cube.split_faces(across, faces), "split_faces");
+        check(out.faces() == 7, "split_faces: " + num(out.faces()) + " faces");
+        bs::Mass m = must(out.mass(), "mass");
+        check(m.closed && std::abs(m.volume - 1000) <= 1e-6 && std::abs(m.area - 600) <= 1e-6, "split_faces: volume " + num(m.volume));
+        int tops = 0;
+        for (std::uint32_t f = 0; f < out.faces(); ++f) {
+            if (std::abs(must(out.face_inner_point(f), "face_inner_point").point[2] - 5) <= 1e-9) ++tops;
+        }
+        check(tops == 2, "split_faces: " + num(tops) + " faces on the top");
+    }
+    refused(cube.split_faces(std::vector<NurbsCurve>{}), "split_faces: ", "", "split_faces with no curves");
+    refused(cube.split_faces(across, {1u, 2u}), "split_faces: ", "", "split_faces with two faces for one curve");
+    const double r = 5;
+    Solid ball = must(must(Solid::sphere(r), "sphere").split_along_silhouette({0, 0, 1}), "split_along_silhouette");
+    bs::Mass m = must(ball.mass(), "mass");
+    check(ball.faces() == 2 && m.closed, "split_along_silhouette: " + num(ball.faces()) + " faces");
+    check(std::abs(m.area - 4 * 3.14159265358979323846 * r * r) <= 1e-6 * m.area, "split_along_silhouette: area " + num(m.area));
+    refused(cube.split_along_silhouette({0, 0, 1}), "split_along_silhouette: ", "", "a box seen along an axis");
+    return {};
+}
+
+// 6h: surface edits (docs/superpowers/specs/2026-11-22-surface-edits-design.md) -- untrim,
+// unstitch, ruled faces off edges, a seam moved, sheets and surfaces merged, and tweens; paint
+// and ids follow the face each result face comes from
+static NurbsSurface patch(double x0, double x1, double z = 0.0) {
+    return must(NurbsSurface::make({{x0, 0, z}, {x0, 1, z}, {x1, 0, z}, {x1, 1, z}}, {2, 2}, 1, 1), "patch");
+}
+
+static Result<void> surface_edits_keep_paint_and_ids() {
+    const Vec3 red{1, 0, 0};
+    const Vec3 blue{0, 0, 1};
+    Solid cube = must(must(must(must(Solid::cuboid(10, 10, 10), "cuboid").coloured(blue), "coloured").coloured(red, 1u), "coloured top").track(),
+                      "track");
+    for (bs::Untrim which : {bs::Untrim::holes, bs::Untrim::outer, bs::Untrim::all}) {
+        Solid out = must(cube.untrim(1, which), "untrim");
+        bs::Mass m = must(out.mass(), "mass");
+        check(out.faces() == 6 && m.closed && std::abs(m.volume - 1000) <= 1e-6, "untrim: " + num(out.faces()) + " faces, volume " + num(m.volume));
+        check(must(out.face_colour(1), "face_colour") == std::optional<Vec3>(red), "untrim: the top lost its red");
+        check(must(out.face_id(1), "face_id") == must(cube.face_id(1), "face_id"), "untrim: the top lost its id");
+    }
+    Solid bored = must(cube.cut(must(must(Solid::cylinder(2, 20), "cylinder").translate(0, 0, -10), "translate")), "cut");
+    std::uint32_t top = 0;
+    for (std::uint32_t f = 0; f < bored.faces(); ++f) {
+        if (std::abs(must(bored.face_inner_point(f), "face_inner_point").point[2] - 5) < 1e-9) top = f;
+    }
+    Solid open = must(bored.untrim(top, bs::Untrim::holes), "untrim holes");
+    check(open.faces() == bored.faces() && !must(open.mass(), "mass").closed, "untrim holes: " + num(open.faces()) + " faces");
+    check(std::abs(area_of(must(open.face_sheet(top), "face_sheet")) - 100) <= 1e-6, "untrim holes: the top is not the whole square");
+
+    std::vector<Solid> sheets = must(cube.unstitch(), "unstitch");
+    check(sheets.size() == 6, "unstitch: " + num(static_cast<double>(sheets.size())) + " sheets");
+    for (const Solid& s : sheets) check(s.faces() == 1 && std::abs(area_of(s) - 100) <= 1e-6, "unstitch: a sheet not one 10 x 10 face");
+    std::vector<Solid> alone = must(cube.unstitch({1u}), "unstitch top");
+    check(alone.size() == 2 && alone[0].faces() == 1 && alone[1].faces() == 5, "unstitch top: not the top, then the other five");
+    check(must(alone[0].face_colour(0), "face_colour") == std::optional<Vec3>(red), "unstitch top: the top lost its red");
+    std::vector<Solid> two = must(cube.unstitch({1u, 2u}, true), "unstitch together");
+    check(two.size() == 2 && two[0].faces() == 2 && two[1].faces() == 4, "unstitch together: not two faces, then four");
+
+    std::uint32_t edge = 0;
+    for (const bs::Edge& e : must(cube.edges(), "edges")) {
+        if (std::find(e.faces.begin(), e.faces.end(), 1u) != e.faces.end()) {
+            edge = e.index;
+            break;
+        }
+    }
+    Solid ruled = must(cube.ruled_from_edges({edge}, bs::Ruling::normal, 2), "ruled_from_edges");
+    check(ruled.faces() == 1 && std::abs(area_of(ruled) - 20) <= 1e-6, "ruled_from_edges: area " + num(area_of(ruled)));
+    Solid other = must(cube.ruled_from_edges({edge}, bs::Ruling::normal, 2, 0, std::nullopt, true), "ruled_from_edges alternate");
+    check(must(ruled.face_colour(0), "face_colour") != must(other.face_colour(0), "face_colour"),
+          "ruled_from_edges: both faces took one colour");
+    Solid up = must(cube.ruled_from_edges({edge}, bs::Ruling::direction, 3, 0, Vec3{0, 0, 1}), "ruled_from_edges direction");
+    check(std::abs(area_of(up) - 30) <= 1e-6, "ruled_from_edges direction: area " + num(area_of(up)));
+
+    const double r = 2;
+    const double h = 5;
+    Solid can = must(Solid::cylinder(r, h), "cylinder");
+    std::uint32_t wall = 0;
+    for (std::uint32_t f = 0; f < can.faces(); ++f) {
+        Vec3 p = must(can.face_inner_point(f), "face_inner_point").point;
+        if (std::abs(std::hypot(p[0], p[1]) - r) < 1e-9 && p[2] > 0 && p[2] < h) wall = f;
+    }
+    Solid painted = must(must(can.coloured(red, wall), "coloured").track(), "track");
+    Solid reseamed = must(painted.change_seam(wall, 1.0), "change_seam");
+    check(reseamed.faces() == can.faces() && std::abs(must(reseamed.mass(), "mass").volume - PI * r * r * h) <= 1e-9 * PI * r * r * h,
+          "change_seam: the shape changed");
+    check(must(reseamed.face_colour(wall), "face_colour") == std::optional<Vec3>(red), "change_seam: the wall lost its red");
+    check(must(reseamed.face_id(wall), "face_id") == must(painted.face_id(wall), "face_id"), "change_seam: the wall lost its id");
+
+    NurbsSurface left = patch(0, 1);
+    NurbsSurface right = patch(1, 2);
+    NurbsSurface merged = must(left.merge(right), "merge");
+    std::pair<std::pair<double, double>, std::pair<double, double>> d = must(merged.domain(), "domain");
+    Vec3 corner = must(merged.point_at(d.first.second, d.second.second), "point_at");
+    check(std::abs(corner[0] - 2) <= 1e-12 && std::abs(corner[1] - 1) <= 1e-12 && std::abs(corner[2]) <= 1e-12, "merge: the far corner is not (2, 1, 0)");
+    Solid sheet = must(must(must(left.to_sheet(), "to_sheet").coloured(red), "coloured")
+                           .merge_surfaces(must(must(right.to_sheet(), "to_sheet").coloured(blue), "coloured")),
+                       "merge_surfaces");
+    check(sheet.faces() == 1 && std::abs(area_of(sheet) - 2) <= 1e-9, "merge_surfaces: area " + num(area_of(sheet)));
+    check(must(sheet.face_colour(0), "face_colour") == std::optional<Vec3>(red), "merge_surfaces: not this sheet's red");
+    std::vector<NurbsSurface> tweens = must(left.tween(patch(0, 1, 4), 3), "tween");
+    check(tweens.size() == 3, "tween: " + num(static_cast<double>(tweens.size())) + " surfaces");
+    for (std::size_t i = 0; i < tweens.size(); ++i) {
+        double z = must(tweens[i].point_at(0.5, 0.5), "point_at")[2];
+        check(std::abs(z - static_cast<double>(i + 1)) <= 1e-12, "tween: surface " + num(static_cast<double>(i)) + " at z " + num(z));
+    }
+
+    Solid plain = must(Solid::cuboid(10, 10, 10), "cuboid");
+    refused(plain.untrim(99), "untrim: ", "", "untrim a face out of range");
+    refused(plain.unstitch({99u}), "unstitch: ", "", "unstitch a face out of range");
+    refused(plain.unstitch({1u, 1u}), "unstitch: ", "", "unstitch a face twice");
+    refused(plain.ruled_from_edges({}, bs::Ruling::normal), "ruled_from_edges: ", "", "ruled_from_edges with no edges");
+    refused(plain.ruled_from_edges({999u}, bs::Ruling::normal), "ruled_from_edges: ", "", "ruled_from_edges an edge out of range");
+    refused(plain.ruled_from_edges({0u}, bs::Ruling::normal, 0), "ruled_from_edges: ", "", "ruled_from_edges a distance 0");
+    refused(plain.ruled_from_edges({0u}, bs::Ruling::direction, 1, 0, Vec3{0, 0, 0}), "ruled_from_edges: ", "", "a zero direction");
+    refused(plain.ruled_from_edges({0u}, bs::Ruling::direction), "ruled_from_edges: ", "", "ruling direction with no direction");
+    refused(plain.ruled_from_edges({0u}, bs::Ruling::normal, 1, 0, Vec3{0, 0, 1}), "ruled_from_edges: ", "", "a direction not read");
+    refused(plain.change_seam(99, 1.0), "change_seam: ", "", "change_seam a face out of range");
+    refused(plain.change_seam(1, 1.0), "change_seam: ", "", "change_seam a plane");
+    refused(plain.merge_surfaces(must(patch(0, 1).to_sheet(), "to_sheet")), "merge_surfaces: ", "", "merge_surfaces a box");
+    refused(patch(0, 1).merge(patch(5, 6)), "nurbs_surface_merge: ", "", "merge with no side shared");
+    refused(patch(0, 1).tween(patch(5, 6), 0), "nurbs_surface_tween: ", "", "tween a count of 0");
     return {};
 }
 
@@ -676,6 +883,56 @@ static Result<void> fillet_law_with_stations_at_the_ends_is_the_varying_fillet()
     refused(shell.fillet_law(crease, {}, 1e-3), "", "at least one station", "no stations");
     refused(must(Solid::cuboid(10, 10, 10), "cuboid").fillet_law({0}, {{0.0, 1.0}, {1.0, 2.0}}), "", "a radius law rounds only spline edges",
             "radius law on a box");
+    return {};
+}
+
+// 10c: fillet_chord and fillet_asymmetric round a box edge to their closed forms
+static Result<void> fillet_chord_and_fillet_asymmetric_round_a_box_edge() {
+    Solid box = must(Solid::cuboid(40, 30, 20), "cuboid");
+    std::uint32_t edge = 0, face = 0;
+    bool found = false;
+    for (const bs::Edge& e : must(box.edges(), "edges")) {
+        if (e.kind == "line" && e.faces.size() == 2) {
+            edge = e.index;
+            face = e.faces[0];
+            found = true;
+            break;
+        }
+    }
+    check(found, "a box has a line edge");
+    double length = must(box.edge_length(edge, 1e-9), "edge_length").length;
+    double quarter = 1.0 - std::acos(-1.0) / 4.0, r = 4.0 / std::sqrt(2.0);
+    double chorded = volume_of(must(box.fillet_chord({edge}, 4.0), "fillet_chord"));
+    double want_chord = 24000.0 - length * r * r * quarter;
+    check(std::fabs(chorded - want_chord) <= 1e-6 * want_chord, "fillet_chord's volume " + num(chorded) + " against " + num(want_chord));
+    double asym = volume_of(must(box.fillet_asymmetric({edge}, face, 6.0, 2.0), "fillet_asymmetric"));
+    double want_asym = 24000.0 - length * 6.0 * 2.0 * quarter;
+    check(std::fabs(asym - want_asym) <= 1e-6 * want_asym, "fillet_asymmetric's volume " + num(asym) + " against " + num(want_asym));
+    refused(box.fillet_chord({edge}, 0.0), "", "the chord must be positive", "a zero chord");
+    refused(box.fillet_asymmetric({edge}, face, 6.0, 0.0), "", "distances must be positive", "a zero distance");
+    return {};
+}
+
+// 10d: fillet_full_round rounds a box's top into a half cylinder; fillet_rule rounds a plate and
+// boss's ridges
+static Result<void> fillet_full_round_and_fillet_rule_round_by_faces() {
+    Solid box = must(Solid::cuboid(40, 6, 12), "cuboid");
+    std::uint32_t top = must(box.select_face(bs::Selector::normal({0, 0, 1})), "top");
+    std::uint32_t front = must(box.select_face(bs::Selector::normal({0, -1, 0})), "front");
+    std::uint32_t back = must(box.select_face(bs::Selector::normal({0, 1, 0})), "back");
+    double rounded = volume_of(must(box.fillet_full_round(front, top, back), "fillet_full_round"));
+    double want = 40.0 * 6.0 * 12.0 - 40.0 * 9.0 * (2.0 - std::acos(-1.0) / 2.0);
+    check(std::fabs(rounded - want) <= 1e-3 * want, "fillet_full_round's volume " + num(rounded) + " against " + num(want));
+    refused(box.fillet_full_round(front, box.faces() + 3, back), "", "no such face", "a face past the last");
+    Solid body = must(must(Solid::cuboid(40, 30, 5), "plate").join(must(must(Solid::cylinder(6, 8), "boss").translate(0, 0, 2.5), "translate")),
+                      "join");
+    std::vector<std::uint32_t> faces;
+    for (std::uint32_t f = 0; f < body.faces(); ++f) faces.push_back(f);
+    double before = volume_of(body);
+    double ridged = volume_of(must(body.fillet_rule(faces, 1.0, {}, bs::EdgeRule::convex, 0.05), "fillet_rule"));
+    check(ridged < before, "fillet_rule convex: volume " + num(ridged) + " not below " + num(before));
+    refused(box.fillet_rule({0, 1, 2, 3, 4, 5}, 1.0, {}, bs::EdgeRule::concave), "", "no edge between the faces matches the rule",
+            "a box has no valley");
     return {};
 }
 
@@ -896,11 +1153,16 @@ int main(int argc, char** argv) {
         {"a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap", a_ring_on_a_square_offsets_splits_and_parts_with_a_panel_gap},
         {"curves_on_a_sphere_push_up_pull_back_and_take_the_short_path", curves_on_a_sphere_push_up_pull_back_and_take_the_short_path},
         {"a_curve_fits_to_a_faces_own_parameter", a_curve_fits_to_a_faces_own_parameter},
+        {"offsets_of_curves_surfaces_and_solids", offsets_of_curves_surfaces_and_solids},
+        {"faces_split_along_curves_and_silhouettes", faces_split_along_curves_and_silhouettes},
+        {"surface_edits_keep_paint_and_ids", surface_edits_keep_paint_and_ids},
         {"continuity_match_and_blend", continuity_match_and_blend},
         {"n_sided_patch_fills_a_pentagon_of_strips", n_sided_patch_fills_a_pentagon_of_strips},
         {"fillet_surfaces_rolls_a_ball_between_two_sheets", fillet_surfaces_rolls_a_ball_between_two_sheets},
         {"fillet_rounds_a_spline_edge_at_a_constant_and_a_varying_radius", fillet_rounds_a_spline_edge_at_a_constant_and_a_varying_radius},
         {"fillet_law_with_stations_at_the_ends_is_the_varying_fillet", fillet_law_with_stations_at_the_ends_is_the_varying_fillet},
+        {"fillet_chord_and_fillet_asymmetric_round_a_box_edge", fillet_chord_and_fillet_asymmetric_round_a_box_edge},
+        {"fillet_full_round_and_fillet_rule_round_by_faces", fillet_full_round_and_fillet_rule_round_by_faces},
         {"sheet_error_and_patch_report_are_set_where_made", sheet_error_and_patch_report_are_set_where_made},
         {"continuity_says_where", continuity_says_where},
         {"a_flange_turns_a_hole_under_and_carries_it_inward", a_flange_turns_a_hole_under_and_carries_it_inward},

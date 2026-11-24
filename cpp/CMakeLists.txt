@@ -79,6 +79,17 @@ if(CADACLYSM_LIBRARY_DIR)
       COMMAND "${CMAKE_COMMAND}" -E copy_if_different
               "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE_DIR:cadaclysm_kinematics_test>")
     add_test(NAME kinematics COMMAND cadaclysm_kinematics_test "${CADACLYSM_SAMPLE}")
+
+    # Node::material, Scene::image_count / image: samples/textured-quad.glb, beside the
+    # sample, and the sample itself (cube.scad: no material, no image).
+    get_filename_component(_cadaclysm_sample_dir "${CADACLYSM_SAMPLE}" DIRECTORY)
+    add_executable(cadaclysm_material_test tests/material_test.cpp)
+    target_link_libraries(cadaclysm_material_test PRIVATE cadaclysm::reader)
+    add_custom_command(TARGET cadaclysm_material_test POST_BUILD
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE_DIR:cadaclysm_material_test>")
+    add_test(NAME material COMMAND cadaclysm_material_test
+             "${_cadaclysm_sample_dir}/textured-quad.glb" "${CADACLYSM_SAMPLE}")
   endif()
 
   # Node::lightmap_uvs over a STEP with faces (mechanism.stp has none); skipped when absent.
@@ -227,6 +238,16 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_sketch_test>")
   add_test(NAME sketch COMMAND cadaclysm_sketch_test ${CADACLYSM_LICENSE})
 
+  # Sketch part 2: smooth/translated/rotated, add_polygon, chamfer, patterns, auto_constrain, at
+  # parity with the Python reference's part 2 sketch tests. Needs a license, no sample file.
+  add_executable(cadaclysm_sketch2_test tests/sketch2_test.cpp)
+  target_link_libraries(cadaclysm_sketch2_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_sketch2_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_sketch2_test>")
+  add_test(NAME sketch2 COMMAND cadaclysm_sketch2_test ${CADACLYSM_LICENSE})
+
   # Solid::face_round_radius/face_chamfer_distance/edge_beziers/isocurve_beziers and mesh_file, at
   # parity with the Python reference's tests. Needs a license, no sample file.
   add_executable(cadaclysm_solid_drawing_test tests/solid_drawing_test.cpp)
@@ -288,6 +309,17 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_mesh_closest_test>")
   add_test(NAME mesh_closest COMMAND cadaclysm_mesh_closest_test ${CADACLYSM_LICENSE})
+
+  # A triangle mesh made a B-rep: a unit cube merged and faceted, less a triangle an open shell,
+  # the refusals, and a STEP cube's node read back through the reader's mesh, at parity with the
+  # Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_from_mesh_test tests/from_mesh_test.cpp)
+  target_link_libraries(cadaclysm_from_mesh_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_from_mesh_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_from_mesh_test>")
+  add_test(NAME from_mesh COMMAND cadaclysm_from_mesh_test ${CADACLYSM_LICENSE})
 
   # Point, edge and face queries: a point on a face or an edge, edge convexity, tangent chains,
   # angles, the smallest radius and a profile's area properties in closed form, at parity with
@@ -407,6 +439,46 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_profile_toolkit_test>")
   add_test(NAME profile_toolkit COMMAND cadaclysm_profile_toolkit_test ${CADACLYSM_LICENSE})
+
+  # Gear profiles: involute and cycloidal gears and the involute centre distance, at parity with
+  # the Python reference's tests. Needs a license, no sample file.
+  add_executable(cadaclysm_gears_test tests/gears_test.cpp)
+  target_link_libraries(cadaclysm_gears_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_gears_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_gears_test>")
+  add_test(NAME gears COMMAND cadaclysm_gears_test ${CADACLYSM_LICENSE})
+
+  # NACA airfoils: parse, points, spline and profile, at parity with the Python reference's
+  # tests. Needs a license, no sample file.
+  add_executable(cadaclysm_naca_test tests/naca_test.cpp)
+  target_link_libraries(cadaclysm_naca_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_naca_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_naca_test>")
+  add_test(NAME naca COMMAND cadaclysm_naca_test ${CADACLYSM_LICENSE})
+
+  # The planar contact solver, contact_settle, at parity with the Python reference's tests.
+  # Needs a license, no sample file.
+  add_executable(cadaclysm_settle_test tests/settle_test.cpp)
+  target_link_libraries(cadaclysm_settle_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_settle_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_settle_test>")
+  add_test(NAME settle COMMAND cadaclysm_settle_test ${CADACLYSM_LICENSE})
+
+  # PolygonSet: booleans, buffers, measures, questions and the way to and from profiles, at
+  # parity with the Python reference's test_polygon_set_* tests. No sample file.
+  add_executable(cadaclysm_polygon_set_test tests/polygon_set_test.cpp)
+  target_link_libraries(cadaclysm_polygon_set_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_polygon_set_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_polygon_set_test>")
+  add_test(NAME polygon_set COMMAND cadaclysm_polygon_set_test ${CADACLYSM_LICENSE})
 
   # RTree, closest_points and k_neighbors, at parity with the Python reference's R-tree tests.
   # No sample file.

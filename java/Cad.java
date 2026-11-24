@@ -158,9 +158,11 @@ public final class Cad {
             // library's own choice among a zip's candidates.
             ValueLayout.ADDRESS.withName("pick"),
             ValueLayout.ADDRESS.withName("pick_user"),
-            // Last in the header; OpenOptions.lightmapResolution.
+            // OpenOptions.lightmapResolution; the padding below puts the double on 8.
             ValueLayout.JAVA_INT.withName("lightmap_resolution"),
-            MemoryLayout.paddingLayout(4));
+            MemoryLayout.paddingLayout(4),
+            // OpenOptions.recognizeTolerance.
+            ValueLayout.JAVA_DOUBLE.withName("recognize_tolerance"));
 
     /**
      * {@code CadaclysmSvgOptions}. {@code cadaclysm_svg_options_init} fills the whole struct,
@@ -235,6 +237,34 @@ public final class Cad {
             ValueLayout.ADDRESS.withName("indices"),
             ValueLayout.JAVA_INT.withName("vertex_count"),
             ValueLayout.JAVA_INT.withName("index_count"));
+
+    // CadaclysmMaterial: 88 bytes; the one-byte double_sided is padded to the four-byte
+    // base_color_image after it. Pinned by bindings.rs.
+    private static final MemoryLayout MATERIAL = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("name"),
+            MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_FLOAT).withName("base_color"),
+            ValueLayout.JAVA_FLOAT.withName("metallic"),
+            ValueLayout.JAVA_FLOAT.withName("roughness"),
+            ValueLayout.JAVA_INT.withName("alpha_mode"),
+            ValueLayout.JAVA_FLOAT.withName("alpha_cutoff"),
+            ValueLayout.JAVA_BOOLEAN.withName("double_sided"),
+            MemoryLayout.paddingLayout(3),
+            ValueLayout.JAVA_INT.withName("base_color_image"),
+            ValueLayout.JAVA_INT.withName("base_color_uv_set"),
+            MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_FLOAT).withName("uv_offset"),
+            ValueLayout.JAVA_FLOAT.withName("uv_rotation"),
+            MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_FLOAT).withName("uv_scale"),
+            ValueLayout.JAVA_INT.withName("wrap_u"),
+            ValueLayout.JAVA_INT.withName("wrap_v"),
+            ValueLayout.JAVA_INT.withName("mag_filter"),
+            ValueLayout.JAVA_INT.withName("min_filter"));
+
+    // CadaclysmImage: a pointer, a size_t and two strings. Pinned by bindings.rs.
+    private static final MemoryLayout IMAGE = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("bytes"),
+            ValueLayout.JAVA_LONG.withName("size"),
+            ValueLayout.ADDRESS.withName("mime"),
+            ValueLayout.ADDRESS.withName("name"));
 
     // {const char* name; enum kind; const char* text; int64_t integer; double real; bool
     // boolean;}. An enum is a C int (4 bytes); the compiler pads 4 bytes before the 8-byte
@@ -469,7 +499,7 @@ public final class Cad {
             FORMAT_COUNT, FORMAT_NAME, FORMAT_EXTENSIONS, PICK_SAVE, GEOMETRY_DIAGNOSTIC_COUNT,
             GEOMETRY_DIAGNOSTIC, FORGET_MESHES, LOD_LEVELS, NODE_MESH_LOD, NODE_MESH_LIGHTMAP_UVS, NODE_LOD_ERROR,
             NODE_EDGE_BEZIERS, NODE_CURVE_BEZIERS, NODE_ISOCURVE_BEZIERS,
-            NODE_COLLISION, NODE_COLLISION_HULL,
+            NODE_COLLISION, NODE_COLLISION_HULL, NODE_MATERIAL, IMAGE_COUNT, IMAGE_AT,
             MESHLETS_BUILD, MESHLETS_COUNT, MESHLETS_FREE, MESHLET_TRIANGLE_COUNT, MESHLET_VERTEX_COUNT,
             MESHLET_LEVEL, MESHLET_GROUP, MESHLET_ERROR, MESHLET_CHILD_COUNT, MESHLET_POSITIONS,
             MESHLET_NORMALS, MESHLET_INDICES, MESHLET_CHILDREN,
@@ -622,6 +652,9 @@ public final class Cad {
         NODE_ISOCURVE_BEZIERS = bind(linker, lib, "cadaclysm_node_isocurve_beziers", FunctionDescriptor.of(BEZIERS, A, I));
         NODE_COLLISION = bind(linker, lib, "cadaclysm_node_collision", FunctionDescriptor.of(B, A, I, I, A));
         NODE_COLLISION_HULL = bind(linker, lib, "cadaclysm_node_collision_hull", FunctionDescriptor.of(COLLISION_HULL, A, I, I));
+        NODE_MATERIAL = bind(linker, lib, "cadaclysm_node_material", FunctionDescriptor.of(B, A, I, A));
+        IMAGE_COUNT = bind(linker, lib, "cadaclysm_image_count", FunctionDescriptor.of(I, A));
+        IMAGE_AT = bind(linker, lib, "cadaclysm_image", FunctionDescriptor.of(B, A, I, A));
         MESHLETS_BUILD = bind(linker, lib, "cadaclysm_meshlets_build", FunctionDescriptor.of(A, A, A, L, A, L, I, I, I));
         MESHLETS_COUNT = bind(linker, lib, "cadaclysm_meshlets_count", FunctionDescriptor.of(I, A));
         MESHLETS_FREE = bind(linker, lib, "cadaclysm_meshlets_free", FunctionDescriptor.ofVoid(A));
@@ -1098,6 +1131,7 @@ public final class Cad {
         out.set(ValueLayout.JAVA_DOUBLE, offset(OPEN_OPTIONS, "source_meters_per_unit"),
                 options.sourceMetresPerUnit());
         out.set(ValueLayout.JAVA_INT, offset(OPEN_OPTIONS, "lightmap_resolution"), options.lightmapResolution());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(OPEN_OPTIONS, "recognize_tolerance"), options.recognizeTolerance());
         return out;
     }
 
@@ -1222,7 +1256,7 @@ public final class Cad {
     /**
      * Open a CAD file already in bytes. {@code format} names the kind as an extension would
      * -- {@code "step"}, {@code "ifc"}, {@code "igs"}, {@code "brep"}, {@code "3dm"},
-     * {@code "scad"} -- since there is no file name to take it from: Python's own
+     * {@code "scad"}, {@code "3mf"}, {@code "ply"} -- since there is no file name to take it from: Python's own
      * {@code format} argument, given on its own here as there, where the two-argument
      * overloads read it off {@code name}. A leading dot is allowed and ignored.
      * {@code options.schema()} must be a path here: there is no file on disk to read a
@@ -1342,24 +1376,37 @@ public final class Cad {
      * Convention#UV_WORLD}): a Java enum cannot carry an arbitrary OR'd bit the way an {@code
      * IntEnum} or a uint-backed enum can, so here they ride as their own named fields instead
      * of inside {@link #convention()}.
+     *
+     * <p>{@link #recognizeTolerance()}: recognize every B-rep body ({@link Node#brep()}) at this
+     * tolerance, as {@link Brep#recognize()} would; 0 (the default) is off, 1e-6 the usual ask.
+     * Meshes are unchanged.
      */
     public record OpenOptions(Convention convention, boolean fileUnits, boolean uvWorld,
                                String schema, boolean colours, double sourceMetresPerUnit,
-                               int lightmapResolution) {
+                               int lightmapResolution, double recognizeTolerance) {
         public OpenOptions {
             if (lightmapResolution < 0)
                 throw new IllegalArgumentException("lightmapResolution must be 0 (off) or a texel count, not " + lightmapResolution);
+            // Java builds the struct itself, so it refuses what the library would, in the same words.
+            if (Double.isNaN(recognizeTolerance) || recognizeTolerance < 0 || Double.isInfinite(recognizeTolerance))
+                throw new IllegalArgumentException("recognizeTolerance must be 0 (off) or a positive finite tolerance, not " + recognizeTolerance);
+        }
+
+        /** The options without recognition: what every caller before recognize-on-open wrote. */
+        public OpenOptions(Convention convention, boolean fileUnits, boolean uvWorld,
+                           String schema, boolean colours, double sourceMetresPerUnit, int lightmapResolution) {
+            this(convention, fileUnits, uvWorld, schema, colours, sourceMetresPerUnit, lightmapResolution, 0.0);
         }
 
         /** The options without a lightmap: what every caller before lightmaps wrote. */
         public OpenOptions(Convention convention, boolean fileUnits, boolean uvWorld,
                            String schema, boolean colours, double sourceMetresPerUnit) {
-            this(convention, fileUnits, uvWorld, schema, colours, sourceMetresPerUnit, 0);
+            this(convention, fileUnits, uvWorld, schema, colours, sourceMetresPerUnit, 0, 0.0);
         }
 
-        /** The file's own axes and units, no extra schema, no colours, no lightmap. */
+        /** The file's own axes and units, no extra schema, no colours, no lightmap, no recognition. */
         public static OpenOptions defaults() {
-            return new OpenOptions(Convention.NATIVE, false, false, null, false, 0.0, 0);
+            return new OpenOptions(Convention.NATIVE, false, false, null, false, 0.0, 0, 0.0);
         }
     }
 
@@ -2168,6 +2215,78 @@ public final class Cad {
         /** {@code none}, {@code box}, {@code sphere}, {@code capsule}, {@code cylinder} or {@code hull}. */
         public String shapeName() {
             return shape >= 0 && shape < NAMES.length ? NAMES[shape] : Integer.toString(shape);
+        }
+    }
+
+    /** A part's PBR metallic-roughness material, as glTF 2.0 defines one ({@link Node#material}).
+     *  Plain data, copied out. {@code baseColor} is the base colour factor, RGBA in <b>linear</b>
+     *  light (the node's {@link Node#colour} is the same factor in display space).
+     *  {@code baseColorImage} is the {@link Scene#image} index the base colour texture reads, or
+     *  null for an untextured material (and for a texture whose image the library does not read,
+     *  such as WebP). The texture reads texture coordinates set {@code baseColorUvSet} (0 the
+     *  mesh's {@code uvs}) through {@code KHR_texture_transform}: {@code uvOffset},
+     *  {@code uvRotation} (radians) and {@code uvScale}. {@code alphaMode} is {@code "opaque"},
+     *  {@code "mask"} (cut below {@code alphaCutoff}) or {@code "blend"}; {@code wrapU} and
+     *  {@code wrapV} {@code "repeat"}, {@code "mirrored_repeat"} or {@code "clamp_to_edge"};
+     *  {@code magFilter} and {@code minFilter} {@code "linear"} or {@code "nearest"}. */
+    public record Material(String name, float[] baseColor, float metallic, float roughness, String alphaMode,
+                           float alphaCutoff, boolean doubleSided, Integer baseColorImage, int baseColorUvSet,
+                           float[] uvOffset, float uvRotation, float[] uvScale, String wrapU, String wrapV,
+                           String magFilter, String minFilter) {
+        private static final String[] ALPHAS = {"opaque", "mask", "blend"};
+        private static final String[] WRAPS = {"repeat", "mirrored_repeat", "clamp_to_edge"};
+        private static final String[] FILTERS = {"linear", "nearest"};
+
+        private static String named(String[] table, int value) {
+            return value >= 0 && value < table.length ? table[value] : Integer.toUnsignedString(value);
+        }
+
+        static Material read(MemorySegment out) {
+            int image = out.get(ValueLayout.JAVA_INT, offset(MATERIAL, "base_color_image"));
+            return new Material(
+                    string(out.get(ValueLayout.ADDRESS, offset(MATERIAL, "name"))),
+                    out.asSlice(offset(MATERIAL, "base_color"), 4 * Float.BYTES).toArray(ValueLayout.JAVA_FLOAT),
+                    out.get(ValueLayout.JAVA_FLOAT, offset(MATERIAL, "metallic")),
+                    out.get(ValueLayout.JAVA_FLOAT, offset(MATERIAL, "roughness")),
+                    named(ALPHAS, out.get(ValueLayout.JAVA_INT, offset(MATERIAL, "alpha_mode"))),
+                    out.get(ValueLayout.JAVA_FLOAT, offset(MATERIAL, "alpha_cutoff")),
+                    out.get(ValueLayout.JAVA_BOOLEAN, offset(MATERIAL, "double_sided")),
+                    image == -1 ? null : image,
+                    out.get(ValueLayout.JAVA_INT, offset(MATERIAL, "base_color_uv_set")),
+                    out.asSlice(offset(MATERIAL, "uv_offset"), 2 * Float.BYTES).toArray(ValueLayout.JAVA_FLOAT),
+                    out.get(ValueLayout.JAVA_FLOAT, offset(MATERIAL, "uv_rotation")),
+                    out.asSlice(offset(MATERIAL, "uv_scale"), 2 * Float.BYTES).toArray(ValueLayout.JAVA_FLOAT),
+                    named(WRAPS, out.get(ValueLayout.JAVA_INT, offset(MATERIAL, "wrap_u"))),
+                    named(WRAPS, out.get(ValueLayout.JAVA_INT, offset(MATERIAL, "wrap_v"))),
+                    named(FILTERS, out.get(ValueLayout.JAVA_INT, offset(MATERIAL, "mag_filter"))),
+                    named(FILTERS, out.get(ValueLayout.JAVA_INT, offset(MATERIAL, "min_filter"))));
+        }
+
+        @Override
+        public String toString() {
+            return "Material('" + name + "', base_color=" + Arrays.toString(baseColor) + ", image="
+                    + (baseColorImage == null ? "None" : baseColorImage) + ", alpha=" + alphaMode + ")";
+        }
+    }
+
+    /** An image a material names ({@link Scene#image}), <b>encoded</b> as the file held it:
+     *  {@code data} the PNG, JPEG, WebP or KTX2 bytes (copied out), {@code mime} {@code "image/png"},
+     *  {@code "image/jpeg"}, {@code "image/webp"} or {@code "image/ktx2"} (for an image the library does not read, what the file declared),
+     *  {@code name} its name in the file. */
+    public record Image(byte[] data, String mime, String name) {
+        @SuppressWarnings("restricted") // reinterpret: the library holds `size` bytes there.
+        static Image read(MemorySegment out) {
+            MemorySegment bytes = out.get(ValueLayout.ADDRESS, offset(IMAGE, "bytes"));
+            long size = out.get(ValueLayout.JAVA_LONG, offset(IMAGE, "size"));
+            byte[] data = bytes.address() == 0 || size == 0 ? new byte[0]
+                    : bytes.reinterpret(size).toArray(ValueLayout.JAVA_BYTE);
+            return new Image(data, string(out.get(ValueLayout.ADDRESS, offset(IMAGE, "mime"))),
+                    string(out.get(ValueLayout.ADDRESS, offset(IMAGE, "name"))));
+        }
+
+        @Override
+        public String toString() {
+            return "Image('" + name + "', " + mime + ", " + data.length + " bytes)";
         }
     }
 
@@ -4886,6 +5005,18 @@ public final class Cad {
             }
         }
 
+        /** This part's PBR material (a glTF primitive's), or null -- every part of every other
+         *  format. Its own, else its shape's, as {@link #colour} resolves. */
+        public Material material() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(MATERIAL);
+                boolean has = (boolean) NODE_MATERIAL.invokeExact(scene.handle(), index, out);
+                return has ? Material.read(out) : null;
+            } catch (Throwable t) {
+                throw unchecked(t);
+            }
+        }
+
         /** Where this node's geometry sits, as a row-major 4x4 double matrix. */
         public double[][] transform() {
             return toRowMajor(rawTransform());
@@ -5678,6 +5809,35 @@ public final class Cad {
             }
         }
 
+        /** How many images the scene's materials name ({@link #image}); 0 for every format but glTF. */
+        public int imageCount() {
+            try {
+                return (int) IMAGE_COUNT.invokeExact(handle());
+            } catch (Throwable t) {
+                throw unchecked(t);
+            }
+        }
+
+        /** Image {@code index} (0 to {@code imageCount() - 1}), encoded as the file held it -- the
+         *  {@code baseColorImage} a {@link Material} names. Throws
+         *  {@link IndexOutOfBoundsException} past the last. */
+        public Image image(int index) {
+            Image found = imageOrNull(index);
+            if (found == null) throw new IndexOutOfBoundsException("image " + index + ": the scene has " + imageCount());
+            return found;
+        }
+
+        private Image imageOrNull(int index) {
+            if (index < 0) return null;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(IMAGE);
+                boolean has = (boolean) IMAGE_AT.invokeExact(handle(), index, out);
+                return has ? Image.read(out) : null;
+            } catch (Throwable t) {
+                throw unchecked(t);
+            }
+        }
+
         /** What the file declares about its own precision, as {@link Tolerances}: the absolute
          *  tolerance in the file's own unit (beside {@link #metresPerUnit}, whatever convention
          *  the scene was opened into) and the angular one in radians, null for one it does not
@@ -6053,7 +6213,9 @@ public final class Cad {
 
         /**
          * Write the whole scene to {@code path}: {@code "glb"} (binary glTF), {@code "gltf"}
-         * (text glTF) or {@code "obj"} (Wavefront) -- every placement of every shape, named
+         * (text glTF), {@code "obj"} (Wavefront), {@code "usda"} (OpenUSD), {@code "3mf"} (3MF,
+         * every placement a build item), {@code "ply"} (binary) or {@code "ply-ascii"} (PLY,
+         * every placement baked into one body) -- every placement of every shape, named
          * and placed as the tree is, where {@link Node#saveMesh} writes one node's mesh on its
          * own. Throws on any other format or a failed write.
          */

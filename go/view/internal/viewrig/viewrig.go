@@ -81,8 +81,10 @@ static void rig_note(const char *text) {
 }
 // The rig's pick in `p`, up to `p->size` as the library writes it.
 static int rig_old_pick; // a library that writes the pick only up to 1.27's fields
+static uint32_t rig_pick_segment_seen; // 1.30: the segment the caller's buffer arrived with
 static void rig_fill(CadaclysmViewPick *p) {
     uint32_t size = p->size;
+    if (size >= sizeof *p) rig_pick_segment_seen = p->segment;
     CadaclysmViewPick answer = rig_pick;
     size_t n = size < sizeof answer ? size : sizeof answer;
     answer.size = size;
@@ -464,9 +466,13 @@ static int rig_closing_set, rig_pick_landed = 1;
 static void rig_queue(const CadaclysmViewInputEvent *e) {
     if (rig_event_count < 32) rig_events[rig_event_count++] = *e;
 }
+static int32_t rig_event_label_seen; // 1.30: the none values the caller's buffer arrived with
+static uint32_t rig_event_segment_seen;
 static bool rig_next_event(CadaclysmView *v, CadaclysmViewInputEvent *out) {
     uint32_t size = out->size;
     (void)v;
+    rig_event_label_seen = out->pick_viewport_label;
+    rig_event_segment_seen = out->pick_segment;
     ++rig_event_calls;
     rig_event_size = size;
     if (rig_event_refusal[0]) {
@@ -517,6 +523,7 @@ static void rig_push_event(uint32_t kind, uint32_t modifiers, float x, float y, 
     CadaclysmViewInputEvent e;
     memset(&e, 0, sizeof e);
     e.pick_viewport_label = pick_label;
+    e.pick_segment = 0xFFFFFFFFu; // 1.30: no wire, as the library writes it
     e.kind = kind;
     e.modifiers = modifiers;
     e.x = x;
@@ -739,6 +746,142 @@ static bool rig_set_on_top(CadaclysmView *v, uint32_t item, bool on) {
     rig_style_note(text);
     return true;
 }
+// 1.29's live-geometry calls and show_glyphs, logged in the same text log: the counts (in units),
+// whether normals and dir were NULL, the kind's number, the size and the colour.
+static bool rig_set_lines(CadaclysmView *v, uint32_t item, const float *p, size_t n) {
+    char text[96];
+    (void)v;
+    snprintf(text, sizeof text, "lines %u %zu%s", item, n, p ? "" : " NULL");
+    rig_style_note(text);
+    return true;
+}
+static bool rig_set_curves(CadaclysmView *v, uint32_t item, const float *p, size_t n) {
+    char text[96];
+    (void)v;
+    snprintf(text, sizeof text, "curves %u %zu%s", item, n, p ? "" : " NULL");
+    rig_style_note(text);
+    return true;
+}
+static bool rig_set_points(CadaclysmView *v, uint32_t item, const float *p, size_t n) {
+    char text[96];
+    (void)v;
+    snprintf(text, sizeof text, "points %u %zu%s", item, n, p ? "" : " NULL");
+    rig_style_note(text);
+    return true;
+}
+static bool rig_set_mesh_positions(CadaclysmView *v, uint32_t item, const float *p, const float *normals, size_t n) {
+    char text[96];
+    (void)v;
+    (void)p;
+    snprintf(text, sizeof text, "mesh %u %zu %s", item, n, normals ? "normals" : "none");
+    rig_style_note(text);
+    return true;
+}
+static uint32_t rig_show_glyphs(CadaclysmView *v, const float *at, const float *dir, size_t n, uint32_t kind, float size_pt, const float *colour) {
+    char col[48], text[160];
+    (void)v;
+    (void)at;
+    rig_colour_text(col, sizeof col, colour);
+    snprintf(text, sizeof text, "glyphs %zu %u %g dir=%s colour=%s", n, kind, size_pt, dir ? "given" : "nil", col);
+    rig_style_note(text);
+    return 21;
+}
+// 1.30's picking and snapping, logged in the same text log: the aperture, the base (NULL or its
+// point) and step, the snap points (NULL or given, the count, the label or NULL) and each
+// pick_rect's rectangle and capacity. pick_rect answers rig_rect_hits -- the total, at most the
+// capacity written -- or 0 while rig_said holds a refusal.
+static CadaclysmViewRectHit rig_rect_hits[128];
+static size_t rig_rect_count;
+static bool rig_set_pick_aperture(CadaclysmView *v, float a) {
+    char text[64];
+    (void)v;
+    snprintf(text, sizeof text, "aperture %g", a);
+    rig_style_note(text);
+    return true;
+}
+static bool rig_set_snap_base(CadaclysmView *v, const float *xyz, float step) {
+    char text[128];
+    (void)v;
+    if (xyz)
+        snprintf(text, sizeof text, "base %g %g %g %g", xyz[0], xyz[1], xyz[2], step);
+    else
+        snprintf(text, sizeof text, "base NULL %g", step);
+    rig_style_note(text);
+    return true;
+}
+static bool rig_set_snap_points(CadaclysmView *v, uint32_t item, const float *xyz, size_t n, const char *label) {
+    char text[160];
+    (void)v;
+    if (label)
+        snprintf(text, sizeof text, "points %u %s %zu '%s'", item, xyz ? "given" : "NULL", n, label);
+    else
+        snprintf(text, sizeof text, "points %u %s %zu NULL", item, xyz ? "given" : "NULL", n);
+    rig_style_note(text);
+    return true;
+}
+static size_t rig_pick_rect(CadaclysmView *v, uint32_t viewport, float x, float y, float w, float h, bool crossing,
+                            CadaclysmViewRectHit *out, size_t capacity) {
+    char text[160];
+    size_t k;
+    (void)v;
+    snprintf(text, sizeof text, "rect %u %g %g %g %g %s %zu", viewport, x, y, w, h, crossing ? "crossing" : "window", capacity);
+    rig_style_note(text);
+    if (rig_said[0]) return 0;
+    for (k = 0; k < rig_rect_count && k < capacity; ++k) out[k] = rig_rect_hits[k];
+    return rig_rect_count;
+}
+static void rig_set_rect_hit(int k, uint32_t item, uint32_t kind, uint32_t index) {
+    if (k < 0 || k >= 128) return;
+    rig_rect_hits[k].item = item;
+    rig_rect_hits[k].kind = kind;
+    rig_rect_hits[k].index = index;
+}
+static void rig_set_rect_count(size_t n) { rig_rect_count = n < 128 ? n : 128; }
+static void rig_set_pick_segment(uint32_t segment, float distance) {
+    rig_pick.segment = segment;
+    rig_pick.distance_px = distance;
+}
+static uint32_t rig_seen_pick_segment(void) { return rig_pick_segment_seen; }
+static int32_t rig_seen_event_label(void) { return rig_event_label_seen; }
+static uint32_t rig_seen_event_segment(void) { return rig_event_segment_seen; }
+// The 1.30 tail of a snap answer: label, lock, guide count and twelve guide doubles.
+static void rig_set_snap_tail(const char *label, int locked, float angle, uint32_t count, const double *guides) {
+    memset(rig_snap.label, 0, sizeof rig_snap.label);
+    strncpy(rig_snap.label, label, sizeof rig_snap.label - 1);
+    rig_snap.locked = locked ? 1u : 0u;
+    rig_snap.locked_angle = angle;
+    rig_snap.guide_count = count;
+    memcpy(rig_snap.guides, guides, sizeof rig_snap.guides);
+}
+// The 1.30 tail of the event queued last: the pick's segment and distance, the snap's label,
+// lock and guides.
+static void rig_tail_last(uint32_t segment, float distance, const char *label, int locked, float angle, uint32_t count,
+                          const double *guides) {
+    CadaclysmViewInputEvent *e;
+    if (rig_event_count == 0) return;
+    e = &rig_events[rig_event_count - 1];
+    e->pick_segment = segment;
+    e->pick_distance_px = distance;
+    memset(e->snap_label, 0, sizeof e->snap_label);
+    strncpy(e->snap_label, label, sizeof e->snap_label - 1);
+    e->snap_locked = locked ? 1u : 0u;
+    e->snap_locked_angle = angle;
+    e->snap_guide_count = count;
+    memcpy(e->snap_guides, guides, sizeof e->snap_guides);
+}
+// The 1.30 layouts: the pick's size, segment and distance_px; the snap's size, label and guides;
+// the event's frozen snap; the event's size, camera, pick_segment and snap_guides; the rect hit.
+static size_t rig_layout130(int i) {
+    static const size_t at[] = {
+        sizeof(CadaclysmViewPick),        offsetof(CadaclysmViewPick, segment),
+        offsetof(CadaclysmViewPick, distance_px), sizeof(CadaclysmViewSnap),
+        offsetof(CadaclysmViewSnap, label),       offsetof(CadaclysmViewSnap, guides),
+        sizeof(CadaclysmViewEventSnap),           sizeof(CadaclysmViewInputEvent),
+        offsetof(CadaclysmViewInputEvent, camera), offsetof(CadaclysmViewInputEvent, pick_segment),
+        offsetof(CadaclysmViewInputEvent, snap_guides), sizeof(CadaclysmViewRectHit),
+    };
+    return at[i];
+}
 static const char *rig_styles_logged(void) { return rig_style_log; }
 
 static void *rig_fn(const char *name) {
@@ -803,6 +946,15 @@ static void *rig_fn(const char *name) {
         {"set_viewport_label", (void *)rig_set_viewport_label},
         {"set_viewport_border", (void *)rig_set_viewport_border},
         {"set_on_top", (void *)rig_set_on_top},
+        {"set_lines", (void *)rig_set_lines},
+        {"set_curves", (void *)rig_set_curves},
+        {"set_points", (void *)rig_set_points},
+        {"set_mesh_positions", (void *)rig_set_mesh_positions},
+        {"show_glyphs", (void *)rig_show_glyphs},
+        {"set_pick_aperture", (void *)rig_set_pick_aperture},
+        {"set_snap_base", (void *)rig_set_snap_base},
+        {"set_snap_points", (void *)rig_set_snap_points},
+        {"pick_rect", (void *)rig_pick_rect},
         {"close", (void *)rig_close},
         {"pump_events", (void *)rig_pump_events},
         {"pick_result_or_none", (void *)rig_pick_result_or_none},
@@ -820,6 +972,9 @@ static void rig_reset(void) {
     memset(rig_waits, 0, sizeof rig_waits);
     memset(&rig_pick, 0, sizeof rig_pick);
     rig_pick.viewport_label = -1;
+    rig_pick.segment = 0xFFFFFFFFu;
+    rig_pick_segment_seen = 0;
+    rig_rect_count = 0;
     rig_style_log[0] = 0;
     rig_old_pick = 0;
     rig_log[0] = 0;
@@ -954,7 +1109,7 @@ func SetNavigation(n uint32) { C.rig_set_navigation(C.uint32_t(n)) }
 // "; " between calls.
 func Log() string { return C.GoString(C.rig_logged()) }
 
-// StyleLog is what 1.28's drafting calls were handed since Reset, one text each, joined by "; ".
+// StyleLog is what 1.28's drafting calls and 1.29's live-geometry and glyph calls were handed since Reset, one text each, joined by "; ".
 func StyleLog() string { return C.GoString(C.rig_styles_logged()) }
 
 // SetPickLabel is the viewport_label of the pick pick_result and run hand back (Reset: -1, none).
@@ -1136,6 +1291,15 @@ type Event struct {
 	PickLabel                      *int32 // pick_viewport_label (1.28); nil: -1, none
 	SnapKind, SnapEdge             uint32
 	Eye, Up                        [3]float32
+	// 1.30's tail: pick_segment (nil: UINT32_MAX, none) and pick_distance_px; the snap's label,
+	// lock, guide count and guides.
+	PickSegment    *uint32
+	PickDistance   float32
+	SnapLabel      string
+	SnapLocked     bool
+	SnapAngle      float32
+	SnapGuideCount uint32
+	SnapGuides     [12]float64
 }
 
 func push(e Event, closing bool) {
@@ -1154,6 +1318,24 @@ func push(e Event, closing bool) {
 		C.uint32_t(e.Repeat), C.uint32_t(e.Dropped), C.double(e.TimeMS), k, C.uint32_t(e.PickItem), C.uint32_t(e.PickClicks),
 		C.uint32_t(e.SnapKind), C.uint32_t(e.SnapEdge), C.float(e.Eye[0]), C.float(e.Eye[1]), C.float(e.Eye[2]),
 		C.float(e.Up[0]), C.float(e.Up[1]), C.float(e.Up[2]), c, label)
+	if closing {
+		return
+	}
+	segment := C.uint32_t(0xFFFFFFFF)
+	if e.PickSegment != nil {
+		segment = C.uint32_t(*e.PickSegment)
+	}
+	l := C.CString(e.SnapLabel)
+	defer C.free(unsafe.Pointer(l))
+	var g [12]C.double
+	for i := range g {
+		g[i] = C.double(e.SnapGuides[i])
+	}
+	locked := C.int(0)
+	if e.SnapLocked {
+		locked = 1
+	}
+	C.rig_tail_last(segment, C.float(e.PickDistance), l, locked, C.float(e.SnapAngle), C.uint32_t(e.SnapGuideCount), &g[0])
 }
 
 // QueueEvents appends events to next_event's queue (rigged as "next_event").
@@ -1262,4 +1444,57 @@ func BindingLayout() [4]uintptr {
 		out[i] = uintptr(C.rig_binding_layout(C.int(i)))
 	}
 	return out
+}
+
+// ---- view ABI 1.30: picking and snapping ----
+
+// Layout130 is, from the header through C: the pick's size, segment and distance_px offsets;
+// the snap's size, label and guides offsets; the event's frozen snap's size; the event's size
+// and its camera, pick_segment and snap_guides offsets; the rect hit's size.
+func Layout130() [12]uintptr {
+	var out [12]uintptr
+	for i := range out {
+		out[i] = uintptr(C.rig_layout130(C.int(i)))
+	}
+	return out
+}
+
+// SetRectHits is what pick_rect answers from now on: each {item, kind, index} (at most 128).
+func SetRectHits(hits [][3]uint32) {
+	for k, h := range hits {
+		C.rig_set_rect_hit(C.int(k), C.uint32_t(h[0]), C.uint32_t(h[1]), C.uint32_t(h[2]))
+	}
+	C.rig_set_rect_count(C.size_t(len(hits)))
+}
+
+// SetPickSegment is the segment and distance_px of the pick pick_result and run hand back
+// (Reset: UINT32_MAX and 0, none).
+func SetPickSegment(segment uint32, distancePx float32) {
+	C.rig_set_pick_segment(C.uint32_t(segment), C.float(distancePx))
+}
+
+// PickSegmentSeen is the segment the last pick_result's buffer arrived with.
+func PickSegmentSeen() uint32 { return uint32(C.rig_seen_pick_segment()) }
+
+// EventBufferSeen is the pick_viewport_label and pick_segment the last next_event's buffer
+// arrived with.
+func EventBufferSeen() (label int32, segment uint32) {
+	return int32(C.rig_seen_event_label()), uint32(C.rig_seen_event_segment())
+}
+
+// SetSnapTail is the 1.30 tail of the snap answer snap_result hands back: its label, whether
+// it is locked and at what angle, guide_count and the twelve guide doubles. Set it after
+// SetSnapAnswer, which clears it.
+func SetSnapTail(label string, locked bool, angle float32, count uint32, guides [12]float64) {
+	l := C.CString(label)
+	defer C.free(unsafe.Pointer(l))
+	var g [12]C.double
+	for i := range g {
+		g[i] = C.double(guides[i])
+	}
+	k := C.int(0)
+	if locked {
+		k = 1
+	}
+	C.rig_set_snap_tail(l, k, C.float(angle), C.uint32_t(count), &g[0])
 }

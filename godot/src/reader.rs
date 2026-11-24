@@ -404,7 +404,7 @@ pub(crate) fn edge_id(edge: i64) -> Option<u32> {
 /// own space -- where every other wrapper defaults to `"native"`: here a file opened
 /// with no options should simply draw.
 fn open_options(options: &VarDictionary) -> Option<sdk::OpenOptions> {
-    let mut known = vec!["convention", "uv_world", "colors", "schema", "source_metres_per_unit", "name", "lightmap_resolution"];
+    let mut known = vec!["convention", "uv_world", "colors", "schema", "source_metres_per_unit", "name", "lightmap_resolution", "recognize_tolerance"];
     known.sort_unstable();
     for key in options.keys_array().iter_shared() {
         let key = key.to_string();
@@ -435,6 +435,10 @@ fn open_options(options: &VarDictionary) -> Option<sdk::OpenOptions> {
             return fail(format!("lightmap_resolution: expected a whole number from 0 to 4294967295, not {texels}"));
         }
         opened = opened.lightmap_resolution(texels as u32);
+    }
+    if let Some(tolerance) = options.get("recognize_tolerance") {
+        // Not range-checked here: the library refuses a negative, NaN or infinite tolerance by name.
+        opened = opened.recognize_tolerance(ok(number(&tolerance, "recognize_tolerance"))?);
     }
     Some(opened)
 }
@@ -807,7 +811,9 @@ impl CadaclysmScene {
     /// units), `uv_world` (world-scale UVs), `colors` (per-vertex colours for a body
     /// painted in more than one), `schema` (an extra EXPRESS `.exp`), and
     /// `source_metres_per_unit` for a format that states no unit, and `lightmap_resolution` (a
-    /// lightmap atlas that many texels on a side, 0 for none, read back as `CadaclysmNode.lightmap_uvs`).
+    /// lightmap atlas that many texels on a side, 0 for none, read back as `CadaclysmNode.lightmap_uvs`),
+    /// and `recognize_tolerance` (every `CadaclysmNode.brep` comes back recognized at that
+    /// tolerance, as `CadaclysmBrep.recognize` would; 0 or absent for off, 1e-6 the usual ask).
     #[func]
     fn open_with(path: GString, options: VarDictionary) -> Option<Gd<CadaclysmScene>> {
         let opened = open_options(&options)?;
@@ -1127,7 +1133,7 @@ impl CadaclysmScene {
         with_scene(&self.shared, |s| s.cancel());
     }
 
-    /// Write the whole scene: `"glb"`, `"gltf"`, `"obj"`, `"stl"`... (see
+    /// Write the whole scene: `"glb"`, `"gltf"`, `"obj"`, `"usda"`, `"3mf"`, `"ply"`... (see
     /// `Cadaclysm.mesh_formats()`).
     #[func]
     fn save(&self, path: GString, format: GString) -> bool {

@@ -63,7 +63,7 @@ import os
 import platform
 import re
 import sys
-from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_uint64, c_void_p
+from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint8, c_uint32, c_uint64, c_void_p
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, NamedTuple, Tuple, Union, cast, overload
@@ -272,7 +272,8 @@ FILE_UNITS = 0x100
 UV_WORLD = 0x200
 
 
-def _options(convention, schema=None, colors=False, source_meters_per_unit=0.0, lightmap_resolution=0):
+def _options(convention, schema=None, colors=False, source_meters_per_unit=0.0, lightmap_resolution=0,
+             recognize_tolerance=0.0):
     """A `CadaclysmOpenOptions` built from this module's arguments.
 
     Returns the struct *and the objects it points into*: ctypes will happily let
@@ -301,6 +302,8 @@ def _options(convention, schema=None, colors=False, source_meters_per_unit=0.0, 
     if texels > 0xFFFFFFFF:
         raise ValueError(f"lightmap_resolution must fit in 32 bits, not {lightmap_resolution}")
     options.lightmap_resolution = texels
+    # Not checked here: the library refuses a negative, NaN or infinite tolerance by name.
+    options.recognize_tolerance = float(recognize_tolerance)
     held = []
     if schema is not None:
         encoded = str(schema).encode()
@@ -419,6 +422,8 @@ class _OpenOptions(ctypes.Structure):
         ("pick", c_void_p),
         ("pick_user", c_void_p),
         ("lightmap_resolution", c_uint32),
+        # Declared because init writes it; exposed on `open` in the next change.
+        ("recognize_tolerance", c_double),
     ]
 
 
@@ -508,6 +513,39 @@ class _Collision(ctypes.Structure):
         ("error", c_double),
         ("hull_vertex_count", c_uint32),
         ("hull_index_count", c_uint32),
+    ]
+
+
+class _Material(ctypes.Structure):
+    #: `CadaclysmMaterial`: a glTF primitive's PBR material. Pinned by `tests/bindings.rs`;
+    #: `Node.material` reads it.
+    _fields_ = [
+        ("name", c_char_p),
+        ("base_color", c_float * 4),
+        ("metallic", c_float),
+        ("roughness", c_float),
+        ("alpha_mode", c_uint32),
+        ("alpha_cutoff", c_float),
+        ("double_sided", c_bool),
+        ("base_color_image", c_uint32),
+        ("base_color_uv_set", c_uint32),
+        ("uv_offset", c_float * 2),
+        ("uv_rotation", c_float),
+        ("uv_scale", c_float * 2),
+        ("wrap_u", c_uint32),
+        ("wrap_v", c_uint32),
+        ("mag_filter", c_uint32),
+        ("min_filter", c_uint32),
+    ]
+
+
+class _Image(ctypes.Structure):
+    #: `CadaclysmImage`: an image a material names, encoded. `Scene.image` reads it.
+    _fields_ = [
+        ("bytes", POINTER(c_uint8)),
+        ("size", c_size_t),
+        ("mime", c_char_p),
+        ("name", c_char_p),
     ]
 
 
@@ -815,6 +853,9 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_mesh_lod", _Mesh, [c_void_p, c_uint32, c_uint32]),
     ("cadaclysm_node_lod_error", c_float, [c_void_p, c_uint32, c_uint32]),
     ("cadaclysm_node_collision", c_bool, [c_void_p, c_uint32, c_uint32, POINTER(_Collision)]),
+    ("cadaclysm_node_material", c_bool, [c_void_p, c_uint32, POINTER(_Material)]),
+    ("cadaclysm_image_count", c_uint32, [c_void_p]),
+    ("cadaclysm_image", c_bool, [c_void_p, c_uint32, POINTER(_Image)]),
     ("cadaclysm_node_collision_hull", _CollisionHull, [c_void_p, c_uint32, c_uint32]),
     ("cadaclysm_node_bounds_placed", _Bounds, [c_void_p, c_uint32, POINTER(c_double)]),
     ("cadaclysm_node_bounds_placed64", _Bounds64, [c_void_p, c_uint32, POINTER(c_double)]),
@@ -1839,6 +1880,89 @@ class Collision:
 
     def __repr__(self) -> str:
         return f"Collision({self.shape_name}, error={self.error})"
+
+
+class Material:
+    """A part's PBR metallic-roughness material, as glTF 2.0 defines one (`Node.material`).
+    Plain data, copied out.
+
+    `base_color` is the base colour factor, RGBA in **linear** light (glTF's own space; the
+    node's `colour` is the same factor in display space). `base_color_image` is the
+    `Scene.image` index the base colour texture reads, or None for an untextured material (and
+    for a texture whose image the library does not read, such as WebP). The texture reads
+    texture coordinates set `base_color_uv_set` (0 the mesh's `uvs`) through
+    `KHR_texture_transform`: `uv_offset`, `uv_rotation` (radians) and `uv_scale`.
+    `alpha_mode` is `"opaque"`, `"mask"` (cut below `alpha_cutoff`) or `"blend"`; `wrap_u` and
+    `wrap_v` `"repeat"`, `"mirrored_repeat"` or `"clamp_to_edge"`; `mag_filter` and
+    `min_filter` `"linear"` or `"nearest"`."""
+
+    __slots__ = ("name", "base_color", "metallic", "roughness", "alpha_mode", "alpha_cutoff",
+                 "double_sided", "base_color_image", "base_color_uv_set", "uv_offset",
+                 "uv_rotation", "uv_scale", "wrap_u", "wrap_v", "mag_filter", "min_filter")
+    _ALPHA = ("opaque", "mask", "blend")
+    _WRAP = ("repeat", "mirrored_repeat", "clamp_to_edge")
+    _FILTER = ("linear", "nearest")
+
+    name: str
+    base_color: tuple[float, float, float, float]
+    metallic: float
+    roughness: float
+    alpha_mode: str
+    alpha_cutoff: float
+    double_sided: bool
+    base_color_image: int | None
+    base_color_uv_set: int
+    uv_offset: tuple[float, float]
+    uv_rotation: float
+    uv_scale: tuple[float, float]
+    wrap_u: str
+    wrap_v: str
+    mag_filter: str
+    min_filter: str
+
+    def __init__(self, raw: _Material):
+        def named(table: tuple[str, ...], value: int) -> str:
+            return table[value] if value < len(table) else str(value)
+
+        self.name = _text(raw.name)
+        self.base_color = cast("tuple[float, float, float, float]", tuple(float(v) for v in raw.base_color))
+        self.metallic = float(raw.metallic)
+        self.roughness = float(raw.roughness)
+        self.alpha_mode = named(self._ALPHA, raw.alpha_mode)
+        self.alpha_cutoff = float(raw.alpha_cutoff)
+        self.double_sided = bool(raw.double_sided)
+        self.base_color_image = None if raw.base_color_image == 0xFFFFFFFF else int(raw.base_color_image)
+        self.base_color_uv_set = int(raw.base_color_uv_set)
+        self.uv_offset = (float(raw.uv_offset[0]), float(raw.uv_offset[1]))
+        self.uv_rotation = float(raw.uv_rotation)
+        self.uv_scale = (float(raw.uv_scale[0]), float(raw.uv_scale[1]))
+        self.wrap_u = named(self._WRAP, raw.wrap_u)
+        self.wrap_v = named(self._WRAP, raw.wrap_v)
+        self.mag_filter = named(self._FILTER, raw.mag_filter)
+        self.min_filter = named(self._FILTER, raw.min_filter)
+
+    def __repr__(self) -> str:
+        return f"Material({self.name!r}, base_color={self.base_color}, image={self.base_color_image}, alpha={self.alpha_mode})"
+
+
+class Image:
+    """An image a material names (`Scene.image`), **encoded** as the file held it: `data` the
+    PNG, JPEG, WebP or KTX2 bytes (copied out), `mime` `"image/png"`, `"image/jpeg"`, `"image/webp"` or `"image/ktx2"` (for an image the
+    library does not read, what the file declared), `name` its name in the file."""
+
+    __slots__ = ("data", "mime", "name")
+
+    data: bytes
+    mime: str
+    name: str
+
+    def __init__(self, raw: _Image):
+        self.data = ctypes.string_at(raw.bytes, raw.size) if raw.bytes and raw.size else b""
+        self.mime = _text(raw.mime)
+        self.name = _text(raw.name)
+
+    def __repr__(self) -> str:
+        return f"Image({self.name!r}, {self.mime}, {len(self.data)} bytes)"
 
 
 class CollisionHull:
@@ -4308,6 +4432,15 @@ class Node:
             raise CadaclysmError(_last_error() or f"could not write {path}")
 
     @property
+    def material(self) -> "Material | None":
+        """This part's PBR material (a glTF primitive's), or None -- every part of every
+        other format. Its own, else its shape's, as `colour` resolves."""
+        out = _Material()
+        if not _lib().cadaclysm_node_material(self.scene._handle, self.index, ctypes.byref(out)):
+            return None
+        return Material(out)
+
+    @property
     def colour(self) -> tuple[float, float, float, float] | None:
         """`(r, g, b, a)` if the file gave one, else None.
 
@@ -5016,6 +5149,19 @@ class Scene:
         return Bounds(raw.min, raw.max)
 
     @property
+    def image_count(self) -> int:
+        """How many images the scene's materials name (`image`); 0 for every format but glTF."""
+        return int(_lib().cadaclysm_image_count(self._handle))
+
+    def image(self, index: int) -> Image:
+        """Image `index` (0 to `image_count - 1`), encoded as the file held it -- the
+        `base_color_image` a `Material` names. Raises `IndexError` past the last."""
+        out = _Image()
+        if index < 0 or not _lib().cadaclysm_image(self._handle, index, ctypes.byref(out)):
+            raise IndexError(f"image {index}: the scene has {self.image_count}")
+        return Image(out)
+
+    @property
     def diagnostics(self) -> "list[str]":
         """What this file held that the reader could not build."""
         library, handle = _lib(), self._handle
@@ -5269,10 +5415,15 @@ class Scene:
         """Write the whole scene to `path`: `"glb"` (binary glTF), `"gltf"`
         (text glTF, one file either way), `"obj"` (Wavefront, every
         placement baked to its own named object, a `.mtl` beside it under the
-        same stem when anything has a colour) or `"usda"` (an OpenUSD text
+        same stem when anything has a colour), `"usda"` (an OpenUSD text
         layer: each shape's triangles once, every placement a prim referencing
         them, a node's MaterialX or MDL material bound in its own format over a
-        preview of its colour; the layer states its up axis and metres per unit).
+        preview of its colour; the layer states its up axis and metres per unit),
+        `"3mf"` (a 3MF package: each shape an object once, every placement a
+        build item with its world matrix, a colour per object) or `"ply"`
+        (binary little-endian) / `"ply-ascii"` (PLY has no tree: every
+        placement baked through its world matrix into one body, a colour a
+        vertex where anything has one).
 
         Every placement of every shape, named and placed as the tree is, with a
         material per colour -- where `Node.save_mesh` writes one node's mesh
@@ -5415,7 +5566,7 @@ def resolve_schema(model: str | os.PathLike[str],
 
 def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = None,  # noqa: A001 - the verb
          convention: int = Convention.NATIVE, colors: bool = False,
-         lightmap_resolution: int = 0) -> Scene:
+         lightmap_resolution: int = 0, recognize_tolerance: float = 0.0) -> Scene:
     """Open a CAD file.
 
     `schema` names an EXPRESS schema (`.exp`) beyond the ones built into the
@@ -5434,6 +5585,12 @@ def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = N
     texels on a side -- a second set of texture coordinates in 0..1, one chart
     per B-rep face, no two sharing a texel -- read back as `Node.lightmap_uvs`.
     0, the default, is off. Only B-rep bodies are charted (STEP today).
+
+    `recognize_tolerance` recognizes every B-rep body the scene hands out
+    (`Node.brep`) at that tolerance -- NURBS faces that are planes, cylinders,
+    cones, spheres or tori, and edge curves that are lines, circles or ellipses,
+    come back exact, as `Brep.recognize` would make them. 0 (the default) is
+    off; 1e-6 is the usual ask. Meshes are unchanged.
 
     There is no `surfaces` argument, and there used to be. Every body now carries
     both descriptions -- its triangles and its trimmed surfaces -- and builds
@@ -5466,7 +5623,8 @@ def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = N
     # when the directory is passed through, its real schema being the one in
     # `ap203e2_mim_lf.exp`.
     if schema is not None and Path(schema).is_dir():
-        options, _held = _options(convention, schema, colors, lightmap_resolution=lightmap_resolution)
+        options, _held = _options(convention, schema, colors, lightmap_resolution=lightmap_resolution,
+                                   recognize_tolerance=recognize_tolerance)
         pointer = library.cadaclysm_open(str(path).encode(), ctypes.byref(options))
         if pointer:
             return Scene(pointer, path, Path(schema), int(convention))
@@ -5474,7 +5632,8 @@ def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = N
 
     chosen, fallbacks = resolve_schema(path, schema)
     for candidate in [chosen] if chosen is not None or not fallbacks else fallbacks:
-        options, _held = _options(convention, candidate, colors, lightmap_resolution=lightmap_resolution)
+        options, _held = _options(convention, candidate, colors, lightmap_resolution=lightmap_resolution,
+                                   recognize_tolerance=recognize_tolerance)
         pointer = library.cadaclysm_open(str(path).encode(), ctypes.byref(options))
         if pointer:
             return Scene(pointer, path, candidate, int(convention))
@@ -5484,11 +5643,12 @@ def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = N
 def open_memory(data: bytes | bytearray | memoryview, format: str,  # noqa: A002
                 schema: str | os.PathLike[str] | None = None, name: str = "<memory>",
                 convention: int = Convention.NATIVE, colors: bool = False,
-                lightmap_resolution: int = 0) -> Scene:
+                lightmap_resolution: int = 0, recognize_tolerance: float = 0.0) -> Scene:
     """Open a CAD file already in bytes.
 
     `format` names the kind as an extension would — `"step"`, `"ifc"`, `"igs"`,
-    `"brep"`, `"3dm"`, `"scad"` — since there is no file name to take it from.
+    `"brep"`, `"3dm"`, `"scad"`, `"3mf"`, `"ply"` — since there is no file name
+    to take it from.
     A leading dot is allowed and ignored. `schema` must be a path here: there
     is no file on disk to read a `FILE_SCHEMA` line out of. `convention` is as
     `open` takes it.
@@ -5497,9 +5657,16 @@ def open_memory(data: bytes | bytearray | memoryview, format: str,  # noqa: A002
     texels on a side -- a second set of texture coordinates in 0..1, one chart
     per B-rep face, no two sharing a texel -- read back as `Node.lightmap_uvs`.
     0, the default, is off. Only B-rep bodies are charted (STEP today).
+
+    `recognize_tolerance` recognizes every B-rep body the scene hands out
+    (`Node.brep`) at that tolerance -- NURBS faces that are planes, cylinders,
+    cones, spheres or tori, and edge curves that are lines, circles or ellipses,
+    come back exact, as `Brep.recognize` would make them. 0 (the default) is
+    off; 1e-6 is the usual ask. Meshes are unchanged.
     """
     buffer = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-    options, _held = _options(convention, schema, colors, lightmap_resolution=lightmap_resolution)
+    options, _held = _options(convention, schema, colors, lightmap_resolution=lightmap_resolution,
+                                   recognize_tolerance=recognize_tolerance)
     pointer = _lib().cadaclysm_open_memory(
         buffer,
         len(data),

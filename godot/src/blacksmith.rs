@@ -5,7 +5,7 @@
 //! `CadaclysmSymmetryReport`, `CadaclysmCurvatureTurns`, `CadaclysmHighlightKink`), the draft records
 //! (`CadaclysmDraftPoint`, `CadaclysmFaceDraft`), sheet metal and unrolling (`CadaclysmSheetRule`,
 //! `CadaclysmSheetInfo`, `CadaclysmBendInfo`, `CadaclysmFlatPattern`, `CadaclysmFlatBend`, `CadaclysmBend`,
-//! `CadaclysmUnrolled`), the answers of
+//! `CadaclysmUnrolled`, `CadaclysmSquished`), the answers of
 //! the point, edge and face queries (`CadaclysmFacePoint`, `CadaclysmEdgePoint`, `CadaclysmEdgeConvexity`,
 //! `CadaclysmAngle`, `CadaclysmMinimumRadius`, `CadaclysmAreaProperties`, `CadaclysmDeviation`), the feature
 //! patterns and their records (`CadaclysmPattern`, `CadaclysmPatternReport`, `CadaclysmHoleReport`),
@@ -286,6 +286,453 @@ fn index(i: i64, what: &str) -> Option<u32> {
     match u32::try_from(i) {
         Ok(i) => Some(i),
         Err(_) => fail(format!("{what}: {i} is not an index")),
+    }
+}
+
+/// An optional figure from GDScript: `NAN` (the default) is `None`, the library's default.
+fn given(v: f64) -> Option<f64> {
+    if v.is_nan() { None } else { Some(v) }
+}
+
+/// A tooth or leaf count from GDScript's `int` as the C ABI's `uint32_t`, refused by the call's
+/// name where it would wrap.
+fn gear_count(n: i64, what: &str, name: &str) -> Option<u32> {
+    match u32::try_from(n) {
+        Ok(n) => Some(n),
+        Err(_) => fail(format!("{what}: {name} is out of range: {n}")),
+    }
+}
+
+/// A gear's profile and its report (`CadaclysmProfile.gear_involute`, `gear_wheel_cycloidal`,
+/// `gear_pinion_cycloidal`): its pitch and base radii (`base_radius` `null` for cycloidal
+/// gearing), the largest and smallest radii on the profile, the tooth (leaf) `thickness` on the
+/// pitch circle as an arc length, and whether `undercut` would occur (involute only; it is not
+/// drawn).
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmGearProfile {
+    gear_profile: Gd<CadaclysmProfile>,
+    report: (f64, Option<f64>, f64, f64, f64, bool),
+    /// The gear's outline, a `CadaclysmProfile`.
+    #[var(get = get_profile, no_set)]
+    profile: PhantomVar<Gd<CadaclysmProfile>>,
+    /// The pitch circle's radius.
+    #[var(get = get_pitch_radius, no_set)]
+    pitch_radius: PhantomVar<f64>,
+    /// The base circle's radius; `null` for cycloidal gearing.
+    #[var(get = get_base_radius, no_set)]
+    base_radius: PhantomVar<Variant>,
+    /// The largest radius on the profile.
+    #[var(get = get_tip_radius, no_set)]
+    tip_radius: PhantomVar<f64>,
+    /// The smallest radius on the profile.
+    #[var(get = get_root_radius, no_set)]
+    root_radius: PhantomVar<f64>,
+    /// The tooth (leaf) thickness on the pitch circle, as an arc length.
+    #[var(get = get_thickness, no_set)]
+    thickness: PhantomVar<f64>,
+    /// Whether undercut would occur (involute only; it is not drawn).
+    #[var(get = get_undercut, no_set)]
+    undercut: PhantomVar<bool>,
+}
+
+impl CadaclysmGearProfile {
+    fn wrap(g: bs::GearProfile) -> Gd<CadaclysmGearProfile> {
+        Gd::from_object(CadaclysmGearProfile {
+            gear_profile: CadaclysmProfile::wrap(g.profile),
+            report: (g.pitch_radius, g.base_radius, g.tip_radius, g.root_radius, g.thickness, g.undercut),
+            profile: PhantomVar::default(),
+            pitch_radius: PhantomVar::default(),
+            base_radius: PhantomVar::default(),
+            tip_radius: PhantomVar::default(),
+            root_radius: PhantomVar::default(),
+            thickness: PhantomVar::default(),
+            undercut: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmGearProfile {
+    fn to_string(&self) -> GString {
+        let (pitch, base, tip, root, thickness, undercut) = self.report;
+        gs(format!(
+            "CadaclysmGearProfile(pitch_radius={pitch}, base_radius={base:?}, tip_radius={tip}, root_radius={root}, thickness={thickness}, undercut={undercut})"
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmGearProfile {
+    /// The gear's outline, a `CadaclysmProfile`.
+    #[func]
+    fn get_profile(&self) -> Gd<CadaclysmProfile> {
+        self.gear_profile.clone()
+    }
+
+    /// The pitch circle's radius.
+    #[func]
+    fn get_pitch_radius(&self) -> f64 {
+        self.report.0
+    }
+
+    /// The base circle's radius; `null` for cycloidal gearing.
+    #[func]
+    fn get_base_radius(&self) -> Variant {
+        self.report.1.map_or_else(Variant::nil, |r| r.to_variant())
+    }
+
+    /// The largest radius on the profile.
+    #[func]
+    fn get_tip_radius(&self) -> f64 {
+        self.report.2
+    }
+
+    /// The smallest radius on the profile.
+    #[func]
+    fn get_root_radius(&self) -> f64 {
+        self.report.3
+    }
+
+    /// The tooth (leaf) thickness on the pitch circle, as an arc length.
+    #[func]
+    fn get_thickness(&self) -> f64 {
+        self.report.4
+    }
+
+    /// Whether undercut would occur (involute only; it is not drawn).
+    #[func]
+    fn get_undercut(&self) -> bool {
+        self.report.5
+    }
+}
+
+/// A NACA 4- or 5-digit airfoil by its numbers, fractions of the chord: `parse` a code
+/// (`"0012"`, `"2412"`, `"23012"`, `"23112"`), or `four` and `five` by value. `series` is 4 or 5;
+/// a 4-digit section has its maximum `camber` at `position`, a 5-digit one its design `lift`
+/// coefficient (`0.15 L`), `position` 0.05 to 0.25 by 0.05 and a `reflex`ed camber line or not.
+/// The thickness is laid off normal to the camber line; the leading edge is at the origin, the
+/// chord along +x, the upper surface toward +y, and every curve runs from the upper trailing
+/// edge round the leading edge to the lower one. `closed_te` closes the trailing edge (`k4`
+/// 0.1036) on one point `(chord, 0)`; open, it gapes `0.021 * thickness * chord`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmNaca {
+    value: bs::Naca,
+    /// 4 or 5.
+    #[var(get = get_series, no_set)]
+    series: PhantomVar<i64>,
+    /// A 4-digit section's maximum camber (0 for a 5-digit one).
+    #[var(get = get_camber, no_set)]
+    camber: PhantomVar<f64>,
+    /// A 5-digit section's design lift coefficient (0 for a 4-digit one).
+    #[var(get = get_lift, no_set)]
+    lift: PhantomVar<f64>,
+    /// Where the maximum camber is, a fraction of the chord.
+    #[var(get = get_position, no_set)]
+    position: PhantomVar<f64>,
+    /// The thickness, a fraction of the chord.
+    #[var(get = get_thickness, no_set)]
+    thickness: PhantomVar<f64>,
+    /// Whether a 5-digit camber line is reflexed.
+    #[var(get = get_reflex, no_set)]
+    reflex: PhantomVar<bool>,
+}
+
+impl CadaclysmNaca {
+    fn wrap(value: bs::Naca) -> Gd<CadaclysmNaca> {
+        Gd::from_object(CadaclysmNaca {
+            value,
+            series: PhantomVar::default(),
+            camber: PhantomVar::default(),
+            lift: PhantomVar::default(),
+            position: PhantomVar::default(),
+            thickness: PhantomVar::default(),
+            reflex: PhantomVar::default(),
+        })
+    }
+}
+
+/// Points from the kernel as a `PackedVector2Array` (single precision, Godot's `Vector2`).
+fn naca_vectors(points: &[[f64; 2]]) -> PackedVector2Array {
+    points.iter().map(|p| Vector2::new(p[0] as f32, p[1] as f32)).collect()
+}
+
+/// A count from GDScript's `int` as the C ABI's `uint32_t`, refused by the call's name.
+fn naca_count(n: i64, what: &str, name: &str) -> Option<u32> {
+    match u32::try_from(n) {
+        Ok(n) => Some(n),
+        Err(_) => fail(format!("{what}: {name} is out of range: {n}")),
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmNaca {
+    fn to_string(&self) -> GString {
+        let n = &self.value;
+        gs(format!(
+            "CadaclysmNaca(series={}, camber={}, lift={}, position={}, thickness={}, reflex={})",
+            n.series, n.camber, n.lift, n.position, n.thickness, n.reflex
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmNaca {
+    /// The airfoil a 4- or 5-digit code names. `null` with the reason, starting
+    /// `"naca_parse: "`, in `Cadaclysm.last_error()` for a code that is not 4 or 5 digits, a
+    /// 5-digit position outside 1 to 5, a third digit not 0 or 1, reflex at P = 1, a thickness
+    /// outside (0, 40 %] or camber with no position.
+    #[func]
+    fn parse(code: GString) -> Option<Gd<CadaclysmNaca>> {
+        ok(bs::Naca::parse(&code.to_string())).map(CadaclysmNaca::wrap)
+    }
+
+    /// A 4-digit section: maximum `camber` at `position`, `thickness` (fractions).
+    #[func]
+    fn four(camber: f64, position: f64, thickness: f64) -> Gd<CadaclysmNaca> {
+        CadaclysmNaca::wrap(bs::Naca::four(camber, position, thickness))
+    }
+
+    /// A 5-digit section: design `lift` coefficient, maximum camber at `position` (0.05 to 0.25
+    /// by 0.05), `thickness`, the camber line `reflex`ed or not.
+    #[func]
+    fn five(lift: f64, position: f64, thickness: f64, #[opt(default = false)] reflex: bool) -> Gd<CadaclysmNaca> {
+        CadaclysmNaca::wrap(bs::Naca::five(lift, position, thickness, reflex))
+    }
+
+    /// Whether `other` is the same airfoil, number for number.
+    #[func]
+    fn equals(&self, other: Gd<CadaclysmNaca>) -> bool {
+        self.value == other.bind().value
+    }
+
+    /// `count` (odd, 7 to 100 000) exact points at `chord`, cosine-spaced on each surface, from
+    /// the upper trailing edge to the leading edge (the middle point, `(0, 0)`) and on to the
+    /// lower trailing edge. Empty with the reason, starting `"naca_points: "`, in
+    /// `Cadaclysm.last_error()` for a chord not positive, a count even or out of range, or
+    /// numbers out of range.
+    #[func]
+    fn points(&self, chord: f64, #[opt(default = 101)] count: i64, #[opt(default = true)] closed_te: bool) -> PackedVector2Array {
+        let w = "naca_points";
+        naca_count(count, w, "count")
+            .and_then(|n| ok(self.value.points(chord, n, closed_te)))
+            .map(|p| naca_vectors(&p))
+            .unwrap_or_default()
+    }
+
+    /// The `controls` (8 to 200) control points of an open clamped cubic on uniform knots --
+    /// the spline a page editor without knots of its own draws -- from the upper trailing edge
+    /// round to the lower, least-squares fitted to cosine-spaced exact points, and its error
+    /// (the largest distance from 2 001 exact points to the curve): `{controls, error}`. `null`
+    /// with the reason, starting `"naca_spline: "`, in `Cadaclysm.last_error()` as `points`, or
+    /// for `controls` out of range.
+    #[func]
+    fn spline(&self, chord: f64, #[opt(default = 32)] controls: i64, #[opt(default = true)] closed_te: bool) -> Variant {
+        let w = "naca_spline";
+        naca_count(controls, w, "controls")
+            .and_then(|n| ok(self.value.spline(chord, n, closed_te)))
+            .map(|(c, error)| dict(&[("controls", naca_vectors(&c).to_variant()), ("error", error.to_variant())]).to_variant())
+            .unwrap_or_default()
+    }
+
+    /// A closed profile at `chord`: one cubic NURBS within `tolerance` (`NAN`: `1e-5 * chord`)
+    /// of the airfoil, from the upper trailing edge round to the lower, and a line closing an
+    /// open trailing edge; and the largest distance found between the NURBS and the airfoil:
+    /// `{profile, error}`. `null` with the reason, starting `"profile_naca: "`, in
+    /// `Cadaclysm.last_error()` as `points`, for a tolerance not positive, or for a fit that
+    /// misses the tolerance (saying by how much).
+    #[func]
+    fn profile(&self, chord: f64, #[opt(default = true)] closed_te: bool, #[opt(default = f64::NAN)] tolerance: f64) -> Variant {
+        ok(self.value.profile(chord, closed_te, given(tolerance)))
+            .map(|(p, error)| dict(&[("profile", CadaclysmProfile::wrap(p).to_variant()), ("error", error.to_variant())]).to_variant())
+            .unwrap_or_default()
+    }
+
+    /// 4 or 5.
+    #[func]
+    fn get_series(&self) -> i64 {
+        i64::from(self.value.series)
+    }
+
+    /// A 4-digit section's maximum camber (0 for a 5-digit one).
+    #[func]
+    fn get_camber(&self) -> f64 {
+        self.value.camber
+    }
+
+    /// A 5-digit section's design lift coefficient (0 for a 4-digit one).
+    #[func]
+    fn get_lift(&self) -> f64 {
+        self.value.lift
+    }
+
+    /// Where the maximum camber is, a fraction of the chord.
+    #[func]
+    fn get_position(&self) -> f64 {
+        self.value.position
+    }
+
+    /// The thickness, a fraction of the chord.
+    #[func]
+    fn get_thickness(&self) -> f64 {
+        self.value.thickness
+    }
+
+    /// Whether a 5-digit camber line is reflexed.
+    #[func]
+    fn get_reflex(&self) -> bool {
+        self.value.reflex
+    }
+}
+
+/// Where a `CadaclysmSettle` touches: the midpoint of the closest pair, the unit contact normal
+/// from the driver toward the follower (each two doubles), and each profile's touching
+/// `[loop, segment]` -- loop 0 the outer, 1.. the holes in order.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmSettleContact {
+    value: bs::SettleContact,
+    /// The midpoint of the closest pair, two doubles.
+    #[var(get = get_point, no_set)]
+    point: PhantomVar<PackedFloat64Array>,
+    /// The unit contact normal from the driver toward the follower, two doubles.
+    #[var(get = get_normal, no_set)]
+    normal: PhantomVar<PackedFloat64Array>,
+    /// The driver's touching `[loop, segment]`.
+    #[var(get = get_driver, no_set)]
+    driver: PhantomVar<PackedInt64Array>,
+    /// The follower's touching `[loop, segment]`.
+    #[var(get = get_follower, no_set)]
+    follower: PhantomVar<PackedInt64Array>,
+}
+
+fn settle_contact_text(c: &bs::SettleContact) -> String {
+    format!(
+        "CadaclysmSettleContact(point={:?}, normal={:?}, driver={:?}, follower={:?})",
+        c.point, c.normal, c.driver, c.follower
+    )
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmSettleContact {
+    fn to_string(&self) -> GString {
+        gs(settle_contact_text(&self.value))
+    }
+}
+
+#[godot_api]
+impl CadaclysmSettleContact {
+    /// The midpoint of the closest pair, two doubles.
+    #[func]
+    fn get_point(&self) -> PackedFloat64Array {
+        PackedFloat64Array::from(&self.value.point[..])
+    }
+
+    /// The unit contact normal from the driver toward the follower, two doubles.
+    #[func]
+    fn get_normal(&self) -> PackedFloat64Array {
+        PackedFloat64Array::from(&self.value.normal[..])
+    }
+
+    /// The driver's touching `[loop, segment]`.
+    #[func]
+    fn get_driver(&self) -> PackedInt64Array {
+        let (l, s) = self.value.driver;
+        PackedInt64Array::from(&[i64::from(l), i64::from(s)][..])
+    }
+
+    /// The follower's touching `[loop, segment]`.
+    #[func]
+    fn get_follower(&self) -> PackedInt64Array {
+        let (l, s) = self.value.follower;
+        PackedInt64Array::from(&[i64::from(l), i64::from(s)][..])
+    }
+}
+
+/// Where the follower came to rest (`CadaclysmBlacksmith.contact_settle`): its angle `value`
+/// (never penetrating), the `contact` (a `CadaclysmSettleContact`, `null` stopped at the limit),
+/// whether it `recoiled` out of a starting penetration, and the gap evaluations spent (`steps`).
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmSettle {
+    value_: f64,
+    contact_: Option<Gd<CadaclysmSettleContact>>,
+    recoiled_: bool,
+    steps_: i64,
+    /// The follower's resting angle.
+    #[var(get = get_value, no_set)]
+    value: PhantomVar<f64>,
+    /// The contact, a `CadaclysmSettleContact`; `null` stopped at the limit.
+    #[var(get = get_contact, no_set)]
+    contact: PhantomVar<Variant>,
+    /// Whether it recoiled out of a starting penetration.
+    #[var(get = get_recoiled, no_set)]
+    recoiled: PhantomVar<bool>,
+    /// The gap evaluations spent.
+    #[var(get = get_steps, no_set)]
+    steps: PhantomVar<i64>,
+}
+
+impl CadaclysmSettle {
+    fn wrap(s: bs::Settle) -> Gd<CadaclysmSettle> {
+        let contact_ = s.contact.map(|value| {
+            Gd::from_object(CadaclysmSettleContact {
+                value,
+                point: PhantomVar::default(),
+                normal: PhantomVar::default(),
+                driver: PhantomVar::default(),
+                follower: PhantomVar::default(),
+            })
+        });
+        Gd::from_object(CadaclysmSettle {
+            value_: s.value,
+            contact_,
+            recoiled_: s.recoiled,
+            steps_: i64::from(s.steps),
+            value: PhantomVar::default(),
+            contact: PhantomVar::default(),
+            recoiled: PhantomVar::default(),
+            steps: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmSettle {
+    fn to_string(&self) -> GString {
+        let contact = self.contact_.as_ref().map_or_else(|| "null".to_string(), |c| settle_contact_text(&c.bind().value));
+        gs(format!(
+            "CadaclysmSettle(value={}, contact={contact}, recoiled={}, steps={})",
+            self.value_, self.recoiled_, self.steps_
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmSettle {
+    /// The follower's resting angle.
+    #[func]
+    fn get_value(&self) -> f64 {
+        self.value_
+    }
+
+    /// The contact, a `CadaclysmSettleContact`; `null` stopped at the limit.
+    #[func]
+    fn get_contact(&self) -> Variant {
+        self.contact_.as_ref().map_or_else(Variant::nil, |c| c.to_variant())
+    }
+
+    /// Whether it recoiled out of a starting penetration.
+    #[func]
+    fn get_recoiled(&self) -> bool {
+        self.recoiled_
+    }
+
+    /// The gap evaluations spent.
+    #[func]
+    fn get_steps(&self) -> i64 {
+        self.steps_
     }
 }
 
@@ -655,6 +1102,76 @@ impl CadaclysmBlacksmith {
         ok(bs::thread_size(&designation.to_string())).map(CadaclysmThreadSize::wrap)
     }
 
+    /// The centre distance of two involute gears of `module` in mesh without backlash:
+    /// `module * (z1 + z2) / 2 * cos(alpha) / cos(alpha_w)`. `NAN` is the default: shifts 0,
+    /// `pressure_angle` 20 degrees (radians). `NAN` with the reason, starting
+    /// `"gear_centre_distance_involute: "`, in `Cadaclysm.last_error()` for a module not positive,
+    /// fewer than 4 teeth, a pressure angle outside (0, pi/4) or shifts that leave no working
+    /// angle.
+    #[func]
+    fn gear_centre_distance_involute(
+        module: f64,
+        teeth_first: i64,
+        teeth_second: i64,
+        #[opt(default = f64::NAN)] shift_first: f64,
+        #[opt(default = f64::NAN)] shift_second: f64,
+        #[opt(default = f64::NAN)] pressure_angle: f64,
+    ) -> f64 {
+        let w = "gear_centre_distance_involute";
+        let (Some(first), Some(second)) = (gear_count(teeth_first, w, "teeth_first"), gear_count(teeth_second, w, "teeth_second")) else {
+            return f64::NAN;
+        };
+        ok(bs::gear_centre_distance_involute(module, first, second, given(shift_first), given(shift_second), given(pressure_angle)))
+            .unwrap_or(f64::NAN)
+    }
+
+    /// Where the follower comes to rest, a `CadaclysmSettle`. `driver` (drawn in its own frame,
+    /// the frame's origin at `driver_pivot`, a `Vector2` or two numbers) is held at
+    /// `driver_angle`; `follower` (likewise about `follower_pivot`) starts at `previous` and is
+    /// urged along `direction` (+1 counter-clockwise, -1 clockwise). A local point `p` of a link
+    /// at angle `a` lies at `pivot + R(a) p`; angles are radians. Both profiles are regions with
+    /// their holes. A follower that starts penetrating recoils against `direction` to first
+    /// contact; otherwise it advances to first contact or to `limit`, an absolute follower angle.
+    /// The answer never penetrates: in contact the gap is within `tolerance`. `NAN` is the
+    /// default: `limit` one full turn from `previous` along `direction`, `tolerance` `1e-9` times
+    /// the larger bounding-box diagonal of the two placed profiles. `null` with the reason,
+    /// starting `"contact_settle: "`, in `Cadaclysm.last_error()` for a profile with no segments,
+    /// a pivot, angle or `previous` not finite, a `direction` other than +1 or -1, a `limit`
+    /// infinite or not strictly along `direction` from `previous`, a negative or infinite
+    /// tolerance, a follower that cannot clear by turning, or no convergence within 100 000 gap
+    /// evaluations.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn contact_settle(
+        driver: Gd<CadaclysmProfile>,
+        driver_pivot: Variant,
+        driver_angle: f64,
+        follower: Gd<CadaclysmProfile>,
+        follower_pivot: Variant,
+        previous: f64,
+        direction: i64,
+        #[opt(default = f64::NAN)] limit: f64,
+        #[opt(default = f64::NAN)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSettle>> {
+        let w = "contact_settle";
+        let driver_pivot = v2(&driver_pivot, &format!("{w}: driver_pivot"))?;
+        let follower_pivot = v2(&follower_pivot, &format!("{w}: follower_pivot"))?;
+        // Out of `int32_t`'s range is still a direction other than +1 or -1: the library's to refuse.
+        let direction = direction.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+        let settled = bs::contact_settle(
+            &driver.bind().profile,
+            driver_pivot,
+            driver_angle,
+            &follower.bind().profile,
+            follower_pivot,
+            previous,
+            direction,
+            given(limit),
+            given(tolerance),
+        );
+        ok(settled).map(CadaclysmSettle::wrap)
+    }
+
     #[func]
     fn build_date() -> GString {
         gs(ok(bs::build_date()).unwrap_or_default())
@@ -679,12 +1196,16 @@ impl CadaclysmBlacksmith {
     /// `"boolean.mesh_budget"`, `"boolean.finest_tolerance"`,
     /// `"profile_boolean.point_budget"`, `"measure.default_accuracy"`,
     /// `"step.validation_properties"`, `"step.validation_accuracy"`,
-    /// `"tolerance.relative"` or `"tolerance.angular"`. False -- and
+    /// `"tolerance.relative"`, `"tolerance.angular"` or `"intersect.free_form_exact"`. False -- and
     /// nothing changed -- for a name that is not an option or a value it does not take,
-    /// the reason in `Cadaclysm.last_error()`. The last two stamp a written STEP part
+    /// the reason in `Cadaclysm.last_error()`. The step pair stamps a written STEP part
     /// file with each body's measured area, volume and centroid, there for the kernel
     /// that reads the file to check the transfer against; off by default, since it
     /// measures every body in the file at `"step.validation_accuracy"` (1e-5).
+    /// `"intersect.free_form_exact"` (0 or 1, default 0) makes Solid.intersect's exact
+    /// route take free-form faces too (NURBS, extrusion, revolution and sum faces, held
+    /// exactly) rather than send them to the mesh route; off by default, since an exact
+    /// answer there costs several times the mesh route's.
     #[func]
     fn set_option(name: GString, value: f64) -> bool {
         ok(bs::set_option(&name.to_string(), value)).is_some()
@@ -905,7 +1426,9 @@ impl CadaclysmBlacksmith {
     /// Several solids meshed at `tolerance` (`NAN`, the default: each one's effective
     /// tolerance) as one file's bytes in `format`: `"stl"` (binary, every solid in one body),
     /// `"stl-ascii"`, `"obj"` (one named object a solid), `"glb"` or `"gltf"` (one named node
-    /// a solid in a material of its own). `names` one a solid (empty: each solid's own name,
+    /// a solid in a material of its own), `"3mf"` (one named object a solid, each face's painted
+    /// colour), `"ply"` (binary little-endian, every solid in one body, a colour a vertex) or
+    /// `"ply-ascii"`. `names` one a solid (empty: each solid's own name,
     /// else `Solid 1`, `Solid 2`, ...); `looks` six numbers a solid -- linear `r g b a
     /// metallic roughness` -- the glTF's materials (empty: each solid's own colour). Empty,
     /// with the reason logged, on a refusal.
@@ -4362,6 +4885,106 @@ impl CadaclysmProfile {
         Self::made(bs::Profile::ellipse(v2(&centre, "ellipse: centre")?, rx, ry))
     }
 
+    /// An involute spur gear of `teeth` teeth of `module`, tooth 0 centred on +x: its flanks
+    /// NURBS within `tolerance` of the involute, its tips, fillets and root arcs exact, as a
+    /// `CadaclysmGearProfile`. `NAN` is the default: `pressure_angle` 20 degrees (radians),
+    /// `shift` 0, `addendum` 1 and `dedendum` 1.25 (factors of the module), `root_fillet`
+    /// `0.38 * module`, `backlash` 0 (taken off this gear's tooth), `tolerance` `1e-4 * module`.
+    /// Undercut is flagged in the report, not drawn. `null` with the reason, starting
+    /// `"profile_gear_involute: "`, in `Cadaclysm.last_error()` for fewer than 4 teeth, a module
+    /// not positive, a pressure angle outside (0, pi/4), a pointed tooth or a root fillet that
+    /// does not fit.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn gear_involute(
+        module: f64,
+        teeth: i64,
+        #[opt(default = f64::NAN)] pressure_angle: f64,
+        #[opt(default = f64::NAN)] shift: f64,
+        #[opt(default = f64::NAN)] addendum: f64,
+        #[opt(default = f64::NAN)] dedendum: f64,
+        #[opt(default = f64::NAN)] root_fillet: f64,
+        #[opt(default = f64::NAN)] backlash: f64,
+        #[opt(default = f64::NAN)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmGearProfile>> {
+        let w = "profile_gear_involute";
+        let o = bs::GearInvoluteOptions {
+            pressure_angle: given(pressure_angle),
+            shift: given(shift),
+            addendum: given(addendum),
+            dedendum: given(dedendum),
+            root_fillet: given(root_fillet),
+            backlash: given(backlash),
+            tolerance: given(tolerance),
+        };
+        ok(bs::Profile::gear_involute(module, gear_count(teeth, w, "teeth")?, &o)).map(CadaclysmGearProfile::wrap)
+    }
+
+    /// A cycloidal clock wheel of `teeth` teeth of `module` driving a pinion of `pinion_leaves`,
+    /// tooth 0 centred on +x: epicycloidal addendum flanks within `tolerance`, radial dedendum
+    /// flanks, as a `CadaclysmGearProfile`. `NAN` is the default: `thickness` `PI * module / 2`,
+    /// `addendum` up to the flanks' crossing with the point rounded, `dedendum` 1.57 (a factor of
+    /// the module), `root_fillet` `0.25 * module`, `tolerance` `1e-4 * module`. Its centre
+    /// distance to the pinion is the two reports' pitch radii added. `null` with the reason,
+    /// starting `"profile_gear_wheel_cycloidal: "`, for a pinion under 6 leaves, a wheel no larger
+    /// than it, a size not positive or a fillet that does not fit.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn gear_wheel_cycloidal(
+        module: f64,
+        teeth: i64,
+        pinion_leaves: i64,
+        #[opt(default = f64::NAN)] thickness: f64,
+        #[opt(default = f64::NAN)] addendum: f64,
+        #[opt(default = f64::NAN)] dedendum: f64,
+        #[opt(default = f64::NAN)] root_fillet: f64,
+        #[opt(default = f64::NAN)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmGearProfile>> {
+        let w = "profile_gear_wheel_cycloidal";
+        let o = bs::GearWheelCycloidalOptions {
+            thickness: given(thickness),
+            addendum: given(addendum),
+            dedendum: given(dedendum),
+            root_fillet: given(root_fillet),
+            tolerance: given(tolerance),
+        };
+        let (teeth, leaves) = (gear_count(teeth, w, "teeth")?, gear_count(pinion_leaves, w, "pinion_leaves")?);
+        ok(bs::Profile::gear_wheel_cycloidal(module, teeth, leaves, &o)).map(CadaclysmGearProfile::wrap)
+    }
+
+    /// A cycloidal clock pinion of `leaves` leaves of `module` driven by a wheel of
+    /// `wheel_teeth`, leaf 0 centred on +x: radial flanks inside the pitch circle and a `tip`
+    /// `"round"` (a semicircle of half the leaf thickness) or `"ogive"` (the epicycloid,
+    /// truncated at `0.855 * module`), as a `CadaclysmGearProfile`. `NAN` is the default:
+    /// `thickness` `1.05 * module` (6 to 10 leaves) or `1.25 * module`, `clearance`
+    /// `0.4 * module`, `root_fillet` `0.25 * module`, `tolerance` `1e-4 * module`. `null` with the
+    /// reason, starting `"profile_gear_pinion_cycloidal: "`, for under 6 leaves, a wheel no larger
+    /// than the pinion, another `tip`, a size not positive, a negative clearance or a fillet that
+    /// does not fit.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn gear_pinion_cycloidal(
+        module: f64,
+        leaves: i64,
+        wheel_teeth: i64,
+        #[opt(default = f64::NAN)] thickness: f64,
+        #[opt(default = "round")] tip: GString,
+        #[opt(default = f64::NAN)] clearance: f64,
+        #[opt(default = f64::NAN)] root_fillet: f64,
+        #[opt(default = f64::NAN)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmGearProfile>> {
+        let w = "profile_gear_pinion_cycloidal";
+        let o = bs::GearPinionCycloidalOptions {
+            thickness: given(thickness),
+            tip: ok(tip.to_string().parse::<bs::GearTip>())?,
+            clearance: given(clearance),
+            root_fillet: given(root_fillet),
+            tolerance: given(tolerance),
+        };
+        let (leaves, wheel) = (gear_count(leaves, w, "leaves")?, gear_count(wheel_teeth, w, "wheel_teeth")?);
+        ok(bs::Profile::gear_pinion_cycloidal(module, leaves, wheel, &o)).map(CadaclysmGearProfile::wrap)
+    }
+
     /// Rational cubic Béziers end to end (sixteen numbers each, `x y z w` per control
     /// point) as one open profile; `recognise` makes straight ones lines and circular
     /// ones arcs.
@@ -4417,8 +5040,8 @@ impl CadaclysmProfile {
     /// as the JSON text of `{"a": pieces, "b": pieces, "arc": piece}`: `a` and `b` cut back to
     /// the tangent points, each running the way it ran, the arc from `a`'s side to `b`'s --
     /// pieces `from_pieces` reads. An empty String, with the reason in
-    /// `Cadaclysm.last_error()`, where they do not meet at an end, do not meet in straight
-    /// segments, run straight on or fold back, or the radius does not fit.
+    /// `Cadaclysm.last_error()`, where they do not meet at an end, run straight on or fold
+    /// back, or the radius does not fit.
     #[func]
     fn fillet_corner(a: Gd<CadaclysmProfile>, b: Gd<CadaclysmProfile>, radius: f64, #[opt(default = 0.0)] tolerance: f64) -> GString {
         let (a, b) = (a.bind(), b.bind());
@@ -7698,11 +8321,15 @@ pub struct CadaclysmNurbsSurface {
     /// Whether `close` has freed the surface.
     #[var(get = get_closed, no_set)]
     closed: PhantomVar<bool>,
+    /// On a surface from `offset`, the fit's bound on the distance from the exact surface; `null`
+    /// on any other.
+    #[var(get = get_fit_error, no_set)]
+    fit_error: PhantomVar<Variant>,
 }
 
 impl CadaclysmNurbsSurface {
     fn wrap(surface: bs::NurbsSurface) -> Gd<CadaclysmNurbsSurface> {
-        Gd::from_object(CadaclysmNurbsSurface { surface: Some(surface), closed: PhantomVar::default() })
+        Gd::from_object(CadaclysmNurbsSurface { surface: Some(surface), closed: PhantomVar::default(), fit_error: PhantomVar::default() })
     }
 
     fn held(&self) -> Option<&bs::NurbsSurface> {
@@ -7934,6 +8561,53 @@ impl CadaclysmNurbsSurface {
         ok(surface.extend(side, length)).map(CadaclysmNurbsSurface::wrap)
     }
 
+    /// This surface moved `distance` along its normal (Rhino's Surface.Offset), refitted within
+    /// `tolerance` (0: the effective tolerance); `fit_error` is the fit's bound on the distance
+    /// from the exact offset, 0 for a plane, which offsets exactly. `null` for a distance that is
+    /// not finite, a surface with no normal somewhere, or an offset that folds over (a curvature
+    /// radius used up).
+    #[func]
+    fn offset(&self, distance: f64, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmNurbsSurface>> {
+        let surface = self.held()?;
+        ok(surface.offset(distance, Some(tolerance))).map(CadaclysmNurbsSurface::wrap)
+    }
+
+    /// This surface and `other` joined along a side they share into one surface (Rhino's
+    /// MergeSurfaces): a side of each, any of the four either way along, must be the same curve
+    /// within `tolerance` (0: the two nets' effective tolerance); `other` is turned to continue
+    /// this one across it, this one keeping its parameters. Every point of either is a point of
+    /// the result; knots at the joint are removed as far as it allows. `null` for no side shared,
+    /// sides that meet only in part, or a shared side parametrised differently.
+    #[func]
+    fn merge(&self, other: Gd<CadaclysmNurbsSurface>, #[opt(default = 1e-6)] tolerance: f64) -> Option<Gd<CadaclysmNurbsSurface>> {
+        let surface = self.held()?;
+        let theirs = other.bind();
+        ok(surface.merge(theirs.held()?, Some(tolerance))).map(CadaclysmNurbsSurface::wrap)
+    }
+
+    /// `count` surfaces evenly between this surface and `other`, as an array (Rhino's
+    /// CreateTweenSurfaces on matched nets), surface `i` at the fraction `(i + 1) / (count + 1)`:
+    /// both reparametrised to `[0, 1]` each way and made compatible exactly, their homogeneous
+    /// nets blended; `u` goes with `u` and `v` with `v`. Empty for a count of 0, with the reason
+    /// in `Cadaclysm.last_error()`.
+    #[func]
+    fn tween(&self, other: Gd<CadaclysmNurbsSurface>, count: i64) -> Array<Gd<CadaclysmNurbsSurface>> {
+        let found = (|| {
+            let surface = self.held()?;
+            let theirs = other.bind();
+            let count = index(count, "nurbs_surface_tween: count")?;
+            ok(surface.tween(theirs.held()?, count))
+        })();
+        found.unwrap_or_default().into_iter().map(CadaclysmNurbsSurface::wrap).collect()
+    }
+
+    /// The fit's bound on the distance from the exact surface: set only on a surface from
+    /// `offset`, `null` on any other (or a closed one).
+    #[func]
+    fn get_fit_error(&self) -> Variant {
+        self.surface.as_ref().and_then(bs::NurbsSurface::fit_error).map_or_else(Variant::nil, |e| e.to_variant())
+    }
+
     /// The point and its derivatives at `(u, v)`, six arrays of three doubles: `S, Su, Sv, Suu,
     /// Suv, Svv`. Empty, with the reason in `Cadaclysm.last_error()`, for a parameter outside the
     /// domain.
@@ -8000,6 +8674,32 @@ fn sketch_id(i: i64, what: &str) -> Option<u32> {
         Ok(i) => Some(i),
         Err(_) => fail(format!("{what} {i} is not a sketch id (0 to {})", u32::MAX)),
     }
+}
+
+/// A list of sketch ids: a `PackedInt64Array` or an array of ints.
+fn sketch_ids(v: &Variant, what: &str) -> Option<Vec<u32>> {
+    let listed = match v.get_type() {
+        VariantType::PACKED_INT64_ARRAY | VariantType::PACKED_INT32_ARRAY | VariantType::ARRAY => numbers(v, false),
+        _ => None,
+    };
+    let Some(listed) = listed else { return fail(format!("{what}: expected an array of ids, not {v}")) };
+    listed.iter().map(|&n| sketch_id(n as i64, what)).collect()
+}
+
+/// A sketch chamfer as plain data: `line`, `points` (on `a` and on `b`), `corner`, `dimensions`.
+fn chamfer_out(c: bs::SketchChamfer) -> VarDictionary {
+    dict(&[
+        ("line", i64::from(c.line).to_variant()),
+        ("points", ids_out(&c.points).to_variant()),
+        ("corner", i64::from(c.corner).to_variant()),
+        ("dimensions", ids_out(&c.dimensions).to_variant()),
+    ])
+}
+
+/// A sketch pattern as plain data: `copies` (an array of id arrays), `steps`, `dimensions`.
+fn pattern_out(p: bs::SketchPattern) -> VarDictionary {
+    let copies: VarArray = p.copies.iter().map(|c| ids_out(c).to_variant()).collect();
+    dict(&[("copies", copies.to_variant()), ("steps", ids_out(&p.steps).to_variant()), ("dimensions", ids_out(&p.dimensions).to_variant())])
 }
 
 /// What a `CadaclysmSketch` solve did, as plain data: `CadaclysmSketch.solve`, `drag`,
@@ -8459,6 +9159,115 @@ impl CadaclysmSketch {
         .unwrap_or_default()
     }
 
+    /// A regular polygon of `sides` (3 to 1024) about `centre`, corner 0 at `vertex`, its
+    /// sides kept equal: `{"centre", "circumcircle", "incircle", "corners", "sides"}`, the
+    /// corners and sides counter-clockwise from the vertex (side `i` from corner `i`).
+    /// Dimension either circle to size it. Empty on a refusal.
+    #[func]
+    fn add_polygon(&self, centre: Variant, vertex: Variant, sides: i64) -> VarDictionary {
+        self.run(|s| {
+            let centre = v2(&centre, "sketch_add_polygon: centre")?;
+            let vertex = v2(&vertex, "sketch_add_polygon: vertex")?;
+            let Ok(sides) = u32::try_from(sides) else { return fail(format!("sketch_add_polygon: {sides} sides is not a count")) };
+            Some(s.add_polygon(centre, vertex, sides))
+        })
+        .map(|p| {
+            dict(&[
+                ("centre", i64::from(p.centre).to_variant()),
+                ("circumcircle", i64::from(p.circumcircle).to_variant()),
+                ("incircle", i64::from(p.incircle).to_variant()),
+                ("corners", ids_out(&p.corners).to_variant()),
+                ("sides", ids_out(&p.sides).to_variant()),
+            ])
+        })
+        .unwrap_or_default()
+    }
+
+    /// Cuts the corner where the lines `a` and `b` meet with a new line, `da` along `a` and
+    /// `db` along `b` from the corner: `{"line", "points", "corner", "dimensions"}`, `points`
+    /// the new end points on `a` and on `b`, `corner` the old corner point, `dimensions` the
+    /// two driving distances. Empty on a refusal (the sketch unchanged).
+    #[func]
+    fn chamfer(&self, a: i64, b: i64, da: f64, db: f64) -> VarDictionary {
+        self.run(|s| Some(s.chamfer(sketch_id(a, "sketch_chamfer: a")?, sketch_id(b, "sketch_chamfer: b")?, da, db)))
+            .map(chamfer_out)
+            .unwrap_or_default()
+    }
+
+    /// As `chamfer`, with `angle` (radians) the interior angle at the new point on `a`; the
+    /// second dimension is that angle.
+    #[func]
+    fn chamfer_angle(&self, a: i64, b: i64, da: f64, angle: f64) -> VarDictionary {
+        self.run(|s| Some(s.chamfer_angle(sketch_id(a, "sketch_chamfer_angle: a")?, sketch_id(b, "sketch_chamfer_angle: b")?, da, angle)))
+            .map(chamfer_out)
+            .unwrap_or_default()
+    }
+
+    /// Copies the entities `entities` (an array of ids) into an `n1` by `n2` grid (counts
+    /// include the source) along `d1` and `d2`: `{"copies", "steps", "dimensions"}`,
+    /// `copies[j]` the entities of copy `j` in the order of `entities`. Leave `d2` and `n2`
+    /// for a single row. Empty on a refusal.
+    #[func]
+    fn pattern_rectangular(
+        &self,
+        entities: Variant,
+        d1: Variant,
+        n1: i64,
+        #[opt(default = Vector2::ZERO)] d2: Vector2,
+        #[opt(default = 1)] n2: i64,
+    ) -> VarDictionary {
+        self.run(|s| {
+            let ids = sketch_ids(&entities, "sketch_pattern_rectangular: entities")?;
+            let d1 = v2(&d1, "sketch_pattern_rectangular: d1")?;
+            let d2 = [f64::from(d2.x), f64::from(d2.y)];
+            let (Ok(n1), Ok(n2)) = (u32::try_from(n1), u32::try_from(n2)) else {
+                return fail(format!("sketch_pattern_rectangular: the counts {n1} and {n2} must not be negative"));
+            };
+            Some(s.pattern_rectangular(&ids, d1, n1, d2, n2))
+        })
+        .map(pattern_out)
+        .unwrap_or_default()
+    }
+
+    /// Copies the entities `entities` round the point `centre`: `count` instances (the
+    /// source included), each turned `step` radians counter-clockwise from the last:
+    /// `{"copies", "steps", "dimensions"}` as `pattern_rectangular`. Empty on a refusal.
+    #[func]
+    fn pattern_circular(&self, entities: Variant, centre: i64, count: i64, step: f64) -> VarDictionary {
+        self.run(|s| {
+            let ids = sketch_ids(&entities, "sketch_pattern_circular: entities")?;
+            let centre = sketch_id(centre, "sketch_pattern_circular: centre")?;
+            let Ok(count) = u32::try_from(count) else { return fail(format!("sketch_pattern_circular: count {count} must not be negative")) };
+            Some(s.pattern_circular(&ids, centre, count, step))
+        })
+        .map(pattern_out)
+        .unwrap_or_default()
+    }
+
+    /// Copies the entities `entities` (an array of ids) reflected across the line `line`
+    /// (which must not be among them), each copy held to its source by symmetric constraints
+    /// (equal radius for circles and arcs, point on line for a point on the line):
+    /// `{"copies", "constraints"}`, `copies` one id per entity in the order of `entities`.
+    /// Empty on a refusal, the sketch unchanged.
+    #[func]
+    fn mirror(&self, entities: Variant, line: i64) -> VarDictionary {
+        self.run(|s| {
+            let ids = sketch_ids(&entities, "sketch_mirror: entities")?;
+            let line = sketch_id(line, "sketch_mirror: line")?;
+            Some(s.mirror(&ids, line))
+        })
+        .map(|m| dict(&[("copies", ids_out(&m.copies).to_variant()), ("constraints", ids_out(&m.constraints).to_variant())]))
+        .unwrap_or_default()
+    }
+
+    /// Adds the constraints the geometry already satisfies within `tolerance` (0: 1e-6 of
+    /// the sketch's extent); with `dimensions`, driving dimensions at the measured values
+    /// follow until nothing is free. The new constraint ids, ascending.
+    #[func]
+    fn auto_constrain(&self, #[opt(default = 0.0)] tolerance: f64, #[opt(default = false)] dimensions: bool) -> PackedInt64Array {
+        self.ids(|s| Some(s.auto_constrain(tolerance, dimensions)))
+    }
+
     /// The kind of the entity `id`: `"point"`, `"line"`, `"circle"`, `"arc"` or `"free_curve"`.
     #[func]
     fn kind(&self, id: i64) -> GString {
@@ -8667,6 +9476,36 @@ impl CadaclysmSketch {
         self.id(|s| {
             let a = sketch_id(a, "symmetric: a")?;
             Some(s.symmetric(a, sketch_id(b, "symmetric: b")?, sketch_id(about, "symmetric: about")?))
+        })
+    }
+
+    /// The curves `a` and `b` joined smoothly at their shared end (tangent, with equal
+    /// curvature where both have one).
+    #[func]
+    fn smooth(&self, a: i64, b: i64) -> i64 {
+        self.id(|s| Some(s.smooth(sketch_id(a, "smooth: a")?, sketch_id(b, "smooth: b")?)))
+    }
+
+    /// The point `b` the translation of the point `a` by the vector from the point
+    /// `from_point` to the point `to`.
+    #[func]
+    fn translated(&self, a: i64, b: i64, from_point: i64, to: i64) -> i64 {
+        self.id(|s| {
+            let a = sketch_id(a, "translated: a")?;
+            let b = sketch_id(b, "translated: b")?;
+            Some(s.translated(a, b, sketch_id(from_point, "translated: from_point")?, sketch_id(to, "translated: to")?))
+        })
+    }
+
+    /// The point `b` the point `a` turned about the point `centre` by the angle from the
+    /// ray `centre`-`from_point` to the ray `centre`-`to`.
+    #[func]
+    fn rotated(&self, a: i64, b: i64, centre: i64, from_point: i64, to: i64) -> i64 {
+        self.id(|s| {
+            let a = sketch_id(a, "rotated: a")?;
+            let b = sketch_id(b, "rotated: b")?;
+            let centre = sketch_id(centre, "rotated: centre")?;
+            Some(s.rotated(a, b, centre, sketch_id(from_point, "rotated: from_point")?, sketch_id(to, "rotated: to")?))
         })
     }
 
@@ -12511,6 +13350,47 @@ impl CadaclysmNurbsCurve {
         self.then(|c| c.fit_to_face(held, face, direction, knots.as_slice(), Some(tolerance)))
     }
 
+    /// This curve moved `distance` in space, square to its tangent and to `direction` (three
+    /// doubles; Rhino's Curve.Offset): to the right of its run seen from the tip of `direction`
+    /// for a positive `distance`, to the left for a negative one. A line or an arc in a plane
+    /// square to `direction` offsets exactly (`fit_error` 0); anything else is fitted within
+    /// `tolerance` (0: the effective tolerance), `fit_error` the fit's bound on the distance from
+    /// the exact offset. Distance 0 is a copy. `null` for a zero direction, a distance that is not
+    /// finite, a corner (a kink the offset would tear at), or an offset that folds over (an arc's
+    /// radius used up, a turn tighter than `distance`).
+    #[func]
+    fn offset(&self, distance: f64, direction: PackedFloat64Array, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmNurbsCurve>> {
+        let Some(direction) = optional_v3(&direction, "nurbs_curve_offset: direction")? else {
+            return fail("nurbs_curve_offset: the direction is three doubles, not empty");
+        };
+        self.then(|c| c.offset(distance, direction, Some(tolerance)))
+    }
+
+    /// This curve, lying on the sheet `solid` (within ten times `tolerance`), moved `distance`
+    /// along the sheet's normal at each point -- off the sheet, the way its faces face for a
+    /// positive `distance` (Rhino's OffsetNormalToSurface) -- and fitted within `tolerance` (0:
+    /// the inputs' effective tolerance); `fit_error` is the fit's bound on the distance from the
+    /// exact offset. `null` for a curve off the sheet, one crossing a crease (faces whose normals
+    /// differ by more than a degree), a distance that is not finite, or an offset that folds over.
+    #[func]
+    fn offset_normal_to_sheet(&self, solid: Gd<CadaclysmSolid>, distance: f64, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmNurbsCurve>> {
+        let solid = solid.bind();
+        let held = solid.held()?;
+        self.then(|c| c.offset_normal_to_sheet(held, distance, Some(tolerance)))
+    }
+
+    /// This curve, lying on the sheet `solid` (within ten times `tolerance`), moved `distance` in
+    /// the sheet's tangent plane, square to the curve: along N x C' (the sheet's normal crossed
+    /// with the curve's tangent) for a positive `distance` (Rhino's OffsetTangentToSurface).
+    /// Fitted within `tolerance` (0: the inputs' effective tolerance); `fit_error` is the fit's
+    /// bound on the distance from the exact offset. `null` as for `offset_normal_to_sheet`.
+    #[func]
+    fn offset_tangent_to_sheet(&self, solid: Gd<CadaclysmSolid>, distance: f64, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmNurbsCurve>> {
+        let solid = solid.bind();
+        let held = solid.held()?;
+        self.then(|c| c.offset_tangent_to_sheet(held, distance, Some(tolerance)))
+    }
+
     /// A smooth curve through `points` lying on face `face` of `solid` (Rhino's
     /// InterpolatedCurveOnSurface): each point's nearest foot on the face's surface, interpolated
     /// in its parameters (cubic, chord-length) and carried out through the surface. `closed` runs
@@ -13670,7 +14550,7 @@ impl CadaclysmFaceDraft {
 }
 
 // ---- sheet metal: CadaclysmSheetRule, CadaclysmBendInfo, CadaclysmSheetInfo, CadaclysmFlatBend,
-// CadaclysmBend, CadaclysmFlatPattern, CadaclysmUnrolled -------------------------------------
+// CadaclysmBend, CadaclysmFlatPattern, CadaclysmUnrolled, CadaclysmSquished ------------------
 
 /// Two points in a row (`[x0, y0, x1, y1]`, or `[x0, y0, z0, x1, y1, z1]`).
 fn pair_doubles<const N: usize>(pair: &[[f64; N]; 2]) -> PackedFloat64Array {
@@ -14405,6 +15285,101 @@ impl CadaclysmUnrolled {
     #[func]
     fn get_cuts(&self) -> Array<PackedInt64Array> {
         self.cut_rows.iter().map(|&(a, b)| PackedInt64Array::from([i64::from(a), i64::from(b)].as_slice())).collect()
+    }
+}
+
+/// Faces of a solid squished flat (`CadaclysmSolid.squish`), read at once: the flat `sheet`, each
+/// of its faces' source face (`faces`) and distortion (`distortion`: a Dictionary a face, `area`
+/// and `length` each three doubles -- min, max, mean -- of flat over 3D, per mesh triangle and per
+/// mesh edge), the source faces laid exactly (`exact`), each curve given as its pieces on the flat
+/// (`curves`, an array of `CadaclysmNurbsCurve`s a curve) and each point given at its spot
+/// (`points`, three doubles each, `null` where it is on no squished face). Immutable.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmSquished {
+    sheet_value: Gd<CadaclysmSolid>,
+    face_rows: Vec<u32>,
+    distortion_rows: Vec<bs::SquishDistortion>,
+    exact_rows: Vec<u32>,
+    curve_rows: Vec<Vec<Gd<CadaclysmNurbsCurve>>>,
+    point_rows: Vec<Option<[f64; 3]>>,
+    #[var(get = get_sheet, no_set)]
+    sheet: PhantomVar<Gd<CadaclysmSolid>>,
+    #[var(get = get_faces, no_set)]
+    faces: PhantomVar<PackedInt64Array>,
+    #[var(get = get_distortion, no_set)]
+    distortion: PhantomVar<Array<VarDictionary>>,
+    #[var(get = get_exact, no_set)]
+    exact: PhantomVar<PackedInt64Array>,
+    #[var(get = get_curves, no_set)]
+    curves: PhantomVar<VarArray>,
+    #[var(get = get_points, no_set)]
+    points: PhantomVar<VarArray>,
+}
+
+impl CadaclysmSquished {
+    fn wrap(q: bs::Squished) -> Gd<CadaclysmSquished> {
+        Gd::from_object(CadaclysmSquished {
+            sheet_value: CadaclysmSolid::wrap(q.sheet),
+            face_rows: q.faces,
+            distortion_rows: q.distortion,
+            exact_rows: q.exact,
+            curve_rows: q.curves.into_iter().map(|c| c.into_iter().map(CadaclysmNurbsCurve::wrap).collect()).collect(),
+            point_rows: q.points,
+            sheet: PhantomVar::default(),
+            faces: PhantomVar::default(),
+            distortion: PhantomVar::default(),
+            exact: PhantomVar::default(),
+            curves: PhantomVar::default(),
+            points: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmSquished {
+    fn to_string(&self) -> GString {
+        gs(format!("Squished({} faces, {} exact)", self.face_rows.len(), self.exact_rows.len()))
+    }
+}
+
+#[godot_api]
+impl CadaclysmSquished {
+    #[func]
+    fn get_sheet(&self) -> Gd<CadaclysmSolid> {
+        self.sheet_value.clone()
+    }
+
+    #[func]
+    fn get_faces(&self) -> PackedInt64Array {
+        ids_out(&self.face_rows)
+    }
+
+    #[func]
+    fn get_distortion(&self) -> Array<VarDictionary> {
+        self.distortion_rows
+            .iter()
+            .map(|d| {
+                let area = doubles(&[d.area_min, d.area_max, d.area_mean]);
+                let length = doubles(&[d.length_min, d.length_max, d.length_mean]);
+                dict(&[("area", area.to_variant()), ("length", length.to_variant())])
+            })
+            .collect()
+    }
+
+    #[func]
+    fn get_exact(&self) -> PackedInt64Array {
+        ids_out(&self.exact_rows)
+    }
+
+    #[func]
+    fn get_curves(&self) -> VarArray {
+        self.curve_rows.iter().map(|c| c.iter().cloned().collect::<Array<Gd<CadaclysmNurbsCurve>>>().to_variant()).collect()
+    }
+
+    #[func]
+    fn get_points(&self) -> VarArray {
+        self.point_rows.iter().map(|p| p.map_or_else(Variant::nil, |p| doubles(&p).to_variant())).collect()
     }
 }
 
@@ -15817,6 +16792,14 @@ impl CadaclysmPattern {
         found.map_or_else(Array::new, placements)
     }
 
+    /// Two instances: the original (the identity) and its reflection across `plane` (a
+    /// `CadaclysmFrame`, a `Transform3D` or 12 numbers; its z the normal), as
+    /// `CadaclysmTransform.mirror`. Empty for a zero normal.
+    #[func]
+    fn mirror(plane: Variant) -> Array<Gd<CadaclysmTransform>> {
+        frame(&plane, "pattern_mirror: plane").map_or_else(Array::new, |plane| placements(bs::Pattern::mirror(&plane)))
+    }
+
     /// `count` instances along `curve` by arc length from its start, `spacing` apart, or spread
     /// over its whole length with both ends occupied (`spacing` `NAN`, the default). `orient`
     /// `"fixed"` translates each copy; `"path"` also turns it by the curve's rotation-minimising
@@ -16093,6 +17076,41 @@ impl CadaclysmSolid {
         ok(result).map(CadaclysmSolid::wrap)
     }
 
+    /// `from_mesh`'s and `from_mesh_node`'s options: a tolerance of 0 or NaN is the library's
+    /// default as it is; the mode by name. `None` (and `last_error`, `from_mesh: ...`) for a
+    /// mode that is none of the three.
+    fn from_mesh_options(weld: f64, angle: f64, distance: f64, mode: &GString) -> Option<bs::FromMeshOptions> {
+        let mode = match mode.to_string().as_str() {
+            "faceted" => bs::FromMeshMode::Faceted,
+            "planes" => bs::FromMeshMode::Planes,
+            "prismatic" => bs::FromMeshMode::Prismatic,
+            other => return fail(format!("from_mesh: mode '{other}' is not one of faceted, planes, prismatic")),
+        };
+        Some(bs::FromMeshOptions { weld_tolerance: Some(weld), angle_tolerance: Some(angle), distance_tolerance: Some(distance), mode })
+    }
+
+    /// `from_mesh`'s `{body, report}`.
+    fn from_mesh_pair((solid, r): (bs::Solid, bs::FromMeshReport)) -> VarDictionary {
+        let count = |n: u32| i64::from(n).to_variant();
+        let report = dict(&[
+            ("closed", r.closed.to_variant()),
+            ("faces", count(r.faces)),
+            ("edges", count(r.edges)),
+            ("vertices", count(r.vertices)),
+            ("holes", count(r.holes)),
+            ("boundary_edges", count(r.boundary_edges)),
+            ("non_manifold_edges", count(r.non_manifold_edges)),
+            ("flipped", count(r.flipped)),
+            ("dropped", count(r.dropped)),
+            ("planes", count(r.planes)),
+            ("cylinders", count(r.cylinders)),
+            ("cones", count(r.cones)),
+            ("spheres", count(r.spheres)),
+            ("tori", count(r.tori)),
+        ]);
+        dict(&[("body", CadaclysmSolid::wrap(solid).to_variant()), ("report", report.to_variant())])
+    }
+
     /// `loft_through` and `loft_through_open`: `[profile, frame]` pairs, in order.
     fn lofted_through(sections: &VarArray, solid: bool) -> Option<Gd<CadaclysmSolid>> {
         let what = if solid { "loft_through" } else { "loft_through_open" };
@@ -16152,6 +17170,41 @@ impl CadaclysmSolid {
         let points: Vec<[f64; 3]> = points.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
         let solid = self.held()?;
         ok(solid.unroll(Some(&faces), curves, &points, explode, Some(tolerance))).map(CadaclysmUnrolled::wrap)
+    }
+
+    /// `squish` and `squish_with_curves`: faces as ints, points three doubles each in a row, the
+    /// deformation by name.
+    #[allow(clippy::too_many_arguments)]
+    fn squished(
+        &self,
+        curves: &[&bs::NurbsCurve],
+        faces: &PackedInt64Array,
+        points: &PackedFloat64Array,
+        explode: bool,
+        deformation: &GString,
+        preserve_boundary: bool,
+        tolerance: f64,
+    ) -> Option<Gd<CadaclysmSquished>> {
+        let deformation = match deformation.to_string().as_str() {
+            "free" => bs::SquishDeformation::Free,
+            "stretch_mostly" => bs::SquishDeformation::StretchMostly,
+            "stretch_only" => bs::SquishDeformation::StretchOnly,
+            "compress_mostly" => bs::SquishDeformation::CompressMostly,
+            "compress_only" => bs::SquishDeformation::CompressOnly,
+            other => {
+                return fail(format!(
+                    "squish: deformation must be 'free', 'stretch_mostly', 'stretch_only', 'compress_mostly' or 'compress_only', not '{other}'"
+                ))
+            }
+        };
+        let faces: Vec<u32> = faces.as_slice().iter().map(|&f| index(f, "squish: faces")).collect::<Option<_>>()?;
+        let points = points.as_slice();
+        if points.len() % 3 != 0 {
+            return fail(format!("squish: points: three numbers a point, got {}", points.len()));
+        }
+        let points: Vec<[f64; 3]> = points.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+        let solid = self.held()?;
+        ok(solid.squish(Some(&faces), curves, &points, explode, deformation, preserve_boundary, Some(tolerance))).map(CadaclysmSquished::wrap)
     }
 
     /// The faces `draft` and `draft_two_sided` take: an int, or a list of them.
@@ -16548,6 +17601,78 @@ impl CadaclysmSolid {
         Self::made(reader::with_node(&node.shared, node.index, |n| bs::Solid::from_node(&n, placed))?)
     }
 
+    /// A triangle mesh made a B-rep, beside what it became, as a Dictionary `{body, report}`:
+    /// `body` the new `CadaclysmSolid`, `report` a Dictionary `{closed, faces, edges, vertices,
+    /// holes, boundary_edges, non_manifold_edges, flipped, dropped, planes, cylinders, cones,
+    /// spheres, tori}`. `positions` are the
+    /// vertices (a `PackedVector3Array`, or an array of points -- the array keeps a double's
+    /// precision) and `triangles` the triangles (a flat `PackedInt32Array` / `PackedInt64Array`,
+    /// three indices a triangle, or an array of triples).
+    ///
+    /// Points within `weld_tolerance` are welded into one vertex and degenerate triangles
+    /// dropped; the triangles are oriented to agree with their neighbours and each closed
+    /// component turned outward (one inside another inward, a void). `mode` is how far the
+    /// triangles are grouped: `"faceted"` gives one planar face per triangle; `"planes"` merges
+    /// coplanar neighbours -- each normal within `angle_tolerance` (radians) of its region's,
+    /// each vertex within `distance_tolerance` of its plane -- into one planar face bounded by
+    /// their outline, and drops collinear outline points: a CAD box's mesh comes back as 6 faces
+    /// and 12 edges, curved regions faceted; `"prismatic"` (the default) merges the planes and
+    /// fits curved regions with cylinders, cones, spheres and tori, what fits nothing staying
+    /// faceted, and is never worse than `"planes"` (where its body is not closed while the mesh
+    /// was, holds the volume less well, or has more faces, the planes' comes back). `planes`
+    /// counts the merged plane faces (of more than one triangle), `cylinders`, `cones`,
+    /// `spheres` and `tori` the faces fitted with each. A tolerance of 0 (the default) or NaN is the library's
+    /// default: weld 1e-6 x the bounding-box diagonal, angle one degree, distance 1e-5 x the
+    /// diagonal.
+    ///
+    /// A mesh that is not watertight, manifold and orientable comes back as an open shell (a
+    /// sheet), `report.closed` false and the report saying why: `holes` (boundary loops),
+    /// `boundary_edges` (mesh edges with one triangle), `non_manifold_edges` (three or more;
+    /// reported, never repaired). `flipped` counts the triangles whose winding changed,
+    /// `dropped` the degenerate ones. An empty Dictionary (`from_mesh: ...` in
+    /// `Cadaclysm.last_error()`) for no triangles, an index past the vertices, a coordinate that
+    /// is not finite, a negative tolerance, every triangle degenerate or another `mode`.
+    #[func]
+    fn from_mesh(
+        positions: Variant,
+        triangles: Variant,
+        #[opt(default = 0.0)] weld_tolerance: f64,
+        #[opt(default = 0.0)] angle_tolerance: f64,
+        #[opt(default = 0.0)] distance_tolerance: f64,
+        #[opt(default = "prismatic")] mode: GString,
+    ) -> VarDictionary {
+        (|| {
+            let options = Self::from_mesh_options(weld_tolerance, angle_tolerance, distance_tolerance, &mode)?;
+            let positions = rtree_points(&positions, "from_mesh", "vertex")?;
+            let triangles = triangle_indices(&triangles, "from_mesh")?;
+            ok(bs::Solid::from_mesh(&positions, &triangles, &options))
+        })()
+        .map(Self::from_mesh_pair)
+        .unwrap_or_default()
+    }
+
+    /// `from_mesh` over the triangles `node` draws -- an STL's or OBJ's mesh, or any node's --
+    /// read through the reader (the node's double-precision mesh), in the node's own frame: not
+    /// placed where the node's transform puts it. The same options and Dictionary; an empty one
+    /// (`from_mesh_node: ...`) for a node with no triangles.
+    #[func]
+    fn from_mesh_node(
+        node: Gd<CadaclysmNode>,
+        #[opt(default = 0.0)] weld_tolerance: f64,
+        #[opt(default = 0.0)] angle_tolerance: f64,
+        #[opt(default = 0.0)] distance_tolerance: f64,
+        #[opt(default = "prismatic")] mode: GString,
+    ) -> VarDictionary {
+        let Some(options) = Self::from_mesh_options(weld_tolerance, angle_tolerance, distance_tolerance, &mode) else {
+            return VarDictionary::new();
+        };
+        let node = node.bind();
+        reader::with_node(&node.shared, node.index, |n| ok(bs::Solid::from_mesh_node(&n, &options)))
+            .flatten()
+            .map(Self::from_mesh_pair)
+            .unwrap_or_default()
+    }
+
     /// The body a CAD file holds (STEP, ACIS, Rhino, OCCT `.brep`, IGES, IFC or OpenSCAD), read
     /// where it draws, in the file's own units and axes. A file of several bodies needs
     /// `body` (from 0, in drawing order), or `open_all`.
@@ -16583,6 +17708,173 @@ impl CadaclysmSolid {
     fn face_sheet(&self, face: i64) -> Option<Gd<CadaclysmSolid>> {
         let face = Self::face_index(face, "face_sheet")?;
         self.then(|s| s.face_sheet(face))
+    }
+
+    /// This solid offset by `distance` -- every face moved along its outward normal, positive
+    /// outward, negative inward, the moved faces' new neighbours meeting at sharp joins (OCCT's
+    /// BRepOffsetAPI_MakeOffsetShape by join, intersection mode). A closed solid grows or shrinks
+    /// to the solid its moved skin bounds; an open sheet moves to its twin, its rims open. Each
+    /// face keeps the colour, id and attributes of the face it was moved from, however far it
+    /// moved; edges are matched by position. A face the offset uses up is gone. `tolerance` 0 is
+    /// the solid's effective tolerance. `null` for a distance that is 0, NaN or infinite, a face
+    /// that folds over (a wall used up), or a skin the offset leaves open.
+    #[func]
+    fn offset(&self, distance: f64, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
+        self.then(|s| s.offset(distance, Some(tolerance)))
+    }
+
+    /// Face `face` alone, as an open sheet moved `distance` along its outward normal, still facing
+    /// this solid's way, in the face's own colour; a face closed on itself (a sphere's only face)
+    /// gives a closed solid. `tolerance` 0 is the solid's effective tolerance. `null` for a face
+    /// this solid has not, a distance that is 0, NaN or infinite, or an offset that folds over.
+    #[func]
+    fn offset_face(&self, face: i64, distance: f64, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
+        let face = Self::face_index(face, "solid_offset_face")?;
+        self.then(|s| s.offset_face(face, distance, Some(tolerance)))
+    }
+
+    /// This solid with its faces split along `curves` (an array of `CadaclysmNurbsCurve`s), in
+    /// place: still one body (a closed solid stays closed, a sheet keeps its rim) with more faces,
+    /// each new face a piece of a face of this one on its surface and every new edge the curve
+    /// itself (OCCT's BRepFeat_SplitShape). Curve `i` is laid on face `faces[i]`, which it must
+    /// lie on, or -- `faces` empty, or an entry -1 -- on every face it lies on, only where it does.
+    /// A curve may run past its face, cross other curves, and close on itself inside a face (an
+    /// island); every stretch kept must end on the face's edges or on another curve's end. Both
+    /// pieces of a split face keep its colour and attributes; the first keeps its id, the others
+    /// get new ids whose origin is the face. `tolerance` 0 is the solid's effective tolerance.
+    /// `null` for `faces` not empty and not as long as `curves`, no curves, a face this solid has
+    /// not, a curve off its face, a stretch stopping inside a face, a curve through a pole of its
+    /// face's surface, or no curve crossing any face.
+    #[func]
+    fn split_faces(
+        &self,
+        curves: AnyArray,
+        #[opt(default = &PackedInt64Array::new())] faces: PackedInt64Array,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        let on = faces
+            .as_slice()
+            .iter()
+            .map(|&f| if f < 0 { Some(None) } else { Self::face_index(f, "split_faces").map(Some) })
+            .collect::<Option<Vec<Option<u32>>>>()?;
+        with_curves(&curves, "split_faces: curves", |c| {
+            self.then(|s| s.split_faces(c, if on.is_empty() { None } else { Some(&on) }, Some(tolerance)))
+        })
+    }
+
+    /// This solid with its faces split along its silhouette seen along `direction` (a `Vector3`
+    /// or three numbers; a parallel view, looking along it): every face the outline runs across
+    /// is cut there, into the part facing the view and the part facing away, still one body with
+    /// more faces -- a mould's parting line for a pull along `direction` (Fusion's silhouette
+    /// split). Exact on planes, cylinders, cones, spheres and tori where the view allows, fitted
+    /// within `tolerance` (0: the solid's effective tolerance) elsewhere. Colours, ids and
+    /// attributes as `split_faces`. `null` for a zero or non-finite direction, an outline through
+    /// a pole of a face's surface (a sphere seen across its axis), or an outline that crosses no
+    /// face (a box seen along an axis).
+    #[func]
+    fn split_along_silhouette(&self, direction: Variant, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
+        let direction = v3(&direction, "split_along_silhouette: direction")?;
+        self.then(|s| s.split_along_silhouette(direction, Some(tolerance)))
+    }
+
+    /// This solid with face `face` untrimmed (Fusion's UntrimFeatures, Rhino's RemoveHoles and
+    /// Untrim): `which` `"holes"` takes every hole away (a neighbour that shared one of its edges
+    /// keeps it as a free edge, so a bored solid becomes an open sheet), `"outer"` replaces the
+    /// outer boundary by the surface's natural one -- its own parameter domain, the box of the
+    /// face's parameters where the surface runs on, the full turn where the face already wraps
+    /// round -- the holes kept, `"all"` does both. A side of the new boundary lying on an old edge
+    /// keeps that edge. Every face keeps its index, colour, id and attributes. `tolerance` 0 is
+    /// the solid's effective tolerance. `null` for another `which`, a face this solid has not, a
+    /// face with no surface or boundary to read, a natural boundary with no extent, or a kept hole
+    /// the natural boundary would touch.
+    #[func]
+    fn untrim(&self, face: i64, #[opt(default = "all")] which: GString, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
+        let face = Self::face_index(face, "untrim")?;
+        let which = ok(which.to_string().parse::<bs::Untrim>())?;
+        self.then(|s| s.untrim(face, which, Some(tolerance)))
+    }
+
+    /// This solid taken apart along its edges into bodies, as an array (Fusion's
+    /// UnstitchFeatures, Rhino's UnjoinEdges): every face kept as it is, the edges between faces
+    /// of one body still shared, those between bodies left free on each side. `faces` empty:
+    /// every face a one-face sheet of its own. Otherwise, with `together`, the faces listed are
+    /// one body; without, each listed face is a sheet of its own; either way the faces not listed
+    /// are one body per edge-connected run of them. The bodies come back listed ones first, the
+    /// rest in the order of their first faces. Every face keeps its colour, id and attributes.
+    /// Empty for a face this solid has not, or a face listed twice, with the reason in
+    /// `Cadaclysm.last_error()`.
+    #[func]
+    fn unstitch(&self, #[opt(default = &PackedInt64Array::new())] faces: PackedInt64Array, #[opt(default = false)] together: bool) -> Array<Gd<CadaclysmSolid>> {
+        let Some(faces) = faces.as_slice().iter().map(|&f| Self::face_index(f, "unstitch")).collect::<Option<Vec<u32>>>() else {
+            return Array::new();
+        };
+        self.held().map(|s| Self::many(s.unstitch(&faces, together))).unwrap_or_default()
+    }
+
+    /// A sheet of ruled faces, one off each of `edges` (`CadaclysmEdge`s or indices into `edges`;
+    /// Fusion's RuledSurfaceFeatures from edges): each face runs from the edge `distance` along
+    /// its ruling -- `"tangent"` (square to the edge in its face's tangent plane, away from the
+    /// face), `"normal"` (the face's outward normal) or `"direction"` (along `direction`, three
+    /// numbers, given with `"direction"` and only then) -- turned by `angle` radians about the
+    /// edge. A negative `distance` rules the other way. The face the ruling hangs off is the
+    /// edge's first, its second with `alternate_face`. The far side is exact where the ruling is
+    /// constant or an affine image of the edge, fitted within `tolerance` (0: the solid's
+    /// effective tolerance) elsewhere; faces meeting along a side are sewn into one sheet. Each
+    /// ruled face takes the colour and attributes of the face it hangs off. `null` for another
+    /// `ruling`, `direction` given without `"direction"` or missing with it, no edges, an edge out
+    /// of range, a distance zero or not finite, an angle not finite, a zero direction, a ruling
+    /// along the edge's tangent, or an edge with no exact curve.
+    #[func]
+    fn ruled_from_edges(
+        &self,
+        edges: Variant,
+        #[opt(default = "tangent")] ruling: GString,
+        #[opt(default = 1.0)] distance: f64,
+        #[opt(default = 0.0)] angle: f64,
+        #[opt(default = &PackedFloat64Array::new())] direction: PackedFloat64Array,
+        #[opt(default = false)] alternate_face: bool,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        const WHAT: &str = "ruled_from_edges";
+        let edges = indices(&edges, &format!("{WHAT}: edges"))?;
+        let d = direction.as_slice();
+        let ruling = match (ruling.to_string().as_str(), d.len()) {
+            ("tangent", 0) => bs::Ruling::Tangent,
+            ("normal", 0) => bs::Ruling::Normal,
+            ("direction", 3) => bs::Ruling::Direction([d[0], d[1], d[2]]),
+            ("tangent" | "normal", _) => return fail(format!("{WHAT}: direction is given with ruling 'direction', and only then")),
+            ("direction", 0) => return fail(format!("{WHAT}: ruling 'direction' needs a direction")),
+            ("direction", n) => return fail(format!("{WHAT}: a direction is three numbers, got {n}")),
+            (other, _) => return fail(format!("{WHAT}: ruling is 'tangent', 'normal' or 'direction', not '{other}'")),
+        };
+        self.then(|s| s.ruled_from_edges(&edges, ruling, distance, angle, alternate_face, Some(tolerance)))
+    }
+
+    /// This solid with face `face`'s seam moved to `parameter` along `u` (`along_u`) or `v`
+    /// (Rhino's Brep.ChangeSeam): the face's surface must close on itself that way and the face
+    /// go all the way round it. `parameter` is in the face's own parameters, wrapped into the
+    /// period; a seam already there gives the solid back as it was. The shape, the face count and
+    /// every other face are unchanged; edges crossing the new seam are cut in two at it. Every
+    /// face keeps its index, colour, id and attributes. `tolerance` 0 is the solid's effective
+    /// tolerance. `null` for a face this solid has not, a parameter not finite, a surface not
+    /// closed that way or of a kind whose seam is not moved, a face with no seam, or a hole across
+    /// the new seam.
+    #[func]
+    fn change_seam(&self, face: i64, parameter: f64, #[opt(default = true)] along_u: bool, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
+        let face = Self::face_index(face, "change_seam")?;
+        self.then(|s| s.change_seam(face, parameter, along_u, Some(tolerance)))
+    }
+
+    /// This one-face sheet and `other` merged along a side they share into one one-face sheet
+    /// (Rhino's Brep.MergeSurfaces): both faces untrimmed -- bounded by their surfaces' four
+    /// sides -- and their surfaces joined end to end, the joint left smooth where it already was.
+    /// The sheet faces as this one's face does and takes its colour, id and attributes.
+    /// `tolerance` 0 is the two bodies' effective tolerance. `null` for a body with other than one
+    /// face, a trimmed face, no side shared within the tolerance, sides that meet only in part, or
+    /// sides parametrised differently.
+    #[func]
+    fn merge_surfaces(&self, other: Gd<CadaclysmSolid>, #[opt(default = 0.0)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
+        self.with(&other, |a, b| a.merge_surfaces(b, Some(tolerance))).map(CadaclysmSolid::wrap)
     }
 
     /// This solid without the faces at `faces`: the rest keep their order.
@@ -16912,6 +18204,72 @@ impl CadaclysmSolid {
         self.then(|s| s.fillet_law(&edges, &law, tolerance))
     }
 
+    /// `fillet` sized by the chord -- the straight distance between the two lines where the round
+    /// meets its faces -- instead of the radius. Straight edges and partial arcs are rounded
+    /// together at one radius from each edge's opening angle (edges whose faces meet at different
+    /// angles are refused); a whole rim takes its own radius, solved in its meridian plane; spline
+    /// edges, in a call of their own, roll a ball sized so its rails stand `chord` apart. A box's
+    /// edge by chord `c` is `fillet(.., c / sqrt(2))`. `edges`: `CadaclysmEdge`s or their indices.
+    #[func]
+    fn fillet_chord(&self, edges: Variant, chord: f64, #[opt(default = 1e-6)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
+        let edges = indices(&edges, "fillet_chord: edges")?;
+        self.then(|s| s.fillet_chord(&edges, chord, tolerance))
+    }
+
+    /// `fillet` with two set-backs: each straight edge cut back `distance` along `face` (which every
+    /// picked edge must border) and `distance_other` along its other face, the band the conic
+    /// tangent to both -- the rolling ball's arc stretched, that arc when the two agree. Edges
+    /// between two planes, convex or concave, ending against planes, running on into each other, or
+    /// meeting at a convex corner whose sections agree; circular and spline edges, an end against a
+    /// curved face and fillets meeting with different sections are refused.
+    #[func]
+    fn fillet_asymmetric(
+        &self,
+        edges: Variant,
+        face: i64,
+        distance: f64,
+        distance_other: f64,
+        #[opt(default = 1e-6)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        let edges = indices(&edges, "fillet_asymmetric: edges")?;
+        let face = Self::face_index(face, "fillet_asymmetric")?;
+        self.then(|s| s.fillet_asymmetric(&edges, face, distance, distance_other, tolerance))
+    }
+
+    /// A full round: face `centre` replaced by a round tangent to faces `side` and `other_side`
+    /// either side of it -- a rib's top becomes a half cylinder, a tube's top (a ring between two
+    /// coaxial walls) a half torus. The radius is solved from the three faces, not given: sides
+    /// `w` apart give `w / 2`. `centre` must be a plane and each side must share an edge with it;
+    /// a tapered rib, a disc top, curved end faces and side faces lower than the round are refused.
+    #[func]
+    fn fillet_full_round(&self, side: i64, centre: i64, other_side: i64, #[opt(default = 1e-6)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
+        let side = Self::face_index(side, "fillet_full_round")?;
+        let centre = Self::face_index(centre, "fillet_full_round")?;
+        let other_side = Self::face_index(other_side, "fillet_full_round")?;
+        self.then(|s| s.fillet_full_round(side, centre, other_side, tolerance))
+    }
+
+    /// `fillet` at `radius` of the edges a rule picks: with `between` empty every edge with a face
+    /// in `faces`, otherwise every edge between a face in `faces` and one in `between`; of those
+    /// the convex and concave ones (`rule` "all"), the concave ones ("concave") or the convex ones
+    /// ("convex"), classed at the solid's own angular tolerance. Smooth edges and edges convex
+    /// along part and concave along another are never picked; nothing picked is refused.
+    /// `faces`: face indices, in an array or a packed array.
+    #[func]
+    fn fillet_rule(
+        &self,
+        faces: Variant,
+        radius: f64,
+        #[opt(default = &PackedInt32Array::new())] between: PackedInt32Array,
+        #[opt(default = "all")] rule: GString,
+        #[opt(default = 1e-6)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        let faces = indices(&faces, "fillet_rule: faces")?;
+        let between = packed_indices(&between, "fillet_rule: between")?;
+        let rule = ok(rule.to_string().parse::<bs::EdgeRule>())?;
+        self.then(|s| s.fillet_rule(&faces, radius, &between, rule, tolerance))
+    }
+
     // -- sheets from curves
 
     /// On a sheet from `sweep_rail`, `sweep_two_rails`, `edge_surface`, `network_surface`,
@@ -17191,8 +18549,10 @@ impl CadaclysmSolid {
     }
 
     /// Hems on `edges`: `kind` `"flat"` (the lip folded flat on the sheet), `"open"` (folded back
-    /// with a gap), `"rolled"` (rolled round through `angle`, 0: 1.5 `PI`) or `"teardrop"`;
-    /// `length` the lip, `gap` the gap inside (0: the thickness). `null` (`sheet_hem: ...`) as
+    /// with a gap), `"rolled"` (rolled round through `angle`, 0: 1.5 `PI`), `"teardrop"`,
+    /// `"rope"` (curled round a rod `gap` across until it comes back down to the sheet) or
+    /// `"double"` (folded twice and pressed flat, three layers); `length` the lip (unused by a
+    /// rope hem), `gap` the gap inside (0: the thickness). `null` (`sheet_hem: ...`) as
     /// `sheet_flange` is, and for a kind not one of those.
     #[func]
     #[allow(clippy::too_many_arguments)]
@@ -17402,6 +18762,46 @@ impl CadaclysmSolid {
         with_curves(&curves, "unroll: curves", |c| self.unrolled(c, &faces, &points, explode, tolerance))
     }
 
+    /// Faces `faces` (ints; empty, the default: all) laid flat in the xy plane with the least
+    /// distortion, whether or not they are developable, as a `CadaclysmSquished` -- Rhino's
+    /// `Squisher`. Faces sharing an edge flatten together (unless `explode`); a group of faces that
+    /// are all developable is laid exactly as `unroll` lays it. `deformation` reads from the flat
+    /// pattern to the shape: `"free"` (the default), `"stretch_mostly"` / `"stretch_only"` (flat
+    /// lengths shorter than their 3D lengths: the pattern stretches over the shape),
+    /// `"compress_mostly"` / `"compress_only"` (longer). `preserve_boundary` keeps the outline's
+    /// length. `points` (three doubles each, in a row) follow to their spots. `null` (the reason,
+    /// `squish: ...`, in `Cadaclysm.last_error()`) for an unknown deformation, a face out of range
+    /// and faces that close on themselves. `squish_with_curves` carries curves onto the flat too.
+    #[func]
+    fn squish(
+        &self,
+        #[opt(default = &PackedInt64Array::new())] faces: PackedInt64Array,
+        #[opt(default = &PackedFloat64Array::new())] points: PackedFloat64Array,
+        #[opt(default = false)] explode: bool,
+        #[opt(default = "free")] deformation: GString,
+        #[opt(default = true)] preserve_boundary: bool,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSquished>> {
+        self.squished(&[], &faces, &points, explode, &deformation, preserve_boundary, tolerance)
+    }
+
+    /// `squish`, with `curves` (`CadaclysmNurbsCurve`s) carried onto the flat as well: the
+    /// result's `curves` holds each one's pieces there, split where it leaves the faces.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn squish_with_curves(
+        &self,
+        curves: AnyArray,
+        #[opt(default = &PackedInt64Array::new())] faces: PackedInt64Array,
+        #[opt(default = &PackedFloat64Array::new())] points: PackedFloat64Array,
+        #[opt(default = false)] explode: bool,
+        #[opt(default = "free")] deformation: GString,
+        #[opt(default = true)] preserve_boundary: bool,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSquished>> {
+        with_curves(&curves, "squish: curves", |c| self.squished(c, &faces, &points, explode, &deformation, preserve_boundary, tolerance))
+    }
+
     /// The base flange: `profile` as a flat sheet under `frame` (twelve numbers; empty, the default:
     /// the world's xy), its top in the frame's plane and the sheet `rule.thickness` below it. `null`
     /// (`sheet_base: ...`) for a bad rule and a profile that does not extrude.
@@ -17436,6 +18836,27 @@ impl CadaclysmSolid {
         let rule = rule.bind().rule;
         Self::made(bs::Solid::sheet_contour(&path, width, &rule, frame.as_ref(), Some(tolerance)))
     }
+
+    /// A lofted flange between the open polylines `a` and `b` (each a `PackedVector3Array` or an
+    /// array of points, at least two), the sheet's top face: the strip between them cut into
+    /// facets, every crease a bend of `rule`'s radius, so the part unfolds like any other
+    /// (press-brake style; sample an arc into as many points as facets wanted). The sheet lies
+    /// under the facets' normal, along a x towards b (reverse both to put it on the other side).
+    /// `null` (`sheet_lofted_flange: ...`) for fewer than two points, a repeated point, a facet
+    /// with no area, a facet its bends' set-backs leave nothing of and a bad rule.
+    #[func]
+    fn sheet_lofted_flange(
+        a: Variant,
+        b: Variant,
+        rule: Gd<CadaclysmSheetRule>,
+        #[opt(default = 0.0)] tolerance: f64,
+    ) -> Option<Gd<CadaclysmSolid>> {
+        let a = point_list(&a, "sheet_lofted_flange: a")?;
+        let b = point_list(&b, "sheet_lofted_flange: b")?;
+        let rule = rule.bind().rule;
+        Self::made(bs::Solid::sheet_lofted_flange(&a, &b, &rule, Some(tolerance)))
+    }
+
 
     /// A flat outline folded: `profile` under `frame` (twelve numbers; empty, the default: the
     /// world's xy), each of `bends` (`CadaclysmBend`s) a bend -- a `CadaclysmFlatPattern`'s
@@ -17829,7 +19250,7 @@ impl CadaclysmSolid {
     /// original) as one body -- a pattern of bodies. Copies apart from each other are put
     /// together with no boolean at all; copies that overlap are joined, one boolean a group.
     /// An array `[solid, report]`, the report a `CadaclysmPatternReport`, or `null` with the
-    /// reason in `Cadaclysm.last_error()`: no transforms, or one that is not rigid.
+    /// reason in `Cadaclysm.last_error()`: no transforms, or one that is neither rigid nor a mirror.
     #[func]
     fn pattern(&self, transforms: AnyArray, #[opt(default = 0.0)] tolerance: f64) -> Variant {
         let found = (|| {

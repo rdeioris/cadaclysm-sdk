@@ -1,8 +1,8 @@
 // Sheet metal and unroll -- SheetRule, sheet_base, sheet_flange, is_sheet_metal, sheet_info,
 // sheet_bend_faces, flat_pattern with its FlatPattern (bends, body, dxf, Page::add_flat_pattern),
-// fold_flat and unroll with its Unrolled, sheet_rip_points, sheet_rip_face, sheet_join, sheet_fillet
-// and sheet_chamfer -- at parity with the Python reference's tests test_sheet_metal_* and
-// test_unroll_* in test_cadaclysm_blacksmith.py, every figure a closed
+// fold_flat, unroll with its Unrolled, squish with its Squished, sheet_rip_points, sheet_rip_face, sheet_join, sheet_fillet
+// and sheet_chamfer -- at parity with the Python reference's tests test_sheet_metal_*,
+// test_unroll_* and test_squish_* in test_cadaclysm_blacksmith.py, every figure a closed
 // form written out here: a 60 x 40 plate flanged 15 high on its four edges lays flat to
 // 2400 - pi + 2 (58 + 38) (15 - 2 + pi/2 1.44). The kernel's own correctness is the kernel's
 // tests' job. Needs the kernel library and a license; the exit code is the verdict.
@@ -182,7 +182,45 @@ static Result<void> unroll_a_cylinder_with_points() {
     return {};
 }
 
-// 3: sheet_metal_refusals_are_named
+// A sphere r 5 with the half below z = 0 cut away: a dome and a disk.
+static Solid half_ball() {
+    Solid ball = must(Solid::sphere(5), "sphere");
+    Solid below = must(must(Solid::cuboid(20, 20, 10), "cuboid").translate(0, 0, -5), "translate");
+    return must(ball.cut(below, std::nullopt), "cut");
+}
+
+// 3: squish_a_half_ball_with_its_distortion_and_a_point
+static Result<void> squish_a_half_ball_with_its_distortion_and_a_point() {
+    Solid half = half_ball();
+    check(half.faces() == 2, "the half ball has 2 faces, not " + std::to_string(half.faces()));
+    bs::Squished apart = must(half.squish({}, {}, {}, true), "squish exploded");
+    check(apart.faces.size() == 2 && apart.distortion.size() == 2, "two sheet faces, each with its distortion");
+    check(apart.exact.size() == 1, "the disk alone is laid exactly, not " + std::to_string(apart.exact.size()) + " faces");
+    check(must(apart.sheet.mass(), "sheet mass").area > 0, "the sheet has an area");
+    if (apart.faces.size() != 2 || apart.exact.size() != 1) return {};
+    std::size_t disk = apart.faces[0] == apart.exact[0] ? 0 : 1;
+    std::size_t dome = 1 - disk;
+    check(std::fabs(apart.distortion[disk].area_mean - 1) < 1e-6, "the disk's area kept: mean " + num(apart.distortion[disk].area_mean));
+    // The dome's rim kept: its area near half the dome's, every triangle the right way up.
+    const bs::SquishDistortion& d = apart.distortion[dome];
+    check(d.area_min > 0 && d.area_min <= d.area_mean && d.area_mean <= d.area_max,
+          "the dome's area min " + num(d.area_min) + " <= mean " + num(d.area_mean) + " <= max " + num(d.area_max));
+    check(d.area_mean >= 0.45 && d.area_mean <= 0.7, "the dome's area mean " + num(d.area_mean) + " in [0.45, 0.7]");
+
+    // The dome alone, compress-only: the pole lands, a point far off does not.
+    bs::Squished pole = must(half.squish({apart.faces[dome]}, {}, {Vec3{0, 0, 5}, Vec3{50, 50, 50}}, false,
+                                         bs::SquishDeformation::compress_only, false),
+                             "squish the dome");
+    check(pole.distortion.size() == 1 && pole.distortion[0].length_min >= 1,
+          "compress only: every length at least its 3D one, min " + num(pole.distortion.empty() ? 0 : pole.distortion[0].length_min));
+    check(pole.points.size() == 2, "two points back");
+    check(pole.points[0].has_value() && std::fabs((*pole.points[0])[2]) < 1e-9, "the pole lands on the flat");
+    check(!pole.points[1].has_value(), "the point off the dome lands nowhere");
+    check(pole.curves.empty(), "no curves given, none back");
+    return {};
+}
+
+// 4: sheet_metal_refusals_are_named
 static Result<void> sheet_metal_refusals_are_named() {
     bs::SheetRule rule(1.0);
     Solid cube = must(Solid::cuboid(10, 10, 10), "cuboid");
@@ -190,10 +228,48 @@ static Result<void> sheet_metal_refusals_are_named() {
     refused(cube.flat_pattern(0, rule), "flat_pattern: ", "flat_pattern of a cube");
     refused(Solid::sheet_base(must(bs::Profile::rect(10, 10), "rect"), bs::SheetRule(-1.0)), "sheet_base: ", "a sheet -1 thick");
     refused(must(Solid::sphere(5), "sphere").unroll(), "unroll: ", "a sphere unrolled");
+    Result<bs::Squished> closed = half_ball().squish();
+    refused(closed, "squish: ", "a half ball squished whole");
+    check(!closed.ok() && closed.error().message.find("closed") != std::string::npos, "the refusal names the faces closed");
     return {};
 }
 
-// 4: sheet_metal_rips_joins_and_corner_breaks
+// 4: sheet_metal_rope_and_double_hems
+static Result<void> sheet_metal_rope_and_double_hems() {
+    bs::SheetRule rule(1.0);
+    Solid plate = must(Solid::sheet_base(must(bs::Profile::rect(60, 40), "rect"), rule), "sheet_base");
+    std::uint32_t top = face_at(plate, {0, 0, 1}, 0);
+    std::vector<std::uint32_t> edges;
+    for (const bs::Edge& e : must(plate.edges(), "edges")) {
+        for (std::uint32_t f : e.faces) {
+            if (f == top && edges.empty()) edges.push_back(e.index);
+        }
+    }
+    Solid rope = must(plate.sheet_hem(edges, bs::HemKind::rope, 0, rule, 2), "rope hem");
+    std::size_t rope_bends = must(rope.sheet_info(), "sheet_info").bends.size();
+    check(rope_bends == 2, "a rope hem's curl in two halves, not " + std::to_string(rope_bends) + " bends");
+    Solid twice = must(plate.sheet_hem(edges, bs::HemKind::double_, 8, rule), "double hem");
+    std::size_t double_bends = must(twice.sheet_info(), "sheet_info").bends.size();
+    check(double_bends == 2, "a double hem has 2 bends, not " + std::to_string(double_bends));
+    return {};
+}
+
+// 5: sheet_metal_a_lofted_flange_unfolds
+static Result<void> sheet_metal_a_lofted_flange_unfolds() {
+    bs::SheetRule rule(1.0);
+    const std::vector<Vec3> bottom = {Vec3{-10, -10, 0}, Vec3{10, -10, 0}, Vec3{10, 10, 0}, Vec3{-10, 10, 0}};
+    const std::vector<Vec3> top = {Vec3{-15, -15, 20}, Vec3{15, -15, 20}, Vec3{15, 15, 20}, Vec3{-15, 15, 20}};
+    Solid hopper = must(Solid::sheet_lofted_flange(bottom, top, rule), "sheet_lofted_flange");
+    bs::SheetInfo info = must(hopper.sheet_info(), "sheet_info");
+    check(info.bends.size() == 2, "the hopper has 2 bends, not " + std::to_string(info.bends.size()));
+    bs::FlatPattern flat = must(hopper.flat_pattern(info.fixed_face, rule), "flat_pattern");
+    Solid again = must(Solid::fold_flat(must(flat.profile(), "flat profile"), flat.fold_bends(), rule, flat.frame()), "fold_flat");
+    check(near(volume(again), volume(hopper), 1e-6), "folded back to " + num(volume(again)) + ", not the hopper's " + num(volume(hopper)));
+    refused(Solid::sheet_lofted_flange({Vec3{0, 0, 0}}, top, rule), "sheet_lofted_flange: ", "a one-point profile");
+    return {};
+}
+
+// 6: sheet_metal_rips_joins_and_corner_breaks
 static Result<void> sheet_metal_rips_joins_and_corner_breaks() {
     bs::SheetRule rule(1.0);
     Solid plate = must(Solid::sheet_base(must(bs::Profile::rect(60, 40), "rect"), rule), "sheet_base");
@@ -238,7 +314,10 @@ int main(int argc, char** argv) {
     const Test tests[] = {
         {"sheet_metal_a_tray_reads_unfolds_and_folds_back", sheet_metal_a_tray_reads_unfolds_and_folds_back},
         {"unroll_a_cylinder_with_points", unroll_a_cylinder_with_points},
+        {"squish_a_half_ball_with_its_distortion_and_a_point", squish_a_half_ball_with_its_distortion_and_a_point},
         {"sheet_metal_refusals_are_named", sheet_metal_refusals_are_named},
+        {"sheet_metal_rope_and_double_hems", sheet_metal_rope_and_double_hems},
+        {"sheet_metal_a_lofted_flange_unfolds", sheet_metal_a_lofted_flange_unfolds},
         {"sheet_metal_rips_joins_and_corner_breaks", sheet_metal_rips_joins_and_corner_breaks},
     };
     for (const Test& t : tests) {

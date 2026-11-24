@@ -137,6 +137,16 @@ static bool cv_set_lighting(const CvlTable *t, CadaclysmView *v, uint32_t l) { r
 static uint32_t cv_lighting(const CvlTable *t, CadaclysmView *v) { return t->lighting(v); }
 static bool cv_set_occluded_style(const CvlTable *t, CadaclysmView *v, const CadaclysmViewOccludedStyle *s) { return t->set_occluded_style(v, s); }
 static bool cv_occluded_style(const CvlTable *t, CadaclysmView *v, CadaclysmViewOccludedStyle *s) { return t->occluded_style(v, s); }
+static bool cv_set_clip_plane(const CvlTable *t, CadaclysmView *v, uint32_t slot, const CadaclysmViewClipPlane *p) { return t->set_clip_plane(v, slot, p); }
+static bool cv_clip_plane(const CvlTable *t, CadaclysmView *v, uint32_t slot, CadaclysmViewClipPlane *p) { return t->clip_plane(v, slot, p); }
+static bool cv_set_clip_mode(const CvlTable *t, CadaclysmView *v, uint32_t m) { return t->set_clip_mode(v, m); }
+static uint32_t cv_clip_mode(const CvlTable *t, CadaclysmView *v) { return t->clip_mode(v); }
+static bool cv_set_viewport_clip_plane(const CvlTable *t, CadaclysmView *v, uint32_t vp, uint32_t slot, const CadaclysmViewClipPlane *p) { return t->set_viewport_clip_plane(v, vp, slot, p); }
+static bool cv_viewport_clip_plane(const CvlTable *t, CadaclysmView *v, uint32_t vp, uint32_t slot, CadaclysmViewClipPlane *p) { return t->viewport_clip_plane(v, vp, slot, p); }
+static bool cv_set_viewport_clip_mode(const CvlTable *t, CadaclysmView *v, uint32_t vp, uint32_t m) { return t->set_viewport_clip_mode(v, vp, m); }
+static uint32_t cv_viewport_clip_mode(const CvlTable *t, CadaclysmView *v, uint32_t vp) { return t->viewport_clip_mode(v, vp); }
+static bool cv_set_textures(const CvlTable *t, CadaclysmView *v, bool on) { return t->set_textures(v, on); }
+static bool cv_textures(const CvlTable *t, CadaclysmView *v) { return t->textures(v); }
 static bool cv_set_lod(const CvlTable *t, CadaclysmView *v, const CadaclysmViewLod *l) { return t->set_lod(v, l); }
 static uint32_t cv_wake_ms(const CvlTable *t, CadaclysmView *v) { return t->wake_ms(v); }
 static bool cv_set_node_visible(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t n, bool on) { return t->set_node_visible(v, i, n, on); }
@@ -190,6 +200,15 @@ static void cv_set_point_state_colours(const CvlTable *t, CadaclysmView *v, cons
 static bool cv_set_viewport_label(const CvlTable *t, CadaclysmView *v, uint32_t k, const char *s, const float *c) { return t->set_viewport_label(v, k, s, c); }
 static bool cv_set_viewport_border(const CvlTable *t, CadaclysmView *v, uint32_t k, const float *c) { return t->set_viewport_border(v, k, c); }
 static bool cv_set_on_top(const CvlTable *t, CadaclysmView *v, uint32_t i, bool on) { return t->set_on_top(v, i, on); }
+static bool cv_set_lines(const CvlTable *t, CadaclysmView *v, uint32_t i, const float *s, size_t n) { return t->set_lines(v, i, s, n); }
+static bool cv_set_pick_aperture(const CvlTable *t, CadaclysmView *v, float a) { return t->set_pick_aperture(v, a); }
+static size_t cv_pick_rect(const CvlTable *t, CadaclysmView *v, uint32_t vp, float x, float y, float w, float h, bool c, CadaclysmViewRectHit *o, size_t n) { return t->pick_rect(v, vp, x, y, w, h, c, o, n); }
+static bool cv_set_snap_points(const CvlTable *t, CadaclysmView *v, uint32_t i, const float *xyz, size_t n, const char *label) { return t->set_snap_points(v, i, xyz, n, label); }
+static bool cv_set_snap_base(const CvlTable *t, CadaclysmView *v, const float *xyz, float step) { return t->set_snap_base(v, xyz, step); }
+static bool cv_set_curves(const CvlTable *t, CadaclysmView *v, uint32_t i, const float *b, size_t n) { return t->set_curves(v, i, b, n); }
+static bool cv_set_points(const CvlTable *t, CadaclysmView *v, uint32_t i, const float *p, size_t n) { return t->set_points(v, i, p, n); }
+static bool cv_set_mesh_positions(const CvlTable *t, CadaclysmView *v, uint32_t i, const float *p, const float *nrm, size_t n) { return t->set_mesh_positions(v, i, p, nrm, n); }
+static uint32_t cv_show_glyphs(const CvlTable *t, CadaclysmView *v, const float *at, const float *dir, size_t n, uint32_t kind, float size_pt, const float *c) { return t->show_glyphs(v, at, dir, n, kind, size_pt, c); }
 static bool cv_set_item_line_colour(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t l, const float *rgb) { return t->set_item_line_colour(v, i, l, rgb); }
 static bool cv_set_line_colour(const CvlTable *t, CadaclysmView *v, uint32_t l, const float *rgb, uint32_t p) { return t->set_line_colour(v, l, rgb, p); }
 static bool cv_line_colour(const CvlTable *t, CadaclysmView *v, uint32_t l, float *rgb, uint32_t *p) { return t->line_colour(v, l, rgb, p); }
@@ -282,12 +301,15 @@ func lodLayout() (size, minTriangles, motion uintptr) {
 	return unsafe.Sizeof(l), unsafe.Offsetof(l.min_triangles), unsafe.Offsetof(l.motion)
 }
 
-// CadaclysmViewSnapSettings is 16 bytes and CadaclysmViewSnap 88 (1.22): the package fails to
-// compile if the header's structs ever differ.
+// CadaclysmViewSnapSettings is 16 bytes (1.22), CadaclysmViewSnap 232 (1.30) and the event's
+// frozen CadaclysmViewEventSnap 88: the package fails to compile if the header's structs ever
+// differ.
 var _ [unsafe.Sizeof(C.CadaclysmViewSnapSettings{}) - 16]struct{}
 var _ [16 - unsafe.Sizeof(C.CadaclysmViewSnapSettings{})]struct{}
-var _ [unsafe.Sizeof(C.CadaclysmViewSnap{}) - 88]struct{}
-var _ [88 - unsafe.Sizeof(C.CadaclysmViewSnap{})]struct{}
+var _ [unsafe.Sizeof(C.CadaclysmViewSnap{}) - 232]struct{}
+var _ [232 - unsafe.Sizeof(C.CadaclysmViewSnap{})]struct{}
+var _ [unsafe.Sizeof(C.CadaclysmViewEventSnap{}) - 88]struct{}
+var _ [88 - unsafe.Sizeof(C.CadaclysmViewEventSnap{})]struct{}
 
 // snapLayout is the snap answer's size and its fields' offsets, in the header's order, for
 // the layout test.
@@ -457,7 +479,7 @@ func find(stem, variable, what string, dirs []string) (string, error) {
 }
 
 // checkABI is cvl_check_abi, which every open runs on the library's answer first: nil for
-// 1.26 or a later 1.x, else the refusal naming `path`.
+// 1.33 or a later 1.x, else the refusal naming `path`.
 func checkABI(version uint32, path string) error {
 	cp := C.CString(path)
 	defer C.free(unsafe.Pointer(cp))
@@ -569,7 +591,10 @@ type Item struct {
 // shown in, when HasPoint -- false (and Point zero) where the library read no depth (no
 // hit, a machining stock, the terminal library). Overlay (1.24): the item is an overlay --
 // it was over the pixel, so nothing of the scene beneath it was picked (Face is a text
-// overlay's line, else 0). Every field is a value, so two picks compare with ==.
+// overlay's line, else 0). Segment (1.30) is the wire hit's segment -- a lines item's segment,
+// a curves item's Bezier, a kernel solid's edge index -- when HasSegment: false (and Segment 0)
+// for a face, a point, a glyph or a label; DistancePx the cursor's distance to the hit in
+// device pixels (0 for a face). Every field is a value, so two picks compare with ==.
 type Pick struct {
 	Item, Node, Face, Clicks uint32
 	HasPoint                 bool
@@ -579,6 +604,17 @@ type Pick struct {
 	// answer sets it; a Pick built by hand (the zero value, Pick{}) reads 0 -- viewport 0's
 	// label -- so set it to -1 there.
 	ViewportLabel int32
+	Segment       uint32
+	HasSegment    bool
+	DistancePx    float32
+}
+
+// segmentOf is a pick's segment and whether it has one: none for UINT32_MAX.
+func segmentOf(s C.uint32_t) (uint32, bool) {
+	if uint32(s) == 0xFFFFFFFF {
+		return 0, false
+	}
+	return uint32(s), true
 }
 
 // pickOf is a library's pick answer as a Pick.
@@ -590,12 +626,15 @@ func pickOf(p *C.CadaclysmViewPick) Pick {
 	}
 	out.Overlay = p.overlay != 0
 	out.ViewportLabel = int32(p.viewport_label)
+	out.Segment, out.HasSegment = segmentOf(p.segment)
+	out.DistancePx = float32(p.distance_px)
 	return out
 }
 
 // eventPickOf is pickOf for an input event's pick (CadaclysmViewEventPick, the 1.26 layout;
-// the label is the event's own pick_viewport_label, 1.28).
-func eventPickOf(p *C.CadaclysmViewEventPick, label C.int32_t) Pick {
+// the label is the event's own pick_viewport_label, 1.28, and the segment and distance its
+// pick_segment and pick_distance_px, 1.30).
+func eventPickOf(p *C.CadaclysmViewEventPick, label C.int32_t, segment C.uint32_t, distance C.float) Pick {
 	out := Pick{Item: uint32(p.item), Node: uint32(p.node), Face: uint32(p.face), Clicks: uint32(p.clicks)}
 	if p.has_point != 0 {
 		out.HasPoint = true
@@ -603,6 +642,8 @@ func eventPickOf(p *C.CadaclysmViewEventPick, label C.int32_t) Pick {
 	}
 	out.Overlay = p.overlay != 0
 	out.ViewportLabel = int32(label)
+	out.Segment, out.HasSegment = segmentOf(segment)
+	out.DistancePx = float32(distance)
 	return out
 }
 
@@ -619,17 +660,27 @@ const (
 	SnapFace     SnapKind = C.CADACLYSM_VIEW_SNAP_FACE
 	SnapGrid     SnapKind = C.CADACLYSM_VIEW_SNAP_GRID
 	SnapPlane    SnapKind = C.CADACLYSM_VIEW_SNAP_PLANE
-	SnapAll      SnapKind = C.CADACLYSM_VIEW_SNAP_ALL
+	// 1.30: a lines or curves item's piece ends; edges crossing on screen; a point an item
+	// gave with SetSnapPoints; lined up with an earlier snap.
+	SnapEnd          SnapKind = C.CADACLYSM_VIEW_SNAP_END
+	SnapIntersection SnapKind = C.CADACLYSM_VIEW_SNAP_INTERSECTION
+	SnapPoint        SnapKind = C.CADACLYSM_VIEW_SNAP_POINT
+	SnapAlignment    SnapKind = C.CADACLYSM_VIEW_SNAP_ALIGNMENT
+	SnapAll          SnapKind = C.CADACLYSM_VIEW_SNAP_ALL // every kind (twelve since 1.30)
+	// SnapDefault (1.30) is the library's default set: the first eight and SnapPoint.
+	SnapDefault SnapKind = C.CADACLYSM_VIEW_SNAP_DEFAULT
 )
 
 var snapNames = [...]struct {
 	kind SnapKind
 	name string
 }{{SnapVertex, "vertex"}, {SnapMidpoint, "midpoint"}, {SnapCentre, "centre"}, {SnapQuadrant, "quadrant"},
-	{SnapEdge, "edge"}, {SnapFace, "face"}, {SnapGrid, "grid"}, {SnapPlane, "plane"}}
+	{SnapEdge, "edge"}, {SnapFace, "face"}, {SnapGrid, "grid"}, {SnapPlane, "plane"}, {SnapEnd, "end"},
+	{SnapIntersection, "intersection"}, {SnapPoint, "point"}, {SnapAlignment, "alignment"}}
 
 // String is the kinds' names, as Python's ("vertex", "midpoint", "centre", "quadrant",
-// "edge", "face", "grid", "plane"), joined by "|"; "" for none.
+// "edge", "face", "grid", "plane", "end", "intersection", "point", "alignment"), joined by
+// "|"; "" for none.
 func (k SnapKind) String() string {
 	var names []string
 	for _, n := range snapNames {
@@ -645,7 +696,11 @@ func (k SnapKind) String() string {
 // Node and Face it lies on, its Edge when HasEdge (false for a face, grid or plane snap), the
 // edge's unit Tangent there, a circular edge's Axis and Radius (zeros otherwise), DistancePx
 // from the cursor, and Clicks: 0 for View.Snap and a hover, 1 for a click's snap, 2 for a
-// double click's. Every field is a value, so two snaps compare with ==.
+// double click's. 1.30: Label is a SnapPoint's label, else the kind's name; when Locked,
+// LockedAngle is the lock's angle in degrees (0..360) where SetSnapBase turned the point (0
+// otherwise); Guides[:GuideCount] are 0 to 2 guides, each its start and end in world
+// coordinates (alignment guides, or the lock's ray), the rest zero. Every field is a value,
+// so two snaps compare with ==.
 type Snap struct {
 	Kind             SnapKind
 	Point            [3]float64
@@ -656,21 +711,104 @@ type Snap struct {
 	Radius           float64
 	DistancePx       float32
 	Clicks           uint32
+	Label            string
+	Locked           bool
+	LockedAngle      float32
+	Guides           [2][2][3]float64
+	GuideCount       int
+}
+
+// snapTail adds the 1.30 fields to a Snap: the label up to its NUL, the angle where locked,
+// and at most two guides (a guide_count past 2 never reads past the twelve doubles).
+func snapTail(out *Snap, label *[32]C.char, locked C.uint32_t, angle C.float, count C.uint32_t, guides *[12]C.double) {
+	b := make([]byte, 0, len(label))
+	for _, c := range label {
+		if c == 0 {
+			break
+		}
+		b = append(b, byte(c))
+	}
+	out.Label = string(b)
+	if locked != 0 {
+		out.Locked, out.LockedAngle = true, float32(angle)
+	}
+	n := int(count)
+	if n > 2 {
+		n = 2
+	}
+	for g := 0; g < n; g++ {
+		for k := 0; k < 3; k++ {
+			out.Guides[g][0][k] = float64(guides[6*g+k])
+			out.Guides[g][1][k] = float64(guides[6*g+3+k])
+		}
+	}
+	out.GuideCount = n
 }
 
 // snapOf is a library's snap answer as a Snap.
 func snapOf(s *C.CadaclysmViewSnap) Snap {
-	out := Snap{Kind: SnapKind(s.kind), Item: uint32(s.item), Node: uint32(s.node), Face: uint32(s.face),
-		Radius: float64(s.radius), DistancePx: float32(s.distance_px), Clicks: uint32(s.clicks)}
-	if uint32(s.edge) != 0xFFFFFFFF {
-		out.Edge, out.HasEdge = uint32(s.edge), true
+	out := snapHead(s.kind, &s.point, s.item, s.node, s.face, s.edge, &s.tangent, &s.axis, s.radius, s.distance_px, s.clicks)
+	snapTail(&out, &s.label, s.locked, s.locked_angle, s.guide_count, &s.guides)
+	return out
+}
+
+// eventSnapOf is an input event's snap: its frozen 1.22 snap and its snap_* tail (1.30).
+func eventSnapOf(raw *C.CadaclysmViewInputEvent) Snap {
+	s := &raw.snap
+	out := snapHead(s.kind, &s.point, s.item, s.node, s.face, s.edge, &s.tangent, &s.axis, s.radius, s.distance_px, s.clicks)
+	snapTail(&out, &raw.snap_label, raw.snap_locked, raw.snap_locked_angle, raw.snap_guide_count, &raw.snap_guides)
+	return out
+}
+
+// snapHead is a snap answer's 1.22 fields as a Snap.
+func snapHead(kind C.uint32_t, point *[3]C.double, item, node, face, edge C.uint32_t, tangent, axis *[3]C.float, radius C.double,
+	distance C.float, clicks C.uint32_t) Snap {
+	out := Snap{Kind: SnapKind(kind), Item: uint32(item), Node: uint32(node), Face: uint32(face),
+		Radius: float64(radius), DistancePx: float32(distance), Clicks: uint32(clicks)}
+	if uint32(edge) != 0xFFFFFFFF {
+		out.Edge, out.HasEdge = uint32(edge), true
 	}
 	for i := 0; i < 3; i++ {
-		out.Point[i] = float64(s.point[i])
-		out.Tangent[i] = float32(s.tangent[i])
-		out.Axis[i] = float32(s.axis[i])
+		out.Point[i] = float64(point[i])
+		out.Tangent[i] = float32(tangent[i])
+		out.Axis[i] = float32(axis[i])
 	}
 	return out
+}
+
+// HitKind is what a rectangle pick hit (View.PickRect, view ABI 1.30): CADACLYSM_VIEW_HIT_*.
+type HitKind uint32
+
+const (
+	HitFace    HitKind = C.CADACLYSM_VIEW_HIT_FACE    // a face, numbered as Pick numbers it
+	HitNode    HitKind = C.CADACLYSM_VIEW_HIT_NODE    // a node of an item with no face ranges
+	HitSegment HitKind = C.CADACLYSM_VIEW_HIT_SEGMENT // a lines item's segment, a curves item's Bezier
+	HitEdge    HitKind = C.CADACLYSM_VIEW_HIT_EDGE    // a kernel solid's or read scene's edge index
+	HitPoint   HitKind = C.CADACLYSM_VIEW_HIT_POINT   // a point's or glyph's index
+)
+
+// String is "face", "node", "segment", "edge" or "point" (the number for another).
+func (k HitKind) String() string {
+	switch k {
+	case HitFace:
+		return "face"
+	case HitNode:
+		return "node"
+	case HitSegment:
+		return "segment"
+	case HitEdge:
+		return "edge"
+	case HitPoint:
+		return "point"
+	}
+	return strconv.FormatUint(uint64(k), 10)
+}
+
+// RectHit is one thing View.PickRect found: its item, what it is, and that thing's index.
+type RectHit struct {
+	Item  uint32
+	Kind  HitKind
+	Index uint32
 }
 
 // Navigation is how a left drag moves the camera: NavigationOrbit (about the target) or
@@ -804,12 +942,12 @@ func inputEventOf(raw *C.CadaclysmViewInputEvent, yUp bool) (InputEvent, error) 
 		e.Width, e.Height = uint32(raw.width), uint32(raw.height)
 	case InputEventPick:
 		if raw.pick.item != 0 || raw.pick_viewport_label >= 0 {
-			pick := eventPickOf(&raw.pick, raw.pick_viewport_label)
+			pick := eventPickOf(&raw.pick, raw.pick_viewport_label, raw.pick_segment, raw.pick_distance_px)
 			e.Pick = &pick
 		}
 	case InputEventSnap:
 		if raw.snap.kind != 0 {
-			snap := snapOf(&raw.snap)
+			snap := eventSnapOf(raw)
 			e.Snap = &snap
 		}
 	case InputEventTimeline:
@@ -817,6 +955,7 @@ func inputEventOf(raw *C.CadaclysmViewInputEvent, yUp bool) (InputEvent, error) 
 	case InputEventClose:
 		var none C.CadaclysmViewPick
 		none.viewport_label = -1
+		none.segment = 0xFFFFFFFF
 		cam := camera(&raw.camera, &none, yUp)
 		e.Camera = &cam
 	default:
@@ -1315,6 +1454,50 @@ func (v *View) ShowLines(segments []float32, rgb Colour) (*Item, error) {
 	}
 	return v.add("cadaclysm_view_show_lines", func() C.uint32_t {
 		return C.cv_show_lines(v.lib.t, v.handle, floats(segments), n, c)
+	}, nil)
+}
+
+// GlyphKind is a glyph's kind (ShowGlyphs, view ABI 1.29), the header's CADACLYSM_VIEW_GLYPH_*.
+type GlyphKind uint32
+
+const (
+	GlyphArrow         GlyphKind = C.CADACLYSM_VIEW_GLYPH_ARROW
+	GlyphTick          GlyphKind = C.CADACLYSM_VIEW_GLYPH_TICK
+	GlyphCross         GlyphKind = C.CADACLYSM_VIEW_GLYPH_CROSS
+	GlyphSquare        GlyphKind = C.CADACLYSM_VIEW_GLYPH_SQUARE
+	GlyphTriangle      GlyphKind = C.CADACLYSM_VIEW_GLYPH_TRIANGLE
+	GlyphParallel      GlyphKind = C.CADACLYSM_VIEW_GLYPH_PARALLEL
+	GlyphPerpendicular GlyphKind = C.CADACLYSM_VIEW_GLYPH_PERPENDICULAR
+	GlyphCoincident    GlyphKind = C.CADACLYSM_VIEW_GLYPH_COINCIDENT
+	GlyphTangent       GlyphKind = C.CADACLYSM_VIEW_GLYPH_TANGENT
+	GlyphFixed         GlyphKind = C.CADACLYSM_VIEW_GLYPH_FIXED
+	GlyphHorizontal    GlyphKind = C.CADACLYSM_VIEW_GLYPH_HORIZONTAL
+	GlyphVertical      GlyphKind = C.CADACLYSM_VIEW_GLYPH_VERTICAL
+)
+
+// ShowGlyphs shows drafting glyphs of one kind at each point of at (three floats each),
+// sizePt points across (1 to 128), in colour (a Colour, nil the edge colour), turned to
+// dir (three floats a glyph, as projected on the screen; nil: unturned; an arrow points along
+// it), as one item (view ABI 1.29). Glyph i is node i: it picks as the item and node i. The
+// terminal and render view libraries draw no glyphs and refuse it. Go has no default
+// arguments: the other wrappers' default size is 12.
+func (v *View) ShowGlyphs(at []float32, kind GlyphKind, sizePt float32, colour Colour, dir []float32) (*Item, error) {
+	if len(at)%3 != 0 {
+		return nil, refused(fmt.Sprintf("show_glyphs takes three numbers a point, not %d", len(at)))
+	}
+	if dir != nil && len(dir) != len(at) {
+		return nil, refused(fmt.Sprintf("show_glyphs has %d points but %d directions", len(at)/3, len(dir)/3))
+	}
+	c, err := v.paintFor("cadaclysm_view_show_glyphs", colour, false)
+	if err != nil {
+		return nil, err
+	}
+	var d *C.float
+	if dir != nil {
+		d = floats(dir)
+	}
+	return v.add("cadaclysm_view_show_glyphs", func() C.uint32_t {
+		return C.cv_show_glyphs(v.lib.t, v.handle, floats(at), d, C.size_t(len(at)/3), C.uint32_t(kind), C.float(sizePt), c)
 	}, nil)
 }
 
@@ -2321,6 +2504,90 @@ func (i *Item) SetPointStates(states []string) error {
 	})
 }
 
+// SetLines replaces a lines item's segments in place (view ABI 1.29), six floats (two points)
+// each; empty empties it. Refused (the library's message) for any other kind of item.
+func (i *Item) SetLines(segments []float32) error {
+	if len(segments)%6 != 0 {
+		return refused(fmt.Sprintf("set_lines takes six numbers a segment, not %d", len(segments)))
+	}
+	return i.ok("cadaclysm_view_set_lines", func(v *View) C.bool {
+		return C.cv_set_lines(v.lib.t, v.handle, C.uint32_t(i.id), floats(segments), C.size_t(len(segments)/6))
+	})
+}
+
+// SetSnapPoints gives the item points a SnapPoint snap lands on (view ABI 1.30): three numbers
+// each, in the coordinates the item was shown in, moving with its node 0, each answering label
+// (at most 31 bytes of UTF-8). Go strings cannot be nil, so an empty label goes to the library
+// as NULL; the library answers "point" for NULL and empty alike, so every language agrees (D15).
+// No points clear them (NULL, count 0); they also go with the item's removal. A count not a
+// multiple of three and a label holding a NUL are refused before the call; the library
+// refuses text, glyph, image and machining items, a label past 31 bytes and a value that is
+// not finite, in its own words. The terminal library refuses it.
+func (i *Item) SetSnapPoints(xyz []float64, label string) error {
+	if len(xyz)%3 != 0 {
+		return refused(fmt.Sprintf("set_snap_points takes three numbers a point, not %d", len(xyz)))
+	}
+	if strings.ContainsRune(label, 0) {
+		return refused("snap point label " + pyRepr(label) + ": a NUL character cannot be shown (the C string ends there)")
+	}
+	points := make([]float32, len(xyz))
+	for k, x := range xyz {
+		points[k] = float32(x)
+	}
+	var p *C.float
+	if len(points) > 0 {
+		p = (*C.float)(unsafe.Pointer(&points[0]))
+	}
+	var cs *C.char
+	if label != "" {
+		cs = C.CString(label)
+		defer C.free(unsafe.Pointer(cs))
+	}
+	return i.ok("cadaclysm_view_set_snap_points", func(v *View) C.bool {
+		return C.cv_set_snap_points(v.lib.t, v.handle, C.uint32_t(i.id), p, C.size_t(len(points)/3), cs)
+	})
+}
+
+// SetCurves replaces a curves item's rational cubics in place (view ABI 1.29), sixteen floats
+// (four x, y, z, w control points) each.
+func (i *Item) SetCurves(beziers []float32) error {
+	if len(beziers)%16 != 0 {
+		return refused(fmt.Sprintf("set_curves takes four x, y, z, w control points (16 numbers) a curve, not %d", len(beziers)))
+	}
+	return i.ok("cadaclysm_view_set_curves", func(v *View) C.bool {
+		return C.cv_set_curves(v.lib.t, v.handle, C.uint32_t(i.id), floats(beziers), C.size_t(len(beziers)/16))
+	})
+}
+
+// SetPoints replaces a points item's positions in place (view ABI 1.29), three floats each;
+// the point states stay, by index.
+func (i *Item) SetPoints(positions []float32) error {
+	if len(positions)%3 != 0 {
+		return refused(fmt.Sprintf("set_points takes three numbers a point, not %d", len(positions)))
+	}
+	return i.ok("cadaclysm_view_set_points", func(v *View) C.bool {
+		return C.cv_set_points(v.lib.t, v.handle, C.uint32_t(i.id), floats(positions), C.size_t(len(positions)/3))
+	})
+}
+
+// SetMeshPositions moves a mesh item's vertices in place (view ABI 1.29): the same count,
+// three floats each. normals nil: recomputed; otherwise three floats a vertex too.
+func (i *Item) SetMeshPositions(positions, normals []float32) error {
+	if len(positions)%3 != 0 {
+		return refused(fmt.Sprintf("set_mesh_positions takes three numbers a vertex, not %d", len(positions)))
+	}
+	var nrm *C.float
+	if normals != nil {
+		if len(normals) != len(positions) {
+			return refused(fmt.Sprintf("set_mesh_positions has %d positions but %d normals", len(positions)/3, len(normals)/3))
+		}
+		nrm = floats(normals)
+	}
+	return i.ok("cadaclysm_view_set_mesh_positions", func(v *View) C.bool {
+		return C.cv_set_mesh_positions(v.lib.t, v.handle, C.uint32_t(i.id), floats(positions), nrm, C.size_t(len(positions)/3))
+	})
+}
+
 // SetOnTop draws the item after every other, depth testing off (view ABI 1.28); it is picked
 // ahead of what is under it. Refused (the library's message) for overlays, text, images,
 // exact-surface and show_curves items.
@@ -2710,6 +2977,263 @@ func (v *View) OccludedStyle() (OccludedStyle, error) {
 	return s, nil
 }
 
+// ClipPlanes is the number of clip-plane slots (CADACLYSM_VIEW_CLIP_PLANES, view ABI 1.31).
+const ClipPlanes = int(C.CADACLYSM_VIEW_CLIP_PLANES)
+
+// ClipPlane is one clip-plane slot (view ABI 1.31), as Python's ClipPlane: what lies on the
+// side Normal points to is hidden. Cap fills the cut of every body (0..1 RGB, nil: none);
+// Hatch draws parallel lines on the cap (needs Cap): HatchAngle in degrees from the plane's
+// first axis, HatchSpacing in the scene's units (0: automatic, a fiftieth of the scene's
+// size), HatchWidth in points. 1.32: Outline draws the cut as a line (0..1 RGB, nil: none),
+// OutlineWidth points wide (0: 1, at most 100). NewClipPlane gives the defaults.
+type ClipPlane struct {
+	Point, Normal                        [3]float64
+	Cap, Hatch                           *[3]float32
+	HatchAngle, HatchSpacing, HatchWidth float32
+	Outline                              *[3]float32
+	OutlineWidth                         float32
+}
+
+// NewClipPlane is a plane through point hiding the side normal points to, with the defaults:
+// no cap, no hatch, angle 45, spacing 0 (automatic), width 1, no outline, outline width 1.
+func NewClipPlane(point, normal [3]float64) ClipPlane {
+	return ClipPlane{Point: point, Normal: normal, HatchAngle: 45, HatchWidth: 1, OutlineWidth: 1}
+}
+
+// ClipMode is how a clip set's planes combine (view ABI 1.32): ClipIntersection (the default)
+// draws where every plane keeps, ClipCutaway hides only where every plane hides (two planes
+// cut a quarter away). ClipInherit is a viewport's: no set of its own, the view-wide one.
+type ClipMode uint32
+
+const (
+	ClipIntersection ClipMode = C.CADACLYSM_VIEW_CLIP_INTERSECTION
+	ClipCutaway      ClipMode = C.CADACLYSM_VIEW_CLIP_CUTAWAY
+	ClipInherit      ClipMode = C.CADACLYSM_VIEW_CLIP_INHERIT
+)
+
+// ClipViewports is the number of viewports that may have a clip set of their own
+// (CADACLYSM_VIEW_CLIP_VIEWPORTS, view ABI 1.32).
+const ClipViewports = int(C.CADACLYSM_VIEW_CLIP_VIEWPORTS)
+
+// String is "intersection", "cutaway", "inherit", or the number of another mode.
+func (m ClipMode) String() string {
+	switch m {
+	case ClipIntersection:
+		return "intersection"
+	case ClipCutaway:
+		return "cutaway"
+	case ClipInherit:
+		return "inherit"
+	}
+	return fmt.Sprintf("ClipMode(%d)", uint32(m))
+}
+
+// clipRaw is the library's clip plane for p (120 bytes: the loader needs 1.32).
+func clipRaw(p ClipPlane) C.CadaclysmViewClipPlane {
+	raw := C.CadaclysmViewClipPlane{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	for i := 0; i < 3; i++ {
+		raw.point[i], raw.normal[i] = C.double(p.Point[i]), C.double(p.Normal[i])
+	}
+	if p.Cap != nil {
+		raw.cap = 1
+		for i, c := range p.Cap {
+			raw.cap_colour[i] = C.float(c)
+		}
+	}
+	if p.Hatch != nil {
+		raw.hatch = 1
+		for i, c := range p.Hatch {
+			raw.hatch_colour[i] = C.float(c)
+		}
+	}
+	raw.hatch_angle, raw.hatch_spacing, raw.hatch_width = C.float(p.HatchAngle), C.float(p.HatchSpacing), C.float(p.HatchWidth)
+	if p.Outline != nil {
+		raw.outline = 1
+		for i, c := range p.Outline {
+			raw.outline_colour[i] = C.float(c)
+		}
+	}
+	raw.outline_width = C.float(p.OutlineWidth)
+	return raw
+}
+
+// clipOf is a library's clip-plane answer as a ClipPlane.
+func clipOf(raw *C.CadaclysmViewClipPlane) *ClipPlane {
+	p := NewClipPlane([3]float64{float64(raw.point[0]), float64(raw.point[1]), float64(raw.point[2])},
+		[3]float64{float64(raw.normal[0]), float64(raw.normal[1]), float64(raw.normal[2])})
+	if raw.cap != 0 {
+		c := [3]float32{float32(raw.cap_colour[0]), float32(raw.cap_colour[1]), float32(raw.cap_colour[2])}
+		p.Cap = &c
+	}
+	if raw.hatch != 0 {
+		h := [3]float32{float32(raw.hatch_colour[0]), float32(raw.hatch_colour[1]), float32(raw.hatch_colour[2])}
+		p.Hatch = &h
+		p.HatchAngle, p.HatchSpacing, p.HatchWidth = float32(raw.hatch_angle), float32(raw.hatch_spacing), float32(raw.hatch_width)
+	}
+	if raw.outline != 0 {
+		o := [3]float32{float32(raw.outline_colour[0]), float32(raw.outline_colour[1]), float32(raw.outline_colour[2])}
+		p.Outline = &o
+		p.OutlineWidth = float32(raw.outline_width)
+	}
+	return &p
+}
+
+// SetClipPlane sets clip-plane slot `slot` (0..ClipPlanes-1): a point is drawn only where
+// every set plane keeps it. Refused, changing nothing, for a slot past the last, a zero or
+// non-finite normal, a colour outside 0..1, a hatch without a cap, or a bad angle, spacing or
+// width (hatch or outline). The terminal library draws no clip planes and refuses one.
+func (v *View) SetClipPlane(slot int, p ClipPlane) error {
+	const call = "cadaclysm_view_set_clip_plane"
+	if slot < 0 {
+		return refused(fmt.Sprintf("%s: slot %d is negative", call, slot))
+	}
+	raw := clipRaw(p)
+	return v.ok(call, func() C.bool { return C.cv_set_clip_plane(v.lib.t, v.handle, C.uint32_t(slot), &raw) })
+}
+
+// ClearClipPlane empties clip-plane slot `slot`; an empty slot stays empty.
+func (v *View) ClearClipPlane(slot int) error {
+	const call = "cadaclysm_view_set_clip_plane"
+	if slot < 0 {
+		return refused(fmt.Sprintf("%s: slot %d is negative", call, slot))
+	}
+	return v.ok(call, func() C.bool { return C.cv_set_clip_plane(v.lib.t, v.handle, C.uint32_t(slot), nil) })
+}
+
+// ClipPlane reports clip-plane slot `slot`, nil where it is empty: as set, but with the
+// normal of unit length and a zero width as 1; without a hatch (outline), its fields are the
+// defaults (45, 0, 1; 1). A slot past the last is refused.
+func (v *View) ClipPlane(slot int) (*ClipPlane, error) {
+	const call = "cadaclysm_view_clip_plane"
+	if slot < 0 {
+		return nil, refused(fmt.Sprintf("%s: slot %d is negative", call, slot))
+	}
+	if err := v.refusal(call); err != nil {
+		return nil, err
+	}
+	raw := C.CadaclysmViewClipPlane{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	if !bool(C.cv_clip_plane(v.lib.t, v.handle, C.uint32_t(slot), &raw)) {
+		if slot >= ClipPlanes {
+			return nil, v.failed()
+		}
+		return nil, nil // an empty slot
+	}
+	return clipOf(&raw), nil
+}
+
+// SetClipMode sets how the view-wide planes combine (view ABI 1.32): ClipIntersection (the
+// default) or ClipCutaway. ClipInherit is a viewport's, refused here as another mode is. The
+// terminal library takes ClipIntersection and refuses ClipCutaway.
+func (v *View) SetClipMode(mode ClipMode) error {
+	return v.ok("cadaclysm_view_set_clip_mode", func() C.bool {
+		return C.cv_set_clip_mode(v.lib.t, v.handle, C.uint32_t(mode))
+	})
+}
+
+// ClipMode reports how the view-wide planes combine (view ABI 1.32).
+func (v *View) ClipMode() (ClipMode, error) {
+	if err := v.refusal("cadaclysm_view_clip_mode"); err != nil {
+		return ClipIntersection, err
+	}
+	return ClipMode(C.cv_clip_mode(v.lib.t, v.handle)), nil
+}
+
+// SetTextures turns material textures on or off (view ABI 1.33; on by default): off, a
+// textured part draws its base colour factor alone. The terminal and render-view libraries
+// accept it and draw colours either way.
+func (v *View) SetTextures(on bool) error {
+	return v.ok("cadaclysm_view_set_textures", func() C.bool {
+		return C.cv_set_textures(v.lib.t, v.handle, C.bool(on))
+	})
+}
+
+// Textures reports whether material textures are drawn (view ABI 1.33).
+func (v *View) Textures() (bool, error) {
+	if err := v.refusal("cadaclysm_view_textures"); err != nil {
+		return true, err
+	}
+	return bool(C.cv_textures(v.lib.t, v.handle)), nil
+}
+
+// SetViewportClipPlane sets slot `slot` of viewport `viewport`'s own clip set (view ABI 1.32),
+// as SetClipPlane sets the view-wide one, in that viewport only: the first gives the viewport
+// a set of its own (every other slot empty, mode ClipIntersection), which it draws, picks and
+// snaps with instead of the view-wide set. With no viewports set, viewport 0 is the window. A
+// viewport past the last (or past ClipViewports-1) is refused, as is what SetClipPlane refuses.
+func (v *View) SetViewportClipPlane(viewport, slot int, p ClipPlane) error {
+	const call = "cadaclysm_view_set_viewport_clip_plane"
+	if viewport < 0 || slot < 0 {
+		return refused(fmt.Sprintf("%s: viewport %d or slot %d is negative", call, viewport, slot))
+	}
+	raw := clipRaw(p)
+	return v.ok(call, func() C.bool {
+		return C.cv_set_viewport_clip_plane(v.lib.t, v.handle, C.uint32_t(viewport), C.uint32_t(slot), &raw)
+	})
+}
+
+// ClearViewportClipPlane empties slot `slot` of viewport `viewport`'s own set (view ABI 1.32);
+// the set stays the viewport's (SetViewportClipMode with ClipInherit drops it).
+func (v *View) ClearViewportClipPlane(viewport, slot int) error {
+	const call = "cadaclysm_view_set_viewport_clip_plane"
+	if viewport < 0 || slot < 0 {
+		return refused(fmt.Sprintf("%s: viewport %d or slot %d is negative", call, viewport, slot))
+	}
+	return v.ok(call, func() C.bool {
+		return C.cv_set_viewport_clip_plane(v.lib.t, v.handle, C.uint32_t(viewport), C.uint32_t(slot), nil)
+	})
+}
+
+// ViewportClipPlane reports slot `slot` of viewport `viewport`'s own set (view ABI 1.32), as
+// ClipPlane reports the view-wide one; nil where the slot is empty or the viewport has no set
+// of its own (it draws with the view-wide planes). A slot past the last is refused.
+func (v *View) ViewportClipPlane(viewport, slot int) (*ClipPlane, error) {
+	const call = "cadaclysm_view_viewport_clip_plane"
+	if viewport < 0 || slot < 0 {
+		return nil, refused(fmt.Sprintf("%s: viewport %d or slot %d is negative", call, viewport, slot))
+	}
+	if err := v.refusal(call); err != nil {
+		return nil, err
+	}
+	raw := C.CadaclysmViewClipPlane{}
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	if !bool(C.cv_viewport_clip_plane(v.lib.t, v.handle, C.uint32_t(viewport), C.uint32_t(slot), &raw)) {
+		if slot >= ClipPlanes {
+			return nil, v.failed()
+		}
+		return nil, nil // an empty slot, or no set of its own
+	}
+	return clipOf(&raw), nil
+}
+
+// SetViewportClipMode sets viewport `viewport`'s clip mode (view ABI 1.32): ClipIntersection
+// or ClipCutaway sets its own set's mode, giving it a set of its own if it had none (with no
+// planes: that viewport is then not clipped while the others are); ClipInherit drops its set,
+// back to the view-wide one.
+func (v *View) SetViewportClipMode(viewport int, mode ClipMode) error {
+	const call = "cadaclysm_view_set_viewport_clip_mode"
+	if viewport < 0 {
+		return refused(fmt.Sprintf("%s: viewport %d is negative", call, viewport))
+	}
+	return v.ok(call, func() C.bool {
+		return C.cv_set_viewport_clip_mode(v.lib.t, v.handle, C.uint32_t(viewport), C.uint32_t(mode))
+	})
+}
+
+// ViewportClipMode reports viewport `viewport`'s clip mode (view ABI 1.32): its own set's, or
+// ClipInherit where it has none (and for a viewport past the last).
+func (v *View) ViewportClipMode(viewport int) (ClipMode, error) {
+	const call = "cadaclysm_view_viewport_clip_mode"
+	if viewport < 0 {
+		return ClipInherit, refused(fmt.Sprintf("%s: viewport %d is negative", call, viewport))
+	}
+	if err := v.refusal(call); err != nil {
+		return ClipInherit, err
+	}
+	return ClipMode(C.cv_viewport_clip_mode(v.lib.t, v.handle, C.uint32_t(viewport))), nil
+}
+
 // Play plays the view's timeline at `speed` times real time: each Draw moves it on by the
 // wall-clock time since the last. It stops at its end unless Loop is on; Play at the end
 // starts again from 0.
@@ -2941,6 +3465,7 @@ func (v *View) Pick(x, y, viewport uint32) (Pick, error) {
 	}
 	var raw C.CadaclysmViewPick
 	raw.viewport_label = -1
+	raw.segment = 0xFFFFFFFF // 1.30: no wire
 	var msg [C.CVL_ERROR]C.char
 	if C.cvl_pick(v.lib.t, v.handle, &v.drawn, C.uint32_t(viewport), C.uint32_t(x), C.uint32_t(y), &raw, &msg[0], C.CVL_ERROR) == 0 {
 		return Pick{}, refused(C.GoString(&msg[0]))
@@ -2960,6 +3485,7 @@ func (v *View) LastPick() (pick Pick, landed bool, err error) {
 	}
 	raw := C.CadaclysmViewPick{}
 	raw.viewport_label = -1
+	raw.segment = 0xFFFFFFFF // 1.30: no wire
 	raw.size = C.uint32_t(unsafe.Sizeof(raw))
 	if C.cv_pick_result(v.lib.t, v.handle, &raw) {
 		return pickOf(&raw), true, nil
@@ -3027,6 +3553,74 @@ func (v *View) LastSnap() (snap Snap, landed bool, err error) {
 		return Snap{}, false, refused(said)
 	}
 	return Snap{}, false, nil
+}
+
+// SetSnapBase sets the angle lock (view ABI 1.30): snaps that land on no point kind turn about
+// point (world, three numbers) onto the nearest multiple of stepDeg (0 < step <= 180), in the
+// work plane's directions or the plane facing the eye; the answer is SnapPlane with its
+// LockedAngle and the lock's ray as its guide. A nil point clears it (NULL to the library, the
+// step ignored). Other than three numbers is refused before the call; the library refuses a
+// point that is not finite and a step out of range in its own words. The terminal library
+// refuses it.
+func (v *View) SetSnapBase(point []float64, stepDeg float32) error {
+	if point == nil {
+		return v.ok("cadaclysm_view_set_snap_base", func() C.bool {
+			return C.cv_set_snap_base(v.lib.t, v.handle, nil, C.float(stepDeg))
+		})
+	}
+	if len(point) != 3 {
+		return refused(fmt.Sprintf("set_snap_base: a point is 3 numbers, not %d", len(point)))
+	}
+	xyz := [3]C.float{C.float(point[0]), C.float(point[1]), C.float(point[2])}
+	return v.ok("cadaclysm_view_set_snap_base", func() C.bool {
+		return C.cv_set_snap_base(v.lib.t, v.handle, &xyz[0], C.float(stepDeg))
+	})
+}
+
+// SetPickAperture is how far a pick reaches for lines, curves, points and glyphs (view ABI
+// 1.30), in points (times the screen density): 0 restores the default, 4; others clamp to
+// 1..32. Faces are always the pixel's. The library refuses a negative size or one that is not
+// finite, in its own words. The terminal library keeps it, but its picks are face picks.
+func (v *View) SetPickAperture(points float32) error {
+	return v.ok("cadaclysm_view_set_pick_aperture", func() C.bool {
+		return C.cv_set_pick_aperture(v.lib.t, v.handle, C.float(points))
+	})
+}
+
+// PickRect is what lies in a rectangle of a viewport (view ABI 1.30; device pixels from its
+// top left, a negative w or h flipping it), CPU only: crossing keeps everything with a visible
+// part inside, else what lies wholly inside and is visible. Hidden things come only drawn
+// x-ray or on top; text, images, overlays, viewport labels, machining stocks and isocurves are
+// left out. Every hit (see RectHit), sorted by item, kind and index; an exact item shown with
+// no mesh has edges here, no faces. A rectangle wholly off the viewport, and a lost device,
+// answer none. The library refuses a rectangle that is not finite and an unknown viewport in
+// its own words.
+func (v *View) PickRect(x, y, w, h float32, crossing bool, viewport uint32) ([]RectHit, error) {
+	if err := v.refusal("cadaclysm_view_pick_rect"); err != nil {
+		return nil, err
+	}
+	ask := func(capacity int) ([]C.CadaclysmViewRectHit, int) {
+		buf := make([]C.CadaclysmViewRectHit, capacity)
+		n := C.cv_pick_rect(v.lib.t, v.handle, C.uint32_t(viewport), C.float(x), C.float(y), C.float(w), C.float(h),
+			C.bool(crossing), &buf[0], C.size_t(capacity))
+		return buf, int(n)
+	}
+	buf, total := ask(64)
+	if total == 0 && v.said() {
+		return nil, v.failed() // this call's own refusal: the library cleared the error first
+	}
+	if total > len(buf) {
+		// The count rule: asked again with a buffer of the total, never a cut list.
+		buf, total = ask(total)
+	}
+	if total > len(buf) {
+		total = len(buf)
+	}
+	hits := make([]RectHit, total)
+	for k := range hits {
+		hits[k] = RectHit{Item: uint32(buf[k].item), Kind: HitKind(buf[k].kind), Index: uint32(buf[k].index)}
+	}
+	return hits, nil
 }
 
 // ClearSnap hides the snap marker and drops any snap asked or answered and not yet read.
@@ -3150,6 +3744,7 @@ func (v *View) Run() (Camera, error) {
 	c.size = C.uint32_t(unsafe.Sizeof(c))
 	p := C.CadaclysmViewPick{}
 	p.viewport_label = -1
+	p.segment = 0xFFFFFFFF // 1.30: no wire
 	p.size = C.uint32_t(unsafe.Sizeof(p))
 	if !bool(C.cv_run(v.lib.t, v.handle, &c, &p)) {
 		return Camera{}, v.failed()
@@ -3213,6 +3808,7 @@ func (v *View) RunWith(onEvent func(InputEvent) bool) (Camera, error) {
 	// event's.
 	raw := C.CadaclysmViewPick{}
 	raw.viewport_label = -1
+	raw.segment = 0xFFFFFFFF // 1.30: no wire
 	raw.size = C.uint32_t(unsafe.Sizeof(raw))
 	if C.cv_pick_result(v.lib.t, v.handle, &raw) {
 		picked = nil
@@ -3238,6 +3834,8 @@ func (v *View) NextEvent() (e InputEvent, ok bool, err error) {
 	}
 	raw := C.CadaclysmViewInputEvent{}
 	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	raw.pick_viewport_label = -1 // the none values (1.28, 1.30), should the library leave them
+	raw.pick_segment = 0xFFFFFFFF
 	if C.cv_next_event(v.lib.t, v.handle, &raw) {
 		e, err := inputEventOf(&raw, v.yUp)
 		if err != nil {
@@ -3626,6 +4224,7 @@ func draw(solid, scene unsafe.Pointer, tolerance float64, transforms [][16]float
 	c.size = C.uint32_t(unsafe.Sizeof(c))
 	p := C.CadaclysmViewPick{}
 	p.viewport_label = -1
+	p.segment = 0xFFFFFFFF // 1.30: no wire
 	p.size = C.uint32_t(unsafe.Sizeof(p))
 	mode := C.int(0)
 	if interactive {

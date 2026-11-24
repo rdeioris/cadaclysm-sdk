@@ -526,6 +526,11 @@ struct OpenOptions {
     std::string name = "<memory>";
     // A lightmap atlas that many texels on a side, read back as `Node::lightmap_uvs`; 0 for none.
     std::uint32_t lightmap_resolution = 0;
+    // Recognize every B-rep body the scene hands out (`Node::brep`) at this tolerance, as
+    // `Brep::recognize` would: NURBS planes, cylinders, cones, spheres and tori, and line, circle
+    // and ellipse edge curves, come back exact. 0 (the default) is off; 1e-6 is the usual ask.
+    // Meshes are unchanged. A negative, NaN or infinite tolerance makes open() fail.
+    double recognize_tolerance = 0.0;
 };
 
 inline Result<Scene> open(const std::string& path, const OpenOptions& options = OpenOptions());
@@ -853,6 +858,59 @@ struct Collision {
         static constexpr std::string_view names[] = {"none", "box", "sphere", "capsule", "cylinder", "hull"};
         return shape < 6 ? names[shape] : std::string_view("?");
     }
+};
+
+// A part's PBR metallic-roughness material, as glTF 2.0 defines one (Node::material), as
+// Python's Material. Plain data, copied out.
+//
+// `base_color` is the base colour factor, RGBA in linear light (glTF's own space; the node's
+// colour() is the same factor in display space). `base_color_image` is the Scene::image index
+// the base colour texture reads, or nothing for an untextured material (and for a texture
+// whose image the library does not read, such as WebP). The texture reads texture coordinates
+// set `base_color_uv_set` (0 the mesh's uvs) through KHR_texture_transform: `uv_offset`,
+// `uv_rotation` (radians) and `uv_scale`. The alpha mode, wraps and filters are the library's
+// numbers (CADACLYSM_ALPHA_*, CADACLYSM_WRAP_*, CADACLYSM_FILTER_*); their *_name() is
+// Python's word: alpha "opaque", "mask" (cut below `alpha_cutoff`) or "blend"; wraps
+// "repeat", "mirrored_repeat" or "clamp_to_edge"; filters "linear" or "nearest" -- a number
+// past those as its digits, as Python gives it.
+struct Material {
+    std::string name;
+    std::array<float, 4> base_color{};
+    float metallic = 0;
+    float roughness = 0;
+    std::uint32_t alpha_mode = CADACLYSM_ALPHA_OPAQUE;
+    float alpha_cutoff = 0.5f;
+    bool double_sided = false;
+    std::optional<std::uint32_t> base_color_image;
+    std::uint32_t base_color_uv_set = 0;
+    std::array<float, 2> uv_offset{};
+    float uv_rotation = 0;
+    std::array<float, 2> uv_scale{1.0f, 1.0f};
+    std::uint32_t wrap_u = CADACLYSM_WRAP_REPEAT;
+    std::uint32_t wrap_v = CADACLYSM_WRAP_REPEAT;
+    std::uint32_t mag_filter = CADACLYSM_FILTER_LINEAR;
+    std::uint32_t min_filter = CADACLYSM_FILTER_LINEAR;
+
+    std::string alpha_mode_name() const { return word(alpha_mode, {"opaque", "mask", "blend"}); }
+    std::string wrap_u_name() const { return word(wrap_u, {"repeat", "mirrored_repeat", "clamp_to_edge"}); }
+    std::string wrap_v_name() const { return word(wrap_v, {"repeat", "mirrored_repeat", "clamp_to_edge"}); }
+    std::string mag_filter_name() const { return word(mag_filter, {"linear", "nearest", ""}); }
+    std::string min_filter_name() const { return word(min_filter, {"linear", "nearest", ""}); }
+
+private:
+    static std::string word(std::uint32_t value, const std::array<const char*, 3>& words) {
+        if (value < words.size() && words[value][0] != '\0') return words[value];
+        return std::to_string(value);
+    }
+};
+
+// An image a material names (Scene::image), encoded as the file held it, as Python's
+// Image: `data` the PNG, JPEG, WebP or KTX2 bytes (copied out), `mime` "image/png", "image/jpeg", "image/webp" or "image/ktx2" (for
+// an image the library does not read, what the file declared), `name` its name in the file.
+struct Image {
+    std::vector<std::uint8_t> data;
+    std::string mime;
+    std::string name;
 };
 
 // A node's convex hull for a physics engine, as triangles. A view into the scene,
@@ -2245,7 +2303,7 @@ public:
 
     bool can_mesh() const { return ::cadaclysm_node_can_mesh(h(), index_); }
 
-    // Write this node's mesh alone: "stl", "stl-ascii", "obj", ... (see mesh_formats()).
+    // Write this node's mesh alone: "stl", "stl-ascii", "obj", "3mf", "ply", ... (see mesh_formats()).
     Result<void> save_mesh(const std::string& path, const std::string& format = "stl") const {
         if (!::cadaclysm_node_save_mesh(h(), index_, path.c_str(), format.c_str())) {
             return detail::reader_error(("could not write " + path).c_str());
@@ -2492,6 +2550,33 @@ public:
         std::array<float, 4> rgba{};
         if (!::cadaclysm_node_color(h(), index_, rgba.data())) return std::nullopt;
         return rgba;
+    }
+
+    // This part's PBR material (a glTF primitive's), or nothing -- every part of every other
+    // format. Its own, else its shape's, as colour() resolves.
+    std::optional<Material> material() const {
+        CadaclysmMaterial raw{};
+        if (!::cadaclysm_node_material(h(), index_, &raw)) return std::nullopt;
+        Material out;
+        out.name = detail::text(raw.name);
+        for (int i = 0; i < 4; ++i) out.base_color[i] = raw.base_color[i];
+        out.metallic = raw.metallic;
+        out.roughness = raw.roughness;
+        out.alpha_mode = raw.alpha_mode;
+        out.alpha_cutoff = raw.alpha_cutoff;
+        out.double_sided = raw.double_sided;
+        if (raw.base_color_image != NONE) out.base_color_image = raw.base_color_image;
+        out.base_color_uv_set = raw.base_color_uv_set;
+        for (int i = 0; i < 2; ++i) {
+            out.uv_offset[i] = raw.uv_offset[i];
+            out.uv_scale[i] = raw.uv_scale[i];
+        }
+        out.uv_rotation = raw.uv_rotation;
+        out.wrap_u = raw.wrap_u;
+        out.wrap_v = raw.wrap_v;
+        out.mag_filter = raw.mag_filter;
+        out.min_filter = raw.min_filter;
+        return out;
     }
 
     // Where to draw it, as rows.
@@ -3684,6 +3769,27 @@ public:
         return out;
     }
 
+    // How many images the scene's materials name (image()); 0 for every format but glTF.
+    std::uint32_t image_count() const { return ::cadaclysm_image_count(h()); }
+
+    // Image `index` (0 to image_count() - 1), encoded as the file held it -- the
+    // base_color_image a Material names, its bytes copied out. An Error past the last, in
+    // Python's IndexError words.
+    Result<Image> image(std::uint32_t index) const {
+        const CadaclysmScene* scene = h();
+        CadaclysmImage raw{};
+        if (!::cadaclysm_image(scene, index, &raw)) {
+            return Error{"image " + std::to_string(index) + ": the scene has " +
+                             std::to_string(::cadaclysm_image_count(scene)),
+                         Origin::reader};
+        }
+        Image out;
+        if (raw.bytes && raw.size) out.data.assign(raw.bytes, raw.bytes + raw.size);
+        out.mime = detail::text(raw.mime);
+        out.name = detail::text(raw.name);
+        return out;
+    }
+
     // The indices of the nodes a filter matches -- `class == solid and name == Wall`.
     // An error carries the parser's own message; an empty result is not an error.
     Result<std::vector<std::uint32_t>> query(const std::string& filter) const {
@@ -3898,7 +4004,8 @@ public:
         ++scene.forgets;
     }
 
-    // Every placement of every shape as one file: "glb", "gltf" or "obj".
+    // Every placement of every shape as one file: "glb", "gltf", "obj", "usda", "3mf", "ply"
+    // (binary) or "ply-ascii" -- PLY with every placement baked into one body.
     Result<void> save(const std::string& path, const std::string& format = "glb") const {
         if (!::cadaclysm_scene_save(h(), path.c_str(), format.c_str())) {
             return detail::reader_error(("could not write " + path).c_str());
@@ -4097,6 +4204,7 @@ inline void fill_options(CadaclysmOpenOptions& raw, const OpenOptions& options) 
     raw.colors = options.colors ? CADACLYSM_COLORS_PER_FACE : CADACLYSM_COLORS_NONE;
     raw.source_meters_per_unit = options.source_metres_per_unit;
     raw.lightmap_resolution = options.lightmap_resolution;
+    raw.recognize_tolerance = options.recognize_tolerance;
 }
 
 inline Result<void> check_schema(const OpenOptions& options) {
@@ -4133,7 +4241,7 @@ inline Result<Scene> open(const std::string& path, const OpenOptions& options) {
 }
 
 // Open a CAD file already in memory. `format` names the kind as an extension would:
-// "step", "ifc", "igs", "brep", "3dm", "scad" (a leading dot is ignored).
+// "step", "ifc", "igs", "brep", "3dm", "scad", "3mf", "ply" (a leading dot is ignored).
 inline Result<Scene> open_memory(const void* data, std::size_t size, const std::string& format,
                                  const OpenOptions& options) {
     CADACLYSM_TRY_VOID(detail::check_schema(options));

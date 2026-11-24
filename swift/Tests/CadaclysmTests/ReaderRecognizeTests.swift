@@ -59,4 +59,26 @@ final class ReaderRecognizeTests: XCTestCase {
         wide.release()
         XCTAssertEqual(at.tolerance, 0.25)
     }
+
+    /// Unasked, the ball is still NURBS; with `recognizeTolerance` every body the scene hands out
+    /// is already analytic, so recognizing it again finds nothing to take.
+    func testRecognizeOnOpen() throws {
+        for (tolerance, wantSphere) in [(0.0, true), (1e-6, false)] {
+            let scene = try Cadaclysm.open(boxUnionSphere, recognizeTolerance: tolerance)
+            defer { scene.close() }
+            let body = try XCTUnwrap(scene.nodes.lazy.compactMap { $0.brep }.first, "box-union-sphere.3dm has no brep")
+            defer { body.release() }
+            let (back, report) = try body.recognize()
+            back.release()
+            let kinds = report.faces.map(\.kind)
+            if wantSphere {
+                XCTAssertTrue(kinds.contains("sphere"), "unasked: \(kinds)")
+            } else {
+                XCTAssertTrue(kinds.isEmpty, "asked: \(kinds)")
+            }
+        }
+        XCTAssertThrowsError(try Cadaclysm.open(boxUnionSphere, recognizeTolerance: -1)) { error in
+            XCTAssertTrue("\(error)".contains("recognize_tolerance"), "\(error)")
+        }
+    }
 }

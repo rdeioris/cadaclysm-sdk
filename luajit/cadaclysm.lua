@@ -280,6 +280,7 @@ local ENTRY_POINTS = {
   "cadaclysm_node_svg_text", "cadaclysm_node_svg", "cadaclysm_node_silhouette_beziers",
   "cadaclysm_link_count", "cadaclysm_link_name", "cadaclysm_link_node_count", "cadaclysm_link_node",
   "cadaclysm_joint_count", "cadaclysm_joint_name", "cadaclysm_joint_start", "cadaclysm_joint_end",
+  "cadaclysm_node_material", "cadaclysm_image_count", "cadaclysm_image",
 }
 
 local C
@@ -3579,6 +3580,109 @@ function Scene:walk()
   end
 end
 
+-- ---- materials and images --------------------------------------------------------
+
+-- In a block of its own: the main chunk is near LuaJIT's limit of 200 locals. Only
+-- `Material`, `Image`, `Node.material`, `Scene.image_count` and `Scene:image` leave it.
+do
+
+--- A part's PBR metallic-roughness material, as glTF 2.0 defines one (`Node.material`), as
+--- Python's `Material`. Plain data, copied out. `base_color` is the base colour factor
+--- `{r, g, b, a}` in **linear** light (the node's `colour` is the same factor in display
+--- space); `base_color_image` the `Scene:image` index the base colour texture reads, or nil
+--- for an untextured material. The texture reads texture coordinates set
+--- `base_color_uv_set` (0 the mesh's `uvs`) through `KHR_texture_transform`: `uv_offset`
+--- `{u, v}`, `uv_rotation` (radians) and `uv_scale` `{u, v}`. `alpha_mode` is "opaque",
+--- "mask" (cut below `alpha_cutoff`) or "blend"; `wrap_u` and `wrap_v` "repeat",
+--- "mirrored_repeat" or "clamp_to_edge"; `mag_filter` and `min_filter` "linear" or "nearest".
+---@class Material
+---@field name string
+---@field base_color number[]
+---@field metallic number
+---@field roughness number
+---@field alpha_mode string
+---@field alpha_cutoff number
+---@field double_sided boolean
+---@field base_color_image integer|nil
+---@field base_color_uv_set integer
+---@field uv_offset number[]
+---@field uv_rotation number
+---@field uv_scale number[]
+---@field wrap_u string
+---@field wrap_v string
+---@field mag_filter string
+---@field min_filter string
+local Material = {}
+Material.__index = Material
+M.Material = Material
+Material.__tostring = function(m)
+  return ("Material(%q, image=%s, alpha=%s)"):format(m.name, tostring(m.base_color_image), m.alpha_mode)
+end
+
+--- An image a material names (`Scene:image`), **encoded** as the file held it, as Python's
+--- `Image`: `data` the PNG, JPEG, WebP or KTX2 bytes (a Lua string, copied out), `mime` "image/png",
+--- "image/jpeg", "image/webp" or "image/ktx2" (for an image the library does not read, what the file declared), `name`
+--- its name in the file.
+---@class Image
+---@field data string
+---@field mime string
+---@field name string
+local Image = {}
+Image.__index = Image
+M.Image = Image
+Image.__tostring = function(i) return ("Image(%q, %s, %d bytes)"):format(i.name, i.mime, #i.data) end
+
+local ALPHA_MODES = { [0] = "opaque", "mask", "blend" }
+local WRAPS = { [0] = "repeat", "mirrored_repeat", "clamp_to_edge" }
+local FILTERS = { [0] = "linear", "nearest" }
+
+local function named(list, value) return list[value] or tostring(value) end
+
+--- This part's PBR material (a glTF primitive's: the node's own, else its shape's), or nil --
+--- every part of every other format.
+function Node_get.material(self)
+  local raw = ffi.new("CadaclysmMaterial")
+  if not lib().cadaclysm_node_material(h(self), self.index, raw) then return nil end
+  return setmetatable({
+    name = text(raw.name),
+    base_color = { raw.base_color[0], raw.base_color[1], raw.base_color[2], raw.base_color[3] },
+    metallic = raw.metallic,
+    roughness = raw.roughness,
+    alpha_mode = named(ALPHA_MODES, raw.alpha_mode),
+    alpha_cutoff = raw.alpha_cutoff,
+    double_sided = raw.double_sided == true,
+    base_color_image = raw.base_color_image ~= M.NONE and raw.base_color_image or nil,
+    base_color_uv_set = raw.base_color_uv_set,
+    uv_offset = { raw.uv_offset[0], raw.uv_offset[1] },
+    uv_rotation = raw.uv_rotation,
+    uv_scale = { raw.uv_scale[0], raw.uv_scale[1] },
+    wrap_u = named(WRAPS, raw.wrap_u),
+    wrap_v = named(WRAPS, raw.wrap_v),
+    mag_filter = named(FILTERS, raw.mag_filter),
+    min_filter = named(FILTERS, raw.min_filter),
+  }, Material)
+end
+
+--- How many images the scene's materials name (`Scene:image`); 0 for every format but glTF.
+function Scene_get.image_count(self) return lib().cadaclysm_image_count(self:handle()) end
+
+--- Image `index` (counting from zero), encoded as the file held it -- the `base_color_image`
+--- a `Material` names. Raises past the last, as `Scene:node` does.
+function Scene:image(index)
+  local raw = ffi.new("CadaclysmImage")
+  if index < 0 or index >= M.NONE or not lib().cadaclysm_image(self:handle(), index, raw) then
+    fail(("image %d of %d"):format(index, self.image_count), 2)
+  end
+  local size = tonumber(raw.size)
+  return setmetatable({
+    data = (raw.bytes ~= nil and size > 0) and ffi.string(raw.bytes, size) or "",
+    mime = text(raw.mime),
+    name = text(raw.name),
+  }, Image)
+end
+
+end
+
 --- The indices (from zero) of the nodes a filter matches, in document order:
 --- `class == ON_Brep and within(class == ON_Layer and name == Walls)`. Raises with the
 --- parser's message on a filter that will not parse; no match is an empty list.
@@ -3619,7 +3723,8 @@ end
 --- Ask a running `realize_all` to stop. One-way, for the life of the scene.
 function Scene:cancel() lib().cadaclysm_cancel(self:handle()) end
 
---- Write the whole scene: `fmt` is "glb" (default), "gltf" or "obj".
+--- Write the whole scene: `fmt` is "glb" (default), "gltf", "obj", "usda", "3mf",
+--- "ply" (binary) or "ply-ascii" (PLY bakes every placement into one body).
 function Scene:save(path, fmt)
   if not lib().cadaclysm_scene_save(self:handle(), tostring(path), fmt or "glb") then
     local reason = last_error()
@@ -3732,7 +3837,7 @@ end
 -- can decide it is dead.
 local in_flight
 
-local function options(convention, schema, colors, lightmap_resolution)
+local function options(convention, schema, colors, lightmap_resolution, recognize_tolerance)
   local o = ffi.new("CadaclysmOpenOptions")
   lib().cadaclysm_open_options_init(o)
   if convention == nil then convention = Convention.NATIVE end
@@ -3746,6 +3851,8 @@ local function options(convention, schema, colors, lightmap_resolution)
     fail("lightmap_resolution must be 0 (off) or a texel count in 32 bits, not " .. tostring(lightmap_resolution), 3)
   end
   o.lightmap_resolution = texels
+  -- Not checked here: the library refuses a negative, NaN or infinite tolerance by name.
+  o.recognize_tolerance = recognize_tolerance or 0
   local held = {}
   if schema ~= nil then
     local path = tostring(schema)
@@ -3768,15 +3875,19 @@ end
 --- ones. `convention`: a `Convention` value, optionally OR'd with `FILE_UNITS` and
 --- `UV_WORLD`, or a name `Convention.parse` takes ("y-up", "unreal+file-units").
 --- `colors`: per-vertex colours on multi-coloured bodies. `lightmap_resolution`: texels on a
---- side of the lightmap to pack, 0 (the default) for none; see `node.lightmap_uvs`. Raises on failure.
-function M.open(path, schema, convention, colors, lightmap_resolution)
+--- side of the lightmap to pack, 0 (the default) for none; see `node.lightmap_uvs`.
+--- `recognize_tolerance`: recognize every B-rep body the scene hands out (`node.brep`) at this
+--- tolerance, as `Brep:recognize` would -- NURBS planes, cylinders, cones, spheres and tori, and
+--- line, circle and ellipse edges, come back exact; 0 (the default) is off, 1e-6 the usual ask.
+--- Meshes are unchanged. Raises on failure.
+function M.open(path, schema, convention, colors, lightmap_resolution, recognize_tolerance)
   path = tostring(path)
   if not exists(path) and not is_dir(path) then fail(path .. ": no such file", 2) end
   local L = lib()
   if schema ~= nil and is_dir(tostring(schema)) then
     -- A directory goes over whole: the library keys each schema by the name it declares.
     local o, packed
-    o, in_flight, packed = options(convention, schema, colors, lightmap_resolution)
+    o, in_flight, packed = options(convention, schema, colors, lightmap_resolution, recognize_tolerance)
     local pointer = L.cadaclysm_open(path, o)
     in_flight = nil
     if pointer ~= nil then return wrap(pointer, path, tostring(schema), packed) end
@@ -3786,7 +3897,7 @@ function M.open(path, schema, convention, colors, lightmap_resolution)
   local candidates = (chosen ~= nil or #fallbacks == 0) and { chosen or false } or fallbacks
   for _, candidate in ipairs(candidates) do
     local o, packed
-    o, in_flight, packed = options(convention, candidate or nil, colors, lightmap_resolution)
+    o, in_flight, packed = options(convention, candidate or nil, colors, lightmap_resolution, recognize_tolerance)
     local pointer = L.cadaclysm_open(path, o)
     in_flight = nil
     if pointer ~= nil then return wrap(pointer, path, candidate or nil, packed) end
@@ -3795,12 +3906,12 @@ function M.open(path, schema, convention, colors, lightmap_resolution)
 end
 
 --- Open a file already in memory. `data` is a Lua string; `format` names the kind as
---- an extension would ("step", "ifc", "igs", "3dm", "brep", "scad"). `schema` must be
+--- an extension would ("step", "ifc", "igs", "3dm", "brep", "scad", "3mf", "ply"). `schema` must be
 --- a path here. `name` is what `path` and errors will say. Otherwise as `open`.
-function M.open_memory(data, format, schema, name, convention, colors, lightmap_resolution)
+function M.open_memory(data, format, schema, name, convention, colors, lightmap_resolution, recognize_tolerance)
   name = name or "<memory>"
   local o, packed
-  o, in_flight, packed = options(convention, schema, colors, lightmap_resolution)
+  o, in_flight, packed = options(convention, schema, colors, lightmap_resolution, recognize_tolerance)
   local pointer = lib().cadaclysm_open_memory(ffi.cast("const uint8_t *", data), #data, tostring(format), o)
   in_flight = nil
   if pointer == nil then fail(name .. ": " .. last_error(), 2) end

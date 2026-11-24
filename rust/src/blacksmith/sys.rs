@@ -23,6 +23,13 @@ pub const CADACLYSM_BLACKSMITH_NURBS_ANALYTIC: u32 = 1;
 /// Every surface and edge curve.
 pub const CADACLYSM_BLACKSMITH_NURBS_ALL: u32 = 2;
 
+/// `cadaclysm_blacksmith_fillet_rule`'s rules: convex and concave edges both.
+pub const CADACLYSM_BLACKSMITH_EDGE_RULE_ALL: u32 = 0;
+/// The concave edges only (valleys).
+pub const CADACLYSM_BLACKSMITH_EDGE_RULE_CONCAVE: u32 = 1;
+/// The convex edges only (ridges).
+pub const CADACLYSM_BLACKSMITH_EDGE_RULE_CONVEX: u32 = 2;
+
 /// `cadaclysm_blacksmith_hole`'s extents: through everything ahead of the point.
 pub const CADACLYSM_BLACKSMITH_HOLE_THROUGH: u32 = 0;
 /// `depth` of full bore, then a drill point of `tip_angle`.
@@ -98,6 +105,49 @@ pub const CADACLYSM_BLACKSMITH_VALUE_TRIANGLE: u32 = 10;
 /// A ray, `position[3] direction[3]`.
 pub const CADACLYSM_BLACKSMITH_VALUE_RAY: u32 = 11;
 
+/// How many `u32`s `cadaclysm_blacksmith_from_mesh` writes to its `report`: closed (1 or 0),
+/// faces, edges, vertices, holes, boundary edges, non-manifold edges, flipped, dropped, planes,
+/// cylinders, cones, spheres, tori.
+pub const CADACLYSM_BLACKSMITH_FROM_MESH_REPORT_LEN: usize = 14;
+
+// From mesh (`cadaclysm_blacksmith_from_mesh`'s `mode`).
+/// One planar face per triangle (level 1).
+pub const CADACLYSM_BLACKSMITH_FROM_MESH_MODE_FACETED: u32 = 0;
+/// Coplanar neighbouring triangles merged into one planar face (level 2).
+pub const CADACLYSM_BLACKSMITH_FROM_MESH_MODE_PLANES: u32 = 1;
+/// Planes merged as level 2, and curved regions fitted with cylinders, cones, spheres and tori
+/// (level 3, the recommended mode).
+pub const CADACLYSM_BLACKSMITH_FROM_MESH_MODE_PRISMATIC: u32 = 2;
+
+// Squish (`cadaclysm_blacksmith_squish`'s `deformation`).
+/// No preference for stretching or compressing.
+pub const CADACLYSM_BLACKSMITH_SQUISH_FREE: u32 = 0;
+/// A strong bias for flat lengths shorter than their 3D lengths (the pattern stretches over the
+/// shape).
+pub const CADACLYSM_BLACKSMITH_SQUISH_STRETCH_MOSTLY: u32 = 1;
+/// Every flat length at most its 3D length.
+pub const CADACLYSM_BLACKSMITH_SQUISH_STRETCH_ONLY: u32 = 2;
+/// A strong bias for flat lengths longer than their 3D lengths (the pattern compresses onto the
+/// shape).
+pub const CADACLYSM_BLACKSMITH_SQUISH_COMPRESS_MOSTLY: u32 = 3;
+/// Every flat length at least its 3D length.
+pub const CADACLYSM_BLACKSMITH_SQUISH_COMPRESS_ONLY: u32 = 4;
+
+// Surface edits (`cadaclysm_blacksmith_solid_untrim`'s `which`,
+// `cadaclysm_blacksmith_solid_ruled_from_edges`'s `kind`).
+/// Untrim: the face's holes go.
+pub const CADACLYSM_BLACKSMITH_UNTRIM_HOLES: u32 = 0;
+/// Untrim: the outer boundary becomes the surface's natural one; the holes stay.
+pub const CADACLYSM_BLACKSMITH_UNTRIM_OUTER: u32 = 1;
+/// Untrim: both.
+pub const CADACLYSM_BLACKSMITH_UNTRIM_ALL: u32 = 2;
+/// Ruling square to the edge in its face's tangent plane, away from the face.
+pub const CADACLYSM_BLACKSMITH_RULING_TANGENT: u32 = 0;
+/// Ruling along the face's outward normal.
+pub const CADACLYSM_BLACKSMITH_RULING_NORMAL: u32 = 1;
+/// Ruling along a given direction.
+pub const CADACLYSM_BLACKSMITH_RULING_DIRECTION: u32 = 2;
+
 // Sheet metal (`CadaclysmBlacksmithSheetRule`, `cadaclysm_blacksmith_sheet_hem`,
 // `cadaclysm_blacksmith_flat_pattern_dxf`).
 /// `CadaclysmBlacksmithSheetRule::relief`: no bend relief.
@@ -124,6 +174,10 @@ pub const CADACLYSM_BLACKSMITH_HEM_OPEN: u32 = 1;
 pub const CADACLYSM_BLACKSMITH_HEM_ROLLED: u32 = 2;
 /// A tear drop: rolled, its lip back on the sheet.
 pub const CADACLYSM_BLACKSMITH_HEM_TEARDROP: u32 = 3;
+/// A rope hem: curled round a rod `gap` across until it comes back down to the sheet.
+pub const CADACLYSM_BLACKSMITH_HEM_ROPE: u32 = 4;
+/// A double hem: folded twice and pressed flat, three layers.
+pub const CADACLYSM_BLACKSMITH_HEM_DOUBLE: u32 = 5;
 /// `page_add_flat_pattern`'s and `flat_pattern_dxf`'s `flags`: each bend zone's two edges.
 pub const CADACLYSM_BLACKSMITH_FLAT_EXTENTS: u32 = 1;
 /// A ruled table of the bends under the outline.
@@ -171,6 +225,10 @@ pub const CADACLYSM_BLACKSMITH_OFFSET_END_NONE: u32 = 0;
 pub const CADACLYSM_BLACKSMITH_OFFSET_END_FLAT: u32 = 1;
 /// The outline round both sides, a half circle about each end.
 pub const CADACLYSM_BLACKSMITH_OFFSET_END_ROUND: u32 = 2;
+/// A cycloidal pinion's tip: a semicircle of half the leaf thickness.
+pub const CADACLYSM_BLACKSMITH_GEAR_TIP_ROUND: u32 = 0;
+/// A cycloidal pinion's tip: the epicycloid, truncated at 0.855 module.
+pub const CADACLYSM_BLACKSMITH_GEAR_TIP_OGIVE: u32 = 1;
 
 /// A solid (or open sheet). Opaque; freed with `cadaclysm_blacksmith_solid_free`.
 #[repr(C)]
@@ -694,6 +752,38 @@ pub struct CadaclysmBlacksmithAreaProperties {
     pub accuracy_met: bool,
 }
 
+/// A gear's key circles and thickness, written by the `cadaclysm_blacksmith_profile_gear_*`
+/// calls on success only; `base_radius` NaN for cycloidal gearing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CadaclysmBlacksmithGearReport {
+    pub pitch_radius: f64,
+    pub base_radius: f64,
+    pub tip_radius: f64,
+    pub root_radius: f64,
+    pub thickness: f64,
+    pub undercut: bool,
+}
+
+/// Where `cadaclysm_blacksmith_contact_settle` left the follower, written on success only: the
+/// point, normal and touching segments NaN / `u32::MAX` without `contact`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CadaclysmBlacksmithSettle {
+    pub value: f64,
+    pub contact: bool,
+    pub recoiled: bool,
+    pub point_x: f64,
+    pub point_y: f64,
+    pub normal_x: f64,
+    pub normal_y: f64,
+    pub driver_loop: u32,
+    pub driver_segment: u32,
+    pub follower_loop: u32,
+    pub follower_segment: u32,
+    pub steps: u32,
+}
+
 /// One side of the hole `cadaclysm_blacksmith_n_sided_patch` fills: a sheet's side, or (where
 /// `sheet` is NULL) a curve met at G0.
 #[repr(C)]
@@ -956,6 +1046,13 @@ pub struct CadaclysmBlacksmithFlatPattern {
 /// freed with `cadaclysm_blacksmith_unrolled_free`.
 #[repr(C)]
 pub struct CadaclysmBlacksmithUnrolled {
+    _private: [u8; 0],
+}
+
+/// Faces of a solid squished flat. Opaque and immutable; read with
+/// `cadaclysm_blacksmith_squished_*`, freed with `cadaclysm_blacksmith_squished_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithSquished {
     _private: [u8; 0],
 }
 
@@ -1658,6 +1755,45 @@ pub struct CadaclysmBlacksmithFemOptions {
     pub max_size: f64,
 }
 
+/// A set of straight-sided polygons in the plane. Opaque; freed with
+/// `cadaclysm_blacksmith_polygon_set_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithPolygonSet {
+    _private: [u8; 0],
+}
+
+/// The pieces of a polyline a polygon set clipped. Opaque; read with
+/// `cadaclysm_blacksmith_polygon_set_lines_view`, freed with
+/// `cadaclysm_blacksmith_polygon_set_lines_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithPolygonSetLines {
+    _private: [u8; 0],
+}
+
+/// `CadaclysmBlacksmithPolygonSetView`: a polygon set as flat rings -- the points, the
+/// points in each ring, the rings in each polygon (outer first) -- borrowed from the set.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmBlacksmithPolygonSetView {
+    pub xy: *const f64,
+    pub point_count: u32,
+    pub ring_sizes: *const u32,
+    pub ring_count: u32,
+    pub polygon_rings: *const u32,
+    pub polygon_count: u32,
+}
+
+/// `CadaclysmBlacksmithPolygonSetLinesView`: clipped polylines as flat points and the points
+/// in each, borrowed from the handle.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmBlacksmithPolygonSetLinesView {
+    pub xy: *const f64,
+    pub point_count: u32,
+    pub sizes: *const u32,
+    pub count: u32,
+}
+
 /// `CadaclysmBlacksmithFemMeshView`: the flat arrays of one FEM mesh and its summary, every
 /// pointer borrowed from the handle and read once when it is made.
 #[repr(C)]
@@ -1738,6 +1874,8 @@ type NurbsCurve = CadaclysmBlacksmithNurbsCurve;
 type Intersection = CadaclysmBlacksmithIntersection;
 type Check = CadaclysmBlacksmithCheck;
 type ProfileList = CadaclysmBlacksmithProfileList;
+type PolygonSet = CadaclysmBlacksmithPolygonSet;
+type PolygonSetLines = CadaclysmBlacksmithPolygonSetLines;
 type Tool = CadaclysmBlacksmithTool;
 type Stock = CadaclysmBlacksmithStock;
 type Job = CadaclysmBlacksmithJob;
@@ -1761,6 +1899,7 @@ type Regions = CadaclysmBlacksmithRegions;
 type DraftAnalysis = CadaclysmBlacksmithDraftAnalysis;
 type FlatPattern = CadaclysmBlacksmithFlatPattern;
 type Unrolled = CadaclysmBlacksmithUnrolled;
+type Squished = CadaclysmBlacksmithSquished;
 type Collisions = CadaclysmBlacksmithCollisions;
 type Clashes = CadaclysmBlacksmithClashes;
 type SweptClashes = CadaclysmBlacksmithSweptClashes;
@@ -1818,6 +1957,59 @@ entry_points! {
     fn cadaclysm_blacksmith_profile_arc(cx: f64, cy: f64, r: f64, a0: f64, a1: f64) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_arc_through(x0: f64, y0: f64, xm: f64, ym: f64, x1: f64, y1: f64) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_ellipse(cx: f64, cy: f64, rx: f64, ry: f64) -> *mut Profile;
+    fn cadaclysm_blacksmith_profile_gear_involute(
+        module: f64,
+        teeth: u32,
+        pressure_angle: f64,
+        shift: f64,
+        addendum: f64,
+        dedendum: f64,
+        root_fillet: f64,
+        backlash: f64,
+        tolerance: f64,
+        report_out: *mut CadaclysmBlacksmithGearReport
+    ) -> *mut Profile;
+    fn cadaclysm_blacksmith_profile_gear_wheel_cycloidal(
+        module: f64,
+        teeth: u32,
+        pinion_leaves: u32,
+        thickness: f64,
+        addendum: f64,
+        dedendum: f64,
+        root_fillet: f64,
+        tolerance: f64,
+        report_out: *mut CadaclysmBlacksmithGearReport
+    ) -> *mut Profile;
+    fn cadaclysm_blacksmith_profile_gear_pinion_cycloidal(
+        module: f64,
+        leaves: u32,
+        wheel_teeth: u32,
+        thickness: f64,
+        tip: u32,
+        clearance: f64,
+        root_fillet: f64,
+        tolerance: f64,
+        report_out: *mut CadaclysmBlacksmithGearReport
+    ) -> *mut Profile;
+    fn cadaclysm_blacksmith_gear_centre_distance_involute(module: f64, teeth_first: u32, teeth_second: u32, shift_first: f64, shift_second: f64, pressure_angle: f64) -> f64;
+    fn cadaclysm_blacksmith_naca_parse(code: *const c_char, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_naca_points(airfoil: *const f64, chord: f64, count: u32, closed_te: bool, out: *mut f64) -> u32;
+    fn cadaclysm_blacksmith_naca_spline(airfoil: *const f64, chord: f64, controls: u32, closed_te: bool, out: *mut f64, error_out: *mut f64) -> u32;
+    fn cadaclysm_blacksmith_profile_naca(airfoil: *const f64, chord: f64, closed_te: bool, tolerance: f64, error_out: *mut f64) -> *mut Profile;
+    fn cadaclysm_blacksmith_contact_settle(
+        driver: *const Profile,
+        driver_pivot_x: f64,
+        driver_pivot_y: f64,
+        driver_angle: f64,
+        follower: *const Profile,
+        follower_pivot_x: f64,
+        follower_pivot_y: f64,
+        previous: f64,
+        direction: i32,
+        limit: f64,
+        tolerance: f64,
+        out: *mut CadaclysmBlacksmithSettle
+    ) -> bool;
     fn cadaclysm_blacksmith_profile_from_beziers(beziers: *const f64, count: usize, recognise: bool) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_bezier_count(profile: *const Profile) -> u32;
     fn cadaclysm_blacksmith_profile_beziers(profile: *const Profile, frame: *const f64, out: *mut f64) -> bool;
@@ -1872,6 +2064,51 @@ entry_points! {
     fn cadaclysm_blacksmith_profile_difference(a: *const Profile, b: *const Profile, tolerance: f64) -> *mut ProfileList;
     fn cadaclysm_blacksmith_profile_regions(profiles: *const *const Profile, count: usize, tolerance: f64) -> *mut ProfileList;
     fn cadaclysm_blacksmith_profile_contains(p: *const Profile, x: f64, y: f64, tolerance: f64) -> i32;
+    fn cadaclysm_blacksmith_polygon_set_from_rings(
+        xy: *const f64,
+        ring_sizes: *const u32,
+        ring_count: u32,
+        polygon_rings: *const u32,
+        polygon_count: u32
+    ) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_free(set: *mut PolygonSet);
+    fn cadaclysm_blacksmith_polygon_set_view(set: *const PolygonSet, out: *mut CadaclysmBlacksmithPolygonSetView) -> bool;
+    fn cadaclysm_blacksmith_polygon_set_clean(set: *const PolygonSet) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_union(a: *const PolygonSet, b: *const PolygonSet) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_intersection(a: *const PolygonSet, b: *const PolygonSet) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_difference(a: *const PolygonSet, b: *const PolygonSet) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_symmetric_difference(a: *const PolygonSet, b: *const PolygonSet) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_union_all(sets: *const *const PolygonSet, count: u32) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_intersection_area(a: *const PolygonSet, b: *const PolygonSet) -> f64;
+    fn cadaclysm_blacksmith_polygon_set_difference_area(a: *const PolygonSet, b: *const PolygonSet) -> f64;
+    fn cadaclysm_blacksmith_polygon_set_buffer(set: *const PolygonSet, distance: f64, quad_segs: u32, join: u32, mitre_limit: f64) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_buffer_polyline(
+        xy: *const f64,
+        point_count: u32,
+        distance: f64,
+        quad_segs: u32,
+        join: u32,
+        mitre_limit: f64,
+        cap: u32
+    ) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_transform(set: *const PolygonSet, m: *const f64) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_area(set: *const PolygonSet) -> f64;
+    fn cadaclysm_blacksmith_polygon_set_perimeter(set: *const PolygonSet) -> f64;
+    fn cadaclysm_blacksmith_polygon_set_bounds(set: *const PolygonSet, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_polygon_set_centroid(set: *const PolygonSet, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_polygon_set_locate(set: *const PolygonSet, xy: *const f64, point_count: u32, out: *mut i32) -> bool;
+    fn cadaclysm_blacksmith_polygon_set_contains(a: *const PolygonSet, b: *const PolygonSet) -> i32;
+    fn cadaclysm_blacksmith_polygon_set_intersects(a: *const PolygonSet, b: *const PolygonSet) -> i32;
+    fn cadaclysm_blacksmith_polygon_set_contains_polyline(set: *const PolygonSet, xy: *const f64, point_count: u32) -> i32;
+    fn cadaclysm_blacksmith_polygon_set_intersects_polyline(set: *const PolygonSet, xy: *const f64, point_count: u32) -> i32;
+    fn cadaclysm_blacksmith_polygon_set_distance(a: *const PolygonSet, b: *const PolygonSet) -> f64;
+    fn cadaclysm_blacksmith_polygon_set_distance_to_polyline(set: *const PolygonSet, xy: *const f64, point_count: u32) -> f64;
+    fn cadaclysm_blacksmith_polygon_set_boundary_distance(set: *const PolygonSet, x: f64, y: f64) -> f64;
+    fn cadaclysm_blacksmith_polygon_set_clip_polyline(set: *const PolygonSet, xy: *const f64, point_count: u32) -> *mut PolygonSetLines;
+    fn cadaclysm_blacksmith_polygon_set_lines_view(lines: *const PolygonSetLines, out: *mut CadaclysmBlacksmithPolygonSetLinesView) -> bool;
+    fn cadaclysm_blacksmith_polygon_set_lines_free(lines: *mut PolygonSetLines);
+    fn cadaclysm_blacksmith_profile_polygon_set(profile: *const Profile, tolerance: f64) -> *mut PolygonSet;
+    fn cadaclysm_blacksmith_polygon_set_profiles(set: *const PolygonSet) -> *mut ProfileList;
     fn cadaclysm_blacksmith_profile_relationship(a: *const Profile, b: *const Profile, tolerance: f64) -> i32;
     fn cadaclysm_blacksmith_profile_deviation(a: *const Profile, b: *const Profile, tolerance: f64, out10: *mut f64) -> bool;
     fn cadaclysm_blacksmith_profile_offset_corner(p: *const Profile, distance: f64, tolerance: f64, corner: u32) -> *mut ProfileList;
@@ -2264,6 +2501,21 @@ entry_points! {
     fn cadaclysm_blacksmith_nurbs_curve_projected_to_plane(curve: *const NurbsCurve, origin: *const f64, normal: *const f64, direction: *const f64) -> *mut NurbsCurve;
     fn cadaclysm_blacksmith_nurbs_curve_projected_to_face(curve: *const NurbsCurve, solid: *const Solid, face: u32, direction: *const f64, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
     fn cadaclysm_blacksmith_nurbs_curve_offset_on_sheet(curve: *const NurbsCurve, solid: *const Solid, distance: f64, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_offset(curve: *const NurbsCurve, distance: f64, direction: *const f64, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_offset_normal_to_sheet(curve: *const NurbsCurve, solid: *const Solid, distance: f64, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_curve_offset_tangent_to_sheet(curve: *const NurbsCurve, solid: *const Solid, distance: f64, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_nurbs_surface_offset(surface: *const NurbsSurface, distance: f64, tolerance: f64, error_out: *mut f64) -> *mut NurbsSurface;
+    fn cadaclysm_blacksmith_solid_offset(solid: *const Solid, distance: f64, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_offset_face(solid: *const Solid, face: u32, distance: f64, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_split_faces(solid: *const Solid, faces: *const u32, curves: *const *const NurbsCurve, count: usize, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_split_along_silhouette(solid: *const Solid, x: f64, y: f64, z: f64, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_untrim(solid: *const Solid, face: u32, which: u32, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_unstitch(solid: *const Solid, faces: *const u32, count: usize, together: bool) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_ruled_from_edges(solid: *const Solid, edges: *const u32, count: usize, kind: u32, x: f64, y: f64, z: f64, distance: f64, angle: f64, alternate: bool, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_change_seam(solid: *const Solid, face: u32, along_u: bool, parameter: f64, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_merge_surfaces(a: *const Solid, b: *const Solid, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_nurbs_surface_merge(a: *const NurbsSurface, b: *const NurbsSurface, tolerance: f64) -> *mut NurbsSurface;
+    fn cadaclysm_blacksmith_nurbs_surface_tween(a: *const NurbsSurface, b: *const NurbsSurface, count: u32, out: *mut *mut NurbsSurface) -> bool;
     fn cadaclysm_blacksmith_nurbs_curve_pulled_to_face(curve: *const NurbsCurve, solid: *const Solid, face: u32, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
     fn cadaclysm_blacksmith_nurbs_curve_pulled_back(curve: *const NurbsCurve, solid: *const Solid, face: u32, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
     fn cadaclysm_blacksmith_nurbs_curve_pushed_up(uv: *const NurbsCurve, solid: *const Solid, face: u32, tolerance: f64, error_out: *mut f64) -> *mut NurbsCurve;
@@ -2417,7 +2669,16 @@ entry_points! {
         rule: *const CadaclysmBlacksmithSheetRule,
         tolerance: f64
     ) -> *mut Solid;
+    fn cadaclysm_blacksmith_sheet_lofted_flange(
+        a: *const f64,
+        a_count: usize,
+        b: *const f64,
+        b_count: usize,
+        rule: *const CadaclysmBlacksmithSheetRule,
+        tolerance: f64
+    ) -> *mut Solid;
     fn cadaclysm_blacksmith_sheet_flange(
+
         solid: *const Solid,
         edges: *const u32,
         count: usize,
@@ -2519,6 +2780,29 @@ entry_points! {
     fn cadaclysm_blacksmith_unrolled_cut_count(u: *const Unrolled) -> u32;
     fn cadaclysm_blacksmith_unrolled_cuts(u: *const Unrolled, out: *mut u32) -> bool;
     fn cadaclysm_blacksmith_unrolled_free(u: *mut Unrolled);
+    fn cadaclysm_blacksmith_squish(
+        solid: *const Solid,
+        faces: *const u32,
+        face_count: usize,
+        curves: *const *const NurbsCurve,
+        curve_count: usize,
+        points: *const f64,
+        point_count: usize,
+        explode: bool,
+        deformation: u32,
+        preserve_boundary: bool,
+        tolerance: f64
+    ) -> *mut Squished;
+    fn cadaclysm_blacksmith_squished_sheet(q: *const Squished) -> *mut Solid;
+    fn cadaclysm_blacksmith_squished_face_count(q: *const Squished) -> u32;
+    fn cadaclysm_blacksmith_squished_faces(q: *const Squished, out: *mut u32) -> bool;
+    fn cadaclysm_blacksmith_squished_distortion(q: *const Squished, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_squished_exact_count(q: *const Squished) -> u32;
+    fn cadaclysm_blacksmith_squished_exact(q: *const Squished, out: *mut u32) -> bool;
+    fn cadaclysm_blacksmith_squished_curve_piece_count(q: *const Squished, curve: u32) -> u32;
+    fn cadaclysm_blacksmith_squished_curve_piece(q: *const Squished, curve: u32, piece: u32) -> *mut NurbsCurve;
+    fn cadaclysm_blacksmith_squished_point(q: *const Squished, i: u32, out: *mut f64) -> i32;
+    fn cadaclysm_blacksmith_squished_free(q: *mut Squished);
     fn cadaclysm_blacksmith_face_point(solid: *const Solid, face: u32, p: *const f64, tolerance: f64, out: *mut CadaclysmBlacksmithFacePoint) -> i32;
     fn cadaclysm_blacksmith_face_inner_point(solid: *const Solid, face: u32, out: *mut CadaclysmBlacksmithFacePoint) -> bool;
     fn cadaclysm_blacksmith_edge_point(solid: *const Solid, edge: u32, p: *const f64, tolerance: f64, out: *mut CadaclysmBlacksmithEdgePoint) -> i32;
@@ -2581,6 +2865,19 @@ entry_points! {
     ) -> *mut Solid;
     fn cadaclysm_blacksmith_fillet_varying(solid: *const Solid, edges: *const u32, count: usize, radius_start: f64, radius_end: f64, tolerance: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_fillet_law(solid: *const Solid, edges: *const u32, count: usize, shares: *const f64, radii: *const f64, station_count: usize, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_fillet_chord(solid: *const Solid, edges: *const u32, count: usize, chord: f64, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_fillet_asymmetric(solid: *const Solid, edges: *const u32, count: usize, face: u32, distance: f64, distance_other: f64, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_fillet_full_round(solid: *const Solid, side: u32, centre: u32, other_side: u32, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_fillet_rule(
+        solid: *const Solid,
+        faces: *const u32,
+        face_count: usize,
+        between: *const u32,
+        between_count: usize,
+        rule: u32,
+        radius: f64,
+        tolerance: f64
+    ) -> *mut Solid;
     fn cadaclysm_blacksmith_split_by_curve(sheet: *const Solid, curve: *const NurbsCurve, direction: *const f64, tolerance: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_trim_by_curve(sheet: *const Solid, curve: *const NurbsCurve, direction: *const f64, keep_inside: bool, tolerance: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_join_sheets(sheets: *const *const Solid, count: usize, tolerance: f64, report: *mut CadaclysmBlacksmithJoinReport) -> *mut Solid;
@@ -2620,6 +2917,7 @@ entry_points! {
         out: *mut f64
     ) -> u32;
     fn cadaclysm_blacksmith_pattern_circular(axis: *const f64, count: u32, angle: f64, symmetric: bool, skip: *const u32, skip_count: u32, out: *mut f64) -> u32;
+    fn cadaclysm_blacksmith_pattern_mirror(plane: *const f64, out: *mut f64) -> u32;
     fn cadaclysm_blacksmith_pattern_along(curve: *const NurbsCurve, count: u32, spacing: f64, orient: u32, skip: *const u32, skip_count: u32, out: *mut f64) -> u32;
     fn cadaclysm_blacksmith_pattern(solid: *const Solid, transforms: *const f64, count: u32, tolerance: f64, report_out: *mut f64) -> *mut Solid;
     fn cadaclysm_blacksmith_pattern_feature(solid: *const Solid, tool: *const Solid, op: u32, transforms: *const f64, count: u32, tolerance: f64, report_out: *mut f64) -> *mut Solid;
@@ -2849,6 +3147,17 @@ entry_points! {
     fn cadaclysm_blacksmith_projector_curve_closest_points(projector: *const Projector, curve: *const NurbsCurve, max_distance: f64, out: *mut CadaclysmBlacksmithCurveBodyFoot) -> i32;
     fn cadaclysm_blacksmith_nurbs_curve_closest_object(curve: *const NurbsCurve, kinds: *const u8, count: u32, solids: *const *const Solid, n_solids: u32, curves: *const *const NurbsCurve, n_curves: u32, points: *const f64, n_points: u32, projectors: *const *const Projector, n_projectors: u32, meshes: *const *const TriangleMesh, n_meshes: u32, surfaces: *const *const NurbsSurface, n_surfaces: u32, max_distance: f64, tolerance: f64, out: *mut CadaclysmBlacksmithNearestObject) -> i32;
     fn cadaclysm_blacksmith_triangle_mesh_new(positions: *const f64, vertex_count: u32, indices: *const u32, triangle_count: u32) -> *mut TriangleMesh;
+    fn cadaclysm_blacksmith_from_mesh(
+        positions: *const f64,
+        vertex_count: u32,
+        indices: *const u32,
+        triangle_count: u32,
+        weld_tolerance: f64,
+        angle_tolerance: f64,
+        distance_tolerance: f64,
+        mode: u32,
+        report: *mut u32
+    ) -> *mut Solid;
     fn cadaclysm_blacksmith_solid_triangle_mesh(solid: *const Solid, tolerance: f64) -> *mut TriangleMesh;
     fn cadaclysm_blacksmith_triangle_mesh_free(mesh: *mut TriangleMesh);
     fn cadaclysm_blacksmith_triangle_mesh_vertex_count(mesh: *const TriangleMesh) -> u32;
@@ -3259,6 +3568,13 @@ entry_points! {
     fn cadaclysm_blacksmith_sketch_add_conic(s: *mut Sketch, start: u32, cx: f64, cy: f64, x: f64, y: f64, weight: f64) -> u32;
     fn cadaclysm_blacksmith_sketch_add_nurbs(s: *mut Sketch, start: u32, degree: u32, xy: *const f64, count: usize, weights: *const f64, knots: *const f64, knot_count: usize) -> u32;
     fn cadaclysm_blacksmith_sketch_add_rect(s: *mut Sketch, x0: f64, y0: f64, x1: f64, y1: f64, count: *mut usize) -> *const u32;
+    fn cadaclysm_blacksmith_sketch_add_polygon(s: *mut Sketch, cx: f64, cy: f64, vx: f64, vy: f64, sides: u32, count: *mut usize) -> *const u32;
+    fn cadaclysm_blacksmith_sketch_chamfer(s: *mut Sketch, a: u32, b: u32, da: f64, db: f64, count: *mut usize) -> *const u32;
+    fn cadaclysm_blacksmith_sketch_chamfer_angle(s: *mut Sketch, a: u32, b: u32, da: f64, angle: f64, count: *mut usize) -> *const u32;
+    fn cadaclysm_blacksmith_sketch_pattern_rectangular(s: *mut Sketch, ids: *const u32, n: usize, d1x: f64, d1y: f64, n1: u32, d2x: f64, d2y: f64, n2: u32, count: *mut usize) -> *const u32;
+    fn cadaclysm_blacksmith_sketch_pattern_circular(s: *mut Sketch, ids: *const u32, n: usize, centre: u32, count: u32, step: f64, out_count: *mut usize) -> *const u32;
+    fn cadaclysm_blacksmith_sketch_mirror(s: *mut Sketch, ids: *const u32, n: usize, line: u32, out_count: *mut usize) -> *const u32;
+    fn cadaclysm_blacksmith_sketch_auto_constrain(s: *mut Sketch, tolerance: f64, dimensions: bool, count: *mut usize) -> *const u32;
     fn cadaclysm_blacksmith_sketch_kind(s: *const Sketch, id: u32) -> u32;
     fn cadaclysm_blacksmith_sketch_entities(s: *mut Sketch, count: *mut usize) -> *const u32;
     fn cadaclysm_blacksmith_sketch_point(s: *const Sketch, id: u32, out: *mut f64) -> bool;

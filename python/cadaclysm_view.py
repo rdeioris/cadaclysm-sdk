@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 import weakref
-from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_uint32, c_void_p
+from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_void_p
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, TypedDict, Union
 
 if TYPE_CHECKING:
@@ -62,7 +62,23 @@ ABI_MAJOR = 1
 # 1.27: kernel animations on the timeline -- `cadaclysm_view_play_animation`, `_timeline_remove`,
 #       `_set_item_visible`, `_set_node_ghosts` and the "timeline" event.
 # 1.28: the drafting styles (set_line_style, set_point_style, set_point_states, set_point_state_colours, set_viewport_label, set_viewport_border, set_on_top) and the pick's viewport_label.
-ABI_MINOR = 28
+# 1.29: live geometry (set_lines, set_curves, set_points, set_mesh_positions) and show_glyphs.
+# 1.30: picking and snapping -- `cadaclysm_view_set_pick_aperture`, `_pick_rect`, `_set_snap_points`,
+#       `_set_snap_base`; the pick's `segment` and `distance_px`, the snap's label, lock and guides, the
+#       snap kinds END, INTERSECTION, POINT and ALIGNMENT, and the input event's tail.
+# 1.31: `cadaclysm_view_set_clip_plane` and `_clip_plane` (six view-wide clip planes, each with an
+#       optional cap and hatch).
+# 1.32: clip sets -- the cut's outline (`CadaclysmViewClipPlane` grew to 120 bytes),
+#       `cadaclysm_view_set_clip_mode` and `_clip_mode` (the cutaway), and viewports' own sets:
+#       `_set_viewport_clip_plane`, `_viewport_clip_plane`, `_set_viewport_clip_mode`, `_viewport_clip_mode`.
+# 1.33: `cadaclysm_view_set_textures` and `_textures`: a material's base-colour texture drawn.
+ABI_MINOR = 33
+
+#: The number of clip-plane slots (`CADACLYSM_VIEW_CLIP_PLANES`, 1.31).
+CLIP_PLANES = 6
+
+#: The viewports that may have a clip set of their own (`CADACLYSM_VIEW_CLIP_VIEWPORTS`, 1.32).
+CLIP_VIEWPORTS = 8
 
 #: A colour: text -- "#rgb", "#rrggbb" (the "#" optional) or one of the 148 CSS colour names,
 #: any case, read by the view library's own `cadaclysm_view_parse_colour`, so the forms are
@@ -85,15 +101,25 @@ _SURFACES = {"exact": 0, "triangles": 1}
 _LIGHTING = {"headlight": 0, "studio": 1, "showroom": 2}
 _ANALYSIS = {"zebra": 1, "isophotes": 2, "gaussian": 3, "mean": 4, "min": 5, "max": 6}
 _OCCLUDED = {"off": 0, "solid": 1, "dashed": 2}
+_CLIP_MODES = {"intersection": 0, "cutaway": 1}  # CADACLYSM_VIEW_CLIP_INTERSECTION, _CUTAWAY (1.32)
+_CLIP_INHERIT = 2                                 # CADACLYSM_VIEW_CLIP_INHERIT (1.32): a viewport's
 _POINT_SHAPES = {"disc": 0, "ring": 1, "square": 2, "diamond": 3}
+_GLYPH_KINDS = {name: code for code, name in enumerate((
+    "arrow", "tick", "cross", "square", "triangle", "parallel", "perpendicular",
+    "coincident", "tangent", "fixed", "horizontal", "vertical"))}
 _POINT_STATES = {"normal": 0, "hover": 1, "selected": 2, "first": 3}
 _FINISH = {"gloss": 0, "satin": 1, "matte": 2}
 #: A shown solid's material (`show_solid(..., material=)`, 1.21): CADACLYSM_VIEW_MATERIAL_*.
 _MATERIAL = {"default": 0, "plastic": 1, "metal": 2, "matte": 3, "paint": 4, "brushed": 5, "glass": 6}
 #: The `CADACLYSM_VIEW_SNAP_*` bits, by the names `View.set_snap` takes and `Snap.kind` reports.
 _SNAP_KINDS = {"vertex": 1 << 0, "midpoint": 1 << 1, "centre": 1 << 2, "quadrant": 1 << 3,
-               "edge": 1 << 4, "face": 1 << 5, "grid": 1 << 6, "plane": 1 << 7}
-_SNAP_NONE = 0xFFFFFFFF  # CadaclysmViewSnap.edge where the snap is on no edge
+               "edge": 1 << 4, "face": 1 << 5, "grid": 1 << 6, "plane": 1 << 7,
+               "end": 1 << 8, "intersection": 1 << 9, "point": 1 << 10, "alignment": 1 << 11}
+_SNAP_ALL = 0xFFF        # CADACLYSM_VIEW_SNAP_ALL (1.30): every kind
+_SNAP_DEFAULT = 0x4FF    # CADACLYSM_VIEW_SNAP_DEFAULT (1.30): 1.22's eight and "point"
+_SNAP_NONE = 0xFFFFFFFF  # CadaclysmViewSnap.edge where the snap is on no edge; CadaclysmViewPick.segment's none
+#: The `CADACLYSM_VIEW_HIT_*` kinds of a `pick_rect` hit (1.30), by the names `RectHit.kind` reports.
+_HIT_KINDS = {"face": 1, "node": 2, "segment": 3, "edge": 4, "point": 5}
 _LOD_MOTION = {"detailed": 0, "smooth": 1}
 _STANDARD = {"top": 0, "front": 1, "right": 2, "iso": 3}
 _LAYERS = {"surfaces": 0, "edges": 1, "curves": 2, "isocurves": 3, "grid": 4, "text": 5}
@@ -160,7 +186,10 @@ class Pick(TypedDict):
     else 1) and `point` -- where the ray met the model, or None where no depth was read --
     and `overlay` (1.24): True where the item is an overlay, over the pixel, so nothing of the
     scene beneath it was picked (`face` a text overlay's line, else 0). `viewport_label`
-    (1.28) is the viewport whose label was hit (`item` 0), else None."""
+    (1.28) is the viewport whose label was hit (`item` 0), else None. `segment` (1.30) is the
+    wire hit: a line's segment, a curve's Bezier, a solid's kernel edge; None for a face, a
+    point or a glyph. `distance_px` (1.30) is how far the cursor was from the wire or point hit
+    (0 for a face)."""
     item: int
     node: int
     face: int
@@ -168,6 +197,18 @@ class Pick(TypedDict):
     point: Optional[Tuple[float, float, float]]
     overlay: bool
     viewport_label: Optional[int]
+    segment: Optional[int]
+    distance_px: float
+
+
+class RectHit(TypedDict):
+    """One thing `View.pick_rect` found in its rectangle: the item, the `kind` of part --
+    "face", "node" (an item with no face ranges), "segment" (a line's segment or a curve's
+    Bezier), "edge" (a solid's or scene's kernel edge) or "point" (a point or a glyph) --
+    and that part's `index`."""
+    item: int
+    kind: str
+    index: int
 
 
 class _EventPick(ctypes.Structure):
@@ -178,14 +219,16 @@ class _EventPick(ctypes.Structure):
 
 
 class _Pick(ctypes.Structure):
-    #: CadaclysmViewPick, cadaclysm_view.h 1.28 (1.0 had the first four fields, 1.8 clicks and the
-    #: point, 1.24 overlay, 1.28 viewport_label).
-    _fields_ = _EventPick._fields_ + [("viewport_label", ctypes.c_int32)]
+    #: CadaclysmViewPick, cadaclysm_view.h 1.30 (1.0 had the first four fields, 1.8 clicks and the
+    #: point, 1.24 overlay, 1.28 viewport_label, 1.30 segment and distance_px).
+    _fields_ = _EventPick._fields_ + [("viewport_label", ctypes.c_int32), ("segment", c_uint32), ("distance_px", c_float)]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if not args and "viewport_label" not in kwargs:
             self.viewport_label = -1   # "no label hit", until the library writes it
+        if not args and "segment" not in kwargs:
+            self.segment = _SNAP_NONE  # "no segment", until the library writes it
 
 
 class Snap(TypedDict):
@@ -194,7 +237,12 @@ class Snap(TypedDict):
     in, the item, node and face it lies on, its `edge` (None for a face, grid or plane snap),
     the edge's unit `tangent` there, a circular edge's `axis` and `radius` (zeros otherwise),
     how many pixels the cursor was from it, and `clicks`: 0 for `snap` and a hover, 1 for a
-    click's snap, 2 for a double click's."""
+    click's snap, 2 for a double click's. 1.30 adds the kinds "end", "intersection", "point" and
+    "alignment"; `edge` is the pick's `segment` number for the same edge (a line's segment, a
+    curve's Bezier, a solid's kernel edge). `label` is a "point" snap's label (`set_snap_points`),
+    else the kind's own name; `locked_angle` the angle, in degrees, an angle lock
+    (`set_snap_base`) turned the snap onto, else None; `guides` the alignment or lock guides it
+    lies on, as (from, to) world points, 0 to 2 of them."""
     kind: str
     point: Tuple[float, float, float]
     item: int
@@ -206,6 +254,9 @@ class Snap(TypedDict):
     radius: float
     distance_px: float
     clicks: int
+    label: str
+    locked_angle: Optional[float]
+    guides: List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]
 
 
 class _SnapSettings(ctypes.Structure):
@@ -213,11 +264,25 @@ class _SnapSettings(ctypes.Structure):
     _fields_ = [("size", c_uint32), ("kinds", c_uint32), ("aperture_px", c_float), ("marker", c_uint32)]
 
 
+_EVENT_SNAP_FIELDS = [("size", c_uint32), ("kind", c_uint32), ("point", c_double * 3), ("item", c_uint32), ("node", c_uint32),
+                      ("face", c_uint32), ("edge", c_uint32), ("tangent", c_float * 3), ("axis", c_float * 3),
+                      ("radius", c_double), ("distance_px", c_float), ("clicks", c_uint32)]
+
+
+class _EventSnap(ctypes.Structure):
+    #: CadaclysmViewEventSnap: the 1.22 snap, frozen inside the input event.
+    _fields_ = _EVENT_SNAP_FIELDS
+
+
 class _Snap(ctypes.Structure):
-    #: CadaclysmViewSnap, cadaclysm_view.h 1.22.
-    _fields_ = [("size", c_uint32), ("kind", c_uint32), ("point", c_double * 3), ("item", c_uint32), ("node", c_uint32),
-                ("face", c_uint32), ("edge", c_uint32), ("tangent", c_float * 3), ("axis", c_float * 3),
-                ("radius", c_double), ("distance_px", c_float), ("clicks", c_uint32)]
+    #: CadaclysmViewSnap, cadaclysm_view.h 1.30 (1.22's fields, then the label, the lock and the guides).
+    _fields_ = _EVENT_SNAP_FIELDS + [("label", ctypes.c_char * 32), ("locked", c_uint32), ("locked_angle", c_float),
+                                     ("guide_count", c_uint32), ("pad0", c_uint32), ("guides", c_double * 12)]
+
+
+class _RectHit(ctypes.Structure):
+    #: CadaclysmViewRectHit, cadaclysm_view.h 1.30.
+    _fields_ = [("item", c_uint32), ("kind", c_uint32), ("index", c_uint32)]
 
 
 class _Lod(ctypes.Structure):
@@ -246,6 +311,33 @@ class OccludedStyle:
     gap: float = 4.0
     dim: float = 0.5
     colour: Optional[Any] = None
+
+
+class _ClipPlane(ctypes.Structure):
+    #: CadaclysmViewClipPlane, cadaclysm_view.h 1.32: 120 bytes, no padding (1.31's 96, then the outline).
+    _fields_ = [("size", c_uint32), ("cap", c_uint32), ("point", c_double * 3), ("normal", c_double * 3),
+                ("cap_colour", c_float * 3), ("hatch", c_uint32), ("hatch_colour", c_float * 3),
+                ("hatch_angle", c_float), ("hatch_spacing", c_float), ("hatch_width", c_float),
+                ("outline", c_uint32), ("outline_colour", c_float * 3), ("outline_width", c_float), ("reserved", c_uint32)]
+
+
+@dataclasses.dataclass(frozen=True)
+class ClipPlane:
+    """A clip-plane slot as `View.clip_plane` reads it back: a point on the plane and its unit
+    normal (the side it points to is hidden), the cap's colour or None, the hatch's colour or
+    None, and the hatch's angle in degrees, spacing in the scene's units (0: automatic, a
+    fiftieth of the scene's size) and width in points. With no hatch the last three are the
+    defaults (45, 0, 1). 1.32: the outline's colour or None, and its width in points (1 with
+    no outline)."""
+    point: Tuple[float, float, float]
+    normal: Tuple[float, float, float]
+    cap: Optional[Tuple[float, float, float]] = None
+    hatch: Optional[Tuple[float, float, float]] = None
+    hatch_angle: float = 45.0
+    hatch_spacing: float = 0.0
+    hatch_width: float = 1.0
+    outline: Optional[Tuple[float, float, float]] = None
+    outline_width: float = 1.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -310,12 +402,17 @@ class _Stats(ctypes.Structure):
 
 
 class _InputEvent(ctypes.Structure):
-    #: CadaclysmViewInputEvent, cadaclysm_view.h 1.26: 272 bytes, padded explicitly.
+    #: CadaclysmViewInputEvent, cadaclysm_view.h 1.30: 424 bytes, padded explicitly (1.26's 272, the
+    #: snap frozen at its 1.22 layout, then 1.30's tail: the pick's segment and distance, the snap's
+    #: label, lock and guides).
     _fields_ = [("size", c_uint32), ("kind", c_uint32), ("time_ms", c_double), ("x", c_float), ("y", c_float),
                 ("wheel_y", c_float), ("button", c_uint32), ("modifiers", c_uint32), ("pointer", c_uint32),
                 ("pointer_id", c_uint32), ("width", c_uint32), ("height", c_uint32), ("repeat", c_uint32),
                 ("dropped", c_uint32), ("pad0", c_uint32), ("key", ctypes.c_char * 32), ("pick", _EventPick),
-                ("snap", _Snap), ("camera", _Camera), ("pick_viewport_label", ctypes.c_int32)]
+                ("snap", _EventSnap), ("camera", _Camera), ("pick_viewport_label", ctypes.c_int32),
+                ("pick_segment", c_uint32), ("pick_distance_px", c_float), ("snap_label", ctypes.c_char * 32),
+                ("snap_locked", c_uint32), ("snap_locked_angle", c_float), ("snap_guide_count", c_uint32),
+                ("pad1", c_uint32), ("snap_guides", c_double * 12)]
 
 
 class _AnimationBinding(ctypes.Structure):
@@ -376,6 +473,8 @@ _SIGNATURES = {
     "cadaclysm_view_surfaces": (c_uint32, [V]),
     "cadaclysm_view_set_lighting": (c_bool, [V, c_uint32]),
     "cadaclysm_view_lighting": (c_uint32, [V]),
+    "cadaclysm_view_set_textures": (c_bool, [V, c_bool]),
+    "cadaclysm_view_textures": (c_bool, [V]),
     "cadaclysm_view_set_analysis": (c_bool, [V, POINTER(_Analysis)]),
     "cadaclysm_view_set_occluded_style": (c_bool, [V, POINTER(_OccludedStyle)]),
     "cadaclysm_view_set_snap": (c_bool, [V, POINTER(_SnapSettings)]),
@@ -385,6 +484,14 @@ _SIGNATURES = {
     "cadaclysm_view_set_work_plane": (c_bool, [V, POINTER(c_double), POINTER(c_double), POINTER(c_double), c_double]),
     "cadaclysm_view_clear_work_plane": (c_bool, [V]),
     "cadaclysm_view_occluded_style": (c_bool, [V, POINTER(_OccludedStyle)]),
+    "cadaclysm_view_set_clip_plane": (c_bool, [V, c_uint32, POINTER(_ClipPlane)]),
+    "cadaclysm_view_clip_plane": (c_bool, [V, c_uint32, POINTER(_ClipPlane)]),
+    "cadaclysm_view_set_clip_mode": (c_bool, [V, c_uint32]),
+    "cadaclysm_view_clip_mode": (c_uint32, [V]),
+    "cadaclysm_view_set_viewport_clip_plane": (c_bool, [V, c_uint32, c_uint32, POINTER(_ClipPlane)]),
+    "cadaclysm_view_viewport_clip_plane": (c_bool, [V, c_uint32, c_uint32, POINTER(_ClipPlane)]),
+    "cadaclysm_view_set_viewport_clip_mode": (c_bool, [V, c_uint32, c_uint32]),
+    "cadaclysm_view_viewport_clip_mode": (c_uint32, [V, c_uint32]),
     "cadaclysm_view_analysis": (c_bool, [V, POINTER(_Analysis)]),
     "cadaclysm_view_orbit": (None, [V, c_float, c_float]),
     "cadaclysm_view_pan": (None, [V, c_float, c_float]),
@@ -476,6 +583,15 @@ _SIGNATURES = {
     "cadaclysm_view_set_viewport_label": (c_bool, [V, c_uint32, c_char_p, POINTER(c_float)]),
     "cadaclysm_view_set_viewport_border": (c_bool, [V, c_uint32, POINTER(c_float)]),
     "cadaclysm_view_set_on_top": (c_bool, [V, c_uint32, c_bool]),
+    "cadaclysm_view_set_lines": (c_bool, [V, c_uint32, POINTER(c_float), c_size_t]),
+    "cadaclysm_view_set_curves": (c_bool, [V, c_uint32, POINTER(c_float), c_size_t]),
+    "cadaclysm_view_set_points": (c_bool, [V, c_uint32, POINTER(c_float), c_size_t]),
+    "cadaclysm_view_set_mesh_positions": (c_bool, [V, c_uint32, POINTER(c_float), POINTER(c_float), c_size_t]),
+    "cadaclysm_view_show_glyphs": (c_uint32, [V, POINTER(c_float), POINTER(c_float), c_size_t, c_uint32, c_float, POINTER(c_float)]),
+    "cadaclysm_view_set_pick_aperture": (c_bool, [V, c_float]),
+    "cadaclysm_view_pick_rect": (c_size_t, [V, c_uint32, c_float, c_float, c_float, c_float, c_bool, POINTER(_RectHit), c_size_t]),
+    "cadaclysm_view_set_snap_points": (c_bool, [V, c_uint32, POINTER(c_float), c_size_t, c_char_p]),
+    "cadaclysm_view_set_snap_base": (c_bool, [V, POINTER(c_float), c_float]),
     "cadaclysm_view_play_animation": (c_uint32, [V, V, POINTER(_AnimationBinding), c_uint32]),
     "cadaclysm_view_timeline_remove": (c_bool, [V, c_uint32]),
 }
@@ -804,16 +920,22 @@ def _zoom(lib, v, opts) -> None:
         lib.cadaclysm_view_zoom(v, math.log(zoom) / -math.log(_ZOOM_PER_STEP))
 
 
-def _pick_dict(pick: Any, label: Optional[int] = None) -> "Pick":
+def _pick_dict(pick: Any, label: Optional[int] = None, segment: Optional[int] = None,
+               distance: Optional[float] = None) -> "Pick":
     """A hit as the dict every pick answer carries: the item, node and face, `clicks` (2 for a
     double click, else 1) and `point` -- where the ray met the model, in the coordinates the
     items were shown in, or None where the library read no depth (no hit to place, a
     machining stock, the terminal library) -- and `viewport_label`: the viewport whose label
-    was hit (`item` 0), else None. `label` is an event pick's, which has no field of its own."""
+    was hit (`item` 0), else None; and, 1.30, `segment` (a line's segment, a curve's Bezier, a
+    solid's kernel edge; None for a face or a point) and `distance_px`. `label`, `segment` and
+    `distance` are an event pick's, which carries them in the event's tail."""
     raw = pick.viewport_label if label is None else label
+    seg = pick.segment if segment is None else segment
     return {"item": pick.item, "node": pick.node, "face": pick.face, "clicks": pick.clicks,
             "point": tuple(pick.point) if pick.has_point else None, "overlay": bool(pick.overlay),
-            "viewport_label": None if raw < 0 else raw}
+            "viewport_label": None if raw < 0 else raw,
+            "segment": None if seg == _SNAP_NONE else seg,
+            "distance_px": pick.distance_px if distance is None else distance}
 
 
 def _event_dict(e: _InputEvent, y_up: bool) -> Dict[str, Any]:
@@ -831,9 +953,10 @@ def _event_dict(e: _InputEvent, y_up: bool) -> Dict[str, Any]:
     elif kind == "resize":
         out.update(width=e.width, height=e.height)
     elif kind == "pick":
-        out["pick"] = _pick_dict(e.pick, e.pick_viewport_label) if e.pick.item or e.pick_viewport_label >= 0 else None
+        out["pick"] = (_pick_dict(e.pick, e.pick_viewport_label, e.pick_segment, e.pick_distance_px)
+                       if e.pick.item or e.pick_viewport_label >= 0 else None)
     elif kind == "snap":
-        out["snap"] = _snap_dict(e.snap) if e.snap.kind else None
+        out["snap"] = _snap_dict(e.snap, tail=e) if e.snap.kind else None
     elif kind == "close":
         out["camera"] = _camera(e.camera, _Pick(), y_up)
     return out
@@ -853,12 +976,18 @@ def _anchor_name(code: int) -> str:
     return next(name for name, c in _ALIGN.items() if c == code)
 
 
-def _snap_dict(snap: _Snap) -> "Snap":
-    """A snap's answer as the dict `View.snap` and `View.last_snap` return (see `Snap`)."""
+def _snap_dict(snap: Any, tail: Any = None) -> "Snap":
+    """A snap's answer as the dict `View.snap` and `View.last_snap` return (see `Snap`); `tail`
+    is the input event whose `snap_*` fields carry what its frozen 1.22 snap lacks."""
+    get = (lambda f: getattr(snap, f)) if tail is None else (lambda f: getattr(tail, "snap_" + f))
     kind = next((name for name, bit in _SNAP_KINDS.items() if bit == snap.kind), str(snap.kind))
+    raw = get("guides")
+    guides = [(tuple(raw[6 * g:6 * g + 3]), tuple(raw[6 * g + 3:6 * g + 6])) for g in range(min(get("guide_count"), 2))]
     return {"kind": kind, "point": tuple(snap.point), "item": snap.item, "node": snap.node, "face": snap.face,
             "edge": None if snap.edge == _SNAP_NONE else snap.edge, "tangent": tuple(snap.tangent),
-            "axis": tuple(snap.axis), "radius": snap.radius, "distance_px": snap.distance_px, "clicks": snap.clicks}
+            "axis": tuple(snap.axis), "radius": snap.radius, "distance_px": snap.distance_px, "clicks": snap.clicks,
+            "label": get("label").decode("utf-8", "replace"),
+            "locked_angle": get("locked_angle") if get("locked") else None, "guides": guides}
 
 
 def _camera(cam: _Camera, pick: _Pick, y_up: bool) -> dict:
@@ -1496,6 +1625,59 @@ class Item:
         """Draw the item after every other, depth testing off; picked ahead of what is under it."""
         self.view._ok("cadaclysm_view_set_on_top", self.id, bool(on))
 
+    def set_lines(self, segments: Any) -> None:
+        """Replace a `show_lines` item's segments ((n, 6) or (n, 2, 3)) under the same id:
+        colour, layer, dash, placement and on top kept, the camera not re-framed."""
+        s, sp = _floats(segments)
+        if s.size % 6:
+            raise ValueError(f"set_lines takes six numbers a segment, not {s.size}")
+        self.view._ok("cadaclysm_view_set_lines", self.id, sp, s.size // 6)
+
+    def set_curves(self, beziers: Any) -> None:
+        """Replace a `show_curves` item's curves ((n, 4, 4): x, y, z, w control points)."""
+        import numpy as np
+        b = np.ascontiguousarray(beziers, dtype=np.float32)
+        if b.ndim == 2 and b.shape == (4, 4):
+            b = b[None]
+        if b.size and (b.ndim != 3 or b.shape[1:] != (4, 4)):
+            raise ValueError(f"set_curves takes (n, 4, 4) control points, not {b.shape}")
+        self.view._ok("cadaclysm_view_set_curves", self.id, b.ctypes.data_as(POINTER(c_float)), len(b) if b.size else 0)
+
+    def set_points(self, positions: Any) -> None:
+        """Replace a points item's points ((n, 3) or a flat run). The same count keeps the
+        point states; a new count keeps them by index, new points normal."""
+        p, pp = _floats(positions)
+        if p.size % 3:
+            raise ValueError(f"set_points takes three numbers a point, not {p.size}")
+        self.view._ok("cadaclysm_view_set_points", self.id, pp, p.size // 3)
+
+    def set_snap_points(self, points: Any, label: Optional[str] = None) -> None:
+        """Points a "point" snap lands on ((n, 3) or a flat run, in the coordinates the item was
+        shown in, moving with its node 0), each answering `label` (at most 31 bytes of UTF-8;
+        None or "": "point"). An empty `points` clears them; they also go with the item's
+        removal. A label with a NUL raises ValueError before the call. The library refuses, and
+        this raises ViewError for, text, glyph, image and machining items, a label past 31 bytes
+        and a value that is not finite; the terminal and render view libraries refuse it."""
+        p, pp = _floats(points)
+        if p.size % 3:
+            raise ValueError(f"set_snap_points takes three numbers a point, not {p.size}")
+        self.view._ok("cadaclysm_view_set_snap_points", self.id, pp if p.size else None, p.size // 3,
+                      None if label is None else _text_bytes(label))
+
+    def set_mesh_positions(self, positions: Any, normals: Any = None) -> None:
+        """Move a `show_mesh` item's vertices: as many as it was shown with, its triangles
+        kept. `normals` the same shape, or None to recompute them in the mesh's own shading
+        (facet for a mesh shown without normals, smooth for one shown with)."""
+        p, pp = _floats(positions)
+        if p.size % 3:
+            raise ValueError(f"set_mesh_positions takes three numbers a vertex, not {p.size}")
+        nrm = None
+        if normals is not None:
+            n, nrm = _floats(normals)
+            if n.size != p.size:
+                raise ValueError(f"set_mesh_positions has {p.size // 3} positions but {n.size // 3} normals")
+        self.view._ok("cadaclysm_view_set_mesh_positions", self.id, pp, nrm, p.size // 3)
+
     def set_occluded(self, mode: str) -> None:
         """How the item's lines and points draw where a surface hides them: "off" (not
         drawn; an item shows with this until it is set), "solid" (drawn through) or "dashed"
@@ -1538,10 +1720,11 @@ class Item:
 
 class Overlay(Item):
     """An overlay shown (view ABI 1.24): a shape, text or an image hung from an anchor of the
-    window, drawn over everything, untouched by the camera. `remove`, `View.set_item_layer`
-    and, for text, `set_text` and `set_colour` work as on any item; the item calls that mean
-    nothing for an overlay -- `set_colour` on a shape or an image, `set_placement`, `set_xray`, the line
-    and node colours, `frame` -- raise ViewError saying it is an overlay."""
+    window, drawn over everything, untouched by the camera. `remove`, `View.set_item_layer`,
+    `set_colour` (a shape's fill and stroke, or text's glyphs, in place) and, for text,
+    `set_text` work as on any item; the item calls that mean nothing for an overlay --
+    `set_colour` on an image, `set_placement`, `set_xray`, the line and node colours, `frame` --
+    raise ViewError saying it is an overlay."""
 
     __slots__ = ("_anchor",)
 
@@ -2028,6 +2211,27 @@ class View:
         return self._item(self._ok("cadaclysm_view_show_curves", b.ctypes.data_as(POINTER(c_float)), len(b),
                                    None if packed is None else packed[1]))
 
+    def show_glyphs(self, at: Any, kind: str, size_pt: float = 12.0, colour: Optional[Colour] = None,
+                    dir: Any = None) -> Item:
+        """Drafting symbols of one `kind` -- "arrow", "tick", "cross", "square", "triangle",
+        "parallel", "perpendicular", "coincident", "tangent", "fixed", "horizontal" or
+        "vertical" -- at the points `at` ((n, 3)), each `size_pt` points across at any zoom,
+        in `colour` (default: the edge colour), turned to `dir` ((n, 3), as projected on
+        the screen; None: unturned). Glyph i is node i: it picks as the item and node i."""
+        if kind not in _GLYPH_KINDS:
+            raise ValueError(f"show glyphs: {kind!r} is not a glyph kind ({', '.join(_GLYPH_KINDS)})")
+        a, ap = _floats(at)
+        if a.size % 3:
+            raise ValueError(f"show_glyphs takes three numbers a point, not {a.size}")
+        dp = None
+        if dir is not None:
+            d, dp = _floats(dir)
+            if d.size != a.size:
+                raise ValueError(f"show_glyphs has {a.size // 3} points but {d.size // 3} directions")
+        packed = _rgb3(colour, self._lib)
+        return self._item(self._ok("cadaclysm_view_show_glyphs", ap, dp, a.size // 3, _GLYPH_KINDS[kind], float(size_pt),
+                                   None if packed is None else packed[1]))
+
     def show_image(self, corners: Any, rgba: Any, opacity: float = 1.0) -> Item:
         """`rgba` (h, w, 4) uint8, rows top first, on the quad `corners` (bottom-left,
         bottom-right, top-right, top-left)."""
@@ -2236,7 +2440,8 @@ class View:
 
     # -- the rest --
     def pick(self, x: int, y: int, viewport: int = 0) -> Optional[Pick]:
-        """What is under pixel (x, y) of `viewport`: {"item", "node", "face", "clicks", "point"}, or None.
+        """What is under pixel (x, y) of `viewport`, as a `Pick`, or None. Lines, curves, points and
+        glyphs within the pick aperture (`set_pick_aperture`) come ahead of the face under it.
 
         A view never drawn is drawn first: the library answers a pick from the frame it has
         drawn, so one asked before any draw finds nothing. A failure other than "no answer
@@ -2274,11 +2479,15 @@ class View:
             raise ViewError(waiting)
         return None
 
-    def set_snap(self, kinds: Union[str, Iterable[str], None] = "all", aperture_px: float = 0.0,
+    def set_snap(self, kinds: Union[str, Iterable[str], None] = "default", aperture_px: float = 0.0,
                  marker: bool = True) -> None:
-        """What a snap may land on: "all", one kind's name, several, or None to switch snapping
-        off -- the kinds are "vertex", "midpoint", "centre" (a circular edge's), "quadrant",
-        "edge", "face", "grid" and "plane". `aperture_px` is how far from the cursor a point
+        """What a snap may land on: "default", "all", one kind's name, several, or None to switch
+        snapping off -- the kinds are "vertex", "midpoint", "centre" (a circular edge's),
+        "quadrant", "edge", "face", "grid" and "plane", and 1.30's "end" (every segment's and
+        Bezier's ends), "intersection" (where two edges cross), "point" (the points
+        `Item.set_snap_points` registered) and "alignment" (the guides through recent snaps).
+        "default" is the first eight and "point"; "end", "intersection" and "alignment" are on
+        only when asked for ("all" is all twelve). `aperture_px` is how far from the cursor a point
         kind may lie (0: the library's default, 10 pixels); `marker` whether the view draws the
         marker at the snap. A view starts with snapping off. Once on, a mouse hovering over a
         view in its own window snaps, and so does a click (`last_snap` reads them); `snap` asks
@@ -2286,7 +2495,9 @@ class View:
         if kinds is None:
             bits = 0
         elif kinds == "all":
-            bits = 0xFF
+            bits = _SNAP_ALL
+        elif kinds == "default":
+            bits = _SNAP_DEFAULT
         else:
             bits = 0
             for name in [kinds] if isinstance(kinds, str) else kinds:
@@ -2334,6 +2545,48 @@ class View:
     def clear_snap(self) -> None:
         """Hides the snap marker and drops any snap asked or answered and not yet read."""
         self._void("cadaclysm_view_clear_snap")
+
+    def set_snap_base(self, point: Optional[Sequence[float]], step_deg: float = 15.0) -> None:
+        """The angle lock: snaps that land on no point kind turn about `point` (world, three
+        numbers) onto the nearest multiple of `step_deg` (0 < step <= 180), in the work plane's
+        directions or the plane facing the eye; the answer is kind "plane" with its
+        `locked_angle`. `None` clears it (`step_deg` then ignored). Fewer than three numbers raise
+        ValueError; a point that is not finite or a step out of range raises ViewError. The
+        terminal and render view libraries refuse it."""
+        xyz = None if point is None else _f32(point, 3)
+        self._ok("cadaclysm_view_set_snap_base", xyz, float(step_deg))
+
+    def set_pick_aperture(self, points: float) -> None:
+        """How far a pick reaches for lines, curves, points and glyphs, in points (times the
+        screen density): 0 restores the default, 4; others clamp to 1..32; a negative size or one
+        that is not finite raises ViewError. Faces are always the pixel's. The terminal and
+        render view libraries keep it, but their picks are face picks."""
+        self._ok("cadaclysm_view_set_pick_aperture", float(points))
+
+    def pick_rect(self, x: float, y: float, w: float, h: float, crossing: bool = True,
+                  viewport: int = 0) -> List[RectHit]:
+        """What lies in a rectangle of `viewport` (device pixels from its top left; a negative `w`
+        or `h` flips it), CPU only: with `crossing`, everything with a visible part inside, else
+        what lies wholly inside and is visible. Hidden things come only drawn x-ray or on top.
+        Text, images, overlays, viewport labels, machining stocks and isocurves are left out.
+
+        Each hit is a `RectHit`, {"item", "kind", "index"}, sorted by item, kind, index: "face"
+        (numbered as `pick` numbers it), "node" (an item with no face ranges), "segment" (a
+        lines item's segment or a curves item's Bezier), "edge" (a kernel solid's or read
+        scene's kernel edge index) or "point" (a point's or glyph's index). An exact item shown
+        with no mesh has no faces here, only edges. A rectangle wholly off the viewport, and a
+        lost device, answer []; a rectangle that is not finite or an unknown viewport raises
+        ViewError. The render view library refuses it."""
+        args = (int(viewport), float(x), float(y), float(w), float(h), bool(crossing))
+        buf = (_RectHit * 64)()
+        n = self._call("cadaclysm_view_pick_rect", *args, buf, 64)
+        if n == 0 and _text(self._lib.cadaclysm_view_last_error()):
+            raise self._error()   # this call's own refusal: the library cleared the error first
+        if n > 64:
+            buf = (_RectHit * n)()
+            n = self._call("cadaclysm_view_pick_rect", *args, buf, n)
+        names = {code: name for name, code in _HIT_KINDS.items()}
+        return [{"item": r.item, "kind": names.get(r.kind, str(r.kind)), "index": r.index} for r in buf[:n]]
 
     def set_work_plane(self, origin: Optional[Sequence[float]], x_axis: Sequence[float] = (1.0, 0.0, 0.0),
                        normal: Sequence[float] = (0.0, 0.0, 1.0), step: float = 0.0) -> None:
@@ -2383,6 +2636,7 @@ class View:
             raise ViewError("cadaclysm_view_next_event: the view is closed")
         e = _InputEvent()
         e.size = ctypes.sizeof(_InputEvent)
+        e.pick_viewport_label, e.pick_segment = -1, _SNAP_NONE   # the none values, until the library writes them
         if self._lib.cadaclysm_view_next_event(self._v, ctypes.byref(e)):
             return _event_dict(e, self._up == 1)
         waiting = _text(self._lib.cadaclysm_view_last_error())
@@ -2552,6 +2806,18 @@ class View:
         self._ok("cadaclysm_view_set_lighting", _LIGHTING[value])
 
     @property
+    def textures(self) -> bool:
+        """Whether parts whose material has a base-colour texture (a glTF's, `Node.material`)
+        draw it -- True, the default -- or draw in their colour, the material's base colour
+        factor, as every CAD part does (1.33). The terminal and render-view libraries draw
+        colours either way."""
+        return bool(self._call("cadaclysm_view_textures"))
+
+    @textures.setter
+    def textures(self, on: bool) -> None:
+        self._ok("cadaclysm_view_set_textures", bool(on))
+
+    @property
     def analysis(self) -> Optional[str]:
         """The surface analysis drawn over every surface in place of the lighting, for judging
         it as a surfacer does: "zebra", "isophotes", or curvature colour -- "gaussian", "mean",
@@ -2615,6 +2881,126 @@ class View:
         rgb = _f32(_colour(value.colour, self._lib), 3) if has else (c_float * 3)()
         s = _OccludedStyle(ctypes.sizeof(_OccludedStyle), float(value.dash), float(value.gap), float(value.dim), int(has), rgb)
         self._ok("cadaclysm_view_set_occluded_style", ctypes.byref(s))
+
+    def set_clip_plane(self, slot: int, point: Sequence[float], normal: Sequence[float], cap: Optional[Colour] = None,
+                       hatch: Optional[Colour] = None, hatch_angle: float = 45.0, hatch_spacing: float = 0.0,
+                       hatch_width: float = 1.0, outline: Optional[Colour] = None, outline_width: float = 1.0) -> None:
+        """Sets clip-plane slot `slot` (0..CLIP_PLANES-1), view-wide (1.31): what lies on the side
+        `normal` points to is hidden, from every item, edge, curve, line, point, pick and snap (not
+        the grid, text, images or overlays). A point is drawn only where every set plane keeps it,
+        so two make a slab and six a box. `cap` (a colour, or None) fills the cut of every closed
+        body; `hatch` (a colour, needs `cap`) draws lines over the cap at `hatch_angle` degrees
+        from the plane's first axis, `hatch_spacing` apart in the scene's units (0: a fiftieth of
+        the scene's size) and `hatch_width` points wide. `outline` (a colour, or None; 1.32) draws
+        the cut as a line `outline_width` points wide (0: 1), capped or not. `set_clip_mode`
+        ("cutaway") hides only where every plane hides. Translucent items are clipped, never
+        capped. The library refuses (ViewError) a slot past the last, a zero or non-finite
+        normal, a hatch without a cap, a negative spacing or a width above 100 points; the
+        terminal library refuses every plane."""
+        p = self._clip_plane_struct(point, normal, cap, hatch, hatch_angle, hatch_spacing, hatch_width, outline, outline_width)
+        self._ok("cadaclysm_view_set_clip_plane", int(slot), ctypes.byref(p))
+
+    def _clip_plane_struct(self, point, normal, cap, hatch, hatch_angle, hatch_spacing, hatch_width, outline, outline_width):
+        p = _ClipPlane(ctypes.sizeof(_ClipPlane))
+        p.point[:] = list(_f64(point, 3))
+        p.normal[:] = list(_f64(normal, 3))
+        if cap is not None:
+            p.cap = 1
+            p.cap_colour[:] = list(_f32(_colour(cap, self._lib), 3))
+        if hatch is not None:
+            p.hatch = 1
+            p.hatch_colour[:] = list(_f32(_colour(hatch, self._lib), 3))
+        p.hatch_angle, p.hatch_spacing, p.hatch_width = float(hatch_angle), float(hatch_spacing), float(hatch_width)
+        if outline is not None:
+            p.outline = 1
+            p.outline_colour[:] = list(_f32(_colour(outline, self._lib), 3))
+        p.outline_width = float(outline_width)
+        return p
+
+    @staticmethod
+    def _clip_plane_record(out) -> ClipPlane:
+        cap = tuple(out.cap_colour) if out.cap else None
+        outline = tuple(out.outline_colour) if out.outline else None
+        width = out.outline_width if out.outline else 1.0
+        if not out.hatch:
+            return ClipPlane(tuple(out.point), tuple(out.normal), cap, outline=outline, outline_width=width)
+        return ClipPlane(tuple(out.point), tuple(out.normal), cap, tuple(out.hatch_colour), out.hatch_angle,
+                         out.hatch_spacing, out.hatch_width, outline, width)
+
+    def clear_clip_plane(self, slot: int) -> None:
+        """Clears clip-plane slot `slot` (1.31); an empty slot stays empty."""
+        self._ok("cadaclysm_view_set_clip_plane", int(slot), None)
+
+    def clip_plane(self, slot: int) -> Optional[ClipPlane]:
+        """Clip-plane slot `slot` as set (1.31), with the normal of unit length and a zero width
+        resolved to 1; None for an empty slot (and always on the terminal library). A slot past
+        the last raises ViewError."""
+        out = _ClipPlane(ctypes.sizeof(_ClipPlane))
+        if not self._call("cadaclysm_view_clip_plane", int(slot), ctypes.byref(out)):
+            if 0 <= int(slot) < CLIP_PLANES:
+                return None
+            raise self._error()
+        return self._clip_plane_record(out)
+
+    def set_clip_mode(self, mode: str) -> None:
+        """How the view-wide planes combine (1.32): "intersection" (the default: drawn where every
+        plane keeps) or "cutaway" (hidden only where every plane hides: two planes cut a quarter
+        away). Kept as the planes are. The terminal library refuses "cutaway" (ViewError)."""
+        if mode not in _CLIP_MODES:
+            raise ValueError(f"clip mode {mode!r}: 'intersection' or 'cutaway'")
+        self._ok("cadaclysm_view_set_clip_mode", _CLIP_MODES[mode])
+
+    def clip_mode(self) -> str:
+        """The view-wide planes' mode (1.32): "intersection" or "cutaway"."""
+        return "cutaway" if self._call("cadaclysm_view_clip_mode") == _CLIP_MODES["cutaway"] else "intersection"
+
+    def set_viewport_clip_plane(self, viewport: int, slot: int, point: Sequence[float], normal: Sequence[float],
+                                cap: Optional[Colour] = None, hatch: Optional[Colour] = None, hatch_angle: float = 45.0,
+                                hatch_spacing: float = 0.0, hatch_width: float = 1.0, outline: Optional[Colour] = None,
+                                outline_width: float = 1.0) -> None:
+        """Sets slot `slot` of viewport `viewport`'s own clip set (1.32), as `set_clip_plane` sets
+        the view-wide one, in that viewport only: the first gives the viewport a set of its own
+        (every other slot empty, mode "intersection"), which it then draws, picks and snaps with
+        instead of the view-wide set. With no viewports set, viewport 0 is the window. Kept while
+        the viewport exists. Refused (ViewError) as `set_clip_plane` is, and for a viewport past
+        the last or past CLIP_VIEWPORTS-1."""
+        p = self._clip_plane_struct(point, normal, cap, hatch, hatch_angle, hatch_spacing, hatch_width, outline, outline_width)
+        self._ok("cadaclysm_view_set_viewport_clip_plane", _u32(viewport, "viewport"), int(slot), ctypes.byref(p))
+
+    def clear_viewport_clip_plane(self, viewport: int, slot: int) -> None:
+        """Clears slot `slot` of viewport `viewport`'s own clip set (1.32); the set stays its own
+        (`set_viewport_clip_mode(viewport, None)` drops it)."""
+        self._ok("cadaclysm_view_set_viewport_clip_plane", _u32(viewport, "viewport"), int(slot), None)
+
+    def viewport_clip_plane(self, viewport: int, slot: int) -> Optional[ClipPlane]:
+        """Slot `slot` of viewport `viewport`'s own clip set (1.32), as `clip_plane` answers the
+        view-wide one; None for an empty slot or a viewport with no set of its own (it draws with
+        the view-wide planes). A slot past the last raises ViewError."""
+        out = _ClipPlane(ctypes.sizeof(_ClipPlane))
+        if not self._call("cadaclysm_view_viewport_clip_plane", _u32(viewport, "viewport"), int(slot), ctypes.byref(out)):
+            if 0 <= int(slot) < CLIP_PLANES:
+                return None
+            raise self._error()
+        return self._clip_plane_record(out)
+
+    def set_viewport_clip_mode(self, viewport: int, mode: Optional[str]) -> None:
+        """Viewport `viewport`'s clip mode (1.32): "intersection" or "cutaway" sets its own set's
+        mode, giving it a set of its own if it had none (with no planes: that viewport is then
+        not clipped while the others are); None (or "inherit") drops its set, back to the
+        view-wide one. Refused (ViewError) for a viewport as `set_viewport_clip_plane` refuses one."""
+        if mode is None or mode == "inherit":
+            code = _CLIP_INHERIT
+        elif mode in _CLIP_MODES:
+            code = _CLIP_MODES[mode]
+        else:
+            raise ValueError(f"viewport clip mode {mode!r}: 'intersection', 'cutaway' or None (inherit)")
+        self._ok("cadaclysm_view_set_viewport_clip_mode", _u32(viewport, "viewport"), code)
+
+    def viewport_clip_mode(self, viewport: int) -> Optional[str]:
+        """Viewport `viewport`'s own set's mode (1.32), "intersection" or "cutaway"; None where it
+        has no set of its own (it inherits the view-wide one)."""
+        code = self._call("cadaclysm_view_viewport_clip_mode", _u32(viewport, "viewport"))
+        return {0: "intersection", 1: "cutaway"}.get(code)
 
     def _set_line_colour(self, layer: str, rgb: Colour, from_part: bool) -> None:
         self._ok("cadaclysm_view_set_line_colour", _LAYERS[layer], _f32(_colour(rgb, self._lib), 3), int(bool(from_part)))

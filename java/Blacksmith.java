@@ -438,6 +438,35 @@ public final class Blacksmith {
             MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_DOUBLE).withName("principal_axes"),
             ValueLayout.JAVA_BOOLEAN.withName("accuracy_met"),
             MemoryLayout.paddingLayout(7));
+    /** {@code CadaclysmBlacksmithGearReport}: five doubles ({@code base_radius} NaN for cycloidal
+     *  gearing) and C's one-byte {@code bool undercut}, 7 bytes of tail padding (48 bytes). */
+    private static final MemoryLayout GEAR_REPORT_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_DOUBLE.withName("pitch_radius"),
+            ValueLayout.JAVA_DOUBLE.withName("base_radius"),
+            ValueLayout.JAVA_DOUBLE.withName("tip_radius"),
+            ValueLayout.JAVA_DOUBLE.withName("root_radius"),
+            ValueLayout.JAVA_DOUBLE.withName("thickness"),
+            ValueLayout.JAVA_BOOLEAN.withName("undercut"),
+            MemoryLayout.paddingLayout(7));
+    /** {@code CadaclysmBlacksmithSettle}: a double, C's one-byte {@code bool contact} and {@code
+     *  recoiled}, 6 bytes of padding, four doubles (the point and normal, NaN without contact), five
+     *  {@code uint32_t} (the indices {@code UINT32_MAX} without contact, then the steps), 4 bytes of
+     *  tail padding (72 bytes). */
+    private static final MemoryLayout SETTLE_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_DOUBLE.withName("value"),
+            ValueLayout.JAVA_BOOLEAN.withName("contact"),
+            ValueLayout.JAVA_BOOLEAN.withName("recoiled"),
+            MemoryLayout.paddingLayout(6),
+            ValueLayout.JAVA_DOUBLE.withName("point_x"),
+            ValueLayout.JAVA_DOUBLE.withName("point_y"),
+            ValueLayout.JAVA_DOUBLE.withName("normal_x"),
+            ValueLayout.JAVA_DOUBLE.withName("normal_y"),
+            ValueLayout.JAVA_INT.withName("driver_loop"),
+            ValueLayout.JAVA_INT.withName("driver_segment"),
+            ValueLayout.JAVA_INT.withName("follower_loop"),
+            ValueLayout.JAVA_INT.withName("follower_segment"),
+            ValueLayout.JAVA_INT.withName("steps"),
+            MemoryLayout.paddingLayout(4));
     /** {@code CadaclysmBlacksmithSheetRule}: three doubles, the relief code and 4 bytes of padding,
      *  two doubles, the corner code and 4 bytes of padding, two doubles (72 bytes). */
     private static final MemoryLayout SHEET_RULE_LAYOUT = MemoryLayout.structLayout(
@@ -1050,6 +1079,10 @@ public final class Blacksmith {
     private static final MethodHandle PROFILE_POLYLINE, PROFILE_ARC, PROFILE_ARC_THROUGH, PROFILE_ELLIPSE, PROFILE_FROM_BEZIERS,
             PROFILE_BEZIER_COUNT, PROFILE_BEZIERS, PROFILE_LOOPS, PROFILE_CHAIN_ORDER;
 
+    private static final MethodHandle PROFILE_GEAR_INVOLUTE, PROFILE_GEAR_WHEEL_CYCLOIDAL, PROFILE_GEAR_PINION_CYCLOIDAL,
+            GEAR_CENTRE_DISTANCE_INVOLUTE, CONTACT_SETTLE;
+    private static final MethodHandle NACA_PARSE, NACA_POINTS, NACA_SPLINE, PROFILE_NACA;
+
     private static final MethodHandle PROFILE_FROM_PIECES, PROFILE_PIECES_JSON, PROFILE_FILLET_CORNER, PROFILE_BOUNDS,
             PROFILE_REVERSED, DOCUMENT_REVISION, DOCUMENT_NODES, DOCUMENT_INPUTS, DOCUMENT_READERS, DOCUMENT_PROBE,
             DOCUMENT_PROBE_END, DOCUMENT_RESULT_BEZIER_COUNT, DOCUMENT_RESULT_BEZIERS, DOCUMENT_META;
@@ -1113,6 +1146,7 @@ public final class Blacksmith {
             PROFILE_POINT_AT_LENGTH, PROFILE_DIVIDE_BY_COUNT, PROFILE_DIVIDE_BY_LENGTH, SAMPLES_COUNT, SAMPLES_AT, SAMPLES_FREE, CONTAINS, CLASSIFIER_NEW, CLASSIFIER_CONTAINS, CLASSIFIER_FREE, CLOSEST,
             CLOSEST_POINT, PROJECTOR_NEW, PROJECTOR_CLOSEST_POINT, PROJECTOR_FREE, FACE_CLOSEST_POINT, EDGE_CLOSEST_POINT, NURBS_CURVE_CLOSEST_POINT,
             NURBS_CURVE_CLOSEST_POINT_WITHIN, NURBS_CURVE_CLOSEST_POINTS, CURVE_CLOSEST_POINTS, PROJECTOR_CURVE_CLOSEST_POINTS, NURBS_CURVE_CLOSEST_OBJECT,
+            FROM_MESH,
             TRIANGLE_MESH_NEW, SOLID_TRIANGLE_MESH, TRIANGLE_MESH_FREE, TRIANGLE_MESH_VERTEX_COUNT, TRIANGLE_MESH_TRIANGLE_COUNT, TRIANGLE_MESH_BOUNDS,
             TRIANGLE_MESH_CLOSEST_POINT, TRIANGLE_MESH_CURVE_CLOSEST_POINTS,
             NURBS_SURFACE_NEW, SOLID_FACE_SURFACE, NURBS_SURFACE_FREE, NURBS_SURFACE_DEGREES, NURBS_SURFACE_COUNTS, NURBS_SURFACE_DOMAIN,
@@ -1135,7 +1169,8 @@ public final class Blacksmith {
             PARSE_COLOUR, OPTION_SET, OPTION_GET,
             SKETCH_NEW, SKETCH_FREE, SKETCH_FROM_PROFILE, SKETCH_ADD_POINT, SKETCH_ADD_LINE,
             SKETCH_ADD_CIRCLE, SKETCH_ADD_ARC, SKETCH_ADD_BEZIER, SKETCH_ADD_CONIC, SKETCH_ADD_NURBS,
-            SKETCH_ADD_RECT, SKETCH_KIND, SKETCH_ENTITIES, SKETCH_POINT, SKETCH_SET_POINT,
+            SKETCH_ADD_RECT, SKETCH_ADD_POLYGON, SKETCH_CHAMFER, SKETCH_CHAMFER_ANGLE, SKETCH_PATTERN_RECTANGULAR,
+            SKETCH_PATTERN_CIRCULAR, SKETCH_MIRROR, SKETCH_AUTO_CONSTRAIN, SKETCH_KIND, SKETCH_ENTITIES, SKETCH_POINT, SKETCH_SET_POINT,
             SKETCH_RADIUS, SKETCH_SET_RADIUS, SKETCH_CENTRE, SKETCH_ENDS, SKETCH_SET_CONSTRUCTION,
             SKETCH_IS_CONSTRUCTION, SKETCH_IS_REFERENCE, SKETCH_REMOVE_ENTITY, SKETCH_REFERENCE, SKETCH_UPDATE_REFERENCE,
             SKETCH_CONSTRAIN, SKETCH_CONSTRAINTS, SKETCH_CONSTRAINT_KIND, SKETCH_CONSTRAINT_REFS, SKETCH_CONSTRAINT_VALUE,
@@ -1162,9 +1197,13 @@ public final class Blacksmith {
             DRAFT_ANALYSIS_COUNT, DRAFT_ANALYSIS_FACE, DRAFT_ANALYSIS_FREE,
             FACE_POINT, FACE_INNER_POINT, EDGE_POINT, EDGE_INNER_POINT, FACE_SIZE, EDGE_CONVEXITY, EDGES_CONVEXITY, TANGENT_FACES, TANGENT_EDGES,
             TANGENT_FACE_GROUPS, ANGLE_POINTS, ANGLE_BETWEEN, FACE_MINIMUM_RADIUS, PROFILE_AREA_PROPERTIES,
-            MATCH_SIDE, BLEND_SIDES, N_SIDED_PATCH, FILLET_SURFACES, FILLET_VARYING, FILLET_LAW, SPLIT_BY_CURVE, TRIM_BY_CURVE, JOIN_SHEETS,
+            MATCH_SIDE, BLEND_SIDES, N_SIDED_PATCH, FILLET_SURFACES, FILLET_VARYING, FILLET_LAW, FILLET_CHORD, FILLET_ASYMMETRIC, FILLET_FULL_ROUND, FILLET_RULE, SPLIT_BY_CURVE, TRIM_BY_CURVE, JOIN_SHEETS,
             FLANGE, EXTRUDE_TO, RECESS, MIRROR_JOIN, SPLIT_ALONG_CURVE, PANEL_GAP, NURBS_CURVE_OFFSET_ON_SHEET,
-            PATTERN_RECTANGULAR, PATTERN_CIRCULAR, PATTERN_ALONG, PATTERN, PATTERN_FEATURE, HOLE, HOLE_TOOL, RIB, RIB_TOOL,
+            NURBS_CURVE_OFFSET, NURBS_CURVE_OFFSET_NORMAL_TO_SHEET, NURBS_CURVE_OFFSET_TANGENT_TO_SHEET, NURBS_SURFACE_OFFSET,
+            SOLID_OFFSET, SOLID_OFFSET_FACE, SOLID_SPLIT_FACES, SOLID_SPLIT_ALONG_SILHOUETTE,
+            SOLID_UNTRIM, SOLID_UNSTITCH, SOLID_RULED_FROM_EDGES, SOLID_CHANGE_SEAM, SOLID_MERGE_SURFACES, NURBS_SURFACE_MERGE,
+            NURBS_SURFACE_TWEEN,
+            PATTERN_RECTANGULAR, PATTERN_CIRCULAR, PATTERN_MIRROR, PATTERN_ALONG, PATTERN, PATTERN_FEATURE, HOLE, HOLE_TOOL, RIB, RIB_TOOL,
             RIB_REVOLVED, RIB_REVOLVED_TOOL, WEB, WEB_TOOL, HOLE_THREADED, HOLE_THREADED_TOOL, THREAD_SIZE_COUNT, THREAD_SIZE_AT,
             THREAD_SIZE_SIZE, THREAD_SIZE_FIND, THREAD, THREAD_TOOL, COSMETIC_THREAD, THREAD_RECORD;
     private static final MethodHandle FACE_ROUND_RADIUS, FACE_CHAMFER_DISTANCE, EDGE_BEZIER_COUNT, EDGE_BEZIERS,
@@ -1181,13 +1220,15 @@ public final class Blacksmith {
             DOCUMENT_PARAMS, DOCUMENT_EVALUATE, DOCUMENT_EVALUATE_WITH, DOCUMENT_RESULT_KIND, DOCUMENT_RESULT_SOLID, DOCUMENT_RESULT_PROFILE, DOCUMENT_RESULT_PROFILE_COUNT, DOCUMENT_RESULT_PROFILE_AT, DOCUMENT_RESULT_NURBS_CURVE, DOCUMENT_RESULT_SUBD, DOCUMENT_VALUE, DOCUMENT_ERRORS, DOCUMENT_KINDS,
             DOCUMENT_SOLID_BODY, DOCUMENT_PROFILE_PATH, DOCUMENT_BRANCH_NEW, DOCUMENT_BRANCH_SWITCH, DOCUMENT_TIPS, DOCUMENT_BRANCH_RENAME, DOCUMENT_BRANCH_DELETE, DOCUMENT_BRANCH_LIST, DOCUMENT_LOG, DOCUMENT_FREE, BIM_DOCUMENT_NEW, BIM_DOCUMENT_LOAD, BIM_KINDS, BIM_DOCUMENT_EXPORT_IFC;
 
-    private static final MethodHandle SHEET_RULE_DEFAULT, SHEET_BASE, SHEET_CONTOUR, SHEET_FLANGE, SHEET_HEM, SHEET_FOLD, SHEET_RIP, SHEET_CONVERT,
+    private static final MethodHandle SHEET_RULE_DEFAULT, SHEET_BASE, SHEET_CONTOUR, SHEET_LOFTED_FLANGE, SHEET_FLANGE, SHEET_HEM, SHEET_FOLD, SHEET_RIP, SHEET_CONVERT,
             SHEET_CORNER_RELIEF, SHEET_RIP_POINTS, SHEET_RIP_FACE, SHEET_JOIN, SHEET_FILLET, SHEET_CHAMFER, IS_SHEET_METAL, SHEET_BEND_FACES, SHEET_INFO, SHEET_BENDS, FLAT_PATTERN, FLAT_PATTERN_BODY, FLAT_PATTERN_PROFILE,
             FLAT_PATTERN_FRAME, FLAT_PATTERN_BEND_COUNT, FLAT_PATTERN_BEND, FLAT_PATTERN_FOLD_BEND_COUNT, FLAT_PATTERN_FOLD_BEND, FLAT_PATTERN_DXF,
             FLAT_PATTERN_FREE, FOLD_FLAT, PAGE_ADD_FLAT_PATTERN, UNROLL, UNROLLED_SHEET, UNROLLED_FACE_COUNT, UNROLLED_FACES,
             UNROLLED_CURVE_PIECE_COUNT, UNROLLED_CURVE_PIECE, UNROLLED_POINT, UNROLLED_NOT_DEVELOPABLE_COUNT, UNROLLED_NOT_DEVELOPABLE,
             UNROLLED_CUT_COUNT, UNROLLED_CUTS, UNROLLED_FREE;
 
+    private static final MethodHandle SQUISH, SQUISHED_SHEET, SQUISHED_FACE_COUNT, SQUISHED_FACES, SQUISHED_DISTORTION, SQUISHED_EXACT_COUNT,
+            SQUISHED_EXACT, SQUISHED_CURVE_PIECE_COUNT, SQUISHED_CURVE_PIECE, SQUISHED_POINT, SQUISHED_FREE;
     private static final MethodHandle NURBS_CURVE_SPIRAL, NURBS_CURVE_LENGTH_BETWEEN, NURBS_CURVE_POINT_AT_NORMALIZED_LENGTH,
             NURBS_CURVE_POINTS_AT_NORMALIZED_LENGTHS, NURBS_CURVE_DIVIDE_EQUIDISTANT, NURBS_CURVE_DIVIDE_AS_CONTOUR, NURBS_CURVE_MASS,
             NURBS_CURVE_FACE_ISOCURVES, FACE_ISO_INTERVALS, NURBS_CURVE_IS_ISOPARAMETRIC, SOLID_SECTION_CURVES, SOLID_CONTOUR_CURVES,
@@ -1195,6 +1236,13 @@ public final class Blacksmith {
     private static final MethodHandle PROFILE_UNION, PROFILE_DIFFERENCE, PROFILE_REGIONS, PROFILE_CONTAINS, PROFILE_RELATIONSHIP,
             PROFILE_DEVIATION, PROFILE_OFFSET_CORNER, PROFILE_OFFSET_OPEN, PROFILE_REDUCE_SEGMENTS, PROFILE_MERGE_COLINEAR,
             PROFILE_BREAK_AT_KINKS, PROFILE_IS_CONVEX, PROFILE_MAKE_CLOSED, PROFILE_WITH_SEAM;
+    private static final MethodHandle POLYGON_SET_FROM_RINGS, POLYGON_SET_FREE, POLYGON_SET_VIEW, POLYGON_SET_CLEAN, POLYGON_SET_UNION,
+            POLYGON_SET_INTERSECTION, POLYGON_SET_DIFFERENCE, POLYGON_SET_SYMMETRIC_DIFFERENCE, POLYGON_SET_UNION_ALL,
+            POLYGON_SET_INTERSECTION_AREA, POLYGON_SET_DIFFERENCE_AREA, POLYGON_SET_BUFFER, POLYGON_SET_BUFFER_POLYLINE,
+            POLYGON_SET_TRANSFORM, POLYGON_SET_AREA, POLYGON_SET_PERIMETER, POLYGON_SET_BOUNDS, POLYGON_SET_CENTROID, POLYGON_SET_LOCATE,
+            POLYGON_SET_CONTAINS, POLYGON_SET_INTERSECTS, POLYGON_SET_CONTAINS_POLYLINE, POLYGON_SET_INTERSECTS_POLYLINE,
+            POLYGON_SET_DISTANCE, POLYGON_SET_DISTANCE_TO_POLYLINE, POLYGON_SET_BOUNDARY_DISTANCE, POLYGON_SET_CLIP_POLYLINE,
+            POLYGON_SET_LINES_VIEW, POLYGON_SET_LINES_FREE, PROFILE_POLYGON_SET, POLYGON_SET_PROFILES;
 
     /** {@code {flavour, features}} of the loaded library, or null for the separate {@code
      *  cadaclysm_blacksmith} of earlier releases; see {@link #flavour()}. Assigned before any
@@ -1257,6 +1305,15 @@ public final class Blacksmith {
         PROFILE_ARC = bind(linker, lib, "cadaclysm_blacksmith_profile_arc", FunctionDescriptor.of(A, D, D, D, D, D));
         PROFILE_ARC_THROUGH = bind(linker, lib, "cadaclysm_blacksmith_profile_arc_through", FunctionDescriptor.of(A, D, D, D, D, D, D));
         PROFILE_ELLIPSE = bind(linker, lib, "cadaclysm_blacksmith_profile_ellipse", FunctionDescriptor.of(A, D, D, D, D));
+        PROFILE_GEAR_INVOLUTE = bind(linker, lib, "cadaclysm_blacksmith_profile_gear_involute", FunctionDescriptor.of(A, D, I, D, D, D, D, D, D, D, A));
+        PROFILE_GEAR_WHEEL_CYCLOIDAL = bind(linker, lib, "cadaclysm_blacksmith_profile_gear_wheel_cycloidal", FunctionDescriptor.of(A, D, I, I, D, D, D, D, D, A));
+        PROFILE_GEAR_PINION_CYCLOIDAL = bind(linker, lib, "cadaclysm_blacksmith_profile_gear_pinion_cycloidal", FunctionDescriptor.of(A, D, I, I, D, I, D, D, D, A));
+        GEAR_CENTRE_DISTANCE_INVOLUTE = bind(linker, lib, "cadaclysm_blacksmith_gear_centre_distance_involute", FunctionDescriptor.of(D, D, I, I, D, D, D));
+        NACA_PARSE = bind(linker, lib, "cadaclysm_blacksmith_naca_parse", FunctionDescriptor.of(B, A, A));
+        NACA_POINTS = bind(linker, lib, "cadaclysm_blacksmith_naca_points", FunctionDescriptor.of(I, A, D, I, B, A));
+        NACA_SPLINE = bind(linker, lib, "cadaclysm_blacksmith_naca_spline", FunctionDescriptor.of(I, A, D, I, B, A, A));
+        PROFILE_NACA = bind(linker, lib, "cadaclysm_blacksmith_profile_naca", FunctionDescriptor.of(A, A, D, B, D, A));
+        CONTACT_SETTLE = bind(linker, lib, "cadaclysm_blacksmith_contact_settle", FunctionDescriptor.of(B, A, D, D, D, A, D, D, D, I, D, D, A));
         PROFILE_FROM_BEZIERS = bind(linker, lib, "cadaclysm_blacksmith_profile_from_beziers", FunctionDescriptor.of(A, A, L, B));
         PROFILE_BEZIER_COUNT = bind(linker, lib, "cadaclysm_blacksmith_profile_bezier_count", FunctionDescriptor.of(I, A));
         PROFILE_BEZIERS = bind(linker, lib, "cadaclysm_blacksmith_profile_beziers", FunctionDescriptor.of(B, A, A, A));
@@ -1386,6 +1443,7 @@ public final class Blacksmith {
         NURBS_CURVE_CLOSEST_OBJECT = bind(linker, lib, "cadaclysm_blacksmith_nurbs_curve_closest_object",
                 FunctionDescriptor.of(I, A, A, I, A, I, A, I, A, I, A, I, A, I, A, I, D, D, A));
         TRIANGLE_MESH_NEW = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_new", FunctionDescriptor.of(A, A, I, A, I));
+        FROM_MESH = bind(linker, lib, "cadaclysm_blacksmith_from_mesh", FunctionDescriptor.of(A, A, I, A, I, D, D, D, I, A));
         SOLID_TRIANGLE_MESH = bind(linker, lib, "cadaclysm_blacksmith_solid_triangle_mesh", FunctionDescriptor.of(A, A, D));
         TRIANGLE_MESH_FREE = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_free", FunctionDescriptor.ofVoid(A));
         TRIANGLE_MESH_VERTEX_COUNT = bind(linker, lib, "cadaclysm_blacksmith_triangle_mesh_vertex_count", FunctionDescriptor.of(I, A));
@@ -1461,6 +1519,37 @@ public final class Blacksmith {
         RTREE_PAIRS_COUNT = bind(linker, lib, "cadaclysm_blacksmith_rtree_pairs_count", FunctionDescriptor.of(I, A));
         RTREE_PAIRS_AT = bind(linker, lib, "cadaclysm_blacksmith_rtree_pairs_at", FunctionDescriptor.of(B, A, I, A));
         RTREE_PAIRS_FREE = bind(linker, lib, "cadaclysm_blacksmith_rtree_pairs_free", FunctionDescriptor.ofVoid(A));
+        POLYGON_SET_FROM_RINGS = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_from_rings", FunctionDescriptor.of(A, A, A, I, A, I));
+        POLYGON_SET_FREE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_free", FunctionDescriptor.ofVoid(A));
+        POLYGON_SET_VIEW = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_view", FunctionDescriptor.of(B, A, A));
+        POLYGON_SET_CLEAN = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_clean", FunctionDescriptor.of(A, A));
+        POLYGON_SET_UNION = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_union", FunctionDescriptor.of(A, A, A));
+        POLYGON_SET_INTERSECTION = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_intersection", FunctionDescriptor.of(A, A, A));
+        POLYGON_SET_DIFFERENCE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_difference", FunctionDescriptor.of(A, A, A));
+        POLYGON_SET_SYMMETRIC_DIFFERENCE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_symmetric_difference", FunctionDescriptor.of(A, A, A));
+        POLYGON_SET_UNION_ALL = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_union_all", FunctionDescriptor.of(A, A, I));
+        POLYGON_SET_INTERSECTION_AREA = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_intersection_area", FunctionDescriptor.of(D, A, A));
+        POLYGON_SET_DIFFERENCE_AREA = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_difference_area", FunctionDescriptor.of(D, A, A));
+        POLYGON_SET_BUFFER = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_buffer", FunctionDescriptor.of(A, A, D, I, I, D));
+        POLYGON_SET_BUFFER_POLYLINE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_buffer_polyline", FunctionDescriptor.of(A, A, I, D, I, I, D, I));
+        POLYGON_SET_TRANSFORM = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_transform", FunctionDescriptor.of(A, A, A));
+        POLYGON_SET_AREA = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_area", FunctionDescriptor.of(D, A));
+        POLYGON_SET_PERIMETER = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_perimeter", FunctionDescriptor.of(D, A));
+        POLYGON_SET_BOUNDS = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_bounds", FunctionDescriptor.of(B, A, A));
+        POLYGON_SET_CENTROID = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_centroid", FunctionDescriptor.of(B, A, A));
+        POLYGON_SET_LOCATE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_locate", FunctionDescriptor.of(B, A, A, I, A));
+        POLYGON_SET_CONTAINS = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_contains", FunctionDescriptor.of(I, A, A));
+        POLYGON_SET_INTERSECTS = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_intersects", FunctionDescriptor.of(I, A, A));
+        POLYGON_SET_CONTAINS_POLYLINE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_contains_polyline", FunctionDescriptor.of(I, A, A, I));
+        POLYGON_SET_INTERSECTS_POLYLINE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_intersects_polyline", FunctionDescriptor.of(I, A, A, I));
+        POLYGON_SET_DISTANCE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_distance", FunctionDescriptor.of(D, A, A));
+        POLYGON_SET_DISTANCE_TO_POLYLINE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_distance_to_polyline", FunctionDescriptor.of(D, A, A, I));
+        POLYGON_SET_BOUNDARY_DISTANCE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_boundary_distance", FunctionDescriptor.of(D, A, D, D));
+        POLYGON_SET_CLIP_POLYLINE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_clip_polyline", FunctionDescriptor.of(A, A, A, I));
+        POLYGON_SET_LINES_VIEW = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_lines_view", FunctionDescriptor.of(B, A, A));
+        POLYGON_SET_LINES_FREE = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_lines_free", FunctionDescriptor.ofVoid(A));
+        PROFILE_POLYGON_SET = bind(linker, lib, "cadaclysm_blacksmith_profile_polygon_set", FunctionDescriptor.of(A, A, D));
+        POLYGON_SET_PROFILES = bind(linker, lib, "cadaclysm_blacksmith_polygon_set_profiles", FunctionDescriptor.of(A, A));
         INTERPOLATOR_NEW = bind(linker, lib, "cadaclysm_blacksmith_interpolator_new", FunctionDescriptor.of(A, A, I, I, B));
         INTERPOLATOR_COUNT = bind(linker, lib, "cadaclysm_blacksmith_interpolator_count", FunctionDescriptor.of(I, A));
         INTERPOLATOR_DIMENSION = bind(linker, lib, "cadaclysm_blacksmith_interpolator_dimension", FunctionDescriptor.of(I, A));
@@ -1633,6 +1722,14 @@ public final class Blacksmith {
         SKETCH_ADD_CONIC = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_conic", FunctionDescriptor.of(I, A, I, D, D, D, D, D));
         SKETCH_ADD_NURBS = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_nurbs", FunctionDescriptor.of(I, A, I, I, A, L, A, A, L));
         SKETCH_ADD_RECT = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_rect", FunctionDescriptor.of(A, A, D, D, D, D, A));
+        SKETCH_ADD_POLYGON = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_polygon", FunctionDescriptor.of(A, A, D, D, D, D, I, A));
+        SKETCH_CHAMFER = bind(linker, lib, "cadaclysm_blacksmith_sketch_chamfer", FunctionDescriptor.of(A, A, I, I, D, D, A));
+        SKETCH_CHAMFER_ANGLE = bind(linker, lib, "cadaclysm_blacksmith_sketch_chamfer_angle", FunctionDescriptor.of(A, A, I, I, D, D, A));
+        SKETCH_PATTERN_RECTANGULAR = bind(linker, lib, "cadaclysm_blacksmith_sketch_pattern_rectangular",
+                FunctionDescriptor.of(A, A, A, L, D, D, I, D, D, I, A));
+        SKETCH_PATTERN_CIRCULAR = bind(linker, lib, "cadaclysm_blacksmith_sketch_pattern_circular", FunctionDescriptor.of(A, A, A, L, I, I, D, A));        SKETCH_MIRROR = bind(linker, lib, "cadaclysm_blacksmith_sketch_mirror", FunctionDescriptor.of(A, A, A, L, I, A));
+
+        SKETCH_AUTO_CONSTRAIN = bind(linker, lib, "cadaclysm_blacksmith_sketch_auto_constrain", FunctionDescriptor.of(A, A, D, B, A));
         SKETCH_KIND = bind(linker, lib, "cadaclysm_blacksmith_sketch_kind", FunctionDescriptor.of(I, A, I));
         SKETCH_ENTITIES = bind(linker, lib, "cadaclysm_blacksmith_sketch_entities", FunctionDescriptor.of(A, A, A));
         SKETCH_POINT = bind(linker, lib, "cadaclysm_blacksmith_sketch_point", FunctionDescriptor.of(B, A, I, A));
@@ -1840,6 +1937,10 @@ public final class Blacksmith {
         FILLET_SURFACES = bind(linker, lib, "cadaclysm_blacksmith_fillet_surfaces", FunctionDescriptor.of(A, A, I, A, I, D, D, B, B, D, A, A, A));
         FILLET_VARYING = bind(linker, lib, "cadaclysm_blacksmith_fillet_varying", FunctionDescriptor.of(A, A, A, L, D, D, D));
         FILLET_LAW = bind(linker, lib, "cadaclysm_blacksmith_fillet_law", FunctionDescriptor.of(A, A, A, L, A, A, L, D));
+        FILLET_CHORD = bind(linker, lib, "cadaclysm_blacksmith_fillet_chord", FunctionDescriptor.of(A, A, A, L, D, D));
+        FILLET_ASYMMETRIC = bind(linker, lib, "cadaclysm_blacksmith_fillet_asymmetric", FunctionDescriptor.of(A, A, A, L, I, D, D, D));
+        FILLET_FULL_ROUND = bind(linker, lib, "cadaclysm_blacksmith_fillet_full_round", FunctionDescriptor.of(A, A, I, I, I, D));
+        FILLET_RULE = bind(linker, lib, "cadaclysm_blacksmith_fillet_rule", FunctionDescriptor.of(A, A, A, L, A, L, I, D, D));
         SPLIT_BY_CURVE = bind(linker, lib, "cadaclysm_blacksmith_split_by_curve", FunctionDescriptor.of(A, A, A, A, D));
         TRIM_BY_CURVE = bind(linker, lib, "cadaclysm_blacksmith_trim_by_curve", FunctionDescriptor.of(A, A, A, A, B, D));
         JOIN_SHEETS = bind(linker, lib, "cadaclysm_blacksmith_join_sheets", FunctionDescriptor.of(A, A, L, D, A));
@@ -1848,7 +1949,8 @@ public final class Blacksmith {
         RECESS = bind(linker, lib, "cadaclysm_blacksmith_recess", FunctionDescriptor.of(A, A, A, D, D, D, B, D, A));
         MIRROR_JOIN = bind(linker, lib, "cadaclysm_blacksmith_mirror_join", FunctionDescriptor.of(A, A, A, D, D, A));
         PATTERN_RECTANGULAR = bind(linker, lib, "cadaclysm_blacksmith_pattern_rectangular", FunctionDescriptor.of(I, A, I, D, A, I, D, B, A, I, A));
-        PATTERN_CIRCULAR = bind(linker, lib, "cadaclysm_blacksmith_pattern_circular", FunctionDescriptor.of(I, A, I, D, B, A, I, A));
+        PATTERN_CIRCULAR = bind(linker, lib, "cadaclysm_blacksmith_pattern_circular", FunctionDescriptor.of(I, A, I, D, B, A, I, A));        PATTERN_MIRROR = bind(linker, lib, "cadaclysm_blacksmith_pattern_mirror", FunctionDescriptor.of(I, A, A));
+
         PATTERN_ALONG = bind(linker, lib, "cadaclysm_blacksmith_pattern_along", FunctionDescriptor.of(I, A, I, D, I, A, I, A));
         PATTERN = bind(linker, lib, "cadaclysm_blacksmith_pattern", FunctionDescriptor.of(A, A, A, I, D, A));
         PATTERN_FEATURE = bind(linker, lib, "cadaclysm_blacksmith_pattern_feature", FunctionDescriptor.of(A, A, A, I, A, I, D, A));
@@ -1873,6 +1975,21 @@ public final class Blacksmith {
         SPLIT_ALONG_CURVE = bind(linker, lib, "cadaclysm_blacksmith_split_along_curve", FunctionDescriptor.of(A, A, A, D));
         PANEL_GAP = bind(linker, lib, "cadaclysm_blacksmith_panel_gap", FunctionDescriptor.of(B, A, A, D, D, D, A));
         NURBS_CURVE_OFFSET_ON_SHEET = bind(linker, lib, "cadaclysm_blacksmith_nurbs_curve_offset_on_sheet", FunctionDescriptor.of(A, A, A, D, D, A));
+        NURBS_CURVE_OFFSET = bind(linker, lib, "cadaclysm_blacksmith_nurbs_curve_offset", FunctionDescriptor.of(A, A, D, A, D, A));
+        NURBS_CURVE_OFFSET_NORMAL_TO_SHEET = bind(linker, lib, "cadaclysm_blacksmith_nurbs_curve_offset_normal_to_sheet", FunctionDescriptor.of(A, A, A, D, D, A));
+        NURBS_CURVE_OFFSET_TANGENT_TO_SHEET = bind(linker, lib, "cadaclysm_blacksmith_nurbs_curve_offset_tangent_to_sheet", FunctionDescriptor.of(A, A, A, D, D, A));
+        NURBS_SURFACE_OFFSET = bind(linker, lib, "cadaclysm_blacksmith_nurbs_surface_offset", FunctionDescriptor.of(A, A, D, D, A));
+        SOLID_OFFSET = bind(linker, lib, "cadaclysm_blacksmith_solid_offset", FunctionDescriptor.of(A, A, D, D));
+        SOLID_OFFSET_FACE = bind(linker, lib, "cadaclysm_blacksmith_solid_offset_face", FunctionDescriptor.of(A, A, I, D, D));
+        SOLID_SPLIT_FACES = bind(linker, lib, "cadaclysm_blacksmith_solid_split_faces", FunctionDescriptor.of(A, A, A, A, L, D));
+        SOLID_SPLIT_ALONG_SILHOUETTE = bind(linker, lib, "cadaclysm_blacksmith_solid_split_along_silhouette", FunctionDescriptor.of(A, A, D, D, D, D));
+        SOLID_UNTRIM = bind(linker, lib, "cadaclysm_blacksmith_solid_untrim", FunctionDescriptor.of(A, A, I, I, D));
+        SOLID_UNSTITCH = bind(linker, lib, "cadaclysm_blacksmith_solid_unstitch", FunctionDescriptor.of(A, A, A, L, B));
+        SOLID_RULED_FROM_EDGES = bind(linker, lib, "cadaclysm_blacksmith_solid_ruled_from_edges", FunctionDescriptor.of(A, A, A, L, I, D, D, D, D, D, B, D));
+        SOLID_CHANGE_SEAM = bind(linker, lib, "cadaclysm_blacksmith_solid_change_seam", FunctionDescriptor.of(A, A, I, B, D, D));
+        SOLID_MERGE_SURFACES = bind(linker, lib, "cadaclysm_blacksmith_solid_merge_surfaces", FunctionDescriptor.of(A, A, A, D));
+        NURBS_SURFACE_MERGE = bind(linker, lib, "cadaclysm_blacksmith_nurbs_surface_merge", FunctionDescriptor.of(A, A, A, D));
+        NURBS_SURFACE_TWEEN = bind(linker, lib, "cadaclysm_blacksmith_nurbs_surface_tween", FunctionDescriptor.of(B, A, A, I, A));
         SVG_OPTIONS_INIT = bind(linker, lib, "cadaclysm_blacksmith_svg_options_init", FunctionDescriptor.ofVoid(A));
         SVG_TEXT = bind(linker, lib, "cadaclysm_blacksmith_svg_text", FunctionDescriptor.of(A, A, L, A));
         SVG = bind(linker, lib, "cadaclysm_blacksmith_svg", FunctionDescriptor.of(B, A, L, A, A));
@@ -2143,6 +2260,7 @@ public final class Blacksmith {
         SHEET_RULE_DEFAULT = bind(linker, lib, "cadaclysm_blacksmith_sheet_rule_default", FunctionDescriptor.of(B, D, A));
         SHEET_BASE = bind(linker, lib, "cadaclysm_blacksmith_sheet_base", FunctionDescriptor.of(A, A, A, A, D));
         SHEET_CONTOUR = bind(linker, lib, "cadaclysm_blacksmith_sheet_contour", FunctionDescriptor.of(A, A, L, A, D, A, D));
+        SHEET_LOFTED_FLANGE = bind(linker, lib, "cadaclysm_blacksmith_sheet_lofted_flange", FunctionDescriptor.of(A, A, L, A, L, A, D));
         SHEET_FLANGE = bind(linker, lib, "cadaclysm_blacksmith_sheet_flange", FunctionDescriptor.of(A, A, A, L, D, D, A, A, D));
         SHEET_HEM = bind(linker, lib, "cadaclysm_blacksmith_sheet_hem", FunctionDescriptor.of(A, A, A, L, I, D, D, D, A, D));
         SHEET_FOLD = bind(linker, lib, "cadaclysm_blacksmith_sheet_fold", FunctionDescriptor.of(A, A, I, A, D, A, D));
@@ -2182,6 +2300,18 @@ public final class Blacksmith {
         UNROLLED_CUT_COUNT = bind(linker, lib, "cadaclysm_blacksmith_unrolled_cut_count", FunctionDescriptor.of(I, A));
         UNROLLED_CUTS = bind(linker, lib, "cadaclysm_blacksmith_unrolled_cuts", FunctionDescriptor.of(B, A, A));
         UNROLLED_FREE = bind(linker, lib, "cadaclysm_blacksmith_unrolled_free", FunctionDescriptor.ofVoid(A));
+        // Squish (2026-11-16).
+        SQUISH = bind(linker, lib, "cadaclysm_blacksmith_squish", FunctionDescriptor.of(A, A, A, L, A, L, A, L, B, I, B, D));
+        SQUISHED_SHEET = bind(linker, lib, "cadaclysm_blacksmith_squished_sheet", FunctionDescriptor.of(A, A));
+        SQUISHED_FACE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_squished_face_count", FunctionDescriptor.of(I, A));
+        SQUISHED_FACES = bind(linker, lib, "cadaclysm_blacksmith_squished_faces", FunctionDescriptor.of(B, A, A));
+        SQUISHED_DISTORTION = bind(linker, lib, "cadaclysm_blacksmith_squished_distortion", FunctionDescriptor.of(B, A, A));
+        SQUISHED_EXACT_COUNT = bind(linker, lib, "cadaclysm_blacksmith_squished_exact_count", FunctionDescriptor.of(I, A));
+        SQUISHED_EXACT = bind(linker, lib, "cadaclysm_blacksmith_squished_exact", FunctionDescriptor.of(B, A, A));
+        SQUISHED_CURVE_PIECE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_squished_curve_piece_count", FunctionDescriptor.of(I, A, I));
+        SQUISHED_CURVE_PIECE = bind(linker, lib, "cadaclysm_blacksmith_squished_curve_piece", FunctionDescriptor.of(A, A, I, I));
+        SQUISHED_POINT = bind(linker, lib, "cadaclysm_blacksmith_squished_point", FunctionDescriptor.of(I, A, I, A));
+        SQUISHED_FREE = bind(linker, lib, "cadaclysm_blacksmith_squished_free", FunctionDescriptor.ofVoid(A));
         // Curves as objects (2026-11-16).
         NURBS_CURVE_SPIRAL = bind(linker, lib, "cadaclysm_blacksmith_nurbs_curve_spiral", FunctionDescriptor.of(A, A, A, D, D, D, A));
         NURBS_CURVE_LENGTH_BETWEEN = bind(linker, lib, "cadaclysm_blacksmith_nurbs_curve_length_between", FunctionDescriptor.of(B, A, D, D, D, A));
@@ -2643,6 +2773,78 @@ public final class Blacksmith {
         }
     }
 
+    /** The centre distance of two involute gears of {@code module} in mesh without backlash:
+     *  {@code module (z1 + z2) / 2 cos(alpha) / cos(alpha_w)}. Null is the default: shifts 0,
+     *  {@code pressureAngle} 20 degrees (radians). Throws {@link BuildException} for a module not
+     *  positive, fewer than 4 teeth, a pressure angle outside (0, pi/4) or shifts that leave no
+     *  working angle. */
+    public static double gearCentreDistanceInvolute(double module, int teethFirst, int teethSecond, Double shiftFirst,
+                                                    Double shiftSecond, Double pressureAngle) {
+        int z1 = gearCount(teethFirst, "gear_centre_distance_involute: teeth_first");
+        int z2 = gearCount(teethSecond, "gear_centre_distance_involute: teeth_second");
+        double s1 = nanIfNull(shiftFirst), s2 = nanIfNull(shiftSecond), alpha = nanIfNull(pressureAngle);
+        double a = call(() -> (double) GEAR_CENTRE_DISTANCE_INVOLUTE.invokeExact(module, z1, z2, s1, s2, alpha));
+        if (Double.isNaN(a)) throw failure("gear_centre_distance_involute");
+        return a;
+    }
+
+    /** {@link #gearCentreDistanceInvolute(double, int, int, Double, Double, Double)} unshifted, at
+     *  20 degrees. */
+    public static double gearCentreDistanceInvolute(double module, int teethFirst, int teethSecond) {
+        return gearCentreDistanceInvolute(module, teethFirst, teethSecond, null, null, null);
+    }
+
+    /** Where the follower comes to rest. {@code driver} (drawn in its own frame, the frame's origin
+     *  at {@code driverPivot}) is held at {@code driverAngle}; {@code follower} (likewise about
+     *  {@code followerPivot}) starts at {@code previous} and is urged along {@code direction} (+1
+     *  counter-clockwise, -1 clockwise). A local point {@code p} of a link at angle {@code a} lies
+     *  at {@code pivot + R(a) p}; angles are radians. Both profiles are regions with their holes. A
+     *  follower that starts penetrating recoils against {@code direction} to first contact;
+     *  otherwise it advances to first contact or to {@code limit}, an absolute follower angle. The
+     *  answer never penetrates: in contact the gap is within {@code tolerance}. Null is the
+     *  default: {@code limit} one full turn from {@code previous} along {@code direction}, {@code
+     *  tolerance} {@code 1e-9} times the larger bounding-box diagonal of the two placed profiles.
+     *  Throws {@link BuildException} ({@code contact_settle: ...}) for a profile with no segments, a
+     *  pivot, angle or {@code previous} not finite, a {@code direction} other than +1 or -1, a
+     *  {@code limit} infinite or not strictly along the direction from {@code previous}, a negative
+     *  or infinite tolerance, a follower that cannot clear by turning, or no convergence within
+     *  100 000 gap evaluations. */
+    public static Settle contactSettle(Profile driver, double[] driverPivot, double driverAngle, Profile follower,
+                                       double[] followerPivot, double previous, int direction, Double limit, Double tolerance) {
+        double[] dp = point2(driverPivot, "contact_settle: driver_pivot");
+        double[] fp = point2(followerPivot, "contact_settle: follower_pivot");
+        double lim = nanIfNull(limit), tol = nanIfNull(tolerance);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(SETTLE_LAYOUT);
+            MemorySegment d = driver.handle();
+            MemorySegment f = follower.handle();
+            boolean ok = call(() -> (boolean) CONTACT_SETTLE.invokeExact(d, dp[0], dp[1], driverAngle, f, fp[0], fp[1], previous,
+                    direction, lim, tol, out));
+            if (!ok) throw failure("contact_settle");
+            return Settle.of(out);
+        } finally {
+            keep(driver, follower);
+        }
+    }
+
+    /** {@link #contactSettle(Profile, double[], double, Profile, double[], double, int, Double, Double)}
+     *  on the default limit and tolerance. */
+    public static Settle contactSettle(Profile driver, double[] driverPivot, double driverAngle, Profile follower,
+                                       double[] followerPivot, double previous, int direction) {
+        return contactSettle(driver, driverPivot, driverAngle, follower, followerPivot, previous, direction, null, null);
+    }
+
+    /** A gear call's optional number: null is the library's default, NaN at the C ABI. */
+    private static double nanIfNull(Double v) {
+        return v == null ? Double.NaN : v;
+    }
+
+    /** A tooth or leaf count as C's {@code uint32_t}: a negative one is refused here, named. */
+    private static int gearCount(int v, String what) {
+        if (v < 0) throw new BuildException(what + " is out of range: " + v);
+        return v;
+    }
+
     /** The version of the library actually loaded, which is the one worth reporting. */
     public static String version() {
         return string(call(() -> (MemorySegment) VERSION.invokeExact()));
@@ -2677,12 +2879,17 @@ public final class Blacksmith {
      * {@code "boolean.mesh_budget"}, {@code "boolean.finest_tolerance"},
      * {@code "profile_boolean.point_budget"}, {@code "measure.default_accuracy"},
      * {@code "step.validation_properties"}, {@code "step.validation_accuracy"},
-     * {@code "tolerance.relative"} or {@code "tolerance.angular"}. Throws --
+     * {@code "tolerance.relative"}, {@code "tolerance.angular"} or
+     * {@code "intersect.free_form_exact"}. Throws --
      * and changes nothing -- for a name that is not an option or a value it does not take,
-     * saying which and what it takes. The last two stamp a written STEP part file with each
+     * saying which and what it takes. The step pair stamps a written STEP part file with each
      * body's measured area, volume and centroid, there for the kernel that reads the file to
      * check the transfer against; off by default, since it measures every body in the file at
      * {@code "step.validation_accuracy"} (1e-5).
+     * {@code "intersect.free_form_exact"} (0 or 1, default 0) makes Solid.intersect's exact
+     * route take free-form faces too (NURBS, extrusion, revolution and sum faces, held
+     * exactly) rather than send them to the mesh route; off by default, since an exact
+     * answer there costs several times the mesh route's.
      */
     public static void setOption(String name, double value) {
         boolean ok;
@@ -3385,13 +3592,17 @@ public final class Blacksmith {
      * {@code format}: {@code "stl"} (binary, every solid in one body), {@code "stl-ascii"}
      * (one body named as the first solid), {@code "obj"} (one named object a solid, no
      * material library), {@code "glb"} or {@code "gltf"} (one named node a solid in a
-     * material of its own; the {@code .gltf} with its buffer embedded).
+     * material of its own; the {@code .gltf} with its buffer embedded), {@code "3mf"} (a 3MF
+     * package, one named object a solid, in millimetres), {@code "ply"} (binary
+     * little-endian) or {@code "ply-ascii"} (PLY, every solid's triangles in one body). 3MF
+     * and PLY carry the solids' colours -- each face its own where it was painted, else the
+     * solid's; 3MF a colour a triangle, PLY a colour a vertex.
      *
      * @param names one a solid ({@code null}: each solid's own name, else {@code Solid 1},
      *     {@code Solid 2}, ...)
      * @param looks one a solid, six numbers each -- linear {@code r, g, b, a, metallic,
      *     roughness} in 0..1 -- the glTF's materials ({@code null}: each solid's own colour);
-     *     STL and OBJ ignore them
+     *     the other formats ignore them
      */
     public static byte[] meshFile(Collection<Solid> solids, String format, List<String> names, List<double[]> looks, Double tolerance) {
         Solid[] all = solids.toArray(new Solid[0]);
@@ -4530,6 +4741,88 @@ public final class Blacksmith {
             return new Profile(call(() -> (MemorySegment) PROFILE_ELLIPSE.invokeExact(c[0], c[1], rx, ry)));
         }
 
+        /** An involute spur gear of {@code teeth} teeth of {@code module}, tooth 0 centred on +x: its
+         *  flanks NURBS within {@code tolerance} of the involute, its tips, fillets and root arcs
+         *  exact. Null is the default: {@code pressureAngle} 20 degrees (radians), {@code shift} 0,
+         *  {@code addendum} 1 and {@code dedendum} 1.25 (factors of the module), {@code rootFillet}
+         *  {@code 0.38 module}, {@code backlash} 0 (taken off this gear's tooth), {@code tolerance}
+         *  {@code 1e-4 module}. Undercut is flagged in the report, not drawn. Throws {@link
+         *  BuildException} for fewer than 4 teeth, a module not positive, a pressure angle outside
+         *  (0, pi/4), a pointed tooth or a root fillet that does not fit. */
+        public static GearProfile gearInvolute(double module, int teeth, Double pressureAngle, Double shift, Double addendum,
+                                               Double dedendum, Double rootFillet, Double backlash, Double tolerance) {
+            int z = gearCount(teeth, "profile_gear_involute: teeth");
+            double pa = nanIfNull(pressureAngle), x = nanIfNull(shift), ha = nanIfNull(addendum), hf = nanIfNull(dedendum),
+                    rf = nanIfNull(rootFillet), bl = nanIfNull(backlash), tol = nanIfNull(tolerance);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment report = arena.allocate(GEAR_REPORT_LAYOUT);
+                MemorySegment raw = call(() -> (MemorySegment) PROFILE_GEAR_INVOLUTE.invokeExact(module, z, pa, x, ha, hf, rf, bl, tol, report));
+                return GearProfile.of(raw, report, "profile_gear_involute");
+            }
+        }
+
+        /** {@link #gearInvolute(double, int, Double, Double, Double, Double, Double, Double, Double)}
+         *  on every default. */
+        public static GearProfile gearInvolute(double module, int teeth) {
+            return gearInvolute(module, teeth, null, null, null, null, null, null, null);
+        }
+
+        /** A cycloidal clock wheel of {@code teeth} teeth of {@code module} driving a pinion of
+         *  {@code pinionLeaves}, tooth 0 centred on +x: epicycloidal addendum flanks within {@code
+         *  tolerance}, radial dedendum flanks. Null is the default: {@code thickness} {@code
+         *  pi module / 2}, {@code addendum} up to the flanks' crossing with the point rounded, {@code
+         *  dedendum} 1.57 (a factor of the module), {@code rootFillet} {@code 0.25 module}, {@code
+         *  tolerance} {@code 1e-4 module}. Its centre distance to the pinion is the two reports'
+         *  pitch radii added. Throws {@link BuildException} for a pinion under 6 leaves, a wheel no
+         *  larger than it, a size not positive or a fillet that does not fit. */
+        public static GearProfile gearWheelCycloidal(double module, int teeth, int pinionLeaves, Double thickness, Double addendum,
+                                                     Double dedendum, Double rootFillet, Double tolerance) {
+            int z = gearCount(teeth, "profile_gear_wheel_cycloidal: teeth");
+            int n = gearCount(pinionLeaves, "profile_gear_wheel_cycloidal: pinion_leaves");
+            double t = nanIfNull(thickness), ha = nanIfNull(addendum), hf = nanIfNull(dedendum), rf = nanIfNull(rootFillet),
+                    tol = nanIfNull(tolerance);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment report = arena.allocate(GEAR_REPORT_LAYOUT);
+                MemorySegment raw = call(() -> (MemorySegment) PROFILE_GEAR_WHEEL_CYCLOIDAL.invokeExact(module, z, n, t, ha, hf, rf, tol, report));
+                return GearProfile.of(raw, report, "profile_gear_wheel_cycloidal");
+            }
+        }
+
+        /** {@link #gearWheelCycloidal(double, int, int, Double, Double, Double, Double, Double)} on
+         *  every default. */
+        public static GearProfile gearWheelCycloidal(double module, int teeth, int pinionLeaves) {
+            return gearWheelCycloidal(module, teeth, pinionLeaves, null, null, null, null, null);
+        }
+
+        /** A cycloidal clock pinion of {@code leaves} leaves of {@code module} driven by a wheel of
+         *  {@code wheelTeeth}, leaf 0 centred on +x: radial flanks inside the pitch circle and a
+         *  {@code tip} {@link GearTip#ROUND} (a semicircle of half the leaf thickness) or {@link
+         *  GearTip#OGIVE} (the epicycloid, truncated at {@code 0.855 module}). Null is the default:
+         *  {@code thickness} {@code 1.05 module} (6 to 10 leaves) or {@code 1.25 module}, {@code
+         *  clearance} {@code 0.4 module}, {@code rootFillet} {@code 0.25 module}, {@code tolerance}
+         *  {@code 1e-4 module}. Throws {@link BuildException} for under 6 leaves, a wheel no larger
+         *  than the pinion, a size not positive, a negative clearance or a fillet that does not
+         *  fit. */
+        public static GearProfile gearPinionCycloidal(double module, int leaves, int wheelTeeth, Double thickness, GearTip tip,
+                                                      Double clearance, Double rootFillet, Double tolerance) {
+            if (tip == null) throw new NullPointerException("tip");
+            int n = gearCount(leaves, "profile_gear_pinion_cycloidal: leaves");
+            int z = gearCount(wheelTeeth, "profile_gear_pinion_cycloidal: wheel_teeth");
+            int code = tip.code;
+            double t = nanIfNull(thickness), c = nanIfNull(clearance), rf = nanIfNull(rootFillet), tol = nanIfNull(tolerance);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment report = arena.allocate(GEAR_REPORT_LAYOUT);
+                MemorySegment raw = call(() -> (MemorySegment) PROFILE_GEAR_PINION_CYCLOIDAL.invokeExact(module, n, z, t, code, c, rf, tol, report));
+                return GearProfile.of(raw, report, "profile_gear_pinion_cycloidal");
+            }
+        }
+
+        /** {@link #gearPinionCycloidal(double, int, int, Double, GearTip, Double, Double, Double)}
+         *  with a round tip, on every default. */
+        public static GearProfile gearPinionCycloidal(double module, int leaves, int wheelTeeth) {
+            return gearPinionCycloidal(module, leaves, wheelTeeth, null, GearTip.ROUND, null, null, null);
+        }
+
         /** {@link #fromBeziers(double[], boolean)} with {@code recognise} true. */
         public static Profile fromBeziers(double[] beziers) {
             return fromBeziers(beziers, true);
@@ -4627,8 +4920,7 @@ public final class Blacksmith {
          *  pieces, "arc": piece}}: {@code a} and {@code b} cut back to the tangent points, each
          *  running the way it ran, the arc from {@code a}'s side to {@code b}'s -- pieces {@link
          *  #fromPieces(String)} reads. Throws {@link BuildException} where they do not meet at an
-         *  end, do not meet in straight segments, run straight on or fold back, or the radius does
-         *  not fit. */
+         *  end, run straight on or fold back, or the radius does not fit. */
         public static String filletCorner(Profile a, Profile b, double radius, double tolerance) {
             try {
                 MemorySegment ha = a.handle();
@@ -5647,6 +5939,238 @@ public final class Blacksmith {
         }
     }
 
+    /** A cycloidal pinion leaf's tip ({@link Profile#gearPinionCycloidal}); {@link #code} is the C
+     *  ABI's {@code CADACLYSM_BLACKSMITH_GEAR_TIP_*}. */
+    public enum GearTip {
+        /** A semicircle of half the leaf thickness. */
+        ROUND(0),
+        /** The ogive: the epicycloid of a circle of half the wheel's pitch radius, truncated at
+         *  {@code 0.855 module}. */
+        OGIVE(1);
+
+        /** The tip's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        GearTip(int code) {
+            this.code = code;
+        }
+    }
+
+    /** A gear's profile and its report ({@link Profile#gearInvolute}, {@link
+     *  Profile#gearWheelCycloidal}, {@link Profile#gearPinionCycloidal}): its pitch and base radii
+     *  ({@code baseRadius} null for cycloidal gearing), the largest and smallest radii on the
+     *  profile, the tooth (leaf) {@code thickness} on the pitch circle as an arc length, and
+     *  whether {@code undercut} would occur (involute only; it is not drawn). Closing it closes the
+     *  profile. */
+    public record GearProfile(Profile profile, double pitchRadius, Double baseRadius, double tipRadius, double rootRadius,
+                              double thickness, boolean undercut) implements AutoCloseable {
+        static GearProfile of(MemorySegment raw, MemorySegment s, String what) {
+            Profile p = new Profile(checked(raw, what));
+            double base = s.get(ValueLayout.JAVA_DOUBLE, offset(GEAR_REPORT_LAYOUT, "base_radius"));
+            return new GearProfile(p, s.get(ValueLayout.JAVA_DOUBLE, offset(GEAR_REPORT_LAYOUT, "pitch_radius")),
+                    Double.isNaN(base) ? null : base,
+                    s.get(ValueLayout.JAVA_DOUBLE, offset(GEAR_REPORT_LAYOUT, "tip_radius")),
+                    s.get(ValueLayout.JAVA_DOUBLE, offset(GEAR_REPORT_LAYOUT, "root_radius")),
+                    s.get(ValueLayout.JAVA_DOUBLE, offset(GEAR_REPORT_LAYOUT, "thickness")),
+                    s.get(ValueLayout.JAVA_BOOLEAN, offset(GEAR_REPORT_LAYOUT, "undercut")));
+        }
+
+        /** Give the profile back. Idempotent. */
+        @Override
+        public void close() {
+            profile.close();
+        }
+    }
+
+    /** A NACA 4- or 5-digit airfoil by its numbers, fractions of the chord: {@link #parse} a code
+     *  ("0012", "2412", "23012", "23112"), or {@link #four} and {@link #five} by value (the
+     *  tutorial's 4.5 % camber is {@code Naca.four(0.045, 0.4, 0.12)}). {@code series} is 4 or 5; a
+     *  4-digit section has its maximum {@code camber} at {@code position}, a 5-digit one its design
+     *  {@code lift} coefficient ({@code 0.15 L}), {@code position} 0.05 to 0.25 by 0.05 and a
+     *  {@code reflex}ed camber line or not. The thickness is laid off normal to the camber line; the
+     *  leading edge is at the origin, the chord along +x, the upper surface toward +y, and every
+     *  curve runs from the upper trailing edge round the leading edge to the lower one. {@code
+     *  closedTe} closes the trailing edge ({@code k4} 0.1036) on one point {@code (chord, 0)}; open,
+     *  it gapes {@code 0.021 thickness chord}. */
+    public record Naca(int series, double camber, double lift, double position, double thickness, boolean reflex) {
+        /** The airfoil a 4- or 5-digit code names. Throws {@link BuildException} ({@code
+         *  naca_parse: ...}) for a code that is not 4 or 5 digits, a 5-digit position outside 1 to
+         *  5, a third digit not 0 or 1, reflex at P = 1, a thickness outside (0, 40 %] or camber
+         *  with no position. */
+        public static Naca parse(String code) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 5);
+                MemorySegment c = arena.allocateFrom(code);
+                boolean ok = call(() -> (boolean) NACA_PARSE.invokeExact(c, out));
+                if (!ok) throw failure("naca_parse");
+                double[] v = out.toArray(ValueLayout.JAVA_DOUBLE);
+                return v[0] == 5 ? five(v[1], v[2], v[3], v[4] == 1) : four(v[1], v[2], v[3]);
+            }
+        }
+
+        /** A 4-digit section: maximum {@code camber} at {@code position}, {@code thickness}
+         *  (fractions). */
+        public static Naca four(double camber, double position, double thickness) {
+            return new Naca(4, camber, 0, position, thickness, false);
+        }
+
+        /** A 5-digit section: design {@code lift} coefficient, maximum camber at {@code position}
+         *  (0.05 to 0.25 by 0.05), {@code thickness}, the camber line {@code reflex}ed or not. */
+        public static Naca five(double lift, double position, double thickness, boolean reflex) {
+            return new Naca(5, 0, lift, position, thickness, reflex);
+        }
+
+        /** {@link #five(double, double, double, boolean)} without reflex. */
+        public static Naca five(double lift, double position, double thickness) {
+            return five(lift, position, thickness, false);
+        }
+
+        private MemorySegment numbers(Arena arena) {
+            return arena.allocateFrom(ValueLayout.JAVA_DOUBLE, series, series == 5 ? lift : camber, position, thickness, reflex ? 1.0 : 0.0);
+        }
+
+        private static double[][] pairs(MemorySegment flat, int n) {
+            double[][] out = new double[n][];
+            for (int i = 0; i < n; i++) {
+                out[i] = new double[] {flat.getAtIndex(ValueLayout.JAVA_DOUBLE, 2L * i), flat.getAtIndex(ValueLayout.JAVA_DOUBLE, 2L * i + 1)};
+            }
+            return out;
+        }
+
+        /** {@code count} (odd, 7 to 100 000) exact points {@code {x, y}} at {@code chord},
+         *  cosine-spaced on each surface, from the upper trailing edge to the leading edge (the
+         *  middle point, {@code {0, 0}}) and on to the lower trailing edge. Throws {@link
+         *  BuildException} ({@code naca_points: ...}) for a chord not positive, a count even or out
+         *  of range, or numbers out of range. */
+        public double[][] points(double chord, int count, boolean closedTe) {
+            int n = gearCount(count, "naca_points: count");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment a = numbers(arena);
+                int got = call(() -> (int) NACA_POINTS.invokeExact(a, chord, n, closedTe, MemorySegment.NULL));
+                if (got == 0) throw failure("naca_points");
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 2L * got);
+                int again = call(() -> (int) NACA_POINTS.invokeExact(a, chord, n, closedTe, out));
+                if (again != got) throw failure("naca_points");
+                return pairs(out, got);
+            }
+        }
+
+        /** {@link #points(double, int, boolean)} with a closed trailing edge. */
+        public double[][] points(double chord, int count) {
+            return points(chord, count, true);
+        }
+
+        /** {@link #points(double, int, boolean)}: 101 points, a closed trailing edge. */
+        public double[][] points(double chord) {
+            return points(chord, 101, true);
+        }
+
+        /** The {@code controls} (8 to 200) control points of an open clamped cubic on uniform
+         *  knots -- the spline a page editor without knots of its own draws -- from the upper
+         *  trailing edge round to the lower, least-squares fitted to cosine-spaced exact points;
+         *  and its error, the largest distance from 2 001 exact points to the curve. Throws {@link
+         *  BuildException} ({@code naca_spline: ...}) as {@link #points} does, or for {@code
+         *  controls} out of range. */
+        public NacaSpline spline(double chord, int controls, boolean closedTe) {
+            int n = gearCount(controls, "naca_spline: controls");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment a = numbers(arena);
+                int got = call(() -> (int) NACA_SPLINE.invokeExact(a, chord, n, closedTe, MemorySegment.NULL, MemorySegment.NULL));
+                if (got == 0) throw failure("naca_spline");
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 2L * got);
+                MemorySegment err = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                int again = call(() -> (int) NACA_SPLINE.invokeExact(a, chord, n, closedTe, out, err));
+                if (again != got) throw failure("naca_spline");
+                return new NacaSpline(pairs(out, got), err.get(ValueLayout.JAVA_DOUBLE, 0));
+            }
+        }
+
+        /** {@link #spline(double, int, boolean)} with a closed trailing edge. */
+        public NacaSpline spline(double chord, int controls) {
+            return spline(chord, controls, true);
+        }
+
+        /** {@link #spline(double, int, boolean)}: 32 controls, a closed trailing edge. */
+        public NacaSpline spline(double chord) {
+            return spline(chord, 32, true);
+        }
+
+        /** A closed profile at {@code chord}: one cubic NURBS within {@code tolerance} (null:
+         *  {@code 1e-5 chord}) of the airfoil, from the upper trailing edge round to the lower, and
+         *  a line closing an open trailing edge; and the largest distance found between the NURBS
+         *  and the airfoil. Throws {@link BuildException} ({@code profile_naca: ...}) as {@link
+         *  #points} does, for a tolerance not positive, or for a fit that misses the tolerance
+         *  (saying by how much). */
+        public NacaProfile profile(double chord, boolean closedTe, Double tolerance) {
+            double tol = nanIfNull(tolerance);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment a = numbers(arena);
+                MemorySegment err = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                MemorySegment raw = call(() -> (MemorySegment) PROFILE_NACA.invokeExact(a, chord, closedTe, tol, err));
+                Profile p = new Profile(checked(raw, "profile_naca"));
+                return new NacaProfile(p, err.get(ValueLayout.JAVA_DOUBLE, 0));
+            }
+        }
+
+        /** {@link #profile(double, boolean, Double)} at the default tolerance. */
+        public NacaProfile profile(double chord, boolean closedTe) {
+            return profile(chord, closedTe, null);
+        }
+
+        /** {@link #profile(double, boolean, Double)}: a closed trailing edge, the default
+         *  tolerance. */
+        public NacaProfile profile(double chord) {
+            return profile(chord, true, null);
+        }
+    }
+
+    /** {@link Naca#spline}'s answer: the control points {@code {x, y}} and the fit's error. */
+    public record NacaSpline(double[][] controls, double error) {}
+
+    /** {@link Naca#profile}'s answer: the profile and the largest distance found from the
+     *  airfoil. Closing it closes the profile. */
+    public record NacaProfile(Profile profile, double error) implements AutoCloseable {
+        /** Give the profile back. Idempotent. */
+        @Override
+        public void close() {
+            profile.close();
+        }
+    }
+
+    /** Where a {@link Settle} touches: the midpoint of the closest pair {@code {x, y}}, the unit
+     *  contact normal from the driver toward the follower, and each profile's touching {@code
+     *  {loop, segment}} -- loop 0 the outer, 1.. the holes in order. */
+    public record SettleContact(double[] point, double[] normal, int[] driver, int[] follower) {
+        @Override
+        public String toString() {
+            return "SettleContact[point=" + Arrays.toString(point) + ", normal=" + Arrays.toString(normal) + ", driver="
+                    + Arrays.toString(driver) + ", follower=" + Arrays.toString(follower) + "]";
+        }
+    }
+
+    /** Where the follower came to rest ({@link Blacksmith#contactSettle}): its angle {@code value} (never
+     *  penetrating), the {@code contact} (null stopped at the limit), whether it {@code recoiled} out
+     *  of a starting penetration, and the gap evaluations spent ({@code steps}). */
+    public record Settle(double value, SettleContact contact, boolean recoiled, int steps) {
+        static Settle of(MemorySegment s) {
+            SettleContact contact = null;
+            if (s.get(ValueLayout.JAVA_BOOLEAN, offset(SETTLE_LAYOUT, "contact"))) {
+                contact = new SettleContact(
+                        new double[] {s.get(ValueLayout.JAVA_DOUBLE, offset(SETTLE_LAYOUT, "point_x")),
+                                s.get(ValueLayout.JAVA_DOUBLE, offset(SETTLE_LAYOUT, "point_y"))},
+                        new double[] {s.get(ValueLayout.JAVA_DOUBLE, offset(SETTLE_LAYOUT, "normal_x")),
+                                s.get(ValueLayout.JAVA_DOUBLE, offset(SETTLE_LAYOUT, "normal_y"))},
+                        new int[] {s.get(ValueLayout.JAVA_INT, offset(SETTLE_LAYOUT, "driver_loop")),
+                                s.get(ValueLayout.JAVA_INT, offset(SETTLE_LAYOUT, "driver_segment"))},
+                        new int[] {s.get(ValueLayout.JAVA_INT, offset(SETTLE_LAYOUT, "follower_loop")),
+                                s.get(ValueLayout.JAVA_INT, offset(SETTLE_LAYOUT, "follower_segment"))});
+            }
+            return new Settle(s.get(ValueLayout.JAVA_DOUBLE, offset(SETTLE_LAYOUT, "value")), contact,
+                    s.get(ValueLayout.JAVA_BOOLEAN, offset(SETTLE_LAYOUT, "recoiled")),
+                    s.get(ValueLayout.JAVA_INT, offset(SETTLE_LAYOUT, "steps")));
+        }
+    }
+
     /** How {@link Profile#offsetOpen} ends an open chain; {@link #code} is the C ABI's {@code
      *  CADACLYSM_BLACKSMITH_OFFSET_END_*}. */
     public enum OffsetEnd {
@@ -5743,12 +6267,34 @@ public final class Blacksmith {
         /** Rolled round through an angle. */
         ROLLED(2),
         /** A teardrop. */
-        TEARDROP(3);
+        TEARDROP(3),
+        /** A rope: curled round a rod {@code gap} across until it comes back down to the sheet. */
+        ROPE(4),
+        /** A double hem: folded twice and pressed flat, three layers. */
+        DOUBLE(5);
 
         /** The hem's {@code uint32_t} in the C ABI. */
         public final int code;
 
         HemKind(int code) {
+            this.code = code;
+        }
+    }
+
+    /** Which edges {@link Solid#filletRule} rounds of those its faces pick; {@link #code} is the C
+     *  ABI's {@code CADACLYSM_BLACKSMITH_EDGE_RULE_*}. */
+    public enum EdgeRule {
+        /** The convex and the concave edges both. */
+        ALL(0),
+        /** The concave edges only (valleys). */
+        CONCAVE(1),
+        /** The convex edges only (ridges). */
+        CONVEX(2);
+
+        /** The rule's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        EdgeRule(int code) {
             this.code = code;
         }
     }
@@ -6105,6 +6651,122 @@ public final class Blacksmith {
         }
     }
 
+    /** How {@link Solid#squish} may deform, read from the flat pattern to the shape; {@link
+     *  #code} is the C ABI's {@code CADACLYSM_BLACKSMITH_SQUISH_*}. */
+    public enum SquishDeformation {
+        /** No preference for stretching or compressing. */
+        FREE(0),
+        /** A strong bias for flat lengths shorter than their 3D lengths (the pattern stretches
+         *  over the shape). */
+        STRETCH_MOSTLY(1),
+        /** Every flat length at most its 3D length. */
+        STRETCH_ONLY(2),
+        /** A strong bias for flat lengths longer than their 3D lengths (the pattern compresses
+         *  onto the shape). */
+        COMPRESS_MOSTLY(3),
+        /** Every flat length at least its 3D length. */
+        COMPRESS_ONLY(4);
+
+        /** The deformation's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        SquishDeformation(int code) {
+            this.code = code;
+        }
+    }
+
+    /** How far {@link Solid#fromMesh} groups the triangles; {@link #code} is the C ABI's {@code
+     *  CADACLYSM_BLACKSMITH_FROM_MESH_MODE_*}. */
+    public enum FromMeshMode {
+        /** One planar face per triangle (level 1). */
+        FACETED(0),
+        /** Coplanar neighbouring triangles merged into one planar face; curved regions stay
+         *  faceted (level 2). */
+        PLANES(1),
+        /** Planes merged as {@link #PLANES}, and curved regions fitted with cylinders, cones,
+         *  spheres and tori (level 3, the default). */
+        PRISMATIC(2);
+
+        /** The mode's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        FromMeshMode(int code) {
+            this.code = code;
+        }
+    }
+
+    /** One squished face's distortion ({@link Squished#distortion}): the flat over 3D area per
+     *  mesh triangle (min, max, mean weighted by area), then the flat over 3D length per mesh
+     *  edge (min, max, mean weighted by length). */
+    public record SquishDistortion(double areaMin, double areaMax, double areaMean, double lengthMin, double lengthMax,
+                                   double lengthMean) {
+    }
+
+    /** Faces of a solid squished flat ({@link Solid#squish}), read at once: the flat {@code
+     *  sheet}, each of its faces' source face ({@code faces}) and distortion ({@code
+     *  distortion}), the source faces laid exactly ({@code exact}), each curve given as its
+     *  pieces on the flat ({@code curves}, a list a curve) and each point given at its spot
+     *  ({@code points}, null where it is on no squished face). */
+    public record Squished(Solid sheet, int[] faces, List<SquishDistortion> distortion, int[] exact, List<List<NurbsCurve>> curves,
+                           List<double[]> points) {
+        /** Reads the result at {@code raw} and frees it, on every path. */
+        static Squished read(MemorySegment raw, int curveCount, int pointCount) {
+            MemorySegment h = checked(raw, "squish");
+            try (Arena arena = Arena.ofConfined()) {
+                Solid sheet = new Solid(call(() -> (MemorySegment) SQUISHED_SHEET.invokeExact(h)));
+                int nf = call(() -> (int) SQUISHED_FACE_COUNT.invokeExact(h));
+                MemorySegment fs = arena.allocate(ValueLayout.JAVA_INT, Math.max(nf, 1));
+                if (!call(() -> (boolean) SQUISHED_FACES.invokeExact(h, fs))) throw failure("squished_faces");
+                int[] faces = fs.asSlice(0, 4L * nf).toArray(ValueLayout.JAVA_INT);
+                MemorySegment ds = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(6L * nf, 1));
+                if (!call(() -> (boolean) SQUISHED_DISTORTION.invokeExact(h, ds))) throw failure("squished_distortion");
+                List<SquishDistortion> distortion = new ArrayList<>(nf);
+                for (int i = 0; i < nf; i++) {
+                    long o = 6L * i;
+                    distortion.add(new SquishDistortion(ds.getAtIndex(ValueLayout.JAVA_DOUBLE, o), ds.getAtIndex(ValueLayout.JAVA_DOUBLE, o + 1),
+                            ds.getAtIndex(ValueLayout.JAVA_DOUBLE, o + 2), ds.getAtIndex(ValueLayout.JAVA_DOUBLE, o + 3),
+                            ds.getAtIndex(ValueLayout.JAVA_DOUBLE, o + 4), ds.getAtIndex(ValueLayout.JAVA_DOUBLE, o + 5)));
+                }
+                int ne = call(() -> (int) SQUISHED_EXACT_COUNT.invokeExact(h));
+                MemorySegment es = arena.allocate(ValueLayout.JAVA_INT, Math.max(ne, 1));
+                if (!call(() -> (boolean) SQUISHED_EXACT.invokeExact(h, es))) throw failure("squished_exact");
+                int[] exact = es.asSlice(0, 4L * ne).toArray(ValueLayout.JAVA_INT);
+                List<double[]> points = new ArrayList<>(pointCount);
+                MemorySegment p = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                for (int i = 0; i < pointCount; i++) {
+                    int at = i;
+                    int r = call(() -> (int) SQUISHED_POINT.invokeExact(h, at, p));
+                    if (r < 0) throw failure("squished_point");
+                    points.add(r == 1 ? p.toArray(ValueLayout.JAVA_DOUBLE) : null);
+                }
+                List<List<NurbsCurve>> curves = new ArrayList<>(curveCount);
+                for (int i = 0; i < curveCount; i++) {
+                    int c = i;
+                    int pieces = call(() -> (int) SQUISHED_CURVE_PIECE_COUNT.invokeExact(h, c));
+                    List<NurbsCurve> made = new ArrayList<>(pieces);
+                    for (int k = 0; k < pieces; k++) {
+                        int piece = k;
+                        made.add(new NurbsCurve(call(() -> (MemorySegment) SQUISHED_CURVE_PIECE.invokeExact(h, c, piece)),
+                                "squished_curve_piece", null));
+                    }
+                    curves.add(List.copyOf(made));
+                }
+                return new Squished(sheet, faces, List.copyOf(distortion), exact, List.copyOf(curves), Collections.unmodifiableList(points));
+            } finally {
+                call(() -> {
+                    SQUISHED_FREE.invokeExact(h);
+                    return null;
+                });
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "Squished[faces=" + Arrays.toString(faces) + ", distortion=" + distortion + ", exact=" + Arrays.toString(exact)
+                    + ", curves=" + curves.size() + ", points=" + points.size() + "]";
+        }
+    }
+
     /** How well an N-sided patch ({@link Solid#nSidedPatch}) meets: {@code faces} sub-patches, the
      *  worst {@code boundary} {@link Continuity} against the neighbours (the gap over every side,
      *  the angle over those met at G1 or G2, the curvature jump over those at G2), the worst {@code
@@ -6173,6 +6835,27 @@ public final class Blacksmith {
 
     /** The result of {@link #joinSheets}: the joined body and what was done. */
     public record Joined(Solid solid, JoinReport report) {
+    }
+
+    /**
+     * What {@link Solid#fromMesh} made of a triangle mesh. {@code closed}: no boundary edge, no
+     * non-manifold edge, every component orientable -- a solid; otherwise the result is an open
+     * shell (a sheet) and {@code holes} (boundary loops), {@code boundaryEdges} (mesh edges with
+     * one triangle) and {@code nonManifoldEdges} (three or more; reported, never repaired) say
+     * why. {@code faces}, {@code edges} and {@code vertices} count the B-rep's. {@code flipped}
+     * counts every triangle whose final winding differs from the input's (to agree with its
+     * neighbours, or a whole shell turned outward, or inward as a void); {@code dropped} the
+     * degenerate triangles dropped after welding. {@code planes} counts the merged plane faces
+     * (of more than one triangle), and {@code cylinders}, {@code cones}, {@code spheres} and
+     * {@code tori} the faces fitted with each surface ({@link FromMeshMode#PRISMATIC} only).
+     */
+    public record FromMeshReport(boolean closed, int faces, int edges, int vertices, int holes, int boundaryEdges, int nonManifoldEdges,
+                                 int flipped, int dropped, int planes, int cylinders, int cones, int spheres, int tori) {
+    }
+
+    /** The result of {@link Solid#fromMesh}: the B-rep (the caller's to close) and its {@link
+     *  FromMeshReport}. */
+    public record FromMesh(Solid solid, FromMeshReport report) {
     }
 
     /** The two panels of {@link Solid#panelGap}: the one left of the curve's run, then the right one. */
@@ -6501,6 +7184,20 @@ public final class Blacksmith {
         public static List<Transform> circular(double[] axisPoint, double[] axisDirection, int count) {
             return circular(axisPoint, axisDirection, count, 2 * Math.PI, false, null);
         }
+        /** Two instances: the original (the identity) and its reflection across {@code plane}
+         *  (twelve numbers: origin, x, y, z; its z the normal), as {@link Transform#mirror(double[])}. */
+        public static List<Transform> mirror(double[] plane) {
+            double[] f = frame(plane);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = doublesIn(arena, f);
+                return placements("pattern_mirror", out -> (int) PATTERN_MIRROR.invokeExact(fs, out));
+            }
+        }
+
+        public static List<Transform> mirror(Frame plane) {
+            return mirror(plane.toArray());
+        }
+
 
         /** {@code count} instances along {@code curve} by arc length from its start, {@code
          *  spacing} apart, or spread over its whole length with both ends occupied ({@code
@@ -6630,6 +7327,34 @@ public final class Blacksmith {
         }
     }
 
+    /** What {@link Solid#untrim} takes away; {@link #code} is the C ABI's
+     *  {@code CADACLYSM_BLACKSMITH_UNTRIM_*}: the face's holes, its outer boundary (made the
+     *  surface's natural one, the holes kept), or both. */
+    public enum Untrim {
+        HOLES(0), OUTER(1), ALL(2);
+
+        /** The choice's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        Untrim(int code) {
+            this.code = code;
+        }
+    }
+
+    /** How {@link Solid#ruledFromEdges} rules off each edge; {@link #code} is the C ABI's
+     *  {@code CADACLYSM_BLACKSMITH_RULING_*}: square to the edge in its face's tangent plane, along
+     *  the face's outward normal, or along a given direction. */
+    public enum Ruling {
+        TANGENT(0), NORMAL(1), DIRECTION(2);
+
+        /** The ruling's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        Ruling(int code) {
+            this.code = code;
+        }
+    }
+
     /** A surface's bending at a point ({@link NurbsSurface#curvature}), signed about {@code normal}
      *  ({@code dS/du x dS/dv}, unit): a curvature is positive where the surface bends toward the
      *  normal. {@code k1 >= k2} are the principal curvatures, {@code dir1} and {@code dir2} their
@@ -6672,6 +7397,12 @@ public final class Blacksmith {
         private final Handle handle;
         private final Cleaner.Cleanable cleanable;
         private final Double fitError;
+
+        /** {@link Blacksmith#offset(MemoryLayout, String)}, which this class's {@code offset}
+         *  methods would otherwise hide from the calls inside it. */
+        private static long offset(MemoryLayout struct, String field) {
+            return Blacksmith.offset(struct, field);
+        }
 
         private NurbsCurve(MemorySegment raw, String what, Double fitError) {
             handle = new Handle(NURBS_CURVE_FREE, "nurbs_curve: closed", checked(raw, what));
@@ -7214,6 +7945,75 @@ public final class Blacksmith {
         /** {@link #offsetOnSheet(Solid, double, double)} within 1e-3. */
         public NurbsCurve offsetOnSheet(Solid solid, double distance) {
             return offsetOnSheet(solid, distance, 1e-3);
+        }
+
+        /** This curve moved {@code distance} in space, square to its tangent and to
+         *  {@code direction} (Rhino's {@code Curve.Offset}): to the right of its run seen from the
+         *  tip of {@code direction} for a positive distance, to the left for a negative one. A line
+         *  or an arc in a plane square to {@code direction} offsets exactly ({@link #fitError} 0);
+         *  anything else is fitted within {@code tolerance} (0 or NaN: the effective tolerance),
+         *  {@link #fitError} the fit's bound on the distance from the exact offset. Distance 0 is a
+         *  copy. Throws for a zero direction, a distance that is not finite, a corner (a kink the
+         *  offset would tear at), or an offset that folds over (an arc's radius used up, a turn
+         *  tighter than the distance). */
+        public NurbsCurve offset(double distance, double[] direction, double tolerance) {
+            if (direction == null) throw new NullPointerException("direction");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment d = vec3(arena, direction, "nurbs_curve_offset");
+                MemorySegment err = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                MemorySegment h = handle.live();
+                MemorySegment raw = call(() -> (MemorySegment) NURBS_CURVE_OFFSET.invokeExact(h, distance, d, tolerance, err));
+                return new NurbsCurve(raw, "nurbs_curve_offset", err.get(ValueLayout.JAVA_DOUBLE, 0));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #offset(double, double[], double)} at the effective tolerance. */
+        public NurbsCurve offset(double distance, double[] direction) {
+            return offset(distance, direction, Double.NaN);
+        }
+
+        /** This curve, lying on the sheet {@code solid} (within ten times {@code tolerance}), moved
+         *  {@code distance} along the sheet's normal at each point -- off the sheet, the way its
+         *  faces face for a positive distance (Rhino's {@code OffsetNormalToSurface}) -- and fitted
+         *  within {@code tolerance} (0 or NaN: the inputs' effective tolerance); {@link #fitError}
+         *  is the fit's bound on the distance from the exact offset. Throws for a curve off the
+         *  sheet, one crossing a crease (faces whose normals differ by more than a degree), a
+         *  distance that is not finite, or an offset that folds over. */
+        public NurbsCurve offsetNormalToSheet(Solid solid, double distance, double tolerance) {
+            return offsetBy(solid, distance, tolerance, "nurbs_curve_offset_normal_to_sheet", NURBS_CURVE_OFFSET_NORMAL_TO_SHEET);
+        }
+
+        /** {@link #offsetNormalToSheet(Solid, double, double)} at the inputs' effective tolerance. */
+        public NurbsCurve offsetNormalToSheet(Solid solid, double distance) {
+            return offsetNormalToSheet(solid, distance, Double.NaN);
+        }
+
+        /** This curve, lying on the sheet {@code solid} (within ten times {@code tolerance}), moved
+         *  {@code distance} in the sheet's tangent plane, square to the curve: along N x C' (the
+         *  sheet's normal crossed with the curve's tangent) for a positive distance (Rhino's
+         *  {@code OffsetTangentToSurface}). Fitted within {@code tolerance} (0 or NaN: the inputs'
+         *  effective tolerance); {@link #fitError} is the fit's bound on the distance from the
+         *  exact offset. Throws as {@link #offsetNormalToSheet(Solid, double, double)} does. */
+        public NurbsCurve offsetTangentToSheet(Solid solid, double distance, double tolerance) {
+            return offsetBy(solid, distance, tolerance, "nurbs_curve_offset_tangent_to_sheet", NURBS_CURVE_OFFSET_TANGENT_TO_SHEET);
+        }
+
+        /** {@link #offsetTangentToSheet(Solid, double, double)} at the inputs' effective tolerance. */
+        public NurbsCurve offsetTangentToSheet(Solid solid, double distance) {
+            return offsetTangentToSheet(solid, distance, Double.NaN);
+        }
+
+        private NurbsCurve offsetBy(Solid solid, double distance, double tolerance, String what, MethodHandle fn) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment err = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                MemorySegment h = handle.live(), s = solid.handle();
+                MemorySegment raw = call(() -> (MemorySegment) fn.invokeExact(h, s, distance, tolerance, err));
+                return new NurbsCurve(raw, what, err.get(ValueLayout.JAVA_DOUBLE, 0));
+            } finally {
+                keep(this, solid);
+            }
         }
 
         /** The same curve run the other way over the same domain. */
@@ -9545,6 +10345,12 @@ public final class Blacksmith {
      * Close it to free it; the cleaner does so otherwise.
      */
     public static final class Solid implements AutoCloseable {
+
+        /** {@link Blacksmith#offset(MemoryLayout, String)}, which this class's {@code offset}
+         *  methods would otherwise hide from the calls inside it. */
+        private static long offset(MemoryLayout struct, String field) {
+            return Blacksmith.offset(struct, field);
+        }
         private final Handle handle;
         private final Cleaner.Cleanable cleanable;
         /** What {@link #inexactTrims()} reads: set by the two calls that count it. */
@@ -9922,6 +10728,275 @@ public final class Blacksmith {
             } finally {
                 keep(this);
             }
+        }
+
+        /** This solid offset by {@code distance} -- every face moved along its outward normal,
+         *  positive outward, negative inward, the moved faces' new neighbours meeting at sharp
+         *  joins (OCCT's {@code BRepOffsetAPI_MakeOffsetShape} by join, intersection mode). A
+         *  closed solid grows or shrinks to the solid its moved skin bounds; an open sheet moves to
+         *  its twin, its rims open. Each face keeps the colour, id and attributes of the face it
+         *  was moved from, however far it moved; edges are matched by position. A face the offset
+         *  uses up is gone. {@code tolerance} 0 or NaN is the solid's effective tolerance. Throws
+         *  for a distance that is 0, NaN or infinite, a face that folds over (a wall used up), or a
+         *  skin the offset leaves open. */
+        public Solid offset(double distance, double tolerance) {
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) SOLID_OFFSET.invokeExact(h, distance, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #offset(double, double)} at the solid's effective tolerance. */
+        public Solid offset(double distance) {
+            return offset(distance, Double.NaN);
+        }
+
+        /** Face {@code face} alone, as an open sheet moved {@code distance} along its outward
+         *  normal, still facing this solid's way, in the face's own colour; a face closed on
+         *  itself (a sphere's only face) gives a closed solid. {@code tolerance} 0 or NaN is the
+         *  solid's effective tolerance. Throws for a face this solid has not, a distance that is
+         *  0, NaN or infinite, or an offset that folds over. */
+        public Solid offsetFace(int face, double distance, double tolerance) {
+            int which = u32of(face, "solid_offset_face", "face");
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) SOLID_OFFSET_FACE.invokeExact(h, which, distance, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #offsetFace(int, double, double)} at the solid's effective tolerance. */
+        public Solid offsetFace(int face, double distance) {
+            return offsetFace(face, distance, Double.NaN);
+        }
+
+        /** This solid with its faces split along {@code curves}, in place: still one body (a
+         *  closed solid stays closed, a sheet keeps its rim) with more faces, each new face a piece
+         *  of a face of this one on its surface and every new edge the curve itself (OCCT's
+         *  {@code BRepFeat_SplitShape}). Curve {@code i} is laid on face {@code faces.get(i)},
+         *  which it must lie on, or -- {@code faces} null, or an entry null -- on every face it
+         *  lies on, only where it does. A curve may run past its face, cross other curves, and
+         *  close on itself inside a face (an island); every stretch kept must end on the face's
+         *  edges or on another curve's end. Both pieces of a split face keep its colour and
+         *  attributes; the first keeps its id, the others get new ids whose origin is the face.
+         *  {@code tolerance} NaN is the solid's effective tolerance. Throws for {@code faces} not
+         *  as long as {@code curves}, no curves, a face this solid has not, a curve off its face, a
+         *  stretch stopping inside a face, a curve through a pole of its face's surface, or no
+         *  curve crossing any face. */
+        public Solid splitFaces(List<NurbsCurve> curves, List<Integer> faces, double tolerance) {
+            int n = curves.size();
+            if (faces != null && faces.size() != n) {
+                throw new BuildException("split_faces: " + faces.size() + " faces for " + n + " curves");
+            }
+            int[] on = new int[n];
+            for (int i = 0; i < n; i++) {
+                Integer f = faces == null ? null : faces.get(i);
+                on[i] = f == null ? NONE : u32of(f, "split_faces", "face");
+            }
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle(), arr = curveHandles(arena, curves), fs = u32sIn(arena, on);
+                long count = n;
+                return new Solid(call(() -> (MemorySegment) SOLID_SPLIT_FACES.invokeExact(h, fs, arr, count, tolerance)));
+            } finally {
+                keep(this, curves);
+            }
+        }
+
+        /** {@link #splitFaces(List, List, double)} at the solid's effective tolerance. */
+        public Solid splitFaces(List<NurbsCurve> curves, List<Integer> faces) {
+            return splitFaces(curves, faces, Double.NaN);
+        }
+
+        /** {@link #splitFaces(List, List, double)} on every face each curve lies on, at the
+         *  solid's effective tolerance. */
+        public Solid splitFaces(List<NurbsCurve> curves) {
+            return splitFaces(curves, null, Double.NaN);
+        }
+
+        /** This solid with its faces split along its silhouette seen along {@code direction}
+         *  (three doubles; a parallel view, looking along it): every face the outline runs across
+         *  is cut there, into the part facing the view and the part facing away, still one body
+         *  with more faces -- a mould's parting line for a pull along {@code direction} (Fusion's
+         *  silhouette split). Exact on planes, cylinders, cones, spheres and tori where the view
+         *  allows, fitted within {@code tolerance} (NaN: the solid's effective tolerance)
+         *  elsewhere. Colours, ids and attributes as {@link #splitFaces(List, List, double)}.
+         *  Throws for a zero or non-finite direction, an outline through a pole of a face's
+         *  surface (a sphere seen across its axis), or an outline that crosses no face (a box seen
+         *  along an axis). */
+        public Solid splitAlongSilhouette(double[] direction, double tolerance) {
+            if (direction.length != 3) throw new BuildException("split_along_silhouette: the direction is three doubles, not " + direction.length);
+            double x = direction[0], y = direction[1], z = direction[2];
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) SOLID_SPLIT_ALONG_SILHOUETTE.invokeExact(h, x, y, z, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #splitAlongSilhouette(double[], double)} at the solid's effective tolerance. */
+        public Solid splitAlongSilhouette(double[] direction) {
+            return splitAlongSilhouette(direction, Double.NaN);
+        }
+
+        /** This solid with face {@code face} untrimmed (Fusion's {@code UntrimFeatures}, Rhino's
+         *  {@code RemoveHoles} and {@code Untrim}, OCCT's {@code ShapeUpgrade_RemoveInternalWires}
+         *  for the holes). {@link Untrim#HOLES} takes every hole of the face away: a neighbour that
+         *  shared one of its edges keeps it as a free edge, so a bored solid becomes an open sheet
+         *  with the bore's walls hanging. {@link Untrim#OUTER} replaces the outer boundary by the
+         *  surface's natural one, the holes kept; {@link Untrim#ALL} does both. A side of the new
+         *  boundary lying on an old edge of the face keeps that edge. Every face keeps its index,
+         *  colour, id and attributes. {@code tolerance} NaN is the solid's effective tolerance.
+         *  Throws for a face this solid has not, a face with no surface or boundary to read, a
+         *  natural boundary with no extent, or a kept hole the natural boundary would touch. */
+        public Solid untrim(int face, Untrim which, double tolerance) {
+            if (which == null) throw new NullPointerException("which");
+            int f = u32of(face, "untrim", "face"), k = which.code;
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) SOLID_UNTRIM.invokeExact(h, f, k, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #untrim(int, Untrim, double)} at the solid's effective tolerance. */
+        public Solid untrim(int face, Untrim which) {
+            return untrim(face, which, Double.NaN);
+        }
+
+        /** {@link #untrim(int, Untrim)} of both the holes and the outer boundary. */
+        public Solid untrim(int face) {
+            return untrim(face, Untrim.ALL, Double.NaN);
+        }
+
+        /** This solid taken apart along its edges into bodies (Fusion's {@code UnstitchFeatures},
+         *  Rhino's {@code UnjoinEdges}): every face kept as it is, the edges between faces of one
+         *  body still shared, those between bodies left free on each side. {@code faces} null (or
+         *  empty): every face a one-face sheet of its own. Otherwise, with {@code together}, the
+         *  faces listed are one body; without, each listed face is a sheet of its own; either way
+         *  the faces not listed are one body per edge-connected run of them. The bodies come back
+         *  listed ones first, the rest in the order of their first faces. Every face keeps its
+         *  colour, id and attributes. Throws for a face this solid has not, or a face listed
+         *  twice. */
+        public List<Solid> unstitch(int[] faces, boolean together) {
+            int[] which = faces == null ? new int[0] : indices(faces);
+            Solid all;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment list = u32sIn(arena, which);
+                long count = which.length;
+                MemorySegment h = handle();
+                all = new Solid(call(() -> (MemorySegment) SOLID_UNSTITCH.invokeExact(h, list, count, together)));
+            } finally {
+                keep(this);
+            }
+            try (all) {
+                return all.lumps();
+            }
+        }
+
+        /** {@link #unstitch(int[], boolean)} with every face a one-face sheet of its own. */
+        public List<Solid> unstitch() {
+            return unstitch(null, false);
+        }
+
+        /** A sheet of ruled faces, one off each of {@code edges} (indices into {@link #edges};
+         *  Fusion's {@code RuledSurfaceFeatures} from edges): each face runs from the edge
+         *  {@code distance} along its ruling -- {@link Ruling#TANGENT} (square to the edge in its
+         *  face's tangent plane, away from the face), {@link Ruling#NORMAL} (the face's outward
+         *  normal) or {@link Ruling#DIRECTION} (along {@code direction}, three doubles, normalised,
+         *  not made square to the edge) -- turned by {@code angle} radians about the edge. A
+         *  negative distance rules the other way. The face the ruling hangs off is the edge's
+         *  first, its second with {@code alternateFace}. Faces meeting along a side are sewn into
+         *  one sheet. Each ruled face takes the colour and attributes of the face it hangs off.
+         *  {@code tolerance} NaN is the solid's effective tolerance. Throws for {@code direction}
+         *  given without {@link Ruling#DIRECTION} or missing with it, no edges, an edge out of
+         *  range, a distance zero or not finite, an angle not finite, a zero direction, a ruling
+         *  along the edge's tangent, or an edge with no exact curve. */
+        public Solid ruledFromEdges(int[] edges, Ruling ruling, double distance, double angle, double[] direction,
+                                    boolean alternateFace, double tolerance) {
+            if (ruling == null) throw new NullPointerException("ruling");
+            if ((direction != null) != (ruling == Ruling.DIRECTION)) {
+                throw new BuildException("ruled_from_edges: direction is given with ruling DIRECTION, and only then");
+            }
+            if (direction != null && direction.length != 3) {
+                throw new BuildException("ruled_from_edges: the direction is three doubles, not " + direction.length);
+            }
+            double x = direction == null ? 0 : direction[0], y = direction == null ? 0 : direction[1], z = direction == null ? 0 : direction[2];
+            int[] which = indices(edges);
+            int k = ruling.code;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment list = u32sIn(arena, which);
+                long count = which.length;
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) SOLID_RULED_FROM_EDGES.invokeExact(
+                        h, list, count, k, x, y, z, distance, angle, alternateFace, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #ruledFromEdges(int[], Ruling, double, double, double[], boolean, double)} off
+         *  {@link Edge} records. */
+        public Solid ruledFromEdges(Collection<Edge> edges, Ruling ruling, double distance, double angle, double[] direction,
+                                    boolean alternateFace, double tolerance) {
+            return ruledFromEdges(indicesOf(edges), ruling, distance, angle, direction, alternateFace, tolerance);
+        }
+
+        /** {@link #ruledFromEdges(int[], Ruling, double, double, double[], boolean, double)} with
+         *  no tilt, off each edge's first face, at the solid's effective tolerance. */
+        public Solid ruledFromEdges(int[] edges, Ruling ruling, double distance) {
+            return ruledFromEdges(edges, ruling, distance, 0, null, false, Double.NaN);
+        }
+
+        /** This solid with face {@code face}'s seam moved to {@code parameter} along {@code u}
+         *  ({@code alongU}) or {@code v} (Rhino's {@code Brep.ChangeSeam}): the face's surface must
+         *  close on itself that way and the face go all the way round it. {@code parameter} is in
+         *  the face's own parameters, wrapped into the period; a seam already there gives the solid
+         *  back as it was. The shape, the face count and every other face are unchanged; edges
+         *  crossing the new seam are cut in two at it. Every face keeps its index, colour, id and
+         *  attributes. {@code tolerance} NaN is the solid's effective tolerance. Throws for a face
+         *  this solid has not, a parameter not finite, a surface not closed that way or of a kind
+         *  whose seam is not moved, a face with no seam, or a hole across the new seam. */
+        public Solid changeSeam(int face, double parameter, boolean alongU, double tolerance) {
+            int f = u32of(face, "change_seam", "face");
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) SOLID_CHANGE_SEAM.invokeExact(h, f, alongU, parameter, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #changeSeam(int, double, boolean, double)} along {@code u}, at the solid's
+         *  effective tolerance. */
+        public Solid changeSeam(int face, double parameter) {
+            return changeSeam(face, parameter, true, Double.NaN);
+        }
+
+        /** This one-face sheet and {@code other} merged along a side they share into one one-face
+         *  sheet (Rhino's {@code Brep.MergeSurfaces}): both faces untrimmed -- bounded by their
+         *  surfaces' four sides, as a box's face is -- and their surfaces joined end to end, the
+         *  joint left smooth where it already was. The sheet faces as this one's face does and
+         *  takes its colour, id and attributes. {@code tolerance} NaN is the two bodies' effective
+         *  tolerance. Throws for a body with other than one face, a trimmed face, no side shared
+         *  within the tolerance, sides that meet only in part, or sides parametrised
+         *  differently. */
+        public Solid mergeSurfaces(Solid other, double tolerance) {
+            try {
+                MemorySegment h = handle(), o = other.handle();
+                return new Solid(call(() -> (MemorySegment) SOLID_MERGE_SURFACES.invokeExact(h, o, tolerance)));
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** {@link #mergeSurfaces(Solid, double)} at the two bodies' effective tolerance. */
+        public Solid mergeSurfaces(Solid other) {
+            return mergeSurfaces(other, Double.NaN);
         }
 
         /** This solid without the faces at {@code faces}: the rest keep their order, so an
@@ -11119,7 +12194,7 @@ public final class Blacksmith {
          *  pattern of bodies -- and a {@link PatternReport}. Copies apart from each other are put
          *  together with no boolean at all; copies that overlap are joined, one boolean a group.
          *  {@code tolerance} null: the inputs' effective tolerance. Throws {@link
-         *  BuildException} for no transforms or one that is not rigid. */
+         *  BuildException} for no transforms or one that is neither rigid nor a mirror. */
         public Patterned pattern(List<Transform> transforms, Double tolerance) {
             double tol = tolerance == null ? Double.NaN : tolerance;
             try (Arena arena = Arena.ofConfined()) {
@@ -11144,7 +12219,7 @@ public final class Blacksmith {
          *  Copies apart from each other go into one multi-lump tool and one boolean; overlapping
          *  copies fall into a few groups. A copy that shares no volume with the body is missed:
          *  dropped for a cut, kept as a body of its own for a join. Throws {@link
-         *  BuildException} for no transforms, one not rigid, or a tool that is not closed. */
+         *  BuildException} for no transforms, one neither rigid nor a mirror, or a tool that is not closed. */
         public Patterned patternFeature(Solid tool, FeatureOp op, List<Transform> transforms, Double tolerance) {
             double tol = tolerance == null ? Double.NaN : tolerance;
             int code = op.code;
@@ -14049,6 +15124,136 @@ public final class Blacksmith {
             return filletLaw(edges, law, 1e-6);
         }
 
+        /**
+         * The fillet sized by the chord -- the straight distance between the two lines where the
+         * round meets its faces -- instead of the radius. Straight edges and partial arcs are
+         * rounded together at one radius from each edge's opening angle (edges whose faces meet at
+         * different angles are refused); a whole rim takes its own radius, solved in its meridian
+         * plane; spline edges, in a call of their own, roll a ball sized so its rails stand
+         * {@code chord} apart. A box's edge by chord {@code c} is the fillet at radius {@code c / sqrt(2)}.
+         */
+        public Solid filletChord(Collection<Edge> edges, double chord, double tolerance) {
+            return filletChord(indicesOf(edges), chord, tolerance);
+        }
+
+        /** {@link #filletChord(Collection, double, double)} at tolerance 1e-6. */
+        public Solid filletChord(Collection<Edge> edges, double chord) {
+            return filletChord(edges, chord, 1e-6);
+        }
+
+        /** {@link #filletChord(Collection, double, double)} by edge index. */
+        public Solid filletChord(int[] edges, double chord, double tolerance) {
+            int[] which = indices(edges);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment list = arena.allocateFrom(ValueLayout.JAVA_INT, which);
+                long count = which.length;
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) FILLET_CHORD.invokeExact(h, list, count, chord, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #filletChord(int[], double, double)} at tolerance 1e-6. */
+        public Solid filletChord(int[] edges, double chord) {
+            return filletChord(edges, chord, 1e-6);
+        }
+
+        /**
+         * The fillet with two set-backs: each straight edge cut back {@code distance} along
+         * {@code face} (which every picked edge must border) and {@code distanceOther} along its
+         * other face, the band the conic tangent to both -- the rolling ball's arc stretched, that
+         * arc when the two agree. Edges between two planes, convex or concave, ending against
+         * planes, running on into each other, or meeting at a convex corner whose sections agree;
+         * circular and spline edges, an end against a curved face and fillets meeting with
+         * different sections are refused.
+         */
+        public Solid filletAsymmetric(Collection<Edge> edges, int face, double distance, double distanceOther, double tolerance) {
+            return filletAsymmetric(indicesOf(edges), face, distance, distanceOther, tolerance);
+        }
+
+        /** {@link #filletAsymmetric(Collection, int, double, double, double)} at tolerance 1e-6. */
+        public Solid filletAsymmetric(Collection<Edge> edges, int face, double distance, double distanceOther) {
+            return filletAsymmetric(edges, face, distance, distanceOther, 1e-6);
+        }
+
+        /** {@link #filletAsymmetric(Collection, int, double, double, double)} by edge index. */
+        public Solid filletAsymmetric(int[] edges, int face, double distance, double distanceOther, double tolerance) {
+            int[] which = indices(edges);
+            int f = index(face);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment list = arena.allocateFrom(ValueLayout.JAVA_INT, which);
+                long count = which.length;
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) FILLET_ASYMMETRIC.invokeExact(h, list, count, f, distance, distanceOther, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #filletAsymmetric(int[], int, double, double, double)} at tolerance 1e-6. */
+        public Solid filletAsymmetric(int[] edges, int face, double distance, double distanceOther) {
+            return filletAsymmetric(edges, face, distance, distanceOther, 1e-6);
+        }
+
+        /**
+         * A full round: face {@code centre} replaced by a round tangent to faces {@code side} and
+         * {@code otherSide} either side of it -- a rib's top becomes a half cylinder, a tube's top
+         * (a ring between two coaxial walls) a half torus. The radius is solved from the three
+         * faces, not given: sides {@code w} apart give {@code w / 2}. {@code centre} must be a
+         * plane and each side must share an edge with it; a tapered rib, a disc top, curved end
+         * faces and side faces lower than the round are refused. Face indices.
+         */
+        public Solid filletFullRound(int side, int centre, int otherSide, double tolerance) {
+            int a = index(side), c = index(centre), b = index(otherSide);
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) FILLET_FULL_ROUND.invokeExact(h, a, c, b, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #filletFullRound(int, int, int, double)} at tolerance 1e-6. */
+        public Solid filletFullRound(int side, int centre, int otherSide) {
+            return filletFullRound(side, centre, otherSide, 1e-6);
+        }
+
+        /**
+         * The fillet at {@code radius} of the edges a rule picks: with {@code between} empty (or
+         * null) every edge with a face in {@code faces}, otherwise every edge between a face in
+         * {@code faces} and one in {@code between}; of those the convex and concave ones ({@link
+         * EdgeRule#ALL}), the concave ones ({@link EdgeRule#CONCAVE}) or the convex ones ({@link
+         * EdgeRule#CONVEX}), classed at the solid's own angular tolerance. Smooth edges and edges
+         * convex along part and concave along another are never picked; nothing picked is refused.
+         * Face indices.
+         */
+        public Solid filletRule(int[] faces, double radius, int[] between, EdgeRule rule, double tolerance) {
+            int[] picked = indices(faces);
+            int[] others = indices(between == null ? new int[0] : between);
+            int code = Objects.requireNonNull(rule, "fillet_rule: rule").code;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment list = arena.allocateFrom(ValueLayout.JAVA_INT, picked);
+                MemorySegment otherList = others.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, others);
+                long count = picked.length, otherCount = others.length;
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) FILLET_RULE.invokeExact(h, list, count, otherList, otherCount, code, radius, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #filletRule(int[], double, int[], EdgeRule, double)} at tolerance 1e-6. */
+        public Solid filletRule(int[] faces, double radius, int[] between, EdgeRule rule) {
+            return filletRule(faces, radius, between, rule, 1e-6);
+        }
+
+        /** {@link #filletRule(int[], double, int[], EdgeRule, double)} on every edge of {@code
+         *  faces} ({@link EdgeRule#ALL}, no {@code between}) at tolerance 1e-6. */
+        public Solid filletRule(int[] faces, double radius) {
+            return filletRule(faces, radius, null, EdgeRule.ALL, 1e-6);
+        }
+
         /** {@link #chamfer(Collection, double, double)} at tolerance 1e-6. */
         public Solid chamfer(Collection<Edge> edges, double distance) {
             return chamfer(edges, distance, 1e-6);
@@ -14295,9 +15500,11 @@ public final class Blacksmith {
 
         /** Hems on {@code edges}: {@code kind} {@link HemKind#FLAT} (the lip folded flat on the
          *  sheet), {@link HemKind#OPEN} (folded back with a gap), {@link HemKind#ROLLED} (rolled
-         *  round through {@code angle}, 0: 1.5 pi) or {@link HemKind#TEARDROP}; {@code length} the
-         *  lip, {@code gap} the gap inside (0: the thickness). Throws {@link BuildException} ({@code
-         *  sheet_hem: ...}) as {@link #sheetFlange} does. */
+         *  round through {@code angle}, 0: 1.5 pi), {@link HemKind#TEARDROP}, {@link HemKind#ROPE}
+         *  (curled round a rod {@code gap} across until it comes back down to the sheet) or {@link
+         *  HemKind#DOUBLE} (folded twice and pressed flat, three layers); {@code length} the lip
+         *  (unused by a rope hem), {@code gap} the gap inside (0: the thickness). Throws {@link
+         *  BuildException} ({@code sheet_hem: ...}) as {@link #sheetFlange} does. */
         public Solid sheetHem(int[] edges, HemKind kind, double length, SheetRule rule, double gap, double angle, double tolerance) {
             int[] which = indices(edges);
             int k = kind.code;
@@ -14649,6 +15856,46 @@ public final class Blacksmith {
             return unroll(null, null, null, false, Double.NaN);
         }
 
+        /** Faces {@code faces} (null: all) laid flat in the xy plane with the least distortion,
+         *  whether or not they are developable -- Rhino's {@code Squisher}. Faces sharing an edge
+         *  flatten together (unless {@code explode}); a group of faces that are all developable is
+         *  laid exactly as {@link #unroll} lays it. {@code deformation} (null: {@link
+         *  SquishDeformation#FREE}) reads from the flat pattern to the shape: stretch is flat
+         *  lengths shorter than their 3D lengths (the pattern stretches over the shape), compress
+         *  longer. {@code preserveBoundary} keeps the outline's length. {@code curves} (null:
+         *  none) follow onto the flat (in pieces where they leave the faces), {@code points}
+         *  (null: none) to their spots. Throws {@link BuildException} ({@code squish: ...}) for a
+         *  face out of range and faces that close on themselves. */
+        public Squished squish(int[] faces, List<NurbsCurve> curves, double[][] points, boolean explode, SquishDeformation deformation,
+                               boolean preserveBoundary, double tolerance) {
+            int[] which = faces == null ? new int[0] : indices(faces);
+            List<NurbsCurve> cs = curves == null ? List.of() : curves;
+            double[] pts = points == null ? new double[0] : flatPoints(points, "squish");
+            int pointCount = pts.length / 3;
+            int code = (deformation == null ? SquishDeformation.FREE : deformation).code;
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fa = u32sIn(arena, which);
+                MemorySegment ca = arena.allocate(ValueLayout.ADDRESS, Math.max(cs.size(), 1));
+                for (int i = 0; i < cs.size(); i++) ca.setAtIndex(ValueLayout.ADDRESS, i, cs.get(i).handle());
+                MemorySegment pa = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(pts.length, 1));
+                for (int i = 0; i < pts.length; i++) pa.setAtIndex(ValueLayout.JAVA_DOUBLE, i, pts[i]);
+                long nf = which.length, nc = cs.size(), np = pointCount;
+                MemorySegment h = handle();
+                raw = call(() -> (MemorySegment) SQUISH.invokeExact(h, fa, nf, ca, nc, pa, np, explode, code, preserveBoundary, tolerance));
+            } finally {
+                keep(this, cs);
+                for (NurbsCurve c : cs) keep(c);
+            }
+            return Squished.read(raw, cs.size(), pointCount);
+        }
+
+        /** {@link #squish(int[], List, double[][], boolean, SquishDeformation, boolean, double)}:
+         *  every face, joined, free, the boundary kept, at the effective tolerance. */
+        public Squished squish() {
+            return squish(null, null, null, false, SquishDeformation.FREE, true, Double.NaN);
+        }
+
         /** The base flange: {@code profile} as a flat sheet under {@code frame} (null: the world's
          *  xy), its top in the frame's plane and the sheet {@code rule.thickness()} below it. Throws
          *  {@link BuildException} ({@code sheet_base: ...}) for a bad rule and a profile that does
@@ -14691,6 +15938,34 @@ public final class Blacksmith {
         public static Solid sheetContour(double[][] path, double width, SheetRule rule, double[] frame) {
             return sheetContour(path, width, rule, frame, Double.NaN);
         }
+
+        /** A lofted flange between the open polylines {@code a} and {@code b} (x, y, z points, at
+         *  least two each), the sheet's top face: the strip between them cut into facets, every
+         *  crease a bend of {@code rule}'s radius, so the part unfolds like any other (press-brake
+         *  style; sample an arc into as many points as facets wanted). The sheet lies under the
+         *  facets' normal, along a x towards b -- reverse both to put it on the other side. Throws
+         *  {@link BuildException} ({@code sheet_lofted_flange: ...}) for fewer than two points, a
+         *  repeated point, a facet with no area, a facet its bends' set-backs leave nothing of and a
+         *  bad rule. */
+        public static Solid sheetLoftedFlange(double[][] a, double[][] b, SheetRule rule, double tolerance) {
+            double[] pa = flatPoints(a, "sheet_lofted_flange");
+            double[] pb = flatPoints(b, "sheet_lofted_flange");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment as = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(pa.length, 1));
+                for (int i = 0; i < pa.length; i++) as.setAtIndex(ValueLayout.JAVA_DOUBLE, i, pa[i]);
+                MemorySegment bs = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(pb.length, 1));
+                for (int i = 0; i < pb.length; i++) bs.setAtIndex(ValueLayout.JAVA_DOUBLE, i, pb[i]);
+                MemorySegment r = rule.raw(arena);
+                long aCount = pa.length / 3, bCount = pb.length / 3;
+                return new Solid(call(() -> (MemorySegment) SHEET_LOFTED_FLANGE.invokeExact(as, aCount, bs, bCount, r, tolerance)));
+            }
+        }
+
+        /** {@link #sheetLoftedFlange(double[][], double[][], SheetRule, double)} at the effective tolerance. */
+        public static Solid sheetLoftedFlange(double[][] a, double[][] b, SheetRule rule) {
+            return sheetLoftedFlange(a, b, rule, Double.NaN);
+        }
+
 
         /** A flat outline folded: {@code profile} under {@code frame} (null: the world's xy), each
          *  of {@code bends} a bend -- a {@link FlatPattern}'s outline and bends, edited and folded
@@ -15029,6 +16304,89 @@ public final class Blacksmith {
         /** {@link #fromNode(Cad.Scene, Cad.Node, boolean)}, placed. */
         public static Solid fromNode(Cad.Scene scene, Cad.Node node) {
             return fromNode(scene, node, true);
+        }
+
+        /** {@link #fromMesh(double[], int[], double, double, double, FromMeshMode)} with every
+         *  tolerance its default, {@link FromMeshMode#PRISMATIC}. */
+        public static FromMesh fromMesh(double[] positions, int[] indices) {
+            return fromMesh(positions, indices, 0, 0, 0, FromMeshMode.PRISMATIC);
+        }
+
+        /**
+         * A triangle mesh made a B-rep, and a {@link FromMeshReport} of what it became. {@code
+         * positions} are the vertices (three numbers each, flat) and {@code indices} the
+         * triangles (three vertex indices each, flat). Points within {@code weldTolerance} are
+         * welded into one vertex and degenerate triangles dropped; the triangles are oriented to
+         * agree with their neighbours and each closed component turned outward (one inside
+         * another inward, a void). {@code mode} is how far the triangles are grouped ({@code
+         * null}: {@link FromMeshMode#PRISMATIC}): {@link FromMeshMode#FACETED} gives one planar
+         * face per triangle; {@link FromMeshMode#PLANES} merges coplanar neighbours -- each normal
+         * within {@code angleTolerance} (radians) of its region's, each vertex within {@code
+         * distanceTolerance} of its plane -- into one planar face bounded by their outline, and
+         * drops collinear outline points: a CAD box's mesh comes back as 6 faces and 12 edges,
+         * curved regions faceted; {@link FromMeshMode#PRISMATIC} (the default) merges the planes
+         * and fits curved regions with cylinders, cones, spheres and tori, what fits nothing
+         * staying faceted, and is never worse than {@code PLANES} (where its body is not closed
+         * while the mesh was, holds the volume less well, or has more faces, the planes' comes
+         * back). A
+         * tolerance of 0 or NaN is its default: weld 1e-6 x the bounding-box diagonal, angle one
+         * degree, distance 1e-5 x the diagonal; a weld tolerance given is the solid's declared
+         * absolute tolerance. A mesh that is not watertight, manifold and orientable comes back
+         * as an open shell (a sheet), {@code report.closed()} false and the report saying why.
+         * Throws {@link BuildException} ({@code from_mesh: ...}) for no triangles, an index past
+         * the vertices, a coordinate that is not finite, a negative tolerance or every triangle
+         * degenerate.
+         */
+        public static FromMesh fromMesh(double[] positions, int[] indices, double weldTolerance, double angleTolerance,
+                                        double distanceTolerance, FromMeshMode mode) {
+            final String what = "from_mesh";
+            if (positions == null) throw new NullPointerException("positions");
+            if (indices == null) throw new NullPointerException("indices");
+            if (positions.length % 3 != 0) throw new BuildException(what + ": " + positions.length + " numbers are not three a vertex");
+            if (indices.length % 3 != 0) throw new BuildException(what + ": " + indices.length + " indices are not three a triangle");
+            try (Arena arena = Arena.ofConfined()) {
+                // One slot at least; the counts say how many are real (0 triangles: refused by the library).
+                MemorySegment ps = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(positions.length, 1));
+                MemorySegment.copy(positions, 0, ps, ValueLayout.JAVA_DOUBLE, 0, positions.length);
+                MemorySegment is = arena.allocate(ValueLayout.JAVA_INT, Math.max(indices.length, 1));
+                MemorySegment.copy(indices, 0, is, ValueLayout.JAVA_INT, 0, indices.length);
+                MemorySegment rs = arena.allocate(ValueLayout.JAVA_INT, 14);
+                int nv = positions.length / 3, nt = indices.length / 3, code = (mode == null ? FromMeshMode.PRISMATIC : mode).code;
+                MemorySegment raw = call(() -> (MemorySegment) FROM_MESH.invokeExact(ps, nv, is, nt, weldTolerance, angleTolerance,
+                        distanceTolerance, code, rs));
+                Solid solid = new Solid(checked(raw, what));
+                int[] r = rs.toArray(ValueLayout.JAVA_INT);
+                return new FromMesh(solid, new FromMeshReport(r[0] != 0, r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10],
+                        r[11], r[12], r[13]));
+            }
+        }
+
+        /** {@link #fromMeshNode(Cad.Node, double, double, double, FromMeshMode)} with every
+         *  tolerance its default, {@link FromMeshMode#PRISMATIC}. */
+        public static FromMesh fromMeshNode(Cad.Node node) {
+            return fromMeshNode(node, 0, 0, 0, FromMeshMode.PRISMATIC);
+        }
+
+        /** {@link #fromMesh(double[], int[], double, double, double, FromMeshMode)} over the triangles
+         *  a reader {@link Cad.Node} draws -- an STL's or OBJ's mesh, or any node's -- read from
+         *  its {@code mesh64()}, in the node's own frame: not placed where the node's {@code
+         *  transform()} puts it. A node with no triangles throws {@link BuildException} ({@code
+         *  from_mesh: no triangles}). */
+        public static FromMesh fromMeshNode(Cad.Node node, double weldTolerance, double angleTolerance, double distanceTolerance,
+                                            FromMeshMode mode) {
+            if (node == null) throw new NullPointerException("node");
+            Cad.Mesh64 mesh = node.mesh64();
+            double[] positions = new double[0];
+            int[] indices = new int[0];
+            if (mesh != null) {   // copied: the buffers are lent by the scene
+                java.nio.DoubleBuffer p = mesh.positions();
+                positions = new double[p.remaining()];
+                p.get(positions);
+                java.nio.IntBuffer i = mesh.indices();
+                indices = new int[i.remaining()];
+                i.get(indices);
+            }
+            return fromMesh(positions, indices, weldTolerance, angleTolerance, distanceTolerance, mode);
         }
 
         /** {@link #fromNode(Cad.Scene, Cad.Node, boolean)} by node index. */
@@ -17713,6 +19071,13 @@ public final class Blacksmith {
     public static final class NurbsSurface implements AutoCloseable {
         private final Handle handle;
         private final Cleaner.Cleanable cleanable;
+        private final Double fitError;
+
+        /** {@link Blacksmith#offset(MemoryLayout, String)}, which this class's {@code offset}
+         *  methods would otherwise hide from the calls inside it. */
+        private static long offset(MemoryLayout struct, String field) {
+            return Blacksmith.offset(struct, field);
+        }
 
         /** The surface of the control net {@code points} (one {@code double[3]} a control point,
          *  rows along {@code u}) of {@code counts = {n_u, n_v}} points. */
@@ -17737,8 +19102,19 @@ public final class Blacksmith {
         }
 
         private NurbsSurface(MemorySegment raw, String what) {
+            this(raw, what, null);
+        }
+
+        private NurbsSurface(MemorySegment raw, String what, Double fitError) {
             handle = new Handle(NURBS_SURFACE_FREE, "nurbs_surface: closed", checked(raw, what));
             cleanable = CLEANER.register(this, handle);
+            this.fitError = fitError;
+        }
+
+        /** The fit's bound on the distance from the exact surface, set only on a surface from
+         *  {@link #offset}; null otherwise. */
+        public Double fitError() {
+            return fitError;
         }
 
         private static MemorySegment build(double[] points, int[] counts, int degreeU, int degreeV, double[] weights, double[] knotsU,
@@ -18053,6 +19429,71 @@ public final class Blacksmith {
             return derived("nurbs_surface_extended", h -> (MemorySegment) NURBS_SURFACE_EXTENDED.invokeExact(h, s, length));
         }
 
+        /** This surface moved {@code distance} along its normal (Rhino's {@code Surface.Offset}),
+         *  refitted within {@code tolerance} (0 or NaN: the effective tolerance); {@link #fitError}
+         *  is the fit's bound on the distance from the exact offset, 0 for a plane, which offsets
+         *  exactly. Throws for a distance that is not finite, a surface with no normal somewhere,
+         *  or an offset that folds over (a curvature radius used up). */
+        public NurbsSurface offset(double distance, double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment err = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                MemorySegment h = handle();
+                MemorySegment raw = call(() -> (MemorySegment) NURBS_SURFACE_OFFSET.invokeExact(h, distance, tolerance, err));
+                return new NurbsSurface(raw, "nurbs_surface_offset", err.get(ValueLayout.JAVA_DOUBLE, 0));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #offset(double, double)} at the effective tolerance. */
+        public NurbsSurface offset(double distance) {
+            return offset(distance, Double.NaN);
+        }
+
+        /** This surface and {@code other} joined along a side they share into one surface
+         *  (Rhino's {@code MergeSurfaces}): a side of each, any of the four either way along, must
+         *  be the same curve within {@code tolerance} (0 or NaN: the two nets' effective
+         *  tolerance); {@code other} is turned to continue this one across it, this one keeping its
+         *  parameters and the shared row of control points. Every point of either is a point of
+         *  the result; knots at the joint are removed as far as it allows. A side collapsed to a
+         *  point (a pole) is never the shared side. Throws for no side shared, sides that meet only
+         *  in part, or a shared side parametrised differently. */
+        public NurbsSurface merge(NurbsSurface other, double tolerance) {
+            try {
+                MemorySegment h = handle(), o = other.handle();
+                MemorySegment raw = call(() -> (MemorySegment) NURBS_SURFACE_MERGE.invokeExact(h, o, tolerance));
+                return new NurbsSurface(raw, "nurbs_surface_merge");
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** {@link #merge(NurbsSurface, double)} within 1e-6, Python's default. */
+        public NurbsSurface merge(NurbsSurface other) {
+            return merge(other, 1e-6);
+        }
+
+        /** {@code count} surfaces evenly between this surface and {@code other} (Rhino's {@code
+         *  CreateTweenSurfaces} on matched nets), surface {@code i} at the fraction
+         *  {@code (i + 1) / (count + 1)}: both reparametrised to {@code [0, 1]} each way and made
+         *  compatible exactly (degrees elevated, knots merged), their homogeneous nets blended;
+         *  {@code u} goes with {@code u} and {@code v} with {@code v}, as given. A count of 0
+         *  throws. */
+        public List<NurbsSurface> tween(NurbsSurface other, int count) {
+            int n = u32of(count, "nurbs_surface_tween", "count");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.ADDRESS, Math.max(n, 1));
+                MemorySegment h = handle(), o = other.handle();
+                boolean ok = call(() -> (boolean) NURBS_SURFACE_TWEEN.invokeExact(h, o, n, out));
+                if (!ok) throw failure("nurbs_surface_tween");
+                List<NurbsSurface> made = new ArrayList<>(n);
+                for (int i = 0; i < n; i++) made.add(new NurbsSurface(out.getAtIndex(ValueLayout.ADDRESS, i), "nurbs_surface_tween"));
+                return made;
+            } finally {
+                keep(this, other);
+            }
+        }
+
         /** The point and its partial derivatives to second order at {@code (u, v)} (Rhino's {@code
          *  Surface.Evaluate} to order 2). A parameter outside the domain or not finite throws. */
         public SurfaceDerivatives secondDerivatives(double u, double v) {
@@ -18124,6 +19565,606 @@ public final class Blacksmith {
             if (closed()) return "NurbsSurface(closed)";
             int[] n = counts();
             return "NurbsSurface(degrees " + degreeU() + " x " + degreeV() + ", " + n[0] + " x " + n[1] + " points)";
+        }
+    }
+
+    // ---- Polygon sets -------------------------------------------------------------------------
+
+    /** {@code CadaclysmBlacksmithPolygonSetView}: the set's rings, flat (48 bytes). */
+    private static final MemoryLayout POLYGON_SET_VIEW_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("xy"),
+            ValueLayout.JAVA_INT.withName("point_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("ring_sizes"),
+            ValueLayout.JAVA_INT.withName("ring_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("polygon_rings"),
+            ValueLayout.JAVA_INT.withName("polygon_count"),
+            MemoryLayout.paddingLayout(4));
+
+    /** {@code CadaclysmBlacksmithPolygonSetLinesView}: polylines, flat (32 bytes). */
+    private static final MemoryLayout POLYGON_SET_LINES_VIEW_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("xy"),
+            ValueLayout.JAVA_INT.withName("point_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("sizes"),
+            ValueLayout.JAVA_INT.withName("count"),
+            MemoryLayout.paddingLayout(4));
+
+    /**
+     * Any number of straight-sided polygons in the plane, each an outer ring and holes: the 2D
+     * geometry of a floor plan -- Python's {@code PolygonSet}, member for member. Booleans
+     * ({@link #union}, {@link #intersection}, {@link #difference}, {@link #unionAll}), the buffer
+     * ({@link #buffer(double)}, and {@link #bufferPolyline(double[][], double)} for lines), measures
+     * ({@link #area}, {@link #perimeter}, {@link #bounds}, {@link #centroid}) and the questions a
+     * layout asks over and over -- {@link #locate} points, {@link #contains} / {@link #intersects}
+     * other sets or polylines, {@link #distance}, {@link #clipPolyline}. A set keeps an index for
+     * those questions the first time one is asked, so a fixed set (a room) answers many cheaply.
+     *
+     * <p>Points are {@code {x, y}} pairs. Sets are immutable: every verb returns a new one. A set
+     * made from rings keeps them as written (either winding). A set a verb makes has its rings as
+     * GEOS (shapely) makes them: outer rings clockwise, holes counter-clockwise, no closing point
+     * repeated. The buffer is built as GEOS builds it. {@link #close} frees the set; so does the
+     * garbage collector. A call after {@link #close} throws {@code polygon_set: closed}.
+     */
+    public static final class PolygonSet implements AutoCloseable {
+        /** One polygon: its outer ring and its holes, each ring {@code {x, y}} points with no
+         *  closing point repeated. */
+        public record Polygon(double[][] outer, List<double[][]> holes) {
+            /** A polygon with no holes. */
+            public Polygon(double[][] outer) {
+                this(outer, List.of());
+            }
+        }
+
+        /** How {@link #buffer} and {@link #bufferPolyline} join the corners that open up. */
+        public enum Join {
+            /** An arc of {@code quadSegs} segments a quarter turn. */
+            ROUND(0),
+            /** Out to where the edges meet, squared off past {@code mitreLimit} times the distance. */
+            MITRE(1),
+            /** A line across. */
+            BEVEL(2);
+
+            /** The join's {@code uint32_t} in the C ABI. */
+            public final int code;
+
+            Join(int code) {
+                this.code = code;
+            }
+        }
+
+        /** How {@link #bufferPolyline} caps a polyline's ends. */
+        public enum Cap {
+            /** A half disc. */
+            ROUND(0),
+            /** Square across the end. */
+            FLAT(1),
+            /** Carried on past the end by the distance. */
+            SQUARE(2);
+
+            /** The cap's {@code uint32_t} in the C ABI. */
+            public final int code;
+
+            Cap(int code) {
+                this.code = code;
+            }
+        }
+
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        /** The empty set. */
+        public PolygonSet() {
+            this(call(() -> (MemorySegment) POLYGON_SET_FROM_RINGS.invokeExact(MemorySegment.NULL, MemorySegment.NULL, 0,
+                    MemorySegment.NULL, 0)), "polygon_set_from_rings");
+        }
+
+        private PolygonSet(MemorySegment raw, String what) {
+            handle = new Handle(POLYGON_SET_FREE, "polygon_set: closed", checked(raw, what));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the set back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** {@code {x, y}} points as flat doubles, a point that is not two numbers refused by index. */
+        private static double[] flat(double[][] points, String what) {
+            if (points == null) throw new BuildException(what + ": points is null");
+            double[] flat = new double[2 * points.length];
+            for (int i = 0; i < points.length; i++) {
+                double[] p = points[i];
+                if (p == null || p.length != 2) throw new BuildException(what + ": point " + i + " is not an (x, y) pair");
+                flat[2 * i] = p[0];
+                flat[2 * i + 1] = p[1];
+            }
+            return flat;
+        }
+
+        private static MemorySegment doubles(Arena arena, double[] values) {
+            return values.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, values);
+        }
+
+        /** A set of {@code polygons}, each ring kept as written (either winding; a repeated closing
+         *  point dropped) and not re-cut: rings that cross want {@link #cleaned}. Overlapping
+         *  polygons are allowed -- every verb treats the set as their union. Throws {@link
+         *  BuildException} for a ring of fewer than 3 points or a non-finite coordinate. */
+        public static PolygonSet fromPolygons(List<Polygon> polygons) {
+            List<double[][]> rings = new ArrayList<>();
+            int[] counts = new int[polygons.size()];
+            for (int p = 0; p < counts.length; p++) {
+                Polygon polygon = polygons.get(p);
+                if (polygon == null || polygon.outer() == null) throw new BuildException("polygon_set_from_rings: polygon " + p + " has no outer ring");
+                rings.add(polygon.outer());
+                List<double[][]> holes = polygon.holes() == null ? List.of() : polygon.holes();
+                rings.addAll(holes);
+                counts[p] = 1 + holes.size();
+            }
+            int[] sizes = new int[rings.size()];
+            List<double[]> parts = new ArrayList<>();
+            int total = 0;
+            for (int r = 0; r < sizes.length; r++) {
+                double[] part = flat(rings.get(r), "polygon_set_from_rings");
+                parts.add(part);
+                sizes[r] = part.length / 2;
+                total += part.length;
+            }
+            double[] xy = new double[total];
+            int at = 0;
+            for (double[] part : parts) {
+                System.arraycopy(part, 0, xy, at, part.length);
+                at += part.length;
+            }
+            int ringCount = sizes.length, polygonCount = counts.length;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment xs = doubles(arena, xy);
+                MemorySegment ss = ringCount == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, sizes);
+                MemorySegment cs = polygonCount == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, counts);
+                return new PolygonSet(call(() -> (MemorySegment) POLYGON_SET_FROM_RINGS.invokeExact(xs, ss, ringCount, cs, polygonCount)),
+                        "polygon_set_from_rings");
+            }
+        }
+
+        /** One polygon: {@code outer} and its {@code holes} (see {@link #fromPolygons}). */
+        public static PolygonSet fromRings(double[][] outer, double[][]... holes) {
+            return fromPolygons(List.of(new Polygon(outer, holes == null ? List.of() : java.util.Arrays.asList(holes))));
+        }
+
+        /** {@code profile} flattened to a set: every arc and free-form side walked in steps that
+         *  keep it within {@code tolerance} (null: the profile's effective tolerance) -- the outline
+         *  its polylines draw -- its outer loop and holes kept as they run. Throws {@link
+         *  BuildException} for a loop that does not close or a tolerance that is not positive. */
+        public static PolygonSet fromProfile(Profile profile, Double tolerance) {
+            double t = tolerance == null ? Double.NaN : tolerance;
+            try {
+                MemorySegment h = profile.handle();
+                return new PolygonSet(call(() -> (MemorySegment) PROFILE_POLYGON_SET.invokeExact(h, t)), "profile_polygon_set");
+            } finally {
+                keep(profile);
+            }
+        }
+
+        /** {@link #fromProfile(Profile, Double)} at the profile's effective tolerance. */
+        public static PolygonSet fromProfile(Profile profile) {
+            return fromProfile(profile, null);
+        }
+
+        /** Everything in any of {@code sets}, merged in one pass (shapely's {@code unary_union}). */
+        public static PolygonSet unionAll(List<PolygonSet> sets) {
+            int n = sets.size();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment arr = n == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, n);
+                for (int i = 0; i < n; i++) arr.setAtIndex(ValueLayout.ADDRESS, i, sets.get(i).handle());
+                return new PolygonSet(call(() -> (MemorySegment) POLYGON_SET_UNION_ALL.invokeExact(arr, n)), "polygon_set_union_all");
+            } finally {
+                keep(sets);
+                for (PolygonSet s : sets) keep(s);
+            }
+        }
+
+        /** The region within {@code distance} (&gt; 0) of the polyline {@code points}: {@code join}
+         *  as {@link #buffer(double, int, Join, double)}, the ends capped by {@code cap}. One point
+         *  with a round cap is a disc. */
+        public static PolygonSet bufferPolyline(double[][] points, double distance, int quadSegs, Join join, double mitreLimit, Cap cap) {
+            double[] xy = flat(points, "polygon_set_buffer_polyline");
+            if (join == null) throw new BuildException("polygon_set_buffer_polyline: join is null");
+            if (cap == null) throw new BuildException("polygon_set_buffer_polyline: cap is null");
+            int n = xy.length / 2, j = join.code, c = cap.code;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment xs = doubles(arena, xy);
+                return new PolygonSet(call(() -> (MemorySegment) POLYGON_SET_BUFFER_POLYLINE.invokeExact(xs, n, distance, quadSegs, j, mitreLimit, c)),
+                        "polygon_set_buffer_polyline");
+            }
+        }
+
+        /** {@link #bufferPolyline(double[][], double, int, Join, double, Cap)} capped by {@code cap},
+         *  round joins of 16 segments a quarter turn. */
+        public static PolygonSet bufferPolyline(double[][] points, double distance, Cap cap) {
+            return bufferPolyline(points, distance, 16, Join.ROUND, 5.0, cap);
+        }
+
+        /** {@link #bufferPolyline(double[][], double, int, Join, double, Cap)}, round throughout. */
+        public static PolygonSet bufferPolyline(double[][] points, double distance) {
+            return bufferPolyline(points, distance, 16, Join.ROUND, 5.0, Cap.ROUND);
+        }
+
+        /** Runs a verb on this set and wraps the set it returns. */
+        private PolygonSet verb(String what, java.util.function.Function<MemorySegment, MemorySegment> body, Object... others) {
+            try {
+                MemorySegment h = handle();
+                return new PolygonSet(body.apply(h), what);
+            } finally {
+                keep(this);
+                keep(others);
+            }
+        }
+
+        /** A measure the library answered: NaN is its refusal, named {@code what}. */
+        private static double measure(double value, String what) {
+            if (Double.isNaN(value)) throw failure(what);
+            return value;
+        }
+
+        /** A question the library answered: -1 is its refusal, named {@code what}. */
+        private static boolean answer(int value, String what) {
+            if (value < 0) throw failure(what);
+            return value == 1;
+        }
+
+        private MemorySegment view(Arena arena) {
+            MemorySegment out = arena.allocate(POLYGON_SET_VIEW_LAYOUT);
+            MemorySegment h = handle();
+            boolean ok = call(() -> (boolean) POLYGON_SET_VIEW.invokeExact(h, out));
+            if (!ok) throw failure("polygon_set_view");
+            return out;
+        }
+
+        private static int intAt(MemorySegment s, MemoryLayout layout, String field) {
+            return s.get(ValueLayout.JAVA_INT, offset(layout, field));
+        }
+
+        private static long addressAt(MemorySegment s, MemoryLayout layout, String field) {
+            return s.get(ValueLayout.ADDRESS, offset(layout, field)).address();
+        }
+
+        private static double[][] ring(double[] xy, int at, int n) {
+            double[][] ring = new double[n][];
+            for (int i = 0; i < n; i++) ring[i] = new double[] {xy[2 * (at + i)], xy[2 * (at + i) + 1]};
+            return ring;
+        }
+
+        /** Every polygon, its rings {@code {x, y}} points with no closing point repeated: as written
+         *  for a made set, GEOS's order (outer clockwise) for a verb's result. */
+        public List<Polygon> polygons() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment v = view(arena);
+                MemoryLayout l = POLYGON_SET_VIEW_LAYOUT;
+                double[] xy = toArray(doubleView(addressAt(v, l, "xy"), 2L * Integer.toUnsignedLong(intAt(v, l, "point_count"))));
+                int[] sizes = toArray(intView(addressAt(v, l, "ring_sizes"), Integer.toUnsignedLong(intAt(v, l, "ring_count"))));
+                int[] counts = toArray(intView(addressAt(v, l, "polygon_rings"), Integer.toUnsignedLong(intAt(v, l, "polygon_count"))));
+                List<Polygon> found = new ArrayList<>(counts.length);
+                int at = 0, r = 0;
+                for (int k : counts) {
+                    List<double[][]> rings = new ArrayList<>(k);
+                    for (int i = 0; i < k; i++) {
+                        int n = sizes[r++];
+                        rings.add(ring(xy, at, n));
+                        at += n;
+                    }
+                    found.add(new Polygon(rings.get(0), List.copyOf(rings.subList(1, rings.size()))));
+                }
+                return found;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** How many polygons. */
+        public int size() {
+            try (Arena arena = Arena.ofConfined()) {
+                return intAt(view(arena), POLYGON_SET_VIEW_LAYOUT, "polygon_count");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Whether the set has no polygons. */
+        public boolean isEmpty() {
+            return size() == 0;
+        }
+
+        /** Re-cut into valid polygons: crossings resolved, overlaps merged (shapely's {@code buffer(0)}). */
+        public PolygonSet cleaned() {
+            return verb("polygon_set_clean", h -> call(() -> (MemorySegment) POLYGON_SET_CLEAN.invokeExact(h)));
+        }
+
+        /** Everything in either. */
+        public PolygonSet union(PolygonSet other) {
+            MemorySegment o = other.handle();
+            return verb("polygon_set_union", h -> call(() -> (MemorySegment) POLYGON_SET_UNION.invokeExact(h, o)), other);
+        }
+
+        /** What the two share. */
+        public PolygonSet intersection(PolygonSet other) {
+            MemorySegment o = other.handle();
+            return verb("polygon_set_intersection", h -> call(() -> (MemorySegment) POLYGON_SET_INTERSECTION.invokeExact(h, o)), other);
+        }
+
+        /** This set with {@code other} taken away. */
+        public PolygonSet difference(PolygonSet other) {
+            MemorySegment o = other.handle();
+            return verb("polygon_set_difference", h -> call(() -> (MemorySegment) POLYGON_SET_DIFFERENCE.invokeExact(h, o)), other);
+        }
+
+        /** What is in exactly one of the two. */
+        public PolygonSet symmetricDifference(PolygonSet other) {
+            MemorySegment o = other.handle();
+            return verb("polygon_set_symmetric_difference", h -> call(() -> (MemorySegment) POLYGON_SET_SYMMETRIC_DIFFERENCE.invokeExact(h, o)), other);
+        }
+
+        /** {@code intersection(other).area()}, without building the intersection. */
+        public double intersectionArea(PolygonSet other) {
+            try {
+                MemorySegment h = handle(), o = other.handle();
+                return measure(call(() -> (double) POLYGON_SET_INTERSECTION_AREA.invokeExact(h, o)), "polygon_set_intersection_area");
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** {@code difference(other).area()}, without building the difference. */
+        public double differenceArea(PolygonSet other) {
+            try {
+                MemorySegment h = handle(), o = other.handle();
+                return measure(call(() -> (double) POLYGON_SET_DIFFERENCE_AREA.invokeExact(h, o)), "polygon_set_difference_area");
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** The set grown by {@code distance} (shrunk where negative; 0 cleans it). Opening corners
+         *  are joined by {@code join}: {@link Join#ROUND} (an arc of {@code quadSegs} segments a
+         *  quarter turn), {@link Join#MITRE} (out to where the edges meet, squared off past {@code
+         *  mitreLimit} times the distance) or {@link Join#BEVEL}. */
+        public PolygonSet buffer(double distance, int quadSegs, Join join, double mitreLimit) {
+            if (join == null) throw new BuildException("polygon_set_buffer: join is null");
+            int j = join.code;
+            return verb("polygon_set_buffer", h -> call(() -> (MemorySegment) POLYGON_SET_BUFFER.invokeExact(h, distance, quadSegs, j, mitreLimit)));
+        }
+
+        /** {@link #buffer(double, int, Join, double)} with {@code join}, 16 segments a quarter
+         *  turn and a mitre limit of 5. */
+        public PolygonSet buffer(double distance, Join join) {
+            return buffer(distance, 16, join, 5.0);
+        }
+
+        /** {@link #buffer(double, int, Join, double)} with round joins of 16 segments a quarter turn. */
+        public PolygonSet buffer(double distance) {
+            return buffer(distance, 16, Join.ROUND, 5.0);
+        }
+
+        /** Every corner mapped by {@code x' = a x + b y + xoff}, {@code y' = d x + e y + yoff}
+         *  (shapely's {@code affine_transform} order); a mirroring map re-winds the rings. */
+        public PolygonSet transformed(double a, double b, double d, double e, double xoff, double yoff) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment m = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, a, b, d, e, xoff, yoff);
+                return verb("polygon_set_transform", h -> call(() -> (MemorySegment) POLYGON_SET_TRANSFORM.invokeExact(h, m)));
+            }
+        }
+
+        /** {@link #transformed(double, double, double, double, double, double)} with no offset. */
+        public PolygonSet transformed(double a, double b, double d, double e) {
+            return transformed(a, b, d, e, 0.0, 0.0);
+        }
+
+        /** The area, holes taken off. */
+        public double area() {
+            try {
+                MemorySegment h = handle();
+                return measure(call(() -> (double) POLYGON_SET_AREA.invokeExact(h)), "polygon_set_area");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The length of every ring, holes included. */
+        public double perimeter() {
+            try {
+                MemorySegment h = handle();
+                return measure(call(() -> (double) POLYGON_SET_PERIMETER.invokeExact(h)), "polygon_set_perimeter");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@code {min x, min y, max x, max y}}, or empty for the empty set. */
+        public Optional<double[]> bounds() {
+            if (isEmpty()) return Optional.empty();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 4);
+                boolean ok = call(() -> (boolean) POLYGON_SET_BOUNDS.invokeExact(h, out));
+                if (!ok) throw failure("polygon_set_bounds");
+                return Optional.of(out.toArray(ValueLayout.JAVA_DOUBLE));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The centre of area {@code {x, y}} (summed as GEOS sums it), or empty for a set with no area. */
+        public Optional<double[]> centroid() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 2);
+                boolean ok = call(() -> (boolean) POLYGON_SET_CENTROID.invokeExact(h, out));
+                return ok ? Optional.of(out.toArray(ValueLayout.JAVA_DOUBLE)) : Optional.empty();
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Where each point is: 1 inside, 0 on the outline, -1 outside. */
+        public int[] locate(double[][] points) {
+            double[] xy = flat(points, "polygon_set_locate");
+            int n = xy.length / 2;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment xs = doubles(arena, xy);
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_INT, Math.max(1, n));
+                boolean ok = call(() -> (boolean) POLYGON_SET_LOCATE.invokeExact(h, xs, n, out));
+                if (!ok) throw failure("polygon_set_locate");
+                return n == 0 ? new int[0] : out.asSlice(0, 4L * n).toArray(ValueLayout.JAVA_INT);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Whether {@code point} is strictly inside (on the outline is not). */
+        public boolean containsPoint(double[] point) {
+            return locate(new double[][] {point})[0] == 1;
+        }
+
+        /** Whether {@code other} lies in this set: none of it outside, some of it inside; flush
+         *  against the outline counts (shapely's {@code contains}). An empty set is in nothing. */
+        public boolean contains(PolygonSet other) {
+            try {
+                MemorySegment h = handle(), o = other.handle();
+                return answer(call(() -> (int) POLYGON_SET_CONTAINS.invokeExact(h, o)), "polygon_set_contains");
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** Whether the two share any point, outlines included. */
+        public boolean intersects(PolygonSet other) {
+            try {
+                MemorySegment h = handle(), o = other.handle();
+                return answer(call(() -> (int) POLYGON_SET_INTERSECTS.invokeExact(h, o)), "polygon_set_intersects");
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** Whether the polyline lies in the set: none of it outside, some of it strictly inside
+         *  (one lying wholly along the outline is not). */
+        public boolean containsPolyline(double[][] points) {
+            double[] xy = flat(points, "polygon_set_contains_polyline");
+            int n = xy.length / 2;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle(), xs = doubles(arena, xy);
+                return answer(call(() -> (int) POLYGON_SET_CONTAINS_POLYLINE.invokeExact(h, xs, n)), "polygon_set_contains_polyline");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Whether the polyline meets the set anywhere, outline included. */
+        public boolean intersectsPolyline(double[][] points) {
+            double[] xy = flat(points, "polygon_set_intersects_polyline");
+            int n = xy.length / 2;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle(), xs = doubles(arena, xy);
+                return answer(call(() -> (int) POLYGON_SET_INTERSECTS_POLYLINE.invokeExact(h, xs, n)), "polygon_set_intersects_polyline");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The least distance between the two sets (0 where they meet). */
+        public double distance(PolygonSet other) {
+            try {
+                MemorySegment h = handle(), o = other.handle();
+                return measure(call(() -> (double) POLYGON_SET_DISTANCE.invokeExact(h, o)), "polygon_set_distance");
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** The least distance to the polyline (one point is a polyline too); 0 where they meet. */
+        public double distanceToPolyline(double[][] points) {
+            double[] xy = flat(points, "polygon_set_distance_to_polyline");
+            int n = xy.length / 2;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle(), xs = doubles(arena, xy);
+                return measure(call(() -> (double) POLYGON_SET_DISTANCE_TO_POLYLINE.invokeExact(h, xs, n)), "polygon_set_distance_to_polyline");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The least distance to {@code point} (0 inside or on the set). */
+        public double distanceToPoint(double[] point) {
+            return distanceToPolyline(new double[][] {point});
+        }
+
+        /** The least distance from the outline to {@code point}, inside or out. */
+        public double boundaryDistance(double[] point) {
+            double[] p = flat(new double[][] {point}, "polygon_set_boundary_distance");
+            try {
+                MemorySegment h = handle();
+                return measure(call(() -> (double) POLYGON_SET_BOUNDARY_DISTANCE.invokeExact(h, p[0], p[1])), "polygon_set_boundary_distance");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Each polygon as a straight-sided {@link Profile} with its holes -- the outer loop
+         *  counter-clockwise, holes clockwise -- ready to extrude, revolve or combine exactly. */
+        public List<Profile> toProfiles() {
+            try {
+                MemorySegment h = handle();
+                return Profile.profileList(call(() -> (MemorySegment) POLYGON_SET_PROFILES.invokeExact(h)), "polygon_set_profiles");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The parts of the polyline in the set, outline included, in the line's own order. */
+        public List<double[][]> clipPolyline(double[][] points) {
+            double[] xy = flat(points, "polygon_set_clip_polyline");
+            int n = xy.length / 2;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle(), xs = doubles(arena, xy);
+                MemorySegment lines = checked(call(() -> (MemorySegment) POLYGON_SET_CLIP_POLYLINE.invokeExact(h, xs, n)), "polygon_set_clip_polyline");
+                try {
+                    MemorySegment v = arena.allocate(POLYGON_SET_LINES_VIEW_LAYOUT);
+                    boolean ok = call(() -> (boolean) POLYGON_SET_LINES_VIEW.invokeExact(lines, v));
+                    if (!ok) throw failure("polygon_set_lines_view");
+                    MemoryLayout l = POLYGON_SET_LINES_VIEW_LAYOUT;
+                    double[] got = toArray(doubleView(addressAt(v, l, "xy"), 2L * Integer.toUnsignedLong(intAt(v, l, "point_count"))));
+                    int[] sizes = toArray(intView(addressAt(v, l, "sizes"), Integer.toUnsignedLong(intAt(v, l, "count"))));
+                    List<double[][]> found = new ArrayList<>(sizes.length);
+                    int at = 0;
+                    for (int k : sizes) {
+                        found.add(ring(got, at, k));
+                        at += k;
+                    }
+                    return found;
+                } finally {
+                    call(() -> {
+                        POLYGON_SET_LINES_FREE.invokeExact(lines);
+                        return null;
+                    });
+                }
+            } finally {
+                keep(this);
+            }
+        }
+
+        @Override
+        public String toString() {
+            return closed() ? "PolygonSet(closed)" : "PolygonSet(" + size() + " polygons, area " + area() + ")";
         }
     }
 
@@ -20019,6 +22060,83 @@ public final class Blacksmith {
         }
     }
 
+    /** {@link Sketch#addPolygon}: the centre point, the construction circumcircle and incircle, the corners (corner 0
+     *  at the given vertex) and the sides (side {@code i} from corner {@code i}). */
+    public record Polygon(int centre, int circumcircle, int incircle, int[] corners, int[] sides) {
+        public Polygon {
+            corners = corners.clone();
+            sides = sides.clone();
+        }
+
+        @Override
+        public int[] corners() {
+            return corners.clone();
+        }
+
+        @Override
+        public int[] sides() {
+            return sides.clone();
+        }
+    }
+
+    /** {@link Sketch#chamfer}: the new line, its points on the first and the second line, the old corner (kept as
+     *  the virtual sharp) and the two dimensions (distance along the first line, then along the second or the angle). */
+    public record Chamfer(int line, int[] points, int corner, int[] dimensions) {
+        public Chamfer {
+            points = points.clone();
+            dimensions = dimensions.clone();
+        }
+
+        @Override
+        public int[] points() {
+            return points.clone();
+        }
+
+        @Override
+        public int[] dimensions() {
+            return dimensions.clone();
+        }
+    }
+
+    /** {@link Sketch#patternRectangular} and {@link Sketch#patternCircular}: {@code copies.get(j)} lists copy {@code j}'s
+     *  entity for each source entity in order, then the construction step entities and the dimensions that hold it. */
+    public record SketchPattern(List<int[]> copies, int[] steps, int[] dimensions) {
+        public SketchPattern {
+            copies = copies.stream().map(int[]::clone).toList();
+            steps = steps.clone();
+            dimensions = dimensions.clone();
+        }
+
+        @Override
+        public int[] steps() {
+            return steps.clone();
+        }
+
+        @Override
+        public int[] dimensions() {
+            return dimensions.clone();
+        }
+    }
+    /** {@link Sketch#mirror}: {@code copies} one entity id per source entity, in their order, and the
+     *  {@code constraints} holding them to the sources across the line (symmetric, equal_radius, point_on_line). */
+    public record SketchMirror(int[] copies, int[] constraints) {
+        public SketchMirror {
+            copies = copies.clone();
+            constraints = constraints.clone();
+        }
+
+        @Override
+        public int[] copies() {
+            return copies.clone();
+        }
+
+        @Override
+        public int[] constraints() {
+            return constraints.clone();
+        }
+    }
+
+
     /**
      * A 2D sketch of points, lines, circles, arcs and free curves held by geometric constraints and
      * dimensions, solved on request:
@@ -20047,7 +22165,8 @@ public final class Blacksmith {
             "coincident", "point_on_line", "point_on_circle", "horizontal", "vertical", "parallel", "perpendicular",
             "collinear", "tangent", "tangent_at_end", "concentric", "equal_length", "equal_radius", "midpoint",
             "symmetric", "fix", "distance", "point_line_distance", "line_distance", "circle_line_distance",
-            "circle_distance", "horizontal_distance", "vertical_distance", "length", "angle", "radius", "diameter"};
+            "circle_distance", "horizontal_distance", "vertical_distance", "length", "angle", "radius", "diameter",
+            "smooth", "translated", "rotated"};
         private static final String[] SENSES = {"auto", "positive", "negative"};
         private static final String[] ENDS = {"start", "end"};
         private static final String[] STATUSES = {"converged", "conflicting", "diverged"};
@@ -20337,6 +22456,135 @@ public final class Blacksmith {
             return new SketchRect(Arrays.copyOfRange(ids, 0, 4), Arrays.copyOfRange(ids, 4, 8));
         }
 
+        /** A borrowed list whose null is a refusal naming ids, copied before any other call on this sketch. */
+        private int[] lendRefusing(String what, Lend body) {
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment count = arena.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment at = call(() -> body.get(h, count));
+                if (at.address() == 0) throw refused(what);
+                return sketchLent(at, count, what);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A regular polygon of {@code sides} (3 to 1024) about {@code centre}, corner 0 at {@code vertex} (each two
+         *  numbers), sides kept equal, with construction circumcircle and incircle about one centre point. */
+        public Polygon addPolygon(double[] centre, double[] vertex, int sides) {
+            handle();
+            double[] c = doubles(centre, 2, "sketch_add_polygon centre"), v = doubles(vertex, 2, "sketch_add_polygon vertex");
+            int n = count(sides, "sketch_add_polygon");
+            int[] ids = lendRefusing("sketch_add_polygon",
+                    (h, out) -> (MemorySegment) SKETCH_ADD_POLYGON.invokeExact(h, c[0], c[1], v[0], v[1], n, out));
+            if (ids.length != 3 + 2 * n) throw new BuildException("sketch_add_polygon: expected " + (3 + 2 * n) + " ids, got " + ids.length);
+            return new Polygon(ids[0], ids[1], ids[2], Arrays.copyOfRange(ids, 3, 3 + n), Arrays.copyOfRange(ids, 3 + n, 3 + 2 * n));
+        }
+
+        private Chamfer chamferOf(String what, int[] ids) {
+            if (ids.length != 6) throw new BuildException(what + ": expected 6 ids, got " + ids.length);
+            return new Chamfer(ids[0], new int[] {ids[1], ids[2]}, ids[3], new int[] {ids[4], ids[5]});
+        }
+
+        /** Cuts the corner where the lines {@code a} and {@code b} meet with a new line, {@code da} along {@code a}
+         *  and {@code db} along {@code b} from the corner; the old corner stays as the virtual sharp. A refusal (a
+         *  distance not shorter than its line, parallel lines, ...) leaves the sketch unchanged. */
+        public Chamfer chamfer(int a, int b, double da, double db) {
+            liveId(a, "sketch_chamfer", "a");
+            sketchId(b, "sketch_chamfer", "b");
+            return chamferOf("sketch_chamfer", lendRefusing("sketch_chamfer",
+                    (h, n) -> (MemorySegment) SKETCH_CHAMFER.invokeExact(h, a, b, da, db, n)));
+        }
+
+        /** As {@link #chamfer}, with {@code angle} (radians) the interior angle at the new point on {@code a} between
+         *  {@code a} and the chamfer; the second dimension is that angle. */
+        public Chamfer chamferAngle(int a, int b, double da, double angle) {
+            liveId(a, "sketch_chamfer_angle", "a");
+            sketchId(b, "sketch_chamfer_angle", "b");
+            return chamferOf("sketch_chamfer_angle", lendRefusing("sketch_chamfer_angle",
+                    (h, n) -> (MemorySegment) SKETCH_CHAMFER_ANGLE.invokeExact(h, a, b, da, angle, n)));
+        }
+
+        private static SketchPattern patternOf(int[] ids, String what) {
+            if (ids.length < 4) throw new BuildException(what + ": expected at least 4 ids, got " + ids.length);
+            int k = ids[0], m = ids[1], s = ids[2], d = ids[3];
+            if (ids.length != 4 + k * m + s + d) throw new BuildException(what + ": the list of " + ids.length + " ids does not fit its header");
+            List<int[]> copies = new ArrayList<>();
+            int at = 4;
+            for (int j = 0; j < k; j++) copies.add(Arrays.copyOfRange(ids, at + j * m, at + (j + 1) * m));
+            at += k * m;
+            return new SketchPattern(copies, Arrays.copyOfRange(ids, at, at + s), Arrays.copyOfRange(ids, at + s, at + s + d));
+        }
+
+        /** Copies {@code entities} into an {@code n1} by {@code n2} grid (both counts include the source) along
+         *  {@code d1} and {@code d2} (each two numbers), held by translated constraints and driving distance dimensions. */
+        public SketchPattern patternRectangular(int[] entities, double[] d1, int n1, double[] d2, int n2) {
+            handle();
+            liveIds(entities, "sketch_pattern_rectangular", "entity id");
+            double[] u = doubles(d1, 2, "sketch_pattern_rectangular d1"), w = doubles(d2, 2, "sketch_pattern_rectangular d2");
+            int c1 = count(n1, "sketch_pattern_rectangular"), c2 = count(n2, "sketch_pattern_rectangular");
+            long n = entities.length;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ids = arena.allocateFrom(ValueLayout.JAVA_INT, entities);
+                return patternOf(lendRefusing("sketch_pattern_rectangular", (hh, out) ->
+                        (MemorySegment) SKETCH_PATTERN_RECTANGULAR.invokeExact(hh, ids, n, u[0], u[1], c1, w[0], w[1], c2, out)),
+                        "sketch_pattern_rectangular");
+            }
+        }
+
+        /** {@link #patternRectangular(int[], double[], int, double[], int)} in one row: {@code n1} copies along {@code d1}. */
+        public SketchPattern patternRectangular(int[] entities, double[] d1, int n1) {
+            return patternRectangular(entities, d1, n1, new double[] {0, 0}, 1);
+        }
+
+        /** Copies {@code entities} round the point {@code centre}: {@code count} instances (the source included), each
+         *  turned {@code step} radians counter-clockwise from the last, held by rotated constraints, two construction
+         *  step lines and a driving angle dimension. */
+        public SketchPattern patternCircular(int[] entities, int centre, int count, double step) {
+            handle();
+            liveIds(entities, "sketch_pattern_circular", "entity id");
+            sketchId(centre, "sketch_pattern_circular", "centre");
+            int c = count(count, "sketch_pattern_circular");
+            long n = entities.length;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ids = arena.allocateFrom(ValueLayout.JAVA_INT, entities);
+                return patternOf(lendRefusing("sketch_pattern_circular", (h, out) ->
+                        (MemorySegment) SKETCH_PATTERN_CIRCULAR.invokeExact(h, ids, n, centre, c, step, out)),
+                        "sketch_pattern_circular");
+            }
+        }
+        /** Copies {@code entities} reflected across the line {@code line} (which must not be among them), each copy
+         *  held to its source by symmetric constraints (equal radius for circles and arcs, point on line for a point
+         *  on the line); the sketch is unchanged on refusal. */
+        public SketchMirror mirror(int[] entities, int line) {
+            handle();
+            liveIds(entities, "sketch_mirror", "entity id");
+            sketchId(line, "sketch_mirror", "line");
+            long n = entities.length;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ids = arena.allocateFrom(ValueLayout.JAVA_INT, entities.length == 0 ? new int[] {0} : entities);
+                int[] made = lendRefusing("sketch_mirror", (h, out) ->
+                        (MemorySegment) SKETCH_MIRROR.invokeExact(h, ids, n, line, out));
+                if (made.length < entities.length)
+                    throw new BuildException("sketch_mirror: the library returned " + made.length + " ids for " + entities.length + " entities");
+                return new SketchMirror(Arrays.copyOfRange(made, 0, entities.length), Arrays.copyOfRange(made, entities.length, made.length));
+            }
+        }
+
+
+        /** {@link #autoConstrain(double, boolean)} at the default tolerance, no dimensions. */
+        public int[] autoConstrain() {
+            return autoConstrain(0.0, false);
+        }
+
+        /** Adds the constraints the geometry already satisfies within {@code tolerance} (0: 1e-6 of the sketch's
+         *  extent), each kept only where it removes a degree of freedom; with {@code dimensions}, driving dimensions at
+         *  the measured values follow until nothing is free. The new constraint ids. */
+        public int[] autoConstrain(double tolerance, boolean dimensions) {
+            return lendRefusing("sketch_auto_constrain",
+                    (h, n) -> (MemorySegment) SKETCH_AUTO_CONSTRAIN.invokeExact(h, tolerance, dimensions, n));
+        }
+
         /** The kind of entity {@code id}: "point", "line", "circle", "arc" or "free_curve". */
         public String kind(int id) {
             liveId(id, "sketch_kind", "id");
@@ -20599,6 +22847,21 @@ public final class Blacksmith {
 
         public int fix(int entity) {
             return geometric("fix", entity);
+        }
+
+        /** The curves {@code a} and {@code b} meet with a continuous tangent and curvature (a smooth joint). */
+        public int smooth(int a, int b) {
+            return geometric("smooth", a, b);
+        }
+
+        /** The point (or entity) {@code b} is {@code a} moved by the vector from point {@code from} to point {@code to}. */
+        public int translated(int a, int b, int from, int to) {
+            return geometric("translated", a, b, from, to);
+        }
+
+        /** {@code b} is {@code a} turned about the point {@code centre} by the angle from {@code from} to {@code to}. */
+        public int rotated(int a, int b, int centre, int from, int to) {
+            return geometric("rotated", a, b, centre, from, to);
         }
 
         public int distance(int a, int b, double value) {

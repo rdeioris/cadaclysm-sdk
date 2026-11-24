@@ -4,7 +4,7 @@ typedef struct CadaclysmBlacksmithAnimation CadaclysmBlacksmithAnimation;
 
 static const uint32_t CADACLYSM_VIEW_ABI_MAJOR = 1;
 
-static const uint32_t CADACLYSM_VIEW_ABI_MINOR = 28;
+static const uint32_t CADACLYSM_VIEW_ABI_MINOR = 34;
 
 static const uint32_t CADACLYSM_VIEW_WINDOW_WIN32 = 1;
 
@@ -70,7 +70,27 @@ static const uint32_t CADACLYSM_VIEW_SNAP_GRID = 64;
 
 static const uint32_t CADACLYSM_VIEW_SNAP_PLANE = 128;
 
-static const uint32_t CADACLYSM_VIEW_SNAP_ALL = 255;
+static const uint32_t CADACLYSM_VIEW_SNAP_END = 256;
+
+static const uint32_t CADACLYSM_VIEW_SNAP_INTERSECTION = 512;
+
+static const uint32_t CADACLYSM_VIEW_SNAP_POINT = 1024;
+
+static const uint32_t CADACLYSM_VIEW_SNAP_ALIGNMENT = 2048;
+
+static const uint32_t CADACLYSM_VIEW_SNAP_ALL = 4095;
+
+static const uint32_t CADACLYSM_VIEW_SNAP_DEFAULT = 1279;
+
+static const uint32_t CADACLYSM_VIEW_HIT_FACE = 1;
+
+static const uint32_t CADACLYSM_VIEW_HIT_NODE = 2;
+
+static const uint32_t CADACLYSM_VIEW_HIT_SEGMENT = 3;
+
+static const uint32_t CADACLYSM_VIEW_HIT_EDGE = 4;
+
+static const uint32_t CADACLYSM_VIEW_HIT_POINT = 5;
 
 static const uint32_t CADACLYSM_VIEW_ANALYSIS_NONE = 0;
 
@@ -85,6 +105,16 @@ static const uint32_t CADACLYSM_VIEW_ANALYSIS_MEAN = 4;
 static const uint32_t CADACLYSM_VIEW_ANALYSIS_MIN = 5;
 
 static const uint32_t CADACLYSM_VIEW_ANALYSIS_MAX = 6;
+
+static const uint32_t CADACLYSM_VIEW_CLIP_PLANES = 6;
+
+static const uint32_t CADACLYSM_VIEW_CLIP_INTERSECTION = 0;
+
+static const uint32_t CADACLYSM_VIEW_CLIP_CUTAWAY = 1;
+
+static const uint32_t CADACLYSM_VIEW_CLIP_INHERIT = 2;
+
+static const uint32_t CADACLYSM_VIEW_CLIP_VIEWPORTS = 8;
 
 static const uint32_t CADACLYSM_VIEW_BACKEND_ANY = 0;
 
@@ -141,6 +171,30 @@ static const uint32_t CADACLYSM_VIEW_POINT_STATE_HOVER = 1;
 static const uint32_t CADACLYSM_VIEW_POINT_STATE_SELECTED = 2;
 
 static const uint32_t CADACLYSM_VIEW_POINT_STATE_FIRST = 3;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_ARROW = 0;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_TICK = 1;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_CROSS = 2;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_SQUARE = 3;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_TRIANGLE = 4;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_PARALLEL = 5;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_PERPENDICULAR = 6;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_COINCIDENT = 7;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_TANGENT = 8;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_FIXED = 9;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_HORIZONTAL = 10;
+
+static const uint32_t CADACLYSM_VIEW_GLYPH_VERTICAL = 11;
 
 static const uint32_t CADACLYSM_VIEW_ALIGN_TOP_LEFT = 0;
 
@@ -357,6 +411,10 @@ typedef struct CadaclysmViewPick {
   uint32_t overlay;
 
   int32_t viewport_label;
+
+  uint32_t segment;
+
+  float distance_px;
 } CadaclysmViewPick;
 
 typedef struct CadaclysmViewAnalysis {
@@ -772,6 +830,18 @@ typedef struct CadaclysmViewSnap {
   float distance_px;
 
   uint32_t clicks;
+
+  char label[32];
+
+  uint32_t locked;
+
+  float locked_angle;
+
+  uint32_t guide_count;
+
+  uint32_t pad0;
+
+  double guides[12];
 } CadaclysmViewSnap;
 
 typedef struct CadaclysmViewOverlay {
@@ -846,6 +916,21 @@ typedef struct CadaclysmViewEventPick {
   uint32_t overlay;
 } CadaclysmViewEventPick;
 
+typedef struct CadaclysmViewEventSnap {
+  uint32_t size;
+  uint32_t kind;
+  double point[3];
+  uint32_t item;
+  uint32_t node;
+  uint32_t face;
+  uint32_t edge;
+  float tangent[3];
+  float axis[3];
+  double radius;
+  float distance_px;
+  uint32_t clicks;
+} CadaclysmViewEventSnap;
+
 typedef struct CadaclysmViewInputEvent {
 
   uint32_t size;
@@ -880,12 +965,65 @@ typedef struct CadaclysmViewInputEvent {
 
   struct CadaclysmViewEventPick pick;
 
-  struct CadaclysmViewSnap snap;
+  struct CadaclysmViewEventSnap snap;
 
   struct CadaclysmViewCamera camera;
 
   int32_t pick_viewport_label;
+
+  uint32_t pick_segment;
+
+  float pick_distance_px;
+
+  char snap_label[32];
+
+  uint32_t snap_locked;
+
+  float snap_locked_angle;
+
+  uint32_t snap_guide_count;
+
+  uint32_t pad1;
+
+  double snap_guides[12];
 } CadaclysmViewInputEvent;
+
+typedef struct CadaclysmViewRectHit {
+  uint32_t item;
+  uint32_t kind;
+  uint32_t index;
+} CadaclysmViewRectHit;
+
+typedef struct CadaclysmViewClipPlane {
+
+  uint32_t size;
+
+  uint32_t cap;
+
+  double point[3];
+
+  double normal[3];
+
+  float cap_colour[3];
+
+  uint32_t hatch;
+
+  float hatch_colour[3];
+
+  float hatch_angle;
+
+  float hatch_spacing;
+
+  float hatch_width;
+
+  uint32_t outline;
+
+  float outline_colour[3];
+
+  float outline_width;
+
+  uint32_t reserved;
+} CadaclysmViewClipPlane;
 
 uint32_t cadaclysm_view_abi_version(void);
 
@@ -948,6 +1086,10 @@ bool cadaclysm_view_set_lighting(struct CadaclysmView *view, uint32_t lighting);
 
 uint32_t cadaclysm_view_lighting(const struct CadaclysmView *view);
 
+bool cadaclysm_view_set_textures(struct CadaclysmView *view, bool on);
+
+bool cadaclysm_view_textures(const struct CadaclysmView *view);
+
 bool cadaclysm_view_set_analysis(struct CadaclysmView *view,
                                  const struct CadaclysmViewAnalysis *analysis);
 
@@ -1006,7 +1148,8 @@ void cadaclysm_view_request_pick_in(struct CadaclysmView *view,
                                     uint32_t x,
                                     uint32_t y);
 
-bool cadaclysm_view_pick_result(struct CadaclysmView *view, struct CadaclysmViewPick *out);
+bool cadaclysm_view_pick_result(struct CadaclysmView *view,
+                                struct CadaclysmViewPick *out);
 
 bool cadaclysm_view_frame_node(struct CadaclysmView *view, uint32_t item, uint32_t node);
 
@@ -1092,6 +1235,35 @@ bool cadaclysm_view_set_point_states(struct CadaclysmView *view,
                                      size_t count);
 
 bool cadaclysm_view_set_on_top(struct CadaclysmView *view, uint32_t item, bool on);
+
+bool cadaclysm_view_set_lines(struct CadaclysmView *view,
+                              uint32_t item,
+                              const float *segments,
+                              size_t count);
+
+bool cadaclysm_view_set_curves(struct CadaclysmView *view,
+                               uint32_t item,
+                               const float *beziers,
+                               size_t count);
+
+bool cadaclysm_view_set_points(struct CadaclysmView *view,
+                               uint32_t item,
+                               const float *positions,
+                               size_t count);
+
+bool cadaclysm_view_set_mesh_positions(struct CadaclysmView *view,
+                                       uint32_t item,
+                                       const float *positions,
+                                       const float *normals,
+                                       size_t count);
+
+uint32_t cadaclysm_view_show_glyphs(struct CadaclysmView *view,
+                                    const float *at,
+                                    const float *dir,
+                                    size_t count,
+                                    uint32_t kind,
+                                    float size_pt,
+                                    const float *colour);
 
 uint32_t cadaclysm_view_show_machining(struct CadaclysmView *view,
                                        const struct CadaclysmViewMachining *machining);
@@ -1238,6 +1410,14 @@ bool cadaclysm_view_set_work_plane(struct CadaclysmView *view,
 
 bool cadaclysm_view_clear_work_plane(struct CadaclysmView *view);
 
+bool cadaclysm_view_set_snap_points(struct CadaclysmView *view,
+                                    uint32_t item,
+                                    const float *xyz,
+                                    size_t count,
+                                    const char *label);
+
+bool cadaclysm_view_set_snap_base(struct CadaclysmView *view, const float *xyz, float step_deg);
+
 uint32_t cadaclysm_view_show_overlay(struct CadaclysmView *view,
                                      const struct CadaclysmViewOverlay *shape);
 
@@ -1255,4 +1435,53 @@ bool cadaclysm_view_stats(struct CadaclysmView *view, struct CadaclysmViewStats 
 bool cadaclysm_view_next_event(struct CadaclysmView *view, struct CadaclysmViewInputEvent *out);
 
 bool cadaclysm_view_close(struct CadaclysmView *view);
+
+bool cadaclysm_view_set_pick_aperture(struct CadaclysmView *view, float aperture_pt);
+
+size_t cadaclysm_view_pick_rect(struct CadaclysmView *view,
+                                uint32_t viewport,
+                                float x,
+                                float y,
+                                float w,
+                                float h,
+                                bool crossing,
+                                struct CadaclysmViewRectHit *out,
+                                size_t capacity);
+
+bool cadaclysm_view_set_clip_plane(struct CadaclysmView *view,
+                                   uint32_t slot,
+                                   const struct CadaclysmViewClipPlane *plane);
+
+bool cadaclysm_view_clip_plane(const struct CadaclysmView *view,
+                               uint32_t slot,
+                               struct CadaclysmViewClipPlane *out);
+
+bool cadaclysm_view_set_clip_mode(struct CadaclysmView *view, uint32_t mode);
+
+uint32_t cadaclysm_view_clip_mode(const struct CadaclysmView *view);
+
+bool cadaclysm_view_set_viewport_clip_plane(struct CadaclysmView *view,
+                                            uint32_t viewport,
+                                            uint32_t slot,
+                                            const struct CadaclysmViewClipPlane *plane);
+
+bool cadaclysm_view_viewport_clip_plane(const struct CadaclysmView *view,
+                                        uint32_t viewport,
+                                        uint32_t slot,
+                                        struct CadaclysmViewClipPlane *out);
+
+bool cadaclysm_view_set_viewport_clip_mode(struct CadaclysmView *view,
+                                           uint32_t viewport,
+                                           uint32_t mode);
+
+uint32_t cadaclysm_view_viewport_clip_mode(const struct CadaclysmView *view, uint32_t viewport);
+
+bool cadaclysm_view_image_of(struct CadaclysmView *view,
+                             const struct CadaclysmViewViewportCamera *camera,
+                             uint32_t width,
+                             uint32_t height,
+                             uint32_t layer_mask,
+                             const float *background,
+                             uint8_t *rgba,
+                             size_t capacity);
 ]]

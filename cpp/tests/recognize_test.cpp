@@ -219,6 +219,37 @@ static void a_3dm_ball_comes_back_as_a_sphere_and_leaves_the_original() {
     ++ball_ran;
 }
 
+// The first body of `scene`'s recognize report, or none.
+static std::optional<cadaclysm::RecognizeReport> first_report(const cadaclysm::Scene& scene) {
+    for (const cadaclysm::Node& n : scene.nodes()) {
+        std::optional<cadaclysm::Brep> body = n.brep();
+        if (body) return must(body->recognize(), "recognize").second;
+    }
+    return std::nullopt;
+}
+
+static void recognize_tolerance_hands_out_analytic_bodies() {
+    if (ball.empty()) return;
+    // unasked the ball is still NURBS; asked, every body arrives already analytic
+    cadaclysm::Scene plain = must(cadaclysm::open(ball), "open box-union-sphere.3dm");
+    cadaclysm::OpenOptions asked_options;
+    asked_options.recognize_tolerance = 1e-6;
+    cadaclysm::Scene asked = must(cadaclysm::open(ball, asked_options), "open box-union-sphere.3dm, recognized");
+    std::optional<cadaclysm::RecognizeReport> r0 = first_report(plain);
+    std::optional<cadaclysm::RecognizeReport> r1 = first_report(asked);
+    check(r0.has_value() && r1.has_value(), "box-union-sphere.3dm has a body");
+    if (!r0 || !r1) return;
+    bool sphere = false;
+    for (const cadaclysm::RecognizedFace& f : r0->faces) sphere = sphere || f.kind == "sphere";
+    check(sphere, "unasked: a sphere still to take");
+    check(r1->faces.empty(), "asked: " + std::to_string(r1->faces.size()) + " faces still to take, not 0");
+    cadaclysm::OpenOptions negative;
+    negative.recognize_tolerance = -1.0;
+    Result<cadaclysm::Scene> refused = cadaclysm::open(ball, negative);
+    check(!refused.ok() && refused.error().message.find("recognize_tolerance") != std::string::npos,
+          "a negative tolerance is refused by name");
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) != "-") {
         if (std::filesystem::exists(argv[1])) ball = argv[1];
@@ -244,6 +275,7 @@ int main(int argc, char** argv) {
         {"the_kernel_decoder_reads_every_column_of_distinct_rows", the_kernel_decoder_reads_every_column_of_distinct_rows},
         {"the_reader_decoder_reads_every_column_of_distinct_rows", the_reader_decoder_reads_every_column_of_distinct_rows},
         {"a_3dm_ball_comes_back_as_a_sphere_and_leaves_the_original", a_3dm_ball_comes_back_as_a_sphere_and_leaves_the_original},
+        {"recognize_tolerance_hands_out_analytic_bodies", recognize_tolerance_hands_out_analytic_bodies},
     };
     for (const Test& t : tests) {
         int before = failures;

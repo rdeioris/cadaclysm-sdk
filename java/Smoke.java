@@ -433,6 +433,52 @@ public final class Smoke {
                 } catch (Cad.CadaclysmException e) {
                     if (!e.getMessage().contains("no mechanism")) fail("wrong no-mechanism error: " + e.getMessage());
                 }
+                // glTF materials and images: the cube (not glTF) has neither.
+                if (cubeScene.imageCount() != 0) fail("materials: cube.scad has " + cubeScene.imageCount() + " images");
+                for (Cad.Node n : cubeScene.nodes())
+                    if (n.material() != null) fail("materials: cube.scad node " + n.name() + " has a material");
+                try {
+                    cubeScene.image(0);
+                    fail("materials: cube.scad answered image 0");
+                } catch (IndexOutOfBoundsException expected) {
+                }
+            }
+            // textured-quad.glb (samples/textured-quad.py): a textured "Checker" and an untextured "Plain".
+            try (Cad.Scene quad = Cad.open(Path.of(path).toAbsolutePath().getParent().resolve("textured-quad.glb").toString())) {
+                Map<String, Cad.Material> materials = new java.util.TreeMap<>();
+                for (Cad.Node n : quad.nodes()) {
+                    Cad.Material mat = n.material();
+                    if (mat != null) materials.put(mat.name(), mat);
+                }
+                if (!materials.keySet().equals(Set.of("Checker", "Plain"))) fail("materials: textured-quad.glb names " + materials.keySet());
+                Cad.Material checker = materials.get("Checker");
+                System.out.println("materials: " + checker);
+                if (!Arrays.equals(checker.baseColor(), new float[] {1f, 0.5f, 0.25f, 1f}) || checker.metallic() != 0f || checker.roughness() != 0.5f
+                        || !"mask".equals(checker.alphaMode()) || checker.alphaCutoff() != 0.25f || !checker.doubleSided()
+                        || checker.baseColorImage() == null || checker.baseColorImage() != 0 || checker.baseColorUvSet() != 0
+                        || !Arrays.equals(checker.uvOffset(), new float[] {0.5f, 0f}) || checker.uvRotation() != 0f
+                        || !Arrays.equals(checker.uvScale(), new float[] {2f, 2f})
+                        || !"clamp_to_edge".equals(checker.wrapU()) || !"mirrored_repeat".equals(checker.wrapV())
+                        || !"linear".equals(checker.magFilter()) || !"linear".equals(checker.minFilter()))
+                    fail("materials: Checker reads " + checker + " metallic=" + checker.metallic() + " roughness=" + checker.roughness()
+                            + " cutoff=" + checker.alphaCutoff() + " double=" + checker.doubleSided() + " uvset=" + checker.baseColorUvSet()
+                            + " offset=" + Arrays.toString(checker.uvOffset()) + " rot=" + checker.uvRotation()
+                            + " scale=" + Arrays.toString(checker.uvScale()) + " wrap=" + checker.wrapU() + "," + checker.wrapV()
+                            + " filter=" + checker.magFilter() + "," + checker.minFilter());
+                Cad.Material plain = materials.get("Plain");
+                if (plain.baseColorImage() != null || !"opaque".equals(plain.alphaMode())) fail("materials: Plain reads " + plain);
+                if (quad.imageCount() != 1) fail("materials: textured-quad.glb has " + quad.imageCount() + " images");
+                Cad.Image image = quad.image(0);
+                System.out.println("images: " + image);
+                byte[] png = image.data();
+                if (!"image/png".equals(image.mime()) || !"checker".equals(image.name()) || png.length != 75
+                        || png[0] != (byte) 0x89 || png[1] != 'P' || png[2] != 'N' || png[3] != 'G')
+                    fail("materials: image 0 reads " + image);
+                try {
+                    quad.image(1);
+                    fail("materials: image 1 of 1 was answered");
+                } catch (IndexOutOfBoundsException expected) {
+                }
             }
             scene.forgetMeshes();
             long rebuiltTriangles = 0;
@@ -753,6 +799,7 @@ public final class Smoke {
             nurbsCurves();
             sheetsFromCurves();
             rtree();
+            polygonSets();
             interpolator();
             animation();
             merge();
@@ -760,11 +807,14 @@ public final class Smoke {
             sheetMetal();
             sheetRipsAndCorners();
             unroll();
+            squish();
+            fromMesh();
             curvesAsObjects();
             profileToolkit();
             rtreeRays();
             subd();
             sketch();
+            sketchPart2();
             solidHits();
             assemblies();
             materials();
@@ -3607,6 +3657,18 @@ public final class Smoke {
                 cs(pair.report().instances() == 2 && pair.report().booleans() == 1 && Math.abs(vol - 28800) <= 1e-6 * 28800,
                         "pattern read " + pair.report() + ", volume " + vol);
             }
+            List<Blacksmith.Transform> mirrored = Blacksmith.Pattern.mirror(new double[] {5, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0});
+            cs(mirrored.size() == 2 && Arrays.equals(mirrored.get(0).rows(), Blacksmith.Transform.identity().rows()),
+                    "pattern_mirror read " + mirrored.size());
+            double[] mp = mirrored.size() == 2 ? mirrored.get(1).point(v(7, 1, 2)) : new double[3];
+            cs(Math.abs(mp[0] - 3) <= 1e-12 && Math.abs(mp[1] - 1) <= 1e-12 && Math.abs(mp[2] - 2) <= 1e-12,
+                    "pattern_mirror maps (7, 1, 2) to " + Arrays.toString(mp));
+            try {
+                Blacksmith.Pattern.mirror(new double[] {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0});
+                cs(false, "a zero-normal pattern_mirror was not refused");
+            } catch (Blacksmith.BuildException expected) {
+                cs(expected.getMessage().contains("pattern_mirror"), expected.getMessage());
+            }
             List<Blacksmith.Transform> spin = Blacksmith.Pattern.circular(v(0, 0, 0), v(0, 0, 1), 6);
             cs(spin.size() == 6 && Math.abs(spin.get(1).rows()[0] - 0.5) <= 1e-12, "pattern_circular read " + spin.size());
             try (Blacksmith.NurbsCurve track = line(v(0, 0, 0), v(30, 0, 0))) {
@@ -3720,6 +3782,101 @@ public final class Smoke {
                     cs(expected.getMessage().equals("hole_threaded: the diameter 9 is not in the thread's band [6.491, 7.188]"), expected.getMessage());
                 }
             }
+        }
+        // gear profiles: clockwork plan 1's hand-computed figures -- I1 an involute m 1 z 20 on every
+        // default, I5 the centre distance plain and shifted, C2 a cycloidal pinion's leaf, and a
+        // 3-tooth involute refused
+        {
+            try (Blacksmith.GearProfile g = Blacksmith.Profile.gearInvolute(1, 20)) {
+                cs(Math.abs(g.pitchRadius() - 10) <= 1e-9 && g.baseRadius() != null && Math.abs(g.baseRadius() - 9.396926208) <= 1e-9
+                        && Math.abs(g.tipRadius() - 11) <= 1e-9 && Math.abs(g.rootRadius() - 8.75) <= 1e-9
+                        && Math.abs(g.thickness() - 1.570796327) <= 1e-6 && !g.undercut(), "gear_involute I1 read " + g);
+            }
+            double a0 = Blacksmith.gearCentreDistanceInvolute(1, 20, 40);
+            cs(Math.abs(a0 - 30) <= 1e-9, "gear_centre_distance_involute I5 read " + a0);
+            double a1 = Blacksmith.gearCentreDistanceInvolute(1, 20, 40, 0.25, 0.25, null);
+            cs(a1 > 30.4 && a1 < 30.5, "gear_centre_distance_involute I5 shifted read " + a1);
+            try (Blacksmith.GearProfile pin = Blacksmith.Profile.gearPinionCycloidal(1, 8, 60)) {
+                cs(Math.abs(pin.thickness() - 1.05) <= 1e-6 && pin.baseRadius() == null && !pin.undercut(), "gear_pinion_cycloidal C2 read " + pin);
+            }
+            try (Blacksmith.GearProfile wheel = Blacksmith.Profile.gearWheelCycloidal(1, 60, 8)) {
+                cs(Math.abs(wheel.pitchRadius() - 30) <= 1e-9 && wheel.baseRadius() == null && wheel.tipRadius() > wheel.pitchRadius(),
+                        "gear_wheel_cycloidal read " + wheel);
+            }
+            try {
+                Blacksmith.Profile.gearInvolute(1, 3).close();
+                cs(false, "a 3-tooth involute was not refused");
+            } catch (Blacksmith.BuildException expected) {
+                cs(expected.getMessage().startsWith("profile_gear_involute: "), expected.getMessage());
+            }
+            System.out.println("blacksmith gears: I1, I5, C2 and the refusal ok");
+        }
+        // NACA airfoils: 2412 parsed, seven points with the leading edge (the middle one) at the
+        // origin and the closed trailing edge one point, A1 0012's half-thickness at mid-chord
+        // (Abbott & von Doenhoff 0.05294), the spline and the profile, and the refusals
+        {
+            Blacksmith.Naca n = Blacksmith.Naca.parse("2412");
+            cs(n.equals(Blacksmith.Naca.four(0.02, 0.4, 0.12)), "naca_parse 2412 read " + n);
+            cs(Blacksmith.Naca.parse("23112").equals(Blacksmith.Naca.five(0.3, 0.15, 0.12, true)), "naca_parse 23112 read " + Blacksmith.Naca.parse("23112"));
+            double[][] seven = n.points(1, 7);
+            cs(seven.length == 7 && seven[3][0] == 0 && seven[3][1] == 0 && seven[0][0] == 1 && seven[0][1] == 0
+                    && seven[6][0] == 1 && seven[6][1] == 0 && seven[1][1] > 0 && seven[5][1] < 0,
+                    "naca_points A5 read " + java.util.Arrays.deepToString(seven));
+            cs(n.points(1).length == 101, "naca_points: the default count is not 101");
+            double[] a1 = Blacksmith.Naca.parse("0012").points(1, 201, false)[50];
+            cs(Math.abs(a1[0] - 0.5) <= 1e-15 && Math.abs(a1[1] - 0.052940252) <= 1e-9, "naca_points A1 read " + java.util.Arrays.toString(a1));
+            Blacksmith.NacaSpline sp = Blacksmith.Naca.parse("4412").spline(50);
+            cs(sp.controls().length == 32 && sp.controls()[0][0] == 50 && sp.controls()[0][1] == 0 && sp.error() > 0 && sp.error() < 1e-4 * 50,
+                    "naca_spline read " + sp.controls().length + " " + sp.error());
+            try (Blacksmith.NacaProfile wing = Blacksmith.Naca.parse("4412").profile(50, false)) {
+                cs(wing.error() > 0 && wing.error() <= 5e-4 && wing.profile().areaProperties().area() > 0, "profile_naca read " + wing.error());
+            }
+            String[][] refusals = {{"parse", "naca_parse: 5-digit positions are 1 to 5"}, {"points", "naca_points: "},
+                    {"spline", "naca_spline: "}, {"profile", "profile_naca: "}};
+            for (String[] r : refusals) {
+                try {
+                    switch (r[0]) {
+                        case "parse" -> Blacksmith.Naca.parse("26012");
+                        case "points" -> n.points(0);
+                        case "spline" -> n.spline(1, 7);
+                        default -> n.profile(1, true, -1.0).close();
+                    }
+                    cs(false, "naca " + r[0] + " was not refused");
+                } catch (Blacksmith.BuildException expected) {
+                    cs(r[0].equals("parse") ? expected.getMessage().equals(r[1]) : expected.getMessage().startsWith(r[1]), expected.getMessage());
+                }
+            }
+            System.out.println("blacksmith naca: A1, A5, the spline, the profile and the refusals ok");
+        }
+        // contact settle: clockwork plan 3's hand-computed figures -- a driver disc of radius 1 at
+        // (3, 0) about (5, 0) held at pi, a follower disc at (2, 0) about the origin. S1 clockwise
+        // from pi to pi/3, S5 counter-clockwise to the limit 3 pi/2, S6 recoiled from pi/6, the
+        // default tolerance, and a direction 0 refused
+        try (Blacksmith.Profile unit = Blacksmith.Profile.circle(1);
+             Blacksmith.Profile sd = unit.translate(3, 0);
+             Blacksmith.Profile sf = unit.translate(2, 0)) {
+            double[] dp = {5, 0}, fp = {0, 0};
+            double h = Math.sqrt(3) / 2;
+            Blacksmith.Settle s1 = Blacksmith.contactSettle(sd, dp, Math.PI, sf, fp, Math.PI, -1, null, 1e-11);
+            Blacksmith.SettleContact k = s1.contact();
+            cs(Math.abs(s1.value() - Math.PI / 3) <= 1e-9 && !s1.recoiled() && s1.steps() > 0 && k != null
+                    && Math.abs(k.point()[0] - 1.5) <= 1e-9 && Math.abs(k.point()[1] - h) <= 1e-9
+                    && Math.abs(k.normal()[0] + 0.5) <= 1e-9 && Math.abs(k.normal()[1] - h) <= 1e-9
+                    && k.driver()[0] == 0 && k.follower()[0] == 0, "contact_settle S1 read " + s1);
+            Blacksmith.Settle s5 = Blacksmith.contactSettle(sd, dp, Math.PI, sf, fp, Math.PI, 1, 1.5 * Math.PI, 1e-11);
+            cs(s5.value() == 1.5 * Math.PI && s5.contact() == null && !s5.recoiled(), "contact_settle S5 read " + s5);
+            Blacksmith.Settle s6 = Blacksmith.contactSettle(sd, dp, Math.PI, sf, fp, Math.PI / 6, -1, null, 1e-11);
+            cs(Math.abs(s6.value() - Math.PI / 3) <= 1e-9 && s6.contact() != null && s6.recoiled(), "contact_settle S6 read " + s6);
+            Blacksmith.Settle byDefault = Blacksmith.contactSettle(sd, dp, Math.PI, sf, fp, Math.PI, -1);
+            Blacksmith.Settle named = Blacksmith.contactSettle(sd, dp, Math.PI, sf, fp, Math.PI, -1, null, 2e-9 * Math.sqrt(2));
+            cs(byDefault.toString().equals(named.toString()), "contact_settle default tolerance: " + byDefault + " != " + named);
+            try {
+                Blacksmith.contactSettle(sd, dp, Math.PI, sf, fp, Math.PI, 0);
+                cs(false, "contact_settle with direction 0 was not refused");
+            } catch (Blacksmith.BuildException expected) {
+                cs(expected.getMessage().startsWith("contact_settle: "), expected.getMessage());
+            }
+            System.out.println("blacksmith contact settle: S1, S5, S6, the default and the refusal ok");
         }
         // an L bracket's rib along the diagonal in the plane y = 15
         try (Blacksmith.Solid foot = Blacksmith.Solid.cuboid(40, 30, 5).translate(20, 15, 2.5);
@@ -4107,6 +4264,57 @@ public final class Smoke {
                 String law = refused(() -> cube.filletLaw(new int[] {0}, new double[][] {{0.0, 1.0}, {1.0, 2.0}}).close());
                 cs(law.contains("a radius law rounds only spline edges"), "a radius law on a cube gave '" + law + "'");
             }
+            // A box edge by chord and by two set-backs: the closed forms of a quarter round and a quarter conic.
+            try (Blacksmith.Solid cbox = Blacksmith.Solid.cuboid(40, 30, 20)) {
+                Blacksmith.Edge cedge = null;
+                for (Blacksmith.Edge e : cbox.edges()) {
+                    if (e.kind().equals("line") && e.faces().length == 2) {
+                        cedge = e;
+                        break;
+                    }
+                }
+                cs(cedge != null, "a box has no line edge");
+                int ci = cedge.index(), cf = cedge.faces()[0];
+                double cl = cbox.edgeLength(ci, 1e-9).length(), quarter = 1 - Math.PI / 4, cr = 4.0 / Math.sqrt(2.0);
+                try (Blacksmith.Solid chorded = cbox.filletChord(List.of(cedge), 4.0);
+                     Blacksmith.Solid asym = cbox.filletAsymmetric(new int[] {ci}, cf, 6.0, 2.0)) {
+                    double vc = chorded.mass(1e-6).volume(), wantC = 24000 - cl * cr * cr * quarter;
+                    cs(Math.abs(vc - wantC) <= 1e-6 * wantC, "fillet_chord gave volume " + vc + ", want " + wantC);
+                    double va = asym.mass(1e-6).volume(), wantA = 24000 - cl * 6 * 2 * quarter;
+                    cs(Math.abs(va - wantA) <= 1e-6 * wantA, "fillet_asymmetric gave volume " + va + ", want " + wantA);
+                }
+                String noChord = refused(() -> cbox.filletChord(new int[] {ci}, 0.0).close());
+                cs(noChord.contains("the chord must be positive"), "a zero chord gave '" + noChord + "'");
+                String noDistance = refused(() -> cbox.filletAsymmetric(new int[] {ci}, cf, 6.0, 0.0).close());
+                cs(noDistance.contains("distances must be positive"), "a zero distance gave '" + noDistance + "'");
+            }
+            // A box's top full-rounded between its long sides (a half cylinder of radius 3), and a
+            // plate and boss's ridges rounded by rule: material away.
+            try (Blacksmith.Solid rib = Blacksmith.Solid.cuboid(40, 6, 12);
+                 Blacksmith.Solid plate = Blacksmith.Solid.cuboid(40, 30, 5);
+                 Blacksmith.Solid boss = Blacksmith.Solid.cylinder(6, 8);
+                 Blacksmith.Solid bossUp = boss.translate(0, 0, 2.5);
+                 Blacksmith.Solid body = plate.join(bossUp)) {
+                int top = rib.selectFace(Blacksmith.Selector.normal(new double[] {0, 0, 1}));
+                int front = rib.selectFace(Blacksmith.Selector.normal(new double[] {0, -1, 0}));
+                int back = rib.selectFace(Blacksmith.Selector.normal(new double[] {0, 1, 0}));
+                double want = 40 * 6 * 12 - 40 * 9 * (2 - Math.PI / 2);
+                try (Blacksmith.Solid rounded = rib.filletFullRound(front, top, back)) {
+                    double v = rounded.mass(1e-6).volume();
+                    cs(Math.abs(v - want) <= 1e-3 * want, "fillet_full_round gave volume " + v + ", want " + want);
+                }
+                String past = refused(() -> rib.filletFullRound(front, rib.faces() + 3, back).close());
+                cs(past.contains("no such face"), "a face past the last gave '" + past + "'");
+                int[] every = new int[body.faces()];
+                for (int i = 0; i < every.length; i++) every[i] = i;
+                double before = body.mass(1e-6).volume();
+                try (Blacksmith.Solid ridged = body.filletRule(every, 1.0, null, Blacksmith.EdgeRule.CONVEX, 0.05)) {
+                    double v = ridged.mass(1e-6).volume();
+                    cs(v < before, "fillet_rule convex left volume " + v + " from " + before);
+                }
+                String valleys = refused(() -> rib.filletRule(new int[] {0, 1, 2, 3, 4, 5}, 1.0, null, Blacksmith.EdgeRule.CONCAVE).close());
+                cs(valleys.contains("no edge between the faces matches the rule"), "a box's valleys gave '" + valleys + "'");
+            }
         }
         System.out.println("sheets from curves: lofts, sweeps, Coons and Gordon sheets, trims, joins, continuity, patches and fillets");
     }
@@ -4390,6 +4598,224 @@ public final class Smoke {
             int sideFace = side;
             String said = refused(() -> shortLine.fitToFace(cyl, sideFace).close());
             nc(said.contains("has to cross the face"), "fit_to_face: a short line refused as '" + said + "'");
+        }
+
+        // 6d. offsets (spec section 8): a line and an arc exactly, a wavy bicubic within its
+        // tolerance, an arc on a quarter wall along and across it, a cube and its top face
+        {
+            double[] z = {0, 0, 1};
+            double h = Math.sqrt(0.5);
+            try (Blacksmith.NurbsCurve line = new Blacksmith.NurbsCurve(new double[][] {{0, 0, 0}, {10, 0, 0}}, 1);
+                 Blacksmith.NurbsCurve o = line.offset(2, z)) {
+                double[] d = o.domain();
+                nc(o.fitError() != null && o.fitError() == 0.0, "offset: the line's fit error " + o.fitError());
+                nc(dist(o.point(d[0]), new double[] {0, -2, 0}) <= 1e-12 && dist(o.point(d[1]), new double[] {10, -2, 0}) <= 1e-12,
+                   "offset: the line runs " + Arrays.toString(o.point(d[0])) + " to " + Arrays.toString(o.point(d[1])));
+            }
+            try (Blacksmith.NurbsCurve arc = new Blacksmith.NurbsCurve(new double[][] {{2, 0, 0}, {2, 2, 0}, {0, 2, 0}}, 2, new double[] {1, h, 1}, null);
+                 Blacksmith.NurbsCurve o = arc.offset(1, z, 1e-6)) {
+                nc(o.fitError() != null && o.fitError() == 0.0, "offset: the arc's fit error " + o.fitError());
+                nc(Math.abs(dist(o.point(0.5), new double[] {0, 0, 0}) - 3) <= 1e-12, "offset: the arc's mid point " + Arrays.toString(o.point(0.5)));
+                String said = refused(() -> arc.offset(-2, z, 1e-6).close());
+                nc(said.startsWith("nurbs_curve_offset: "), "offset: an arc used up refused as '" + said + "'");
+            }
+            double[][] wavy = new double[16][];
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 4; j++) wavy[i * 4 + j] = new double[] {i, j, Math.sin(i) * Math.cos(j) / 4};
+            double[] k = {0, 0, 0, 0, 3, 3, 3, 3};
+            try (Blacksmith.NurbsSurface s = new Blacksmith.NurbsSurface(wavy, new int[] {4, 4}, 3, 3, null, k, k);
+                 Blacksmith.NurbsSurface o = s.offset(0.2, 1e-6)) {
+                nc(s.fitError() == null, "offset: a built surface carries fit error " + s.fitError());
+                nc(o.fitError() != null && o.fitError() >= 0 && o.fitError() <= 1e-6, "offset: the bicubic's fit error " + o.fitError());
+                double[] p = s.pointAt(1.5, 1.5), n = s.normalAt(1.5, 1.5);
+                double[] want = {p[0] + 0.2 * n[0], p[1] + 0.2 * n[1], p[2] + 0.2 * n[2]};
+                nc(dist(o.pointAt(1.5, 1.5), want) <= 1e-6, "offset: the bicubic at (1.5, 1.5) reads " + Arrays.toString(o.pointAt(1.5, 1.5)));
+            }
+            try (Blacksmith.NurbsSurface quarter = new Blacksmith.NurbsSurface(new double[][] {{2, 0, 0}, {2, 0, 5}, {2, 2, 0}, {2, 2, 5}, {0, 2, 0}, {0, 2, 5}},
+                     new int[] {3, 2}, 2, 1, new double[] {1, 1, h, h, 1, 1}, new double[] {0, 0, 0, 1, 1, 1}, new double[] {0, 0, 1, 1});
+                 Blacksmith.Solid wall = quarter.toSheet();
+                 Blacksmith.NurbsCurve onWall = new Blacksmith.NurbsCurve(new double[][] {{2, 0, 2}, {2, 2, 2}, {0, 2, 2}}, 2, new double[] {1, h, 1}, null);
+                 Blacksmith.NurbsCurve up = onWall.offsetNormalToSheet(wall, 1, 1e-6);
+                 Blacksmith.NurbsCurve along = onWall.offsetTangentToSheet(wall, 1, 1e-6)) {
+                nc(up.fitError() <= 1e-6 && along.fitError() <= 1e-6, "offset: the wall's fit errors " + up.fitError() + ", " + along.fitError());
+                for (int i = 0; i <= 20; i++) {
+                    double[] a = up.domain();
+                    double[] q = up.point(a[0] + (a[1] - a[0]) * i / 20);
+                    nc(Math.abs(Math.hypot(q[0], q[1]) - 3) <= 2e-6 && Math.abs(q[2] - 2) <= 2e-6, "offset_normal_to_sheet: " + Arrays.toString(q) + " is off r 3, z 2");
+                    a = along.domain();
+                    q = along.point(a[0] + (a[1] - a[0]) * i / 20);
+                    nc(Math.abs(Math.hypot(q[0], q[1]) - 2) <= 2e-6 && Math.abs(q[2] - 3) <= 2e-6, "offset_tangent_to_sheet: " + Arrays.toString(q) + " is off r 2, z 3");
+                }
+            }
+            try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(10, 10, 10);
+                 Blacksmith.Solid grown = cube.offset(1, 1e-6);
+                 Blacksmith.Solid shrunk = cube.offset(-1, 1e-6);
+                 Blacksmith.Solid top = cube.offsetFace(1, 1, 1e-6)) {
+                nc(Math.abs(grown.mass(1e-9).volume() - 1728) <= 1e-6, "offset: the grown cube's volume " + grown.mass(1e-9).volume());
+                nc(Math.abs(shrunk.mass(1e-9).volume() - 512) <= 1e-6, "offset: the shrunk cube's volume " + shrunk.mass(1e-9).volume());
+                Blacksmith.Bounds b = top.bounds64();
+                nc(top.faces() == 1 && Math.abs(top.mass(1e-9).area() - 100) <= 1e-6 && Math.abs(b.min()[2] - 6) <= 1e-9 && Math.abs(b.max()[2] - 6) <= 1e-9,
+                   "offset_face: " + top.faces() + " faces, area " + top.mass(1e-9).area() + ", z " + b.min()[2] + ".." + b.max()[2]);
+                String said = refused(() -> cube.offset(0).close());
+                nc(said.startsWith("solid_offset: "), "offset: a distance 0 refused as '" + said + "'");
+                said = refused(() -> cube.offsetFace(1, 0).close());
+                nc(said.startsWith("solid_offset_face: "), "offset_face: a distance 0 refused as '" + said + "'");
+            }
+        }
+
+        // 6e. face split: a box's top split by a line across it, on its face and on every face it
+        // lies on; a sphere along its silhouette
+        try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(10, 10, 10);
+             Blacksmith.NurbsCurve across = new Blacksmith.NurbsCurve(new double[][] {{-8, -2, 5}, {8, 3, 5}}, 1)) {
+            List<Integer> none = new ArrayList<>();
+            none.add(null);
+            for (List<Integer> faces : Arrays.asList(null, List.of(1), none)) {
+                try (Blacksmith.Solid split = cube.splitFaces(List.of(across), faces)) {
+                    Blacksmith.Mass m = split.mass(1e-9);
+                    nc(split.faces() == 7 && m.closed() && Math.abs(m.volume() - 1000) <= 1e-6 && Math.abs(m.area() - 600) <= 1e-6,
+                       "split_faces " + faces + ": " + split.faces() + " faces, closed " + m.closed() + ", volume " + m.volume() + ", area " + m.area());
+                    int tops = 0;
+                    for (int f = 0; f < split.faces(); f++) {
+                        if (Math.abs(split.faceInnerPoint(f).point()[2] - 5) < 1e-9) tops++;
+                    }
+                    nc(tops == 2, "split_faces " + faces + ": " + tops + " faces on the top");
+                }
+            }
+            String said = refused(() -> cube.splitFaces(List.of()).close());
+            nc(said.startsWith("split_faces: "), "split_faces: no curves refused as '" + said + "'");
+            said = refused(() -> cube.splitFaces(List.of(across), List.of(1, 2)).close());
+            nc(said.startsWith("split_faces: "), "split_faces: two faces for one curve refused as '" + said + "'");
+            double r = 5;
+            try (Blacksmith.Solid ball = Blacksmith.Solid.sphere(r)) {
+                try (Blacksmith.Solid halves = ball.splitAlongSilhouette(new double[] {0, 0, 1})) {
+                    Blacksmith.Mass m = halves.mass(1e-9);
+                    nc(halves.faces() == 2 && m.closed() && Math.abs(m.area() - 4 * Math.PI * r * r) <= 1e-6 * m.area(),
+                       "split_along_silhouette: " + halves.faces() + " faces, closed " + m.closed() + ", area " + m.area());
+                }
+            }
+            said = refused(() -> cube.splitAlongSilhouette(new double[] {0, 0, 1}).close());
+            nc(said.startsWith("split_along_silhouette: "), "split_along_silhouette: a box along z refused as '" + said + "'");
+        }
+
+        // 6f. surface edits: untrim, unstitch, ruled faces off edges, a seam moved, sheets and
+        // surfaces merged, and tweens; paint and ids follow the face each result face comes from
+        try (Blacksmith.Solid plain = Blacksmith.Solid.cuboid(10, 10, 10);
+             Blacksmith.Solid blue = plain.coloured(0, 0, 1);
+             Blacksmith.Solid redTop = blue.coloured(1, 1, 0, 0);
+             Blacksmith.Solid cube = redTop.track()) {
+            double[] red = {1, 0, 0};
+            for (Blacksmith.Untrim which : Blacksmith.Untrim.values()) {
+                try (Blacksmith.Solid out = cube.untrim(1, which)) {
+                    Blacksmith.Mass m = out.mass(1e-9);
+                    nc(out.faces() == 6 && m.closed() && Math.abs(m.volume() - 1000) <= 1e-6,
+                       "untrim " + which + ": " + out.faces() + " faces, closed " + m.closed() + ", volume " + m.volume());
+                    nc(Arrays.equals(out.faceColour(1), red) && out.faceId(1).equals(cube.faceId(1)), "untrim " + which + ": the top lost its paint or id");
+                }
+            }
+            try (Blacksmith.Solid bore = Blacksmith.Solid.cylinder(2, 20);
+                 Blacksmith.Solid drill = bore.translate(0, 0, -10);
+                 Blacksmith.Solid bored = cube.cut(drill)) {
+                int top = -1;
+                for (int f = 0; f < bored.faces(); f++) {
+                    if (Math.abs(bored.faceInnerPoint(f).point()[2] - 5) < 1e-9) top = f;
+                }
+                try (Blacksmith.Solid open = bored.untrim(top, Blacksmith.Untrim.HOLES);
+                     Blacksmith.Solid topSheet = open.faceSheet(top)) {
+                    nc(open.faces() == bored.faces() && !open.mass(1e-9).closed() && Math.abs(topSheet.mass(1e-9).area() - 100) <= 1e-6,
+                       "untrim holes: " + open.faces() + " faces, top area " + topSheet.mass(1e-9).area());
+                }
+            }
+
+            List<Blacksmith.Solid> sheets = cube.unstitch();
+            nc(sheets.size() == 6, "unstitch: " + sheets.size() + " sheets");
+            for (Blacksmith.Solid s : sheets) {
+                nc(s.faces() == 1 && Math.abs(s.mass(1e-9).area() - 100) <= 1e-6, "unstitch: a sheet not one 10 x 10 face");
+                s.close();
+            }
+            List<Blacksmith.Solid> alone = cube.unstitch(new int[] {1}, false);
+            nc(alone.size() == 2 && alone.get(0).faces() == 1 && alone.get(1).faces() == 5 && Arrays.equals(alone.get(0).faceColour(0), red),
+               "unstitch top: " + alone.size() + " bodies");
+            for (Blacksmith.Solid s : alone) s.close();
+            List<Blacksmith.Solid> together = cube.unstitch(new int[] {1, 2}, true);
+            nc(together.size() == 2 && together.get(0).faces() == 2 && together.get(1).faces() == 4, "unstitch together: " + together.size() + " bodies");
+            for (Blacksmith.Solid s : together) s.close();
+
+            Blacksmith.Edge edge = null;
+            for (Blacksmith.Edge e : cube.edges()) {
+                for (int f : e.faces()) {
+                    if (f == 1 && edge == null) edge = e;
+                }
+            }
+            int edgeIndex = edge.index();
+            try (Blacksmith.Solid ruled = cube.ruledFromEdges(List.of(edge), Blacksmith.Ruling.NORMAL, 2, 0, null, false, Double.NaN);
+                 Blacksmith.Solid other = cube.ruledFromEdges(new int[] {edgeIndex}, Blacksmith.Ruling.NORMAL, 2, 0, null, true, Double.NaN);
+                 Blacksmith.Solid up = cube.ruledFromEdges(new int[] {edgeIndex}, Blacksmith.Ruling.DIRECTION, 3, 0, new double[] {0, 0, 1}, false,
+                                                           Double.NaN)) {
+                nc(ruled.faces() == 1 && Math.abs(ruled.mass(1e-9).area() - 20) <= 1e-6, "ruled_from_edges: area " + ruled.mass(1e-9).area());
+                nc(Arrays.equals(ruled.faceColour(0), red) != Arrays.equals(other.faceColour(0), red), "ruled_from_edges: both faces took one colour");
+                nc(Math.abs(up.mass(1e-9).area() - 30) <= 1e-6, "ruled_from_edges direction: area " + up.mass(1e-9).area());
+            }
+
+            double r = 2, ht = 5;
+            try (Blacksmith.Solid can = Blacksmith.Solid.cylinder(r, ht)) {
+                int wall = -1;
+                for (int f = 0; f < can.faces(); f++) {
+                    double[] p = can.faceInnerPoint(f).point();
+                    if (Math.abs(Math.hypot(p[0], p[1]) - r) < 1e-9 && p[2] > 0 && p[2] < ht) wall = f;
+                }
+                try (Blacksmith.Solid paintedCan = can.coloured(wall, 1, 0, 0);
+                     Blacksmith.Solid painted = paintedCan.track();
+                     Blacksmith.Solid reseamed = painted.changeSeam(wall, 1.0)) {
+                    double want = Math.PI * r * r * ht;
+                    nc(reseamed.faces() == can.faces() && Math.abs(reseamed.mass(1e-9).volume() - want) <= 1e-9 * want,
+                       "change_seam: " + reseamed.faces() + " faces, volume " + reseamed.mass(1e-9).volume());
+                    nc(Arrays.equals(reseamed.faceColour(wall), red) && reseamed.faceId(wall).equals(painted.faceId(wall)),
+                       "change_seam: the wall lost its paint or id");
+                }
+            }
+
+            try (Blacksmith.NurbsSurface left = new Blacksmith.NurbsSurface(new double[][] {{0, 0, 0}, {0, 1, 0}, {1, 0, 0}, {1, 1, 0}}, new int[] {2, 2}, 1, 1);
+                 Blacksmith.NurbsSurface right = new Blacksmith.NurbsSurface(new double[][] {{1, 0, 0}, {1, 1, 0}, {2, 0, 0}, {2, 1, 0}}, new int[] {2, 2}, 1, 1);
+                 Blacksmith.NurbsSurface high = new Blacksmith.NurbsSurface(new double[][] {{0, 0, 4}, {0, 1, 4}, {1, 0, 4}, {1, 1, 4}}, new int[] {2, 2}, 1, 1);
+                 Blacksmith.NurbsSurface far = new Blacksmith.NurbsSurface(new double[][] {{5, 0, 0}, {5, 1, 0}, {6, 0, 0}, {6, 1, 0}}, new int[] {2, 2}, 1, 1);
+                 Blacksmith.NurbsSurface merged = left.merge(right);
+                 Blacksmith.Solid leftSheet = left.toSheet();
+                 Blacksmith.Solid redSheet = leftSheet.coloured(1, 0, 0);
+                 Blacksmith.Solid rightSheet = right.toSheet();
+                 Blacksmith.Solid farSheet = far.toSheet();
+                 Blacksmith.Solid mergedSheet = redSheet.mergeSurfaces(rightSheet)) {
+                Blacksmith.SurfaceValue.Domain d = merged.domain();
+                double[] corner = merged.pointAt(d.u().t1(), d.v().t1());
+                nc(Math.abs(corner[0] - 2) <= 1e-12 && Math.abs(corner[1] - 1) <= 1e-12 && Math.abs(corner[2]) <= 1e-12,
+                   "merge: the far corner is " + Arrays.toString(corner));
+                nc(mergedSheet.faces() == 1 && Math.abs(mergedSheet.mass(1e-9).area() - 2) <= 1e-9 && Arrays.equals(mergedSheet.faceColour(0), red),
+                   "merge_surfaces: " + mergedSheet.faces() + " faces, area " + mergedSheet.mass(1e-9).area());
+                List<Blacksmith.NurbsSurface> tweens = left.tween(high, 3);
+                nc(tweens.size() == 3, "tween: " + tweens.size() + " surfaces");
+                for (int i = 0; i < tweens.size(); i++) {
+                    double z = tweens.get(i).pointAt(0.5, 0.5)[2];
+                    nc(Math.abs(z - (i + 1)) <= 1e-12, "tween: surface " + i + " at z " + z);
+                    tweens.get(i).close();
+                }
+                String[][] calls = {
+                    {refused(() -> plain.untrim(99).close()), "untrim"},
+                    {refused(() -> plain.unstitch(new int[] {99}, false)), "unstitch"},
+                    {refused(() -> plain.unstitch(new int[] {1, 1}, false)), "unstitch"},
+                    {refused(() -> plain.ruledFromEdges(new int[0], Blacksmith.Ruling.NORMAL, 1).close()), "ruled_from_edges"},
+                    {refused(() -> plain.ruledFromEdges(new int[] {999}, Blacksmith.Ruling.NORMAL, 1).close()), "ruled_from_edges"},
+                    {refused(() -> plain.ruledFromEdges(new int[] {0}, Blacksmith.Ruling.NORMAL, 0).close()), "ruled_from_edges"},
+                    {refused(() -> plain.ruledFromEdges(new int[] {0}, Blacksmith.Ruling.DIRECTION, 1, 0, new double[] {0, 0, 0}, false, Double.NaN).close()),
+                     "ruled_from_edges"},
+                    {refused(() -> plain.ruledFromEdges(new int[] {0}, Blacksmith.Ruling.DIRECTION, 1).close()), "ruled_from_edges"},
+                    {refused(() -> plain.changeSeam(99, 1.0).close()), "change_seam"},
+                    {refused(() -> plain.changeSeam(1, 1.0).close()), "change_seam"},
+                    {refused(() -> plain.mergeSurfaces(leftSheet).close()), "merge_surfaces"},
+                    {refused(() -> leftSheet.mergeSurfaces(farSheet).close()), "merge_surfaces"},
+                    {refused(() -> left.merge(far).close()), "nurbs_surface_merge"},
+                    {refused(() -> left.tween(far, 0)), "nurbs_surface_tween"},
+                };
+                for (String[] c : calls) nc(c[0].startsWith(c[1] + ": "), c[1] + ": refused as '" + c[0] + "'");
+            }
         }
 
         // 7. maps and values
@@ -4726,8 +5152,32 @@ public final class Smoke {
             }
             String notSheet = refused(() -> cube.sheetInfo());
             if (!notSheet.startsWith("sheet_info: ")) fail("sheet info: a cube gave '" + notSheet + "'");
+            // Python's test_sheet_metal_a_hem_a_fold_and_a_contour: a rope and a double hem.
+            int[] hemEdge = {edges.get(0).index()};
+            try (Blacksmith.Solid rope = plate.sheetHem(hemEdge, Blacksmith.HemKind.ROPE, 0, rule, 2, 0, Double.NaN);
+                 Blacksmith.Solid twice = plate.sheetHem(hemEdge, Blacksmith.HemKind.DOUBLE, 8, rule)) {
+                int ropeBends = rope.sheetInfo().bends().size(), doubleBends = twice.sheetInfo().bends().size();
+                if (ropeBends != 2) fail("sheet hem: a rope hem has " + ropeBends + " bends, not its curl's two halves");
+                if (doubleBends != 2) fail("sheet hem: a double hem has " + doubleBends + " bends, not 2");
+            }
         }
-        System.out.println("sheet metal: a tray read, unfolded to the closed form, drawn, folded back; a cube refused");
+        // Python's test_sheet_metal_a_lofted_flange_unfolds: a three-sided hopper.
+        double[][] bottom = {{-10, -10, 0}, {10, -10, 0}, {10, 10, 0}, {-10, 10, 0}};
+        double[][] rim = {{-15, -15, 20}, {15, -15, 20}, {15, 15, 20}, {-15, 15, 20}};
+        try (Blacksmith.Solid hopper = Blacksmith.Solid.sheetLoftedFlange(bottom, rim, rule)) {
+            Blacksmith.SheetInfo info = hopper.sheetInfo();
+            if (info.bends().size() != 2) fail("sheet lofted flange: the hopper has " + info.bends().size() + " bends, not 2");
+            try (Blacksmith.FlatPattern flat = hopper.flatPattern(info.fixedFace(), rule);
+                 Blacksmith.Profile outline = flat.profile();
+                 Blacksmith.Solid again = Blacksmith.Solid.foldFlat(outline, flat.foldBends(), rule, flat.frame())) {
+                double v = again.mass(0).volume(), h = hopper.mass(0).volume();
+                if (Math.abs(v - h) > 1e-6 * h) fail("sheet lofted flange: folded back to " + v + ", not " + h);
+            }
+        }
+        String onePoint = refused(() -> Blacksmith.Solid.sheetLoftedFlange(new double[][] {{0, 0, 0}}, rim, rule).close());
+        if (!onePoint.startsWith("sheet_lofted_flange: ")) fail("sheet lofted flange: a one-point profile gave '" + onePoint + "'");
+        System.out.println("sheet metal: a tray read, unfolded to the closed form, drawn, folded back; a cube refused; rope + double hems; a lofted hopper");
+
     }
 
     /** Sheet metal rips, join and corner breaks: Python's
@@ -4893,6 +5343,141 @@ public final class Smoke {
         System.out.println("unroll: a can laid flat keeps its area; a point on it lands, one off it does not");
     }
 
+    /** Squish: squish_abi.rs -- a half ball's two faces squished apart (the disk exactly, the
+     *  dome with its distortion), the dome alone compress-only with a point following, and both
+     *  faces joined refused (they close on themselves). */
+    private static void squish() {
+        try (Blacksmith.Solid ball = Blacksmith.Solid.sphere(5); Blacksmith.Solid block = Blacksmith.Solid.cuboid(20, 20, 10);
+             Blacksmith.Solid below = block.translate(0, 0, -5); Blacksmith.Solid half = ball.cut(below)) {
+            if (half.faces() != 2) fail("squish: half ball has " + half.faces() + " faces");
+            Blacksmith.Squished q = half.squish(null, null, null, true, Blacksmith.SquishDeformation.FREE, true, Double.NaN);
+            int dome;
+            try (Blacksmith.Solid sheet = q.sheet()) {
+                if (q.faces().length != 2 || q.exact().length != 1 || sheet.faces() != 2) fail("squish: " + q);
+                int disk = q.faces()[0] == q.exact()[0] ? 0 : 1;
+                if (q.faces()[disk] != q.exact()[0]) fail("squish: exact face not in faces " + q);
+                dome = 1 - disk;
+                if (Math.abs(q.distortion().get(disk).areaMean() - 1) > 1e-6) fail("squish: disk " + q.distortion().get(disk));
+                Blacksmith.SquishDistortion d = q.distortion().get(dome);
+                if (!(d.areaMin() > 0 && d.areaMin() <= d.areaMean() && d.areaMean() <= d.areaMax())) fail("squish: dome " + d);
+                if (d.areaMean() < 0.45 || d.areaMean() > 0.7) fail("squish: dome area mean " + d);
+            }
+            Blacksmith.Squished alone = half.squish(new int[] {q.faces()[dome]}, null, new double[][] {{0, 0, 5}, {50, 50, 50}}, false,
+                    Blacksmith.SquishDeformation.COMPRESS_ONLY, false, Double.NaN);
+            try (Blacksmith.Solid sheet = alone.sheet()) {
+                if (alone.distortion().get(0).lengthMin() < 1) fail("squish: compress only " + alone.distortion().get(0));
+                double[] p = alone.points().get(0);
+                if (p == null || Math.abs(p[2]) > 1e-9) fail("squish: point 0 " + Arrays.toString(p));
+                if (alone.points().get(1) != null) fail("squish: point 1 " + Arrays.toString(alone.points().get(1)));
+            }
+            try {
+                half.squish();
+                fail("squish: both faces joined were not refused");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().startsWith("squish: ") || !e.getMessage().contains("closed")) fail("squish message: " + e.getMessage());
+            }
+        }
+        System.out.println("squish: a half ball's disk lays exactly, its dome with its distortion; a point follows; closed faces refused");
+    }
+
+    /** From mesh: Python's test_from_mesh_* -- a unit cube's 12 triangles made a box (prismatic,
+     *  planes and faceted), less a triangle an open shell, a stray index refused; a bored block's
+     *  mesh back with a cylinder (from_mesh.rs's a_bore_comes_back_a_cylinder); and a STEP cube's
+     *  node read back through the reader's mesh. */
+    private static void fromMesh() throws IOException {
+        double[] positions = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1};
+        int[] triangles = {0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7};
+        Blacksmith.FromMesh cube = Blacksmith.Solid.fromMesh(positions, triangles);
+        try (Blacksmith.Solid s = cube.solid()) {
+            if (!cube.report().equals(new Blacksmith.FromMeshReport(true, 6, 12, 8, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0)))
+                fail("from_mesh: the cube gave " + cube.report());
+            if (s.faces() != 6 || s.edges().size() != 12 || Math.abs(s.mass(0).volume() - 1) > 1e-9)
+                fail("from_mesh: the cube is " + s.faces() + " faces, " + s.edges().size() + " edges, volume " + s.mass(0).volume());
+        }
+        Blacksmith.FromMesh planes = Blacksmith.Solid.fromMesh(positions, triangles, 0, 0, 0, Blacksmith.FromMeshMode.PLANES);
+        try (Blacksmith.Solid s = planes.solid()) {
+            if (!planes.report().equals(new Blacksmith.FromMeshReport(true, 6, 12, 8, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0)))
+                fail("from_mesh: planes gave " + planes.report());
+        }
+        Blacksmith.FromMesh faceted = Blacksmith.Solid.fromMesh(positions, triangles, 0, Double.NaN, 0, Blacksmith.FromMeshMode.FACETED);
+        try (Blacksmith.Solid s = faceted.solid()) {
+            Blacksmith.FromMeshReport r = faceted.report();
+            if (!r.closed() || r.faces() != 12 || r.edges() != 18 || r.vertices() != 8 || r.planes() != 0 || s.faces() != 12)
+                fail("from_mesh: faceted gave " + r);
+        }
+        Blacksmith.FromMesh open = Blacksmith.Solid.fromMesh(positions, Arrays.copyOfRange(triangles, 3, triangles.length));
+        try (Blacksmith.Solid s = open.solid()) {
+            Blacksmith.FromMeshReport r = open.report();
+            if (r.closed() || r.holes() != 1 || r.boundaryEdges() != 3 || r.nonManifoldEdges() != 0 || s.faces() != 6)
+                fail("from_mesh: less a triangle gave " + r);
+        }
+        try {
+            Blacksmith.Solid.fromMesh(positions, new int[] {0, 1, 8}).solid().close();
+            fail("from_mesh: a stray index was not refused");
+        } catch (Blacksmith.BuildException e) {
+            if (!e.getMessage().startsWith("from_mesh: a triangle index is out of range")) fail("from_mesh message: " + e.getMessage());
+        }
+        try {
+            Blacksmith.Solid.fromMesh(positions, new int[0]).solid().close();
+            fail("from_mesh: no triangles was not refused");
+        } catch (Blacksmith.BuildException e) {
+            if (!e.getMessage().startsWith("from_mesh: no triangles")) fail("from_mesh message: " + e.getMessage());
+        }
+        // A 4 x 4 x 2 block less a radius-1 pin, meshed at 0.01: the bore comes back as cylinder
+        // faces, 6 planes besides (a plain cylinder's mesh has no ruling seam, so it stays planes).
+        try (Blacksmith.Solid block = Blacksmith.Solid.cuboid(4, 4, 2);
+             Blacksmith.Solid pin = Blacksmith.Solid.cylinder(1, 4);
+             Blacksmith.Solid pinAt = pin.translate(0, 0, -2);
+             Blacksmith.Solid bored = block.cut(pinAt, 1e-4)) {
+            Blacksmith.MeshData64 mesh = bored.mesh64(0.01).copy();
+            Blacksmith.FromMesh back = Blacksmith.Solid.fromMesh(mesh.positions(), mesh.indices());
+            try (Blacksmith.Solid s = back.solid()) {
+                Blacksmith.FromMeshReport r = back.report();
+                double volume = s.mass(0).volume();
+                if (!r.closed() || r.planes() != 6 || r.cylinders() < 1 || r.faces() != 6 + r.cylinders()
+                        || Math.abs(volume - (32 - 2 * Math.PI)) > 0.01)
+                    fail("from_mesh: the bored block gave " + r + ", volume " + volume);
+            }
+        }
+        Path step = Files.createTempFile("cadaclysm-smoke-from-mesh", ".stp");
+        try {
+            try (Blacksmith.Solid unit = Blacksmith.Solid.cuboid(1, 1, 1)) {
+                unit.step(step.toString());
+            }
+            try (Cad.Scene scene = Cad.open(step.toString())) {
+                Cad.Node node = null;
+                for (Cad.Node n : scene.nodes()) {
+                    Cad.Mesh64 m = n.mesh64();
+                    if (m != null && m.indexCount() > 0) {
+                        node = n;
+                        break;
+                    }
+                }
+                if (node == null) fail("from_mesh_node: the STEP cube has no meshed node");
+                Blacksmith.FromMesh read = Blacksmith.Solid.fromMeshNode(node);
+                try (Blacksmith.Solid s = read.solid()) {
+                    Blacksmith.FromMeshReport r = read.report();
+                    if (!r.closed() || r.faces() != 6 || r.edges() != 12 || Math.abs(s.mass(0).volume() - 1) > 1e-6)
+                        fail("from_mesh_node: the STEP cube gave " + r);
+                }
+                Blacksmith.FromMesh readFaceted = Blacksmith.Solid.fromMeshNode(node, 0, 0, 0, Blacksmith.FromMeshMode.FACETED);
+                try (Blacksmith.Solid s = readFaceted.solid()) {
+                    Blacksmith.FromMeshReport r = readFaceted.report();
+                    if (!r.closed() || r.faces() != 12 || r.edges() != 18 || s.faces() != 12) fail("from_mesh_node: faceted gave " + r);
+                }
+                Blacksmith.FromMesh readPlanes = Blacksmith.Solid.fromMeshNode(node, 0, 0, 0, Blacksmith.FromMeshMode.PLANES);
+                try (Blacksmith.Solid s = readPlanes.solid()) {
+                    Blacksmith.FromMeshReport r = readPlanes.report();
+                    if (!r.closed() || r.faces() != 6 || r.edges() != 12 || r.planes() != 6) fail("from_mesh_node: planes gave " + r);
+                }
+            }
+        } finally {
+            Files.deleteIfExists(step);
+        }
+        System.out.println("from_mesh: a cube prismatic and planes (6 faces, 12 edges, volume 1) and faceted (12, 18), less a triangle "
+                + "open (1 hole, 3 boundary edges), refusals, a bored block's bore a cylinder; a STEP cube's node 6 faces, 12 edges");
+    }
+
     /** The face of {@code s} whose outward normal is {@code (x, y, z)} and whose frame origin has z {@code z0}, or -1. */
     private static int facingAt(Blacksmith.Solid s, double x, double y, double z, double z0) {
         for (int f = 0; f < s.faces(); f++) {
@@ -4955,6 +5540,116 @@ public final class Smoke {
             if (Math.abs(fr[9] - x) < 1e-9 && Math.abs(fr[10] - y) < 1e-9 && Math.abs(fr[11] - z) < 1e-9) return f;
         }
         return -1;
+    }
+
+    /** An axis-aligned box as a polygon set, as the Python tests' {@code _box}. */
+    private static Blacksmith.PolygonSet psBox(double x0, double y0, double x1, double y1) {
+        return Blacksmith.PolygonSet.fromRings(new double[][] {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}});
+    }
+
+    private static boolean psRing(double[][] got, double[][] want) {
+        return java.util.Arrays.deepEquals(got, want);
+    }
+
+    /** Polygon sets: Python's test_polygon_set_*, figure for figure. */
+    private static void polygonSets() {
+        // 1. booleans and measures
+        Blacksmith.PolygonSet a = psBox(0, 0, 2, 2), b = psBox(1, 1, 3, 3);
+        if (a.union(b).area() != 7.0 || a.intersection(b).area() != 1.0 || a.difference(b).area() != 3.0
+                || a.symmetricDifference(b).area() != 6.0) fail("polygon set: the booleans' areas are not 7, 1, 3, 6");
+        if (a.intersectionArea(b) != 1.0 || a.differenceArea(b) != 3.0) fail("polygon set: intersection/difference area are not 1, 3");
+        List<Blacksmith.PolygonSet> tiles = new java.util.ArrayList<>();
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 3; j++) tiles.add(psBox(i, j, i + 1, j + 1));
+        Blacksmith.PolygonSet tiled = Blacksmith.PolygonSet.unionAll(tiles);
+        if (tiled.polygons().size() != 1 || tiled.area() != 12.0 || tiled.perimeter() != 14.0) fail("polygon set union_all: " + tiled + ", perimeter " + tiled.perimeter());
+        double[] tb = tiled.bounds().orElse(null), tc = tiled.centroid().orElse(null);
+        if (!java.util.Arrays.equals(tb, new double[] {0, 0, 4, 3}) || tc == null || Math.abs(tc[0] - 2.0) > 1e-9 || Math.abs(tc[1] - 1.5) > 1e-9)
+            fail("polygon set union_all: bounds " + java.util.Arrays.toString(tb) + ", centroid " + java.util.Arrays.toString(tc));
+        Blacksmith.PolygonSet none = new Blacksmith.PolygonSet();
+        if (!none.isEmpty() || none.bounds().isPresent() || none.centroid().isPresent()) fail("polygon set: the empty set has bounds or a centroid");
+        // 2. rings come back as written, or as shapely (GEOS 3.13) gives a verb's result
+        Blacksmith.PolygonSet room = Blacksmith.PolygonSet.fromRings(new double[][] {{0, 0}, {4, 0}, {4, 3}, {0, 3}, {0, 0}});
+        List<Blacksmith.PolygonSet.Polygon> roomRings = room.polygons();
+        if (roomRings.size() != 1 || !psRing(roomRings.get(0).outer(), new double[][] {{0, 0}, {4, 0}, {4, 3}, {0, 3}}) || !roomRings.get(0).holes().isEmpty())
+            fail("polygon set: a made room did not come back as written");
+        if (!psRing(room.cleaned().polygons().get(0).outer(), new double[][] {{0, 0}, {0, 3}, {4, 3}, {4, 0}})) fail("polygon set: the cleaned room is not shapely's ring");
+        List<Blacksmith.PolygonSet.Polygon> cut = room.difference(psBox(1, -1, 2, 4)).polygons();
+        if (cut.size() != 2 || !psRing(cut.get(0).outer(), new double[][] {{0, 0}, {0, 3}, {1, 3}, {1, 0}})
+                || !psRing(cut.get(1).outer(), new double[][] {{4, 3}, {4, 0}, {2, 0}, {2, 3}})) fail("polygon set: the cut room is not shapely's two rings");
+        Blacksmith.PolygonSet holed = psBox(0, 0, 10, 10).difference(psBox(4, 4, 6, 6));
+        List<Blacksmith.PolygonSet.Polygon> holedRings = holed.polygons();
+        if (holedRings.size() != 1 || !psRing(java.util.Arrays.copyOf(holedRings.get(0).outer(), 2), new double[][] {{0, 10}, {10, 10}})
+                || !psRing(java.util.Arrays.copyOf(holedRings.get(0).holes().get(0), 2), new double[][] {{6, 4}, {6, 6}}) || holed.area() != 96.0)
+            fail("polygon set: the holed square is not shapely's rings");
+        // 3. the buffer is shapely's (2.1 / GEOS 3.13)
+        Blacksmith.PolygonSet sq = psBox(0, 0, 10, 10);
+        if (Math.abs(sq.buffer(-2).area() - 36.0) > 1e-12 || !sq.buffer(-6).isEmpty()) fail("polygon set buffer: the square shrunk by 2 or 6");
+        Blacksmith.PolygonSet dumbbell = Blacksmith.PolygonSet.unionAll(List.of(psBox(0, 0, 4, 4), psBox(4, 1.5, 8, 2.5), psBox(8, 0, 12, 4)));
+        Blacksmith.PolygonSet shrunk = dumbbell.buffer(-1);
+        if (shrunk.polygons().size() != 2 || Math.abs(shrunk.area() - 8.088436436788012) > 1e-9) fail("polygon set buffer: the dumbbell shrunk to " + shrunk);
+        Blacksmith.PolygonSet gap = Blacksmith.PolygonSet.unionAll(List.of(psBox(0, 0, 1, 1), psBox(1.5, 0, 2.5, 1)));
+        double closedGap = gap.buffer(0.3).buffer(-0.3).area();
+        if (Math.abs(closedGap - 2.4057536390037235) > 1e-9) fail("polygon set buffer: the gap closed to area " + closedGap);
+        if (Math.abs(psBox(0, 0, 4, 3).buffer(1, Blacksmith.PolygonSet.Join.MITRE).area() - 30.0) > 30.0 * 1e-6) fail("polygon set buffer: a mitred box is not 30");
+        Blacksmith.PolygonSet flat = Blacksmith.PolygonSet.bufferPolyline(new double[][] {{0, 0}, {4, 0}}, 0.5, Blacksmith.PolygonSet.Cap.FLAT);
+        if (!java.util.Arrays.equals(flat.bounds().orElse(null), new double[] {0, -0.5, 4, 0.5})) fail("polygon set buffer_polyline: a flat-capped line's bounds " + java.util.Arrays.toString(flat.bounds().orElse(null)));
+        String badSegs = refused(() -> sq.buffer(1, 0, Blacksmith.PolygonSet.Join.ROUND, 5.0));
+        if (!badSegs.startsWith("polygon_set_buffer: ")) fail("polygon set buffer: quad_segs 0 gave '" + badSegs + "'");
+        String nullJoin = refused(() -> sq.buffer(1, null));
+        if (!nullJoin.equals("polygon_set_buffer: join is null")) fail("polygon set buffer: a null join gave '" + nullJoin + "'");
+        // 4. a profile goes across and back
+        try (Blacksmith.Profile washer = Blacksmith.Profile.circle(10).withHole(Blacksmith.Profile.circle(4))) {
+            Blacksmith.PolygonSet s = Blacksmith.PolygonSet.fromProfile(washer, 1e-3);
+            double exact = Math.PI * (100 - 16);
+            if (Math.abs(s.area() - exact) >= exact * 1e-3 || s.polygons().get(0).holes().size() != 1) fail("polygon set from profile: the washer is " + s);
+            List<Blacksmith.Profile> backs = s.toProfiles();
+            if (backs.size() != 1 || Math.abs(Blacksmith.PolygonSet.fromProfile(backs.get(0), 1e-3).area() - s.area()) > 1e-9)
+                fail("polygon set to profiles: the washer did not come back");
+            String tol = refused(() -> Blacksmith.PolygonSet.fromProfile(washer, -1.0));
+            if (!tol.startsWith("profile_polygon_set: tolerance")) fail("polygon set from profile: tolerance -1 gave '" + tol + "'");
+        }
+        Blacksmith.PolygonSet plan = psBox(0, 0, 4, 3);
+        Blacksmith.PolygonSet walls = plan.buffer(0.1, Blacksmith.PolygonSet.Join.MITRE).difference(plan);
+        List<Blacksmith.Profile> wallRings = walls.toProfiles();
+        if (wallRings.size() != 1) fail("polygon set to profiles: the walls are " + wallRings.size() + " profiles");
+        try (Blacksmith.Solid wallSolid = Blacksmith.Solid.extrude(wallRings.get(0), Blacksmith.Frame.xy().toArray(), 2.5)) {
+            double v = wallSolid.mass(0).volume(), want = walls.area() * 2.5;
+            if (Math.abs(v - want) > want * 1e-6) fail("polygon set to profiles: the walls extruded to " + v + ", not " + want);
+        }
+        if (!none.toProfiles().isEmpty()) fail("polygon set to profiles: the empty set gave a profile");
+        // 5. the questions
+        Blacksmith.PolygonSet r = holed;
+        if (!java.util.Arrays.equals(r.locate(new double[][] {{1, 1}, {4, 5}, {5, 5}}), new int[] {1, 0, -1})) fail("polygon set locate: not inside, on, outside");
+        if (!r.contains(psBox(0, 0, 1, 1)) || r.contains(psBox(3, 3, 7, 7)) || r.contains(psBox(4, 4, 6, 8)) || !r.contains(psBox(4, 6, 6, 8))) fail("polygon set contains");
+        if (!r.intersects(psBox(10, 0, 12, 1)) || r.intersects(psBox(4.5, 4.5, 5.5, 5.5))) fail("polygon set intersects");
+        if (!r.containsPolyline(new double[][] {{1, 1}, {9, 1}}) || r.containsPolyline(new double[][] {{1, 5}, {9, 5}})
+                || r.containsPolyline(new double[][] {{0, 0}, {10, 0}})) fail("polygon set contains_polyline");
+        if (!r.intersectsPolyline(new double[][] {{-1, 5}, {11, 5}})) fail("polygon set intersects_polyline");
+        if (!r.containsPoint(new double[] {1, 1}) || r.containsPoint(new double[] {4, 5})) fail("polygon set contains_point");
+        if (r.distance(psBox(12, 0, 13, 1)) != 2.0 || r.distanceToPoint(new double[] {5, 5}) != 1.0 || r.boundaryDistance(new double[] {1, 1}) != 1.0
+                || r.distanceToPolyline(new double[][] {{13, 0}, {13, 10}}) != 3.0) fail("polygon set: a distance is not 2, 1, 1, 3");
+        List<double[][]> clipped = r.clipPolyline(new double[][] {{-1, 5}, {11, 5}});
+        if (clipped.size() != 2 || !psRing(clipped.get(0), new double[][] {{0, 5}, {4, 5}}) || !psRing(clipped.get(1), new double[][] {{6, 5}, {10, 5}}))
+            fail("polygon set clip_polyline");
+        Blacksmith.PolygonSet moved = r.transformed(0, -1, 1, 0, 1, 2);
+        if (moved.area() != 96.0 || !java.util.Arrays.equals(moved.bounds().orElse(null), new double[] {-9, 2, 1, 12}))
+            fail("polygon set transformed: " + moved + ", bounds " + java.util.Arrays.toString(moved.bounds().orElse(null)));
+        String twoPoints = refused(() -> Blacksmith.PolygonSet.fromRings(new double[][] {{0, 0}, {1, 0}}));
+        if (!twoPoints.contains("ring 0 has 2 points")) fail("polygon set from rings: two points gave '" + twoPoints + "'");
+        String nanPoint = refused(() -> r.locate(new double[][] {{0, 0}, {Double.NaN, 0}}));
+        if (!nanPoint.contains("point 1 is not finite")) fail("polygon set locate: a NaN point gave '" + nanPoint + "'");
+        String threeNumbers = refused(() -> r.locate(new double[][] {{0, 0, 0}}));
+        if (!threeNumbers.equals("polygon_set_locate: point 0 is not an (x, y) pair")) fail("polygon set locate: three numbers gave '" + threeNumbers + "'");
+        // 6. lifetime: a closed set refuses
+        Blacksmith.PolygonSet gone = Blacksmith.PolygonSet.fromRings(new double[][] {{0, 0}, {1, 0}, {1, 1}});
+        gone.close();
+        gone.close();
+        for (Runnable call : List.<Runnable>of(gone::area, gone::polygons, () -> a.union(gone), () -> Blacksmith.PolygonSet.unionAll(List.of(a, gone)),
+                () -> gone.clipPolyline(new double[][] {{0, 0}, {1, 1}}))) {
+            String said = refused(call);
+            if (!said.equals("polygon_set: closed")) fail("polygon set: a closed set gave '" + said + "'");
+        }
+        System.out.println("polygon sets: booleans, rings, buffers, profiles, questions and lifetime all read back");
     }
 
     /** The R-tree: Python's test_rtree_*, trimmed to what proves the marshalling (rtree plan 3). */
@@ -7028,6 +7723,126 @@ public final class Smoke {
     private static double skOff(Blacksmith.Sketch s, int line, int point) {
         double[] a = s.point(s.ends(line)[0]), d = skDir(s, line), p = s.point(point);
         return ((p[0] - a[0]) * d[1] - (p[1] - a[1]) * d[0]) / Math.hypot(d[0], d[1]);
+    }
+
+    // ---- sketch constraints part 2: smooth, translated, rotated, polygon, chamfer, patterns, auto-constrain
+
+    private static void sketchPart2() {
+        // smooth reads back its kind
+        try (Blacksmith.Sketch s = new Blacksmith.Sketch()) {
+            int c = s.addPoint(0, 0), a0 = s.addPoint(5, 0), a1 = s.addPoint(0, 5);
+            int arc = s.addArc(c, a0, a1);
+            int bez = s.addBezier(a1, new double[] {-2, 5.3}, new double[] {-4, 4}, new double[] {-6, 1});
+            s.fix(arc);
+            int id = s.smooth(arc, bez);
+            if (!s.constraintKind(id).equals("smooth")) fail("sketch2: smooth reads back as " + s.constraintKind(id));
+        }
+        // translated and rotated place their point
+        try (Blacksmith.Sketch s = new Blacksmith.Sketch()) {
+            int p = s.addPoint(1, 1), q = s.addPoint(0, 0), f = s.addPoint(0, 0), t = s.addPoint(3, 4);
+            s.fix(p);
+            s.fix(f);
+            s.fix(t);
+            int id = s.translated(p, q, f, t);
+            if (!s.constraintKind(id).equals("translated")) fail("sketch2: translated reads back as " + s.constraintKind(id));
+            if (!s.solve().converged()) fail("sketch2: translated does not solve");
+            double[] at = s.point(q);
+            if (!skNear(at[0], 4, 1e-9) || !skNear(at[1], 5, 1e-9)) fail("sketch2: translated put q at " + Arrays.toString(at));
+        }
+        try (Blacksmith.Sketch s = new Blacksmith.Sketch()) {
+            int c = s.addPoint(0, 0), f = s.addPoint(2, 0), t = s.addPoint(0, 7), p = s.addPoint(3, 1), q = s.addPoint(0, 0.5);
+            s.fix(c);
+            s.fix(f);
+            s.fix(t);
+            s.fix(p);
+            int id = s.rotated(p, q, c, f, t);
+            if (!s.constraintKind(id).equals("rotated")) fail("sketch2: rotated reads back as " + s.constraintKind(id));
+            if (!s.solve().converged()) fail("sketch2: rotated does not solve");
+            double[] at = s.point(q);
+            if (!skNear(at[0], -1, 1e-9) || !skNear(at[1], 3, 1e-9)) fail("sketch2: rotated put q at " + Arrays.toString(at));
+        }
+        // a regular polygon
+        try (Blacksmith.Sketch s = new Blacksmith.Sketch()) {
+            Blacksmith.Polygon poly = s.addPolygon(new double[] {0, 0}, new double[] {5, 0}, 6);
+            if (poly.corners().length != 6 || poly.sides().length != 6) fail("sketch2: the hexagon has " + poly.corners().length + " corners");
+            for (int i = 0; i < 6; i++) {
+                double d = skDist(s, poly.corners()[i], poly.corners()[(i + 1) % 6]);
+                if (!skNear(d, 5, 1e-9)) fail("sketch2: hexagon side " + i + " is " + d);
+            }
+            if (s.diagnose().free() != 4) fail("sketch2: the hexagon's dof is " + s.diagnose().free());
+        }
+        // a chamfer, and its refusal
+        try (Blacksmith.Sketch s = new Blacksmith.Sketch()) {
+            Blacksmith.SketchRect rect = s.addRect(new double[] {0, 0}, new double[] {10, 10});
+            Blacksmith.Chamfer ch = s.chamfer(rect.sides()[0], rect.sides()[1], 2, 3);
+            double[] pa = s.point(ch.points()[0]), pb = s.point(ch.points()[1]);
+            if (!skNear(pa[0], 8, 1e-9) || !skNear(pa[1], 0, 1e-9) || !skNear(pb[0], 10, 1e-9) || !skNear(pb[1], 3, 1e-9))
+                fail("sketch2: the chamfer points are " + Arrays.toString(pa) + Arrays.toString(pb));
+            if (ch.corner() != rect.corners()[1]) fail("sketch2: the chamfer corner is " + ch.corner());
+            if (ch.dimensions().length != 2) fail("sketch2: the chamfer has " + ch.dimensions().length + " dimensions");
+            List<Blacksmith.Profile> loops = s.profiles(1e-9);
+            try {
+                if (loops.size() != 1) fail("sketch2: the chamfered rectangle has " + loops.size() + " profiles");
+                else if (!skNear(loops.get(0).areaProperties().area(), 97, 1e-9)) fail("sketch2: the chamfered area is " + loops.get(0).areaProperties().area());
+            } finally {
+                for (Blacksmith.Profile p : loops) p.close();
+            }
+            Blacksmith.BuildException tooLong = skRefused(() -> s.chamfer(rect.sides()[0], rect.sides()[1], 20, 3));
+            if (tooLong == null || !tooLong.getMessage().startsWith("sketch_chamfer: "))
+                fail("sketch2: the oversize chamfer gave '" + (tooLong == null ? null : tooLong.getMessage()) + "'");
+        }
+        // patterns
+        try (Blacksmith.Sketch s = new Blacksmith.Sketch()) {
+            int circle = s.addCircle(s.addPoint(10, 0), 1);
+            int centre = s.addPoint(0, 0);
+            s.fix(centre);
+            Blacksmith.SketchPattern pat = s.patternCircular(new int[] {circle}, centre, 6, Math.PI / 3);
+            if (pat.copies().size() != 5 || pat.steps().length != 2 || pat.dimensions().length != 1)
+                fail("sketch2: the circular pattern is " + pat.copies().size() + "/" + pat.steps().length + "/" + pat.dimensions().length);
+            if (!s.solve().converged()) fail("sketch2: the circular pattern does not solve");
+            double[] at = s.point(s.centre(pat.copies().get(0)[0]));
+            if (!skNear(at[0], 5, 1e-9) || !skNear(at[1], 8.660254037844386, 1e-9)) fail("sketch2: copy 1 (the first copy) is at " + Arrays.toString(at));
+        }
+        try (Blacksmith.Sketch s = new Blacksmith.Sketch()) {
+            int p = s.addPoint(0, 0);
+            s.fix(p);
+            Blacksmith.SketchPattern pat = s.patternRectangular(new int[] {p}, new double[] {2, 0}, 3, new double[] {0, 0}, 1);
+            if (pat.copies().size() != 2 || pat.dimensions().length != 2) fail("sketch2: the grid is " + pat.copies().size() + " copies, " + pat.dimensions().length + " dimensions");
+            if (!s.solve().converged()) fail("sketch2: the grid does not solve");
+            double[] one = s.point(pat.copies().get(0)[0]), two = s.point(pat.copies().get(1)[0]);
+            if (!skNear(one[0], 2, 1e-9) || !skNear(one[1], 0, 1e-9) || !skNear(two[0], 4, 1e-9) || !skNear(two[1], 0, 1e-9))
+                fail("sketch2: the grid copies are at " + Arrays.toString(one) + Arrays.toString(two));
+        }
+        // mirror: a triangle with a-b on the construction line x = 0, c free
+        try (Blacksmith.Sketch s = new Blacksmith.Sketch()) {
+            int axis = s.addLine(s.addPoint(0, 0), s.addPoint(0, 10));
+            s.setConstruction(axis);
+            int a = s.addPoint(0, 2), b = s.addPoint(0, 8), c = s.addPoint(5, 5);
+            s.addLine(a, b);
+            int[] ents = {c, s.addLine(b, c), s.addLine(c, a)};
+            Blacksmith.SketchMirror mir = s.mirror(ents, axis);
+            if (mir.copies().length != 3 || mir.constraints().length == 0)
+                fail("sketch2: the mirror is " + mir.copies().length + "/" + mir.constraints().length);
+            if (!s.kind(mir.copies()[0]).equals("point") || !s.kind(mir.copies()[1]).equals("line") || !s.kind(mir.copies()[2]).equals("line"))
+                fail("sketch2: the mirror copies' kinds");
+            double[] mc = s.point(mir.copies()[0]);
+            if (!skNear(mc[0], -5, 1e-9) || !skNear(mc[1], 5, 1e-9)) fail("sketch2: the mirrored point is " + Arrays.toString(mc));
+            for (int k : mir.constraints()) {
+                String kind = s.constraintKind(k);
+                if (!kind.equals("symmetric") && !kind.equals("equal_radius") && !kind.equals("point_on_line")) fail("sketch2: a mirror constraint is " + kind);
+            }
+            int before = s.entities().length;
+            Blacksmith.BuildException onLine = skRefused(() -> s.mirror(new int[] {c, axis}, axis));
+            if (onLine == null || !onLine.getMessage().contains("mirror line must not be among"))
+                fail("sketch2: mirroring the line itself gave '" + (onLine == null ? null : onLine.getMessage()) + "'");
+            if (s.entities().length != before) fail("sketch2: a refused mirror changed the sketch");
+        }
+        // auto-constrain
+        try (Blacksmith.Profile r = Blacksmith.Profile.rect(10, 6); Blacksmith.Sketch s = Blacksmith.Sketch.fromProfile(r, false, 1e-6)) {
+            int[] added = s.autoConstrain(0, true);
+            if (added.length == 0) fail("sketch2: auto_constrain added nothing");
+            if (s.diagnose().free() != 0) fail("sketch2: after auto_constrain the dof is " + s.diagnose().free());
+        }
     }
 
     private static void sketch() {
@@ -10020,6 +10835,35 @@ public final class Smoke {
             System.out.println("recognize (reader): box-union-sphere.3dm: " + r.faces().size() + " faces taken, " + r.edges().size()
                     + " edges, sphere and plane among them");
         }
+        // OpenOptions.recognizeTolerance: unasked the ball is still NURBS, asked it arrives analytic.
+        Cad.OpenOptions askedOptions = new Cad.OpenOptions(Cad.Convention.NATIVE, false, false, null, false, 0.0, 0, 1e-6);
+        try (Cad.Scene plain = Cad.open(ball.toString()); Cad.Scene asked = Cad.open(ball.toString(), askedOptions)) {
+            Cad.Brep before = firstReaderBrep(plain), after = firstReaderBrep(asked);
+            if (before == null || after == null) fail("recognize on open: box-union-sphere.3dm has no brep");
+            Cad.Recognized r0 = before.recognize(), r1 = after.recognize();
+            r0.brep().close();
+            r1.brep().close();
+            before.close();
+            after.close();
+            if (r0.report().faces().stream().noneMatch(f -> f.kind().equals("sphere")))
+                fail("recognize on open: unasked, the ball is no longer NURBS: " + r0.report().faces());
+            if (!r1.report().faces().isEmpty()) fail("recognize on open: asked, faces still recognized: " + r1.report().faces());
+        }
+        for (double bad : new double[] {-1.0, Double.NaN, Double.POSITIVE_INFINITY}) {
+            boolean refused = false;
+            try { new Cad.OpenOptions(Cad.Convention.NATIVE, false, false, null, false, 0.0, 0, bad); }
+            catch (IllegalArgumentException e) { refused = e.getMessage().contains("recognizeTolerance"); }
+            if (!refused) fail("recognize on open: a recognizeTolerance of " + bad + " was not refused");
+        }
+        System.out.println("recognize on open (reader): unasked NURBS, asked analytic, bad tolerances refused: ok");
+    }
+
+    private static Cad.Brep firstReaderBrep(Cad.Scene scene) {
+        for (Cad.Node n : scene.nodes()) {
+            Cad.Brep b = n.brep();
+            if (b != null) return b;
+        }
+        return null;
     }
 
     private static boolean relClose(double a, double b, double rel) {
@@ -11181,6 +12025,12 @@ public final class Smoke {
             int nodes = gltf.indexOf("\"nodes\"");
             int first = gltf.indexOf("\"Solid 1\"", nodes), second = gltf.indexOf("\"Solid 2\"", nodes);
             if (nodes < 0 || first < 0 || second < first) fail("mesh_file: the glTF's nodes are not Solid 1 and Solid 2");
+            byte[] pkg = Blacksmith.meshFile(both, "3mf");
+            if (pkg.length < 4 || pkg[0] != 'P' || pkg[1] != 'K' || pkg[2] != 3 || pkg[3] != 4) fail("mesh_file: the 3MF is not a zip package");
+            String ply = new String(Blacksmith.meshFile(both, "ply"), java.nio.charset.StandardCharsets.ISO_8859_1);
+            if (!ply.startsWith("ply\n") || !ply.contains("binary_little_endian")) fail("mesh_file: the binary PLY's header");
+            String plyAscii = new String(Blacksmith.meshFile(both, "ply-ascii"), java.nio.charset.StandardCharsets.UTF_8);
+            if (!plyAscii.contains("format ascii 1.0")) fail("mesh_file: the ASCII PLY's header");
             drawingRefused("mesh_file", () -> Blacksmith.meshFile(List.of(a), "step"), "mesh_file: format \"step\" is not one of");
             drawingRefused("mesh_file", () -> Blacksmith.meshFile(List.of(), "stl"), "mesh_file: no solids");
             drawingRefused("mesh_file", () -> Blacksmith.meshFile(List.of(a), "obj", List.of("a", "b"), null, null), "2 names for 1 solids");

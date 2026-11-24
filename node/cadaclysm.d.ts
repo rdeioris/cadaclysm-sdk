@@ -97,6 +97,8 @@ export interface OpenOptions {
   sourceMetersPerUnit?: number;
   /** 0 (the default) for none; a lightmap atlas that many texels on a side, read back as `Node.lightmapUvs`. */
   lightmapResolution?: number;
+  /** Recognize every B-rep body (`Node.brep`) at this tolerance, as `Brep.recognize` would; 0 (the default) is off, 1e-6 the usual ask. Meshes are unchanged. */
+  recognizeTolerance?: number;
 }
 export interface OpenMemoryOptions extends OpenOptions { name?: string }
 export type Bytes = Buffer | Uint8Array | ArrayBuffer | string;
@@ -166,6 +168,31 @@ export class Collision {
   readonly shapeName: string;
 }
 export class CollisionHull { private constructor(); positions: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number }
+/** A part's PBR metallic-roughness material, as glTF 2.0 defines one (`Node.material`); plain data, copied out. */
+export class Material {
+  private constructor();
+  name: string;
+  /** The base colour factor, RGBA in linear light. */
+  baseColor: number[];
+  metallic: number; roughness: number;
+  alphaMode: 'opaque' | 'mask' | 'blend' | string; alphaCutoff: number;
+  doubleSided: boolean;
+  /** The `Scene.image` index the base colour texture reads, or null for an untextured material. */
+  baseColorImage: number | null;
+  baseColorUvSet: number;
+  /** `KHR_texture_transform`: offset, rotation (radians), scale. */
+  uvOffset: number[]; uvRotation: number; uvScale: number[];
+  wrapU: 'repeat' | 'mirrored_repeat' | 'clamp_to_edge' | string;
+  wrapV: 'repeat' | 'mirrored_repeat' | 'clamp_to_edge' | string;
+  magFilter: 'linear' | 'nearest' | string; minFilter: 'linear' | 'nearest' | string;
+}
+/** An image a material names (`Scene.image`), encoded as the file held it. */
+export class Image {
+  private constructor();
+  /** The PNG, JPEG, WebP or KTX2 bytes, copied out. */
+  data: Buffer;
+  mime: string; name: string;
+}
 
 /** A body's exact B-rep, shared with the scene; for `Solid.fromNode`. `release()` gives the reference back. */
 export class Brep {
@@ -566,6 +593,8 @@ export class Node {
   walk(): IterableIterator<Node>;
   attributes(): Attribute[];
   readonly color: number[] | null;
+  /** This part's PBR material (a glTF primitive's), or null -- every part of every other format. */
+  readonly material: Material | null;
   readonly rawTransform: Float64Array; readonly transform: number[][];
   readonly bounds: Bounds;
   /** `bounds` in `double`: exact far from the origin. */
@@ -629,6 +658,10 @@ export class Scene {
   diagnostics(): string[]; geometryDiagnostics(): string[];
   readonly nodeCount: number;
   node(index: number): Node; nodes(): Node[]; roots(): Node[];
+  /** How many images the scene's materials name; 0 for every format but glTF. */
+  readonly imageCount: number;
+  /** Image `index`, encoded as the file held it; throws `CadaclysmError` past the last. */
+  image(index: number): Image;
   walk(): IterableIterator<Node>;
   query(filter: string): number[];
   placements(): Placement[];
@@ -650,7 +683,7 @@ export class Scene {
   readonly realized: number; readonly realizeTotal: number;
   cancel(): void;
   forgetMeshes(): void;
-  /** `format`: `'glb'` (the default), `'gltf'` or `'obj'`. */
+  /** `format`: `'glb'` (the default), `'gltf'`, `'obj'`, `'usda'`, `'3mf'`, `'ply'` (binary) or `'ply-ascii'`. */
   save(path: string, format?: string): void;
   saveAsync(path: string, format?: string): Promise<void>;
   svgText(options?: SvgOptions): string;

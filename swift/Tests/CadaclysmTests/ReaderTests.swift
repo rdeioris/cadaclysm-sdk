@@ -574,6 +574,10 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(iges?.extensions, ["iges", "igs"])
         XCTAssertEqual(meshFormats().first { $0.name == "stl" }?.label, "STL (binary)")
         XCTAssertEqual(meshFormats().first { $0.name == "stl-ascii" }?.extension, "stl")
+        XCTAssertEqual(meshFormats().first { $0.name == "3mf" }?.label, "3D Manufacturing Format")
+        XCTAssertEqual(meshFormats().first { $0.name == "ply" }?.label, "PLY (binary)")
+        XCTAssertEqual(meshFormats().first { $0.name == "ply-ascii" }?.extension, "ply")
+        XCTAssertEqual(meshFormats().first { $0.name == "ply-ascii" }?.label, "PLY (ASCII)")
     }
 
     func testGeometryDiagnosticsAndForgetMeshes() throws {

@@ -375,6 +375,7 @@ public func resolveSchema(_ model: String, schema: String?) throws -> (chosen: S
 
 /// `CadaclysmOpenOptions` for these arguments, alive for the duration of `body`.
 private func withOptions<R>(_ convention: Convention, schema: String?, colors: Bool, lightmapResolution: UInt32,
+                            recognizeTolerance: Double,
                             _ body: (UnsafePointer<CadaclysmOpenOptions>) -> R) -> R {
     var options = CadaclysmOpenOptions()
     cadaclysm_open_options_init(&options)
@@ -385,6 +386,7 @@ private func withOptions<R>(_ convention: Convention, schema: String?, colors: B
         ? UInt32(CADACLYSM_UV_WORLD_SCALE.rawValue) : UInt32(CADACLYSM_UV_NONE.rawValue)
     options.colors = colors ? UInt32(CADACLYSM_COLORS_PER_FACE.rawValue) : UInt32(CADACLYSM_COLORS_NONE.rawValue)
     options.lightmap_resolution = lightmapResolution
+    options.recognize_tolerance = recognizeTolerance
     guard let schema = schema else {
         return withUnsafePointer(to: &options) { body($0) }
     }
@@ -405,12 +407,15 @@ private func withOptions<R>(_ convention: Convention, schema: String?, colors: B
 /// opens with nil. `convention` is the space to read into, optionally with `.fileUnits` and
 /// `.uvWorld`. `colors` asks for per-vertex colours on bodies the file painted in more than one
 /// colour. `lightmapResolution`: a lightmap atlas that many texels on a side, one chart per B-rep
-/// face, read back as `Node.lightmapUvs`; 0 for none. A `.zip` opens its first readable member;
-/// `Scene.sourceName` says which.
+/// face, read back as `Node.lightmapUvs`; 0 for none. `recognizeTolerance` recognizes every B-rep
+/// body the scene hands out (`Node.brep`) at this tolerance, as `Brep.recognize` would: NURBS
+/// planes, cylinders, cones, spheres and tori, and line, circle and ellipse edge curves, come back
+/// exact; 0 (the default) is off, 1e-6 the usual ask, and meshes are unchanged. A `.zip` opens its
+/// first readable member; `Scene.sourceName` says which.
 ///
 /// Throws `CadaclysmError` carrying the library's reason; never returns a dead scene.
 public func open(_ path: String, schema: String? = nil, convention: Convention = .native,
-                 colors: Bool = false, lightmapResolution: UInt32 = 0) throws -> Scene {
+                 colors: Bool = false, lightmapResolution: UInt32 = 0, recognizeTolerance: Double = 0) throws -> Scene {
     guard FileManager.default.fileExists(atPath: path) else {
         throw CadaclysmError("\(path): no such file")
     }
@@ -419,7 +424,8 @@ public func open(_ path: String, schema: String? = nil, convention: Convention =
     // A directory goes over whole: the library keys each schema under the name the schema
     // itself declares, which is the only authority on the matter.
     if let schema = schema, isDirectory(schema) {
-        if let handle = withOptions(convention, schema: schema, colors: colors, lightmapResolution: lightmapResolution, { cadaclysm_open(path, $0) }) {
+        if let handle = withOptions(convention, schema: schema, colors: colors, lightmapResolution: lightmapResolution,
+                                    recognizeTolerance: recognizeTolerance, { cadaclysm_open(path, $0) }) {
             return Scene(handle: handle, path: path, schemaPath: schema, convention: convention)
         }
         throw CadaclysmError("\(name): \(lastError())")
@@ -428,7 +434,8 @@ public func open(_ path: String, schema: String? = nil, convention: Convention =
     let (chosen, fallbacks) = try resolveSchema(path, schema: schema)
     let candidates: [String?] = chosen != nil || fallbacks.isEmpty ? [chosen] : fallbacks
     for candidate in candidates {
-        if let handle = withOptions(convention, schema: candidate, colors: colors, lightmapResolution: lightmapResolution, { cadaclysm_open(path, $0) }) {
+        if let handle = withOptions(convention, schema: candidate, colors: colors, lightmapResolution: lightmapResolution,
+                                    recognizeTolerance: recognizeTolerance, { cadaclysm_open(path, $0) }) {
             return Scene(handle: handle, path: path, schemaPath: candidate, convention: convention)
         }
     }
@@ -438,14 +445,15 @@ public func open(_ path: String, schema: String? = nil, convention: Convention =
 /// Open a CAD file already in bytes -- a download, a database blob, an archive member.
 ///
 /// `format` names the kind as an extension would: `"step"`, `"ifc"`, `"igs"`, `"3dm"`,
-/// `"brep"`, `"scad"` (a leading dot is fine). `schema` must be a file path here, there being no
+/// `"brep"`, `"scad"`, `"3mf"`, `"ply"` (a leading dot is fine). `schema` must be a file path here, there being no
 /// file to read a `FILE_SCHEMA` line from; `name` stands as the scene's `path`. The bytes are
 /// copied; `data` can be reused as soon as this returns. Otherwise as `open`.
 public func openMemory(_ data: Data, format: String, schema: String? = nil, name: String = "<memory>",
                        convention: Convention = .native, colors: Bool = false,
-                       lightmapResolution: UInt32 = 0) throws -> Scene {
+                       lightmapResolution: UInt32 = 0, recognizeTolerance: Double = 0) throws -> Scene {
     let handle = data.withUnsafeBytes { bytes in
-        withOptions(convention, schema: schema, colors: colors, lightmapResolution: lightmapResolution) { options in
+        withOptions(convention, schema: schema, colors: colors, lightmapResolution: lightmapResolution,
+                    recognizeTolerance: recognizeTolerance) { options in
             cadaclysm_open_memory(bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, format, options)
         }
     }
@@ -456,9 +464,10 @@ public func openMemory(_ data: Data, format: String, schema: String? = nil, name
 /// `openMemory` over a byte array.
 public func openMemory(_ bytes: [UInt8], format: String, schema: String? = nil, name: String = "<memory>",
                        convention: Convention = .native, colors: Bool = false,
-                       lightmapResolution: UInt32 = 0) throws -> Scene {
+                       lightmapResolution: UInt32 = 0, recognizeTolerance: Double = 0) throws -> Scene {
     try openMemory(Data(bytes), format: format, schema: schema, name: name,
-                convention: convention, colors: colors, lightmapResolution: lightmapResolution)
+                convention: convention, colors: colors, lightmapResolution: lightmapResolution,
+                recognizeTolerance: recognizeTolerance)
 }
 
 // ---- views over library memory ------------------------------------------------------------------
@@ -1342,6 +1351,67 @@ public struct Collision: Hashable, Sendable {
         hullVertexCount = Int(raw.hull_vertex_count)
         hullIndexCount = Int(raw.hull_index_count)
     }
+}
+
+/// A glTF PBR metallic-roughness material (`Node.material`), plain data copied out of the
+/// scene. `baseColor` is the base colour factor, RGBA, in linear light. `alphaMode` is
+/// `"opaque"`, `"mask"` or `"blend"`; `alphaCutoff` matters under `"mask"` only.
+/// `baseColorImage` is the image the base colour texture reads (`Scene.image`), or nil for an
+/// untextured material; `baseColorUvSet` picks the coordinates it reads (0 the mesh's `uvs`,
+/// 1 its lightmap UVs) through `KHR_texture_transform`:
+/// `uv' = uvOffset + R(uvRotation) * (uvScale * uv)`. `wrapU`/`wrapV` are `"repeat"`,
+/// `"mirrored_repeat"` or `"clamp_to_edge"`; `magFilter`/`minFilter` `"linear"` or `"nearest"`.
+public struct Material: Hashable, Sendable {
+    public let name: String
+    public let baseColor: SIMD4<Float>
+    public let metallic: Float
+    public let roughness: Float
+    public let alphaMode: String
+    public let alphaCutoff: Float
+    public let doubleSided: Bool
+    public let baseColorImage: Int?
+    public let baseColorUvSet: Int
+    public let uvOffset: SIMD2<Float>
+    public let uvRotation: Float
+    public let uvScale: SIMD2<Float>
+    public let wrapU: String
+    public let wrapV: String
+    public let magFilter: String
+    public let minFilter: String
+
+    init(_ raw: CadaclysmMaterial) {
+        func word(_ words: [String], _ code: UInt32) -> String {
+            Int(code) < words.count ? words[Int(code)] : String(code)
+        }
+        let wraps = ["repeat", "mirrored_repeat", "clamp_to_edge"]
+        let filters = ["linear", "nearest"]
+        name = borrowed(raw.name)
+        baseColor = SIMD4(raw.base_color.0, raw.base_color.1, raw.base_color.2, raw.base_color.3)
+        metallic = raw.metallic
+        roughness = raw.roughness
+        alphaMode = word(["opaque", "mask", "blend"], raw.alpha_mode)
+        alphaCutoff = raw.alpha_cutoff
+        doubleSided = raw.double_sided
+        baseColorImage = raw.base_color_image == noneIndex ? nil : Int(raw.base_color_image)
+        baseColorUvSet = Int(raw.base_color_uv_set)
+        uvOffset = SIMD2(raw.uv_offset.0, raw.uv_offset.1)
+        uvRotation = raw.uv_rotation
+        uvScale = SIMD2(raw.uv_scale.0, raw.uv_scale.1)
+        wrapU = word(wraps, raw.wrap_u)
+        wrapV = word(wraps, raw.wrap_v)
+        magFilter = word(filters, raw.mag_filter)
+        minFilter = word(filters, raw.min_filter)
+    }
+}
+
+/// One image a glTF material names (`Scene.image`), encoded as the file held it and copied out
+/// of the scene: `data` the PNG, JPEG, WebP or KTX2 bytes, `mime` `"image/png"`, `"image/jpeg"`, `"image/webp"` or `"image/ktx2"` (for an
+/// image this library does not read, what the file declared, and `data` empty where it could
+/// not be read at all), `name` the file's name for it (empty where unnamed).
+public struct Image: Hashable, Sendable {
+    public let data: [UInt8]
+    public let mime: String
+    public let name: String
 }
 
 /// A node's convex hull for a physics engine, as triangles. Views into the scene, like `Mesh`.
@@ -3204,6 +3274,14 @@ public struct Node: Hashable, CustomStringConvertible {
         }
     }
 
+    /// Its PBR material (its own, else its shape's), or nil -- every part not read from a glTF
+    /// has none.
+    public var material: Material? {
+        var out = CadaclysmMaterial()
+        guard cadaclysm_node_material(live(), raw, &out) else { return nil }
+        return Material(out)
+    }
+
     /// The colour the file gave it as RGBA in 0–1, or nil -- most STEP files carry none, and the
     /// caller's default is the right answer.
     public var colour: SIMD4<Float>? {
@@ -3962,6 +4040,22 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
         return (0..<cadaclysm_diagnostic_count(handle)).map { borrowed(cadaclysm_diagnostic(handle, $0)) }
     }
 
+    /// How many images the scene's materials name: valid indices for `image(_:)`.
+    public var imageCount: Int { Int(cadaclysm_image_count(live())) }
+
+    /// Image `index` (`Material.baseColorImage` names one); throws past the last.
+    public func image(_ index: Int) throws -> Image {
+        let handle = live()
+        var raw = CadaclysmImage()
+        guard index >= 0, index <= Int(UInt32.max),
+              cadaclysm_image(handle, UInt32(index), &raw) else {
+            throw CadaclysmError("image \(index) is past the last of \(cadaclysm_image_count(handle))")
+        }
+        let data = raw.size > 0 && raw.bytes != nil
+            ? Array(UnsafeBufferPointer(start: raw.bytes, count: Int(raw.size))) : []
+        return Image(data: data, mime: borrowed(raw.mime), name: borrowed(raw.name))
+    }
+
     /// What the reader built but the geometry stage could not finish -- a face that would
     /// not trim, a surface that would not mesh. `diagnostics` is what the file held that
     /// could not be read; this is what the geometry did.
@@ -4140,9 +4234,10 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     /// and the line views are the library's own caches and outlive one.
     private(set) var forgets = 0
 
-    /// Write the whole scene: `glb` (binary glTF), `gltf` (text glTF, one file) or `obj` (every
-    /// placement baked to its own named object, a `.mtl` beside it when anything has a colour).
-    /// In the scene's convention (`.yUp` for the space glTF specifies). Throws on any other
+    /// Write the whole scene: `glb` (binary glTF), `gltf` (text glTF, one file), `obj` (every
+    /// placement baked to its own named object, a `.mtl` beside it when anything has a colour),
+    /// `usda` (OpenUSD), `3mf` (3MF, every placement a build item), `ply` (binary) or `ply-ascii`
+    /// (PLY, every placement baked into one body). In the scene's convention (`.yUp` for the space glTF specifies). Throws on any other
     /// format or a failed write.
     public func save(_ path: String, format: String = "glb") throws {
         let handle = try liveOrThrow()

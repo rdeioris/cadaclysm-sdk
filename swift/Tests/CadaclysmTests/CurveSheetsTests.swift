@@ -287,6 +287,200 @@ final class CurveSheetsTests: XCTestCase {
         XCTAssertTrue(said.contains("has to cross the face"), said)
     }
 
+    /// Offsets (spec section 8): a line and an arc exactly, a wavy bicubic within its tolerance,
+    /// an arc on a quarter wall along and across it, a cube and its top face.
+    func testOffsetsOfCurvesSurfacesAndSolids() throws {
+        func dist(_ a: P, _ b: P) -> Double { ((a - b) * (a - b)).sum().squareRoot() }
+        let z = P(0, 0, 1)
+        let ten = try line(P(0, 0, 0), P(10, 0, 0))
+        let o = try ten.offset(2, direction: z)
+        let (lo, hi) = try o.domain
+        XCTAssertEqual(o.fitError, 0)
+        XCTAssertLessThanOrEqual(dist(try o.point(lo), P(0, -2, 0)), 1e-12)
+        XCTAssertLessThanOrEqual(dist(try o.point(hi), P(10, -2, 0)), 1e-12)
+        let h = 0.5.squareRoot()
+        let arc = try NurbsCurve([P(2, 0, 0), P(2, 2, 0), P(0, 2, 0)], degree: 2, weights: [1, h, 1])
+        let out = try arc.offset(1, direction: z, tolerance: 1e-6)
+        XCTAssertEqual(out.fitError, 0)
+        XCTAssertEqual(dist(try out.point(0.5), P(0, 0, 0)), 3, accuracy: 1e-12)
+        let said = try XCTUnwrap(refusal { _ = try arc.offset(-2, direction: z, tolerance: 1e-6) })
+        XCTAssertTrue(said.hasPrefix("nurbs_curve_offset: "), said)
+
+        var wavy: [P] = []
+        for i in 0..<4 {
+            for j in 0..<4 { wavy.append(P(Double(i), Double(j), sin(Double(i)) * cos(Double(j)) / 4)) }
+        }
+        let k: [Double] = [0, 0, 0, 0, 3, 3, 3, 3]
+        let s = try NurbsSurface(wavy, counts: (4, 4), degreeU: 3, degreeV: 3, knotsU: k, knotsV: k)
+        XCTAssertNil(s.fitError)
+        let so = try s.offset(0.2, tolerance: 1e-6)
+        let soError = try XCTUnwrap(so.fitError)
+        XCTAssertTrue(soError >= 0 && soError <= 1e-6, "\(soError)")
+        let p = try s.pointAt(1.5, 1.5), n = try s.normalAt(1.5, 1.5)
+        XCTAssertLessThanOrEqual(dist(try so.pointAt(1.5, 1.5), p + 0.2 * n), 1e-6)
+
+        let wall = try NurbsSurface([P(2, 0, 0), P(2, 0, 5), P(2, 2, 0), P(2, 2, 5), P(0, 2, 0), P(0, 2, 5)], counts: (3, 2),
+                                    degreeU: 2, degreeV: 1, weights: [1, 1, h, h, 1, 1], knotsU: [0, 0, 0, 1, 1, 1],
+                                    knotsV: [0, 0, 1, 1]).toSheet()
+        let onWall = try NurbsCurve([P(2, 0, 2), P(2, 2, 2), P(0, 2, 2)], degree: 2, weights: [1, h, 1])
+        let up = try onWall.offsetNormalToSheet(wall, distance: 1, tolerance: 1e-6)
+        let along = try onWall.offsetTangentToSheet(wall, distance: 1, tolerance: 1e-6)
+        for (c, r, height) in [(up, 3.0, 2.0), (along, 2.0, 3.0)] {
+            XCTAssertLessThanOrEqual(try XCTUnwrap(c.fitError), 1e-6)
+            let (a, b) = try c.domain
+            for i in 0...20 {
+                let q = try c.point(a + (b - a) * Double(i) / 20)
+                XCTAssertEqual((q.x * q.x + q.y * q.y).squareRoot(), r, accuracy: 2e-6, "\(q)")
+                XCTAssertEqual(q.z, height, accuracy: 2e-6, "\(q)")
+            }
+        }
+
+        let cube = try Solid.cuboid(10, 10, 10)
+        let grown: Mass = try cube.offset(1, tolerance: 1e-6).mass()
+        let shrunk: Mass = try cube.offset(-1, tolerance: 1e-6).mass()
+        XCTAssertEqual(grown.volume, 1728, accuracy: 1e-6)
+        XCTAssertEqual(shrunk.volume, 512, accuracy: 1e-6)
+        let top = try cube.offsetFace(1, distance: 1, tolerance: 1e-6)
+        let topMass: Mass = try top.mass()
+        XCTAssertEqual(try top.faces, 1)
+        XCTAssertEqual(topMass.area, 100, accuracy: 1e-6)
+        let box = try top.bounds64
+        XCTAssertEqual(box.min.z, 6, accuracy: 1e-9)
+        XCTAssertEqual(box.max.z, 6, accuracy: 1e-9)
+        let zero = try XCTUnwrap(refusal { _ = try cube.offset(0) })
+        XCTAssertTrue(zero.hasPrefix("solid_offset: "), zero)
+        let zeroFace = try XCTUnwrap(refusal { _ = try cube.offsetFace(1, distance: 0) })
+        XCTAssertTrue(zeroFace.hasPrefix("solid_offset_face: "), zeroFace)
+    }
+
+    /// Face split: a box's top split by a line across it, on its face and on every face it lies
+    /// on; a sphere along its silhouette.
+    func testFacesSplitAlongCurvesAndSilhouettes() throws {
+        let cube = try Solid.cuboid(10, 10, 10)
+        let across = try line(P(-8, -2, 5), P(8, 3, 5))
+        for faces: [Int?]? in [nil, [1], [nil]] {
+            let out = try cube.splitFaces([across], faces: faces)
+            XCTAssertEqual(try out.faces, 7)
+            let m: Mass = try out.mass()
+            XCTAssertTrue(m.closed)
+            XCTAssertEqual(m.volume, 1000, accuracy: 1e-6)
+            XCTAssertEqual(m.area, 600, accuracy: 1e-6)
+            let tops = try (0..<out.faces).filter { abs(try out.faceInnerPoint($0).point.z - 5) < 1e-9 }
+            XCTAssertEqual(tops.count, 2)
+        }
+        let none = try XCTUnwrap(refusal { _ = try cube.splitFaces([]) })
+        XCTAssertTrue(none.hasPrefix("split_faces: "), none)
+        let two = try XCTUnwrap(refusal { _ = try cube.splitFaces([across], faces: [1, 2]) })
+        XCTAssertTrue(two.hasPrefix("split_faces: "), two)
+        let r = 5.0
+        let halves = try Solid.sphere(r).splitAlongSilhouette(P(0, 0, 1))
+        XCTAssertEqual(try halves.faces, 2)
+        let hm: Mass = try halves.mass()
+        XCTAssertTrue(hm.closed)
+        XCTAssertEqual(hm.area, 4 * Double.pi * r * r, accuracy: 1e-6 * hm.area)
+        let boxSeen = try XCTUnwrap(refusal { _ = try cube.splitAlongSilhouette(P(0, 0, 1)) })
+        XCTAssertTrue(boxSeen.hasPrefix("split_along_silhouette: "), boxSeen)
+    }
+
+    /// Surface edits: untrim, unstitch, ruled faces off edges, a seam moved, sheets and surfaces
+    /// merged, and tweens; paint and ids follow the face each result face comes from.
+    func testSurfaceEditsKeepPaintAndIds() throws {
+        let red = P(1, 0, 0)
+        func patch(_ x0: Double, _ x1: Double, _ z: Double = 0) throws -> NurbsSurface {
+            try NurbsSurface([P(x0, 0, z), P(x0, 1, z), P(x1, 0, z), P(x1, 1, z)], counts: (2, 2), degreeU: 1, degreeV: 1)
+        }
+        let plain = try Solid.cuboid(10, 10, 10)
+        let cube = try plain.coloured(P(0, 0, 1)).coloured(red, face: 1).track()
+        for which in Untrim.allCases {
+            let out = try cube.untrim(1, which)
+            let m: Mass = try out.mass()
+            XCTAssertEqual(try out.faces, 6)
+            XCTAssertTrue(m.closed)
+            XCTAssertEqual(m.volume, 1000, accuracy: 1e-6)
+            XCTAssertEqual(try out.faceColour(1), red)
+            XCTAssertEqual(try out.faceId(1), try cube.faceId(1))
+        }
+        let bored = try cube.cut(try Solid.cylinder(2, 20).translate(0, 0, -10))
+        let top = try XCTUnwrap(try (0..<bored.faces).first { abs(try bored.faceInnerPoint($0).point.z - 5) < 1e-9 })
+        let open = try bored.untrim(top, .holes)
+        XCTAssertEqual(try open.faces, try bored.faces)
+        XCTAssertFalse((try open.mass() as Mass).closed)
+        XCTAssertEqual((try open.faceSheet(top).mass() as Mass).area, 100, accuracy: 1e-6)
+
+        let sheets = try cube.unstitch()
+        XCTAssertEqual(sheets.count, 6)
+        for s in sheets {
+            XCTAssertEqual(try s.faces, 1)
+            XCTAssertEqual((try s.mass() as Mass).area, 100, accuracy: 1e-6)
+        }
+        let alone = try cube.unstitch([1])
+        XCTAssertEqual(try alone.map { try $0.faces }, [1, 5])
+        XCTAssertEqual(try alone[0].faceColour(0), red)
+        let together = try cube.unstitch([1, 2], together: true)
+        XCTAssertEqual(try together.map { try $0.faces }, [2, 4])
+
+        let edge = try XCTUnwrap(try cube.edges.first { $0.faces.contains(1) })
+        let ruled = try cube.ruledFromEdges([edge], ruling: .normal, distance: 2)
+        XCTAssertEqual(try ruled.faces, 1)
+        XCTAssertEqual((try ruled.mass() as Mass).area, 20, accuracy: 1e-6)
+        let other = try cube.ruledFromEdges([edge.index], ruling: .normal, distance: 2, alternateFace: true)
+        XCTAssertNotEqual(try ruled.faceColour(0) == red, try other.faceColour(0) == red)
+        let up = try cube.ruledFromEdges([edge.index], ruling: .direction, distance: 3, direction: P(0, 0, 1))
+        XCTAssertEqual((try up.mass() as Mass).area, 30, accuracy: 1e-6)
+
+        let r = 2.0, h = 5.0
+        let can = try Solid.cylinder(r, h)
+        let wall = try XCTUnwrap(try (0..<can.faces).first {
+            let p = try can.faceInnerPoint($0).point
+            return abs((p.x * p.x + p.y * p.y).squareRoot() - r) < 1e-9 && p.z > 0 && p.z < h
+        })
+        let painted = try can.coloured(red, face: wall).track()
+        let reseamed = try painted.changeSeam(wall, 1.0)
+        XCTAssertEqual(try reseamed.faces, try can.faces)
+        XCTAssertEqual((try reseamed.mass() as Mass).volume, Double.pi * r * r * h, accuracy: 1e-9 * Double.pi * r * r * h)
+        XCTAssertEqual(try reseamed.faceColour(wall), red)
+        XCTAssertEqual(try reseamed.faceId(wall), try painted.faceId(wall))
+
+        let left = try patch(0, 1), right = try patch(1, 2)
+        let merged = try left.merge(right)
+        let d = try merged.domain
+        let corner = try merged.pointAt(d.u.t1, d.v.t1)
+        XCTAssertEqual(corner.x, 2, accuracy: 1e-12)
+        XCTAssertEqual(corner.y, 1, accuracy: 1e-12)
+        XCTAssertEqual(corner.z, 0, accuracy: 1e-12)
+        let sheet = try left.toSheet().coloured(red).mergeSurfaces(try right.toSheet().coloured(P(0, 0, 1)))
+        XCTAssertEqual(try sheet.faces, 1)
+        XCTAssertEqual((try sheet.mass() as Mass).area, 2, accuracy: 1e-9)
+        XCTAssertEqual(try sheet.faceColour(0), red)
+        let tweens = try left.tween(try patch(0, 1, 4), 3)
+        XCTAssertEqual(tweens.count, 3)
+        for (i, t) in tweens.enumerated() {
+            XCTAssertEqual(try t.pointAt(0.5, 0.5).z, Double(i + 1), accuracy: 1e-12)
+        }
+
+        let far = try patch(5, 6)
+        let calls: [(() throws -> Void, String)] = [
+            ({ _ = try plain.untrim(99) }, "untrim"),
+            ({ _ = try plain.unstitch([99]) }, "unstitch"),
+            ({ _ = try plain.unstitch([1, 1]) }, "unstitch"),
+            ({ _ = try plain.ruledFromEdges([Int](), ruling: .normal) }, "ruled_from_edges"),
+            ({ _ = try plain.ruledFromEdges([999], ruling: .normal) }, "ruled_from_edges"),
+            ({ _ = try plain.ruledFromEdges([0], ruling: .normal, distance: 0) }, "ruled_from_edges"),
+            ({ _ = try plain.ruledFromEdges([0], ruling: .direction, direction: P(0, 0, 0)) }, "ruled_from_edges"),
+            ({ _ = try plain.ruledFromEdges([0], ruling: .direction) }, "ruled_from_edges"),
+            ({ _ = try plain.changeSeam(99, 1.0) }, "change_seam"),
+            ({ _ = try plain.changeSeam(1, 1.0) }, "change_seam"),
+            ({ _ = try plain.mergeSurfaces(try left.toSheet()) }, "merge_surfaces"),
+            ({ _ = try left.toSheet().mergeSurfaces(try far.toSheet()) }, "merge_surfaces"),
+            ({ _ = try left.merge(far) }, "nurbs_surface_merge"),
+            ({ _ = try left.tween(far, 0) }, "nurbs_surface_tween"),
+        ]
+        for (call, name) in calls {
+            let said = try XCTUnwrap(refusal(call), name)
+            XCTAssertTrue(said.hasPrefix(name + ": "), said)
+        }
+    }
+
     func testTrimByCurveAndJoinRefuseByName() throws {
         let sheet = try rectSheet(P(0, 0, 0), P(1, 0, 0), P(0, 1, 0), 20, 20)
         let ring = try exactCircle(P(0, 0, 0), 5)
@@ -534,6 +728,44 @@ final class CurveSheetsTests: XCTestCase {
         XCTAssertTrue(message.contains("a radius law rounds only spline edges"), message)
     }
 
+    func testFilletChordAndFilletAsymmetricRoundABoxEdge() throws {
+        let box = try Solid.cuboid(40, 30, 20)
+        let edge = try XCTUnwrap(try box.edges.first { $0.kind == "line" && $0.faces.count == 2 })
+        let length = try box.edgeLength(edge.index, 1e-9).length
+        let quarter = 1 - Double.pi / 4, r = 4 / 2.0.squareRoot()
+        let chordMass: Mass = try box.filletChord([edge], 4.0).mass(1e-6)
+        let chorded = chordMass.volume
+        let wantChord = 24000 - length * r * r * quarter
+        XCTAssertLessThanOrEqual(abs(chorded - wantChord), 1e-6 * wantChord)
+        let asymMass: Mass = try box.filletAsymmetric([edge.index], edge.faces[0], 6.0, 2.0).mass(1e-6)
+        let asym = asymMass.volume
+        let wantAsym = 24000 - length * 6 * 2 * quarter
+        XCTAssertLessThanOrEqual(abs(asym - wantAsym), 1e-6 * wantAsym)
+        let zero = try XCTUnwrap(refusal { _ = try box.filletChord([edge], 0.0) })
+        XCTAssertTrue(zero.contains("the chord must be positive"), zero)
+        let flat = try XCTUnwrap(refusal { _ = try box.filletAsymmetric([edge], edge.faces[0], 6.0, 0.0) })
+        XCTAssertTrue(flat.contains("distances must be positive"), flat)
+    }
+
+    func testFilletFullRoundAndFilletRuleRoundByFaces() throws {
+        let rib = try Solid.cuboid(40, 6, 12)
+        let top = try rib.selectFace(.normal([0, 0, 1]))
+        let front = try rib.selectFace(.normal([0, -1, 0]))
+        let back = try rib.selectFace(.normal([0, 1, 0]))
+        let roundedMass: Mass = try rib.filletFullRound(front, top, back).mass(1e-6)
+        let want = 40.0 * 6 * 12 - 40 * 9 * (2 - Double.pi / 2)
+        XCTAssertLessThanOrEqual(abs(roundedMass.volume - want), 1e-3 * want)
+        let ribFaces = try rib.faces
+        let past = try XCTUnwrap(refusal { _ = try rib.filletFullRound(front, ribFaces + 3, back) })
+        XCTAssertTrue(past.contains("no such face"), past)
+        let body = try Solid.cuboid(40, 30, 5).join(try Solid.cylinder(6, 8).translate(0, 0, 2.5))
+        let beforeMass: Mass = try body.mass(1e-6)
+        let ridgedMass: Mass = try body.filletRule(Array(0..<(try body.faces)), 1.0, rule: .convex, tolerance: 0.05).mass(1e-6)
+        XCTAssertLessThan(ridgedMass.volume, beforeMass.volume)
+        let valleys = try XCTUnwrap(refusal { _ = try rib.filletRule([0, 1, 2, 3, 4, 5], 1.0, rule: .concave) })
+        XCTAssertTrue(valleys.contains("no edge between the faces matches the rule"), valleys)
+    }
+
     func testAWobblyLoftFairedTurnsNoCurvatureOver() throws {
         // Eleven lines across a shallow arch, each lifted or dropped by 0.4 in turn: a loft
         // through them ripples between every pair.
@@ -642,6 +874,18 @@ final class CurveSheetsTests: XCTestCase {
         let along = try Pattern.along(line(P(0, 0, 0), P(30, 0, 0)), 4)
         XCTAssertEqual(along.count, 4)
         XCTAssertEqual(along[3].rows[3], 30, accuracy: 1e-9)
+        let at5 = try Frame(P(5, 0, 0), P(0, 1, 0), P(0, 0, 1), P(1, 0, 0))   // the YZ plane at x = 5
+        let pair = try Pattern.mirror(at5)
+        XCTAssertEqual(pair.count, 2)
+        XCTAssertEqual(pair[0].rows, Transform.identity.rows)
+        let image = pair[1].point(P(7, 1, 2))
+        XCTAssertEqual(image.x, 3, accuracy: 1e-12)
+        XCTAssertEqual(image.y, 1, accuracy: 1e-12)
+        XCTAssertEqual(image.z, 2, accuracy: 1e-12)
+        let yz = try Frame(P(0, 0, 0), P(0, 1, 0), P(0, 0, 1), P(1, 0, 0))
+        XCTAssertEqual(try Pattern.mirror(yz)[1].rows, try Transform.mirror(yz).rows)
+        let flat = try XCTUnwrap(refusal { _ = try Pattern.mirror(raw: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0]) })
+        XCTAssertTrue(flat.hasPrefix("pattern_mirror: the plane's normal is zero"), flat)
 
         // A rib across the inside corner of an L, in the L's middle plane y = 15.
         let foot = try Solid.cuboid(40, 30, 5).translate(20, 15, 2.5)

@@ -130,6 +130,12 @@ static void mesh_file_writes_several_solids_in_each_format() {
     check(glb.size() >= 4 && text_of(std::vector<std::uint8_t>(glb.begin(), glb.begin() + 4)) == "glTF", "the GLB's magic");
     std::string gltf = text_of(must(bs::mesh_file(both, "gltf"), "gltf"));
     check(gltf.find("\"Solid 1\"") != std::string::npos && gltf.find("\"Solid 2\"") != std::string::npos, "the glTF's nodes are named");
+    std::string package = text_of(must(bs::mesh_file(both, "3mf"), "3mf"));
+    check(package.rfind(std::string("PK\x03\x04", 4), 0) == 0, "the 3MF is a zip package");
+    std::string ply = text_of(must(bs::mesh_file(both, "ply"), "ply"));
+    check(ply.rfind("ply\n", 0) == 0 && ply.find("binary_little_endian") != std::string::npos, "the binary PLY's header");
+    std::string ply_ascii = text_of(must(bs::mesh_file(both, "ply-ascii"), "ply-ascii"));
+    check(ply_ascii.find("format ascii 1.0") != std::string::npos, "the ASCII PLY's header");
     refused(bs::mesh_file({a}, "step"), "mesh_file: format \"step\" is not one of", "", "mesh_file step");
     refused(bs::mesh_file({}, "stl"), "mesh_file: no solids", "", "mesh_file no solids");
     refused(bs::mesh_file({a}, "obj", std::vector<std::string>{"a", "b"}), "", "2 names for 1 solids", "mesh_file names");

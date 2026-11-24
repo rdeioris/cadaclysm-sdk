@@ -10,7 +10,7 @@
 // table rigged (windows forced offscreen, run faked) the void calls' refusals, show()/view()'s
 // titles, up axes and camera, and run()'s camera Y up; an item removed; a scene posed and back at rest, an empty pose refused, a nested node with its
 // siblings hidden, Scene::close releasing what shows it (and refused while another thread's
-// view shows it); and a closed view's refusals; 1.22's snapping (rigged: the kinds' bits, the answer whole, the work plane; on the GPU: the square's corner); 1.27's animations (rigged: each binding's target, item and node, the ghosts' NULL and empty arrays; on the GPU: a turntable played, seeked and removed, the binding refusals, an item hidden and shown, ghosts set and cleared, one timeline event under the testing hook). The terminal half skips without
+// view shows it); and a closed view's refusals; 1.22's snapping (rigged: the kinds' bits, the answer whole, the work plane; on the GPU: the square's corner); 1.27's animations (rigged: each binding's target, item and node, the ghosts' NULL and empty arrays; on the GPU: a turntable played, seeked and removed, the binding refusals, an item hidden and shown, ghosts set and cleared, one timeline event under the testing hook); 1.30's picking and snapping (rigged: the kinds' and hit kinds' numbers, pick_rect's count rule, none as NULL, the refusals, the event tail, the guide cap; on the GPU: the P3 scene's sweeps, events, rectangle, labelled point and angle lock); 1.31's clip planes (on the GPU: the slots round trip, the library's refusals, clearing); 1.32's clip sets (on the GPU: the outline round trip, an outline width refused, the mode pair, viewport 0's own plane, inherit dropping it). The terminal half skips without
 // cadaclysm_terminal unless CADACLYSM_REQUIRE_TERMINAL=1; the GPU half without cadaclysm_view
 // or an adapter unless CADACLYSM_REQUIRE_WGPU is set.
 //
@@ -37,6 +37,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace bs = cadaclysm::blacksmith;
@@ -134,6 +135,7 @@ CadaclysmView* create(const CadaclysmViewWindow* window, const CadaclysmViewOpti
 CadaclysmViewPick picked = [] {
     CadaclysmViewPick p{};
     p.viewport_label = -1;  // the library's "no label hit"
+    p.segment = 0xFFFFFFFFu;  // 1.30: and no wire
     return p;
 }();
 // The window "closed" at once: the camera on `eye`, looking at the origin; the pick `picked`.
@@ -837,7 +839,7 @@ static void rigged_half(View& view, const cadaclysm::ViewLibrary& wgpu, const st
     {
         spy::said = nullptr;
         cadaclysm::Result<void> all = view.set_snap();
-        CHECK(all && snapspy::settings.size == 16 && snapspy::settings.kinds == 0xFFu &&
+        CHECK(all && snapspy::settings.size == 16 && snapspy::settings.kinds == CADACLYSM_VIEW_SNAP_DEFAULT &&
                   snapspy::settings.aperture_px == 0.0f && snapspy::settings.marker == 1u,
               "set_snap(): %s, kinds 0x%x marker %u", refused(all).c_str(), snapspy::settings.kinds,
               snapspy::settings.marker);
@@ -849,7 +851,8 @@ static void rigged_half(View& view, const cadaclysm::ViewLibrary& wgpu, const st
         CHECK(view.set_snap(std::nullopt) && snapspy::settings.kinds == 0u, "nullopt switches snapping off");
         const int before = snapspy::sets;
         const std::string corner = refused(view.set_snap(std::vector<std::string>{"vertex", "corner"}));
-        CHECK(corner == "snap kind 'corner': one of vertex, midpoint, centre, quadrant, edge, face, grid, plane" &&
+        CHECK(corner == "snap kind 'corner': one of vertex, midpoint, centre, quadrant, edge, face, grid, plane, end, "
+                        "intersection, point, alignment" &&
                   snapspy::sets == before,
               "an unknown kind: %s", corner.c_str());
 
@@ -1708,8 +1711,9 @@ static_assert(std::is_base_of<cadaclysm::Item, cadaclysm::Overlay>::value, "an O
 
 // ---- view ABI 1.26's input events ------------------------------------------------------------
 
-// CadaclysmViewInputEvent as the header lays it out: 272 bytes, no implicit padding.
-static_assert(sizeof(CadaclysmViewInputEvent) == 272, "sizeof(CadaclysmViewInputEvent) is 272");
+// CadaclysmViewInputEvent as the header lays it out: 272 bytes, no implicit padding; 424 since 1.30
+// (its tail; see the 1.30 block).
+static_assert(sizeof(CadaclysmViewInputEvent) == 424, "sizeof(CadaclysmViewInputEvent) is 424 (1.30)");
 static_assert(offsetof(CadaclysmViewInputEvent, kind) == 4 && offsetof(CadaclysmViewInputEvent, time_ms) == 8 &&
                   offsetof(CadaclysmViewInputEvent, x) == 16 && offsetof(CadaclysmViewInputEvent, y) == 20 &&
                   offsetof(CadaclysmViewInputEvent, wheel_y) == 24 && offsetof(CadaclysmViewInputEvent, button) == 28 &&
@@ -1742,6 +1746,7 @@ static CadaclysmViewInputEvent raw_event(std::uint32_t kind, std::uint32_t mods 
     raw.kind = kind;
     raw.modifiers = mods;
     raw.pick_viewport_label = -1;  // the library's "no label hit" on every event
+    raw.pick_segment = 0xFFFFFFFFu;  // 1.30: and no wire segment
     std::snprintf(raw.key, sizeof raw.key, "%s", key);
     return raw;
 }
@@ -2336,6 +2341,600 @@ static void drafting_rigged_case(const cadaclysm::ViewLibrary& wgpu) {
     std::printf("view: drafting calls checked (rigged)\n");
 }
 
+// ---- view ABI 1.29's live geometry and glyphs ----------------------------------------------
+
+// The glyph kinds are the header's numbers, twelve of them.
+static_assert(static_cast<std::uint32_t>(cadaclysm::GlyphKind::Arrow) == CADACLYSM_VIEW_GLYPH_ARROW &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Tick) == CADACLYSM_VIEW_GLYPH_TICK &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Cross) == CADACLYSM_VIEW_GLYPH_CROSS &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Square) == CADACLYSM_VIEW_GLYPH_SQUARE &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Triangle) == CADACLYSM_VIEW_GLYPH_TRIANGLE &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Parallel) == CADACLYSM_VIEW_GLYPH_PARALLEL &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Perpendicular) == CADACLYSM_VIEW_GLYPH_PERPENDICULAR &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Coincident) == CADACLYSM_VIEW_GLYPH_COINCIDENT &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Tangent) == CADACLYSM_VIEW_GLYPH_TANGENT &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Fixed) == CADACLYSM_VIEW_GLYPH_FIXED &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Horizontal) == CADACLYSM_VIEW_GLYPH_HORIZONTAL &&
+                  static_cast<std::uint32_t>(cadaclysm::GlyphKind::Vertical) == CADACLYSM_VIEW_GLYPH_VERTICAL,
+              "kinds are the header's");
+static_assert(static_cast<std::uint32_t>(cadaclysm::GlyphKind::Vertical) == 11u, "twelve kinds");
+static_assert(static_cast<std::uint32_t>(cadaclysm::GlyphKind::Cross) == 2u, "the header's cross is 2");
+
+namespace livespy {
+std::string calls;
+std::string cs(const float* c) {
+    if (!c) return "NULL";
+    char text[64];
+    std::snprintf(text, sizeof text, "%g,%g,%g", c[0], c[1], c[2]);
+    return text;
+}
+bool set_lines(CadaclysmView*, std::uint32_t item, const float* v, std::size_t n) {
+    calls += "lines " + std::to_string(item) + " " + std::to_string(n) + (v ? "" : " NULL") + ";";
+    return true;
+}
+bool set_curves(CadaclysmView*, std::uint32_t item, const float* v, std::size_t n) {
+    calls += "curves " + std::to_string(item) + " " + std::to_string(n) + (v ? "" : " NULL") + ";";
+    return true;
+}
+bool set_points(CadaclysmView*, std::uint32_t item, const float* v, std::size_t n) {
+    calls += "points " + std::to_string(item) + " " + std::to_string(n) + (v ? "" : " NULL") + ";";
+    return true;
+}
+bool set_mesh_positions(CadaclysmView*, std::uint32_t item, const float* v, const float* normals, std::size_t n) {
+    calls += "mesh " + std::to_string(item) + " " + std::to_string(n) + (v ? "" : " NULL") + (normals ? " normals" : " NONORMALS") + ";";
+    return true;
+}
+std::uint32_t show_glyphs(CadaclysmView*, const float* at, const float* dir, std::size_t n, std::uint32_t kind, float size_pt,
+                          const float* colour) {
+    calls += "glyphs " + std::to_string(n) + " kind " + std::to_string(kind) + " size " + std::to_string(static_cast<int>(size_pt)) +
+             " dir " + (dir ? "given" : "NULL") + " colour " + cs(colour) + (at ? "" : " ATNULL") + ";";
+    return 31;
+}
+}  // namespace livespy
+
+// The 1.29 calls' wire: counts in units (size_t), NULL for no normals and no dir, each kind's
+// number the header's, the colour through the Colour type; a count that is not whole units is
+// refused before the library.
+static void live_rigged_case(const cadaclysm::ViewLibrary& wgpu) {
+    cadaclysm::Result<View> made = View::offscreen(32, 24);
+    CHECK(made, "offscreen: %s", refused(made).c_str());
+    if (!made) return;
+    View v = std::move(*made);
+    cadaclysm::Result<cadaclysm::Item> item = v.show_mesh({-1, -1, 0, 1, -1, 0, 1, 1, 0}, {0, 1, 2}, {}, {}, "red");
+    CHECK(item, "show_mesh: %s", refused(item).c_str());
+    if (!item) return;
+    CvlTable& t = const_cast<CvlTable&>(cadaclysm::detail::ViewAccess::table(wgpu));
+    const CvlTable saved = t;
+    t.set_lines = &livespy::set_lines;
+    t.set_curves = &livespy::set_curves;
+    t.set_points = &livespy::set_points;
+    t.set_mesh_positions = &livespy::set_mesh_positions;
+    t.show_glyphs = &livespy::show_glyphs;
+    const std::string id = std::to_string(item->id());
+    livespy::calls.clear();
+    CHECK(item->set_lines({0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1}), "set_lines");
+    CHECK(item->set_lines({}), "set_lines({})");
+    CHECK(item->set_curves(std::vector<float>(32, 0.0f)), "set_curves");
+    CHECK(item->set_points({0, 0, 0, 1, 1, 1, 2, 2, 2}), "set_points");
+    CHECK(item->set_mesh_positions({0, 0, 0, 1, 0, 0, 0, 1, 0}), "set_mesh_positions");
+    CHECK(item->set_mesh_positions({0, 0, 0, 1, 0, 0, 0, 1, 0}, std::vector<float>{0, 0, 1, 0, 0, 1, 0, 0, 1}),
+          "set_mesh_positions with normals");
+    const std::string want_sets = "lines " + id + " 2;lines " + id + " 0;curves " + id + " 2;points " + id + " 3;mesh " + id +
+                                  " 3 NONORMALS;mesh " + id + " 3 normals;";
+    CHECK(livespy::calls == want_sets, "the library saw %s", livespy::calls.c_str());
+    // Refused before the library.
+    livespy::calls.clear();
+    CHECK(!item->set_lines({0, 0, 0}) && !item->set_curves({0}) && !item->set_points({0, 0}) &&
+              !item->set_mesh_positions({0, 0}) &&
+              !item->set_mesh_positions({0, 0, 0}, std::vector<float>{0, 0}),
+          "a count that is not whole units was accepted");
+    CHECK(livespy::calls.empty(), "a refused set reached the library: %s", livespy::calls.c_str());
+    // Every kind reaches the library as the header's number; no dir is NULL.
+    const cadaclysm::GlyphKind kinds[12] = {
+        cadaclysm::GlyphKind::Arrow,         cadaclysm::GlyphKind::Tick,       cadaclysm::GlyphKind::Cross,
+        cadaclysm::GlyphKind::Square,        cadaclysm::GlyphKind::Triangle,   cadaclysm::GlyphKind::Parallel,
+        cadaclysm::GlyphKind::Perpendicular, cadaclysm::GlyphKind::Coincident, cadaclysm::GlyphKind::Tangent,
+        cadaclysm::GlyphKind::Fixed,         cadaclysm::GlyphKind::Horizontal, cadaclysm::GlyphKind::Vertical};
+    std::string want_kinds;
+    for (std::uint32_t k = 0; k < 12; ++k) {
+        cadaclysm::Result<cadaclysm::Item> g = v.show_glyphs({0, 0, 0}, kinds[k]);
+        CHECK(g && g->id() == 31, "show_glyphs %u: %s", k, refused(g).c_str());
+        want_kinds += "glyphs 1 kind " + std::to_string(k) + " size 12 dir NULL colour NULL;";
+    }
+    CHECK(livespy::calls == want_kinds, "the library saw %s", livespy::calls.c_str());
+    livespy::calls.clear();
+    cadaclysm::Result<cadaclysm::Item> given =
+        v.show_glyphs({0, 0, 0, 1, 0, 0}, cadaclysm::GlyphKind::Tick, 16.0f, cadaclysm::Colour{1.0f, 0.0f, 0.0f},
+                      std::vector<float>{1, 0, 0, 0, 1, 0});
+    CHECK(given, "show_glyphs with colour and dir: %s", refused(given).c_str());
+    CHECK(livespy::calls == "glyphs 2 kind 1 size 16 dir given colour 1,0,0;", "the library saw %s", livespy::calls.c_str());
+    livespy::calls.clear();
+    CHECK(!v.show_glyphs({0, 0}, cadaclysm::GlyphKind::Cross) &&
+              !v.show_glyphs({0, 0, 0}, cadaclysm::GlyphKind::Cross, 12.0f, std::nullopt, std::vector<float>{1, 0}),
+          "a bad count was accepted");
+    CHECK(livespy::calls.empty(), "a refused show reached the library: %s", livespy::calls.c_str());
+    t = saved;
+    std::printf("view: live geometry and glyph calls checked (rigged)\n");
+}
+
+// 1.29 on the real library, on its own small view (a large solid in a shared one would hide
+// glyphs at the origin): the four sets in place, the kept point states, the count refusals, a
+// glyph picking as its node.
+static void live_case() {
+    cadaclysm::Result<View> made = View::offscreen(96, 96);
+    CHECK(made, "a view for live geometry: %s", refused(made).c_str());
+    if (!made) return;
+    View v = std::move(*made);
+    cadaclysm::Result<cadaclysm::Item> line = v.show_lines({-1, 0, 0, 1, 0, 0});
+    CHECK(line, "show_lines");
+    if (line) {
+        CHECK(line->set_lines({-1, 1, 0, 1, 1, 0, -1, -1, 0, 1, -1, 0}), "set_lines grows");
+        CHECK(line->set_lines({}), "set_lines empties");
+        std::string wrong = refused(line->set_curves(std::vector<float>(16, 0.0f)));
+        CHECK(wrong.find("is not a curves item") != std::string::npos, "set_curves on a lines item: %s", wrong.c_str());
+    }
+    cadaclysm::Result<cadaclysm::Item> curve = v.show_curves(std::vector<float>{0, 0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 1, 3, 0, 0, 1});
+    CHECK(curve, "show_curves");
+    if (curve) CHECK(curve->set_curves({0, 1, 0, 1, 1, 1, 0, 1, 2, 1, 0, 1, 3, 1, 0, 1}), "set_curves");
+    cadaclysm::Result<cadaclysm::Item> pts = v.show_points({0, 0, 0, 1, 0, 0}, std::nullopt, 9.0f);
+    CHECK(pts, "show_points");
+    if (pts) {
+        CHECK(pts->set_points({0, 1, 0, 1, 1, 0}), "set_points");
+        CHECK(pts->set_point_states({"selected", "normal"}), "two states");
+        // A new count keeps the states by index: succeeds, and a one-state list then fits.
+        CHECK(pts->set_points({0, 0, 0}), "set_points to one point with states set");
+        CHECK(pts->set_point_states({"selected"}), "one state for one point");
+    }
+    cadaclysm::Result<cadaclysm::Item> mesh = v.show_mesh({-1, -1, 0, 1, -1, 0, 0, 1, 0}, {0, 1, 2});
+    CHECK(mesh, "show_mesh");
+    if (mesh) {
+        CHECK(mesh->set_mesh_positions({-1, -1, 1, 1, -1, 1, 0, 1, 1}), "set_mesh_positions");
+        std::string wrong = refused(mesh->set_mesh_positions({0, 0, 0, 1, 0, 0}));
+        CHECK(wrong.find("positions has 2 vertices") != std::string::npos, "a wrong vertex count: %s", wrong.c_str());
+    }
+    cadaclysm::Result<cadaclysm::Item> crosses =
+        v.show_glyphs({-1, 0, 0, 1, 0, 0}, cadaclysm::GlyphKind::Cross, 16.0f, cadaclysm::Colour{1.0f, 0.0f, 0.0f},
+                      std::vector<float>{1, 0, 0, 0, 1, 0});
+    CHECK(crosses, "show_glyphs: %s", refused(crosses).c_str());
+    if (!crosses) return;
+    frame_of(v);
+    bool hit = false;
+    bool second = false;
+    for (std::uint32_t y = 40; y < 56; y += 2) {
+        for (std::uint32_t x = 0; x < 96; x += 2) {
+            cadaclysm::Result<cadaclysm::ViewPick> p = v.pick(x, y);
+            if (p && p->item == crosses->id()) {
+                hit = true;
+                if (p->node == 1) second = true;
+            }
+        }
+    }
+    CHECK(hit, "a glyph picks");
+    cadaclysm::Result<cadaclysm::Item> bad_kind = v.show_glyphs({0, 0, 0}, static_cast<cadaclysm::GlyphKind>(99));
+    CHECK(!bad_kind && refused(bad_kind).find("99") != std::string::npos, "a kind past 11: %s", refused(bad_kind).c_str());
+    CHECK(second, "a glyph picks as its node (node 1 never answered)");
+    std::printf("view: live geometry and glyphs checked\n");
+}
+
+// ---- view ABI 1.30's picking and snapping --------------------------------------------------
+
+// The 1.30 layouts: the pick and the snap grew at their tails; the input event froze its snap
+// at 88 bytes (camera still at 224) and grew a tail of its own.
+static_assert(sizeof(CadaclysmViewPick) == 52 && sizeof(CadaclysmViewSnap) == 232 && sizeof(CadaclysmViewInputEvent) == 424 &&
+                  offsetof(CadaclysmViewInputEvent, camera) == 224,
+              "1.30 layouts");
+static_assert(offsetof(CadaclysmViewPick, segment) == 44 && offsetof(CadaclysmViewPick, distance_px) == 48 &&
+                  offsetof(CadaclysmViewSnap, label) == 88 && offsetof(CadaclysmViewSnap, locked) == 120 &&
+                  offsetof(CadaclysmViewSnap, locked_angle) == 124 && offsetof(CadaclysmViewSnap, guide_count) == 128 &&
+                  offsetof(CadaclysmViewSnap, guides) == 136 && sizeof(CadaclysmViewEventSnap) == 88 &&
+                  offsetof(CadaclysmViewInputEvent, snap) == 136 && offsetof(CadaclysmViewInputEvent, pick_segment) == 272 &&
+                  offsetof(CadaclysmViewInputEvent, pick_distance_px) == 276 &&
+                  offsetof(CadaclysmViewInputEvent, snap_label) == 280 && offsetof(CadaclysmViewInputEvent, snap_locked) == 312 &&
+                  offsetof(CadaclysmViewInputEvent, snap_locked_angle) == 316 &&
+                  offsetof(CadaclysmViewInputEvent, snap_guide_count) == 320 && offsetof(CadaclysmViewInputEvent, pad1) == 324 &&
+                  offsetof(CadaclysmViewInputEvent, snap_guides) == 328 && sizeof(CadaclysmViewRectHit) == 12,
+              "1.30 offsets");
+// HitKind is the header's CADACLYSM_VIEW_HIT_*, compared as raw values.
+static_assert(static_cast<std::uint32_t>(cadaclysm::HitKind::Face) == CADACLYSM_VIEW_HIT_FACE &&
+                  static_cast<std::uint32_t>(cadaclysm::HitKind::Node) == CADACLYSM_VIEW_HIT_NODE &&
+                  static_cast<std::uint32_t>(cadaclysm::HitKind::Segment) == CADACLYSM_VIEW_HIT_SEGMENT &&
+                  static_cast<std::uint32_t>(cadaclysm::HitKind::Edge) == CADACLYSM_VIEW_HIT_EDGE &&
+                  static_cast<std::uint32_t>(cadaclysm::HitKind::Point) == CADACLYSM_VIEW_HIT_POINT,
+              "HitKind is CADACLYSM_VIEW_HIT_*");
+
+// set_snap_base clears the lock for nullptr alone; no integer takes that path (a literal 0 no
+// longer compiles: the template overload deduces int), and a braced list goes to the vector
+// overload, which refuses it (checked at run time in picking_rigged_case).
+template <class T, class = void>
+struct takes_snap_base : std::false_type {};
+template <class T>
+struct takes_snap_base<T, decltype(void(std::declval<View&>().set_snap_base(std::declval<T>())))> : std::true_type {};
+static_assert(takes_snap_base<std::nullptr_t>::value, "set_snap_base(nullptr) clears the lock");
+static_assert(!takes_snap_base<int>::value, "set_snap_base(0) compiles");
+static_assert(!takes_snap_base<long>::value, "set_snap_base(0L) compiles");
+
+namespace pickspy {
+std::string calls;
+const char* said = nullptr;  // last_error's answer
+std::vector<CadaclysmViewRectHit> hits;  // pick_rect's answer: the total, at most capacity written
+std::uint32_t pick_segment_seen = 0;     // the segment pick_result's buffer arrived with
+const char* last_error() { return said; }
+bool set_pick_aperture(CadaclysmView*, float a) {
+    calls += "aperture " + std::to_string(static_cast<int>(a)) + ";";
+    return true;
+}
+bool set_snap_base(CadaclysmView*, const float* xyz, float step) {
+    if (!xyz) {
+        calls += "base NULL " + std::to_string(static_cast<int>(step)) + ";";
+        return true;
+    }
+    char text[96];
+    std::snprintf(text, sizeof text, "base %g %g %g %g;", xyz[0], xyz[1], xyz[2], step);
+    calls += text;
+    return true;
+}
+bool set_snap_points(CadaclysmView*, std::uint32_t item, const float* xyz, std::size_t count, const char* label) {
+    calls += "points " + std::to_string(item) + " " + (xyz ? "given" : "NULL") + " " + std::to_string(count) + " " +
+             (label ? std::string("'") + label + "'" : std::string("NULL")) + ";";
+    return true;
+}
+std::size_t pick_rect(CadaclysmView*, std::uint32_t viewport, float x, float y, float w, float h, bool crossing,
+                      CadaclysmViewRectHit* out, std::size_t capacity) {
+    char text[128];
+    std::snprintf(text, sizeof text, "rect %u %g %g %g %g %s %zu;", viewport, x, y, w, h, crossing ? "crossing" : "window",
+                  capacity);
+    calls += text;
+    if (said) return 0;
+    for (std::size_t i = 0; i < hits.size() && i < capacity; ++i) out[i] = hits[i];
+    return hits.size();
+}
+// next_event: records the none values its buffer arrived with, then "no event".
+std::uint32_t event_segment_seen = 0;
+std::int32_t event_label_seen = 0;
+bool next_event(CadaclysmView*, CadaclysmViewInputEvent* out) {
+    event_segment_seen = out->pick_segment;
+    event_label_seen = out->pick_viewport_label;
+    said = "cadaclysm_view_next_event: no event";
+    return false;
+}
+bool pick_result(CadaclysmView*, CadaclysmViewPick* out) {
+    pick_segment_seen = out->segment;
+    out->item = 3;
+    out->clicks = 1;
+    return true;
+}
+}  // namespace pickspy
+
+// The 1.30 calls' wire, on the wgpu table rigged: the four snap kinds' bits and "default"/"all"
+// the header's; each CADACLYSM_VIEW_HIT_* decoded as its HitKind; pick_rect asked again with a
+// buffer of the total; none sent as NULL (a cleared base, no label, no points); the refusals made
+// before the library, as view errors; the pick buffer starting at segment UINT32_MAX; the event
+// tail decoded; a guide_count past 2 read as 2 guides.
+static void picking_rigged_case(const cadaclysm::ViewLibrary& wgpu) {
+    cadaclysm::Result<View> made = View::offscreen(32, 24);
+    CHECK(made, "offscreen: %s", refused(made).c_str());
+    if (!made) return;
+    View v = std::move(*made);
+    cadaclysm::Result<cadaclysm::Item> item = v.show_lines({0, 0, 0, 1, 0, 0});
+    CHECK(item, "show_lines: %s", refused(item).c_str());
+    if (!item) return;
+    CvlTable& t = const_cast<CvlTable&>(cadaclysm::detail::ViewAccess::table(wgpu));
+    const CvlTable saved = t;
+    t.last_error = &pickspy::last_error;
+    t.set_snap = &snapspy::set_snap;
+    t.set_pick_aperture = &pickspy::set_pick_aperture;
+    t.set_snap_base = &pickspy::set_snap_base;
+    t.set_snap_points = &pickspy::set_snap_points;
+    t.pick_rect = &pickspy::pick_rect;
+    t.pick_result = &pickspy::pick_result;
+    pickspy::said = nullptr;
+    pickspy::calls.clear();
+    // The kinds' bits, as the header defines them.
+    const char* const names[4] = {"end", "intersection", "point", "alignment"};
+    const std::uint32_t bits[4] = {CADACLYSM_VIEW_SNAP_END, CADACLYSM_VIEW_SNAP_INTERSECTION, CADACLYSM_VIEW_SNAP_POINT,
+                                   CADACLYSM_VIEW_SNAP_ALIGNMENT};
+    for (int k = 0; k < 4; ++k) {
+        cadaclysm::Result<void> one = v.set_snap(std::vector<std::string>{names[k]});
+        CHECK(one && snapspy::settings.kinds == bits[k], "set_snap(%s): %s, kinds 0x%x", names[k], refused(one).c_str(),
+              snapspy::settings.kinds);
+    }
+    CHECK(v.set_snap() && snapspy::settings.kinds == CADACLYSM_VIEW_SNAP_DEFAULT, "set_snap() sends 0x%x",
+          snapspy::settings.kinds);
+    CHECK(v.set_snap(std::vector<std::string>{"default"}) && snapspy::settings.kinds == CADACLYSM_VIEW_SNAP_DEFAULT,
+          "\"default\" sends 0x%x", snapspy::settings.kinds);
+    CHECK(v.set_snap(std::vector<std::string>{"all"}) && snapspy::settings.kinds == CADACLYSM_VIEW_SNAP_ALL,
+          "\"all\" sends 0x%x", snapspy::settings.kinds);
+    // pick_rect: each hit kind decoded; crossing in viewport 0 by default; 64 first.
+    pickspy::hits.clear();
+    const std::uint32_t kinds[5] = {CADACLYSM_VIEW_HIT_FACE, CADACLYSM_VIEW_HIT_NODE, CADACLYSM_VIEW_HIT_SEGMENT,
+                                    CADACLYSM_VIEW_HIT_EDGE, CADACLYSM_VIEW_HIT_POINT};
+    for (std::uint32_t k = 0; k < 5; ++k) pickspy::hits.push_back(CadaclysmViewRectHit{7, kinds[k], k});
+    cadaclysm::Result<std::vector<cadaclysm::RectHit>> five = v.pick_rect(0, 0, 8, 8);
+    CHECK(five && five->size() == 5, "pick_rect: %s", refused(five).c_str());
+    if (five && five->size() == 5)
+        for (std::uint32_t k = 0; k < 5; ++k)
+            CHECK(static_cast<std::uint32_t>((*five)[k].kind) == kinds[k] && (*five)[k].item == 7 && (*five)[k].index == k,
+                  "hit %u: kind %u", k, static_cast<std::uint32_t>((*five)[k].kind));
+    CHECK(pickspy::calls == "rect 0 0 0 8 8 crossing 64;", "pick_rect asked %s", pickspy::calls.c_str());
+    // The count rule: 70 hits, 64 written, then asked again with a buffer of 70.
+    pickspy::calls.clear();
+    pickspy::hits.clear();
+    for (std::uint32_t k = 0; k < 70; ++k) pickspy::hits.push_back(CadaclysmViewRectHit{9, CADACLYSM_VIEW_HIT_SEGMENT, k});
+    cadaclysm::Result<std::vector<cadaclysm::RectHit>> all = v.pick_rect(1, 2, -3, 4, false, 2);
+    CHECK(all && all->size() == 70 && all->back().index == 69, "pick_rect past the first buffer: %s, %zu hits",
+          refused(all).c_str(), all ? all->size() : static_cast<std::size_t>(0));
+    CHECK(pickspy::calls == "rect 2 1 2 -3 4 window 64;rect 2 1 2 -3 4 window 70;", "pick_rect asked %s",
+          pickspy::calls.c_str());
+    pickspy::hits.clear();
+    cadaclysm::Result<std::vector<cadaclysm::RectHit>> none = v.pick_rect(0, 0, 8, 8);
+    CHECK(none && none->empty(), "no hits: %s", refused(none).c_str());
+    pickspy::said = "cadaclysm_view_pick_rect: viewport 3 does not exist";
+    cadaclysm::Result<std::vector<cadaclysm::RectHit>> bad = v.pick_rect(0, 0, 8, 8, true, 3);
+    CHECK(!bad && bad.error().origin == cadaclysm::Origin::view &&
+              bad.error().message == "cadaclysm_view_pick_rect: viewport 3 does not exist",
+          "a refused pick_rect: %s", refused(bad).c_str());
+    pickspy::said = nullptr;
+    // None as NULL: the cleared base, no label, no points; the step defaults to 15.
+    pickspy::calls.clear();
+    CHECK(v.set_pick_aperture(6.0f), "set_pick_aperture");
+    CHECK(v.set_snap_base({1, 2, 3}), "set_snap_base");
+    CHECK(v.set_snap_base({0, 0, 0}, 45.0f), "set_snap_base 45");
+    CHECK(v.set_snap_base(nullptr, 15.0f), "set_snap_base(nullptr)");
+    CHECK(item->set_snap_points(std::vector<double>{0.5, 0.5, 0.01}, "hole"), "set_snap_points labelled");
+    CHECK(item->set_snap_points(std::vector<double>{1, 2, 3, 4, 5, 6}), "set_snap_points");
+    CHECK(item->set_snap_points(std::vector<double>{}), "set_snap_points cleared");
+    const std::string id = std::to_string(item->id());
+    const std::string want = "aperture 6;base 1 2 3 15;base 0 0 0 45;base NULL 15;points " + id + " given 1 'hole';points " + id +
+                             " given 2 NULL;points " + id + " NULL 0 NULL;";
+    CHECK(pickspy::calls == want, "the library saw %s", pickspy::calls.c_str());
+    // Refused before the library, as view errors.
+    pickspy::calls.clear();
+    cadaclysm::Result<void> short_base = v.set_snap_base({1, 2});
+    CHECK(!short_base && short_base.error().origin == cadaclysm::Origin::view &&
+              has(short_base.error().message, "3 numbers, not 2"),
+          "a short base: %s", refused(short_base).c_str());
+    // An empty or one-number braced list is a short base, never a clearing nullptr.
+    cadaclysm::Result<void> empty_base = v.set_snap_base({});
+    CHECK(!empty_base && empty_base.error().origin == cadaclysm::Origin::view &&
+              has(empty_base.error().message, "3 numbers, not 0"),
+          "set_snap_base({}): %s", refused(empty_base).c_str());
+    cadaclysm::Result<void> one_base = v.set_snap_base({0});
+    CHECK(!one_base && one_base.error().origin == cadaclysm::Origin::view && has(one_base.error().message, "3 numbers, not 1"),
+          "set_snap_base({0}): %s", refused(one_base).c_str());
+    cadaclysm::Result<void> nul = item->set_snap_points(std::vector<double>{0, 0, 0}, std::string("a\0b", 3));
+    CHECK(!nul && nul.error().origin == cadaclysm::Origin::view && has(nul.error().message, "a NUL character cannot be shown"),
+          "a NUL label: %s", refused(nul).c_str());
+    cadaclysm::Result<void> two = item->set_snap_points(std::vector<double>{0, 0});
+    CHECK(!two && two.error().origin == cadaclysm::Origin::view && has(two.error().message, "three numbers a point, not 2"),
+          "points not in threes: %s", refused(two).c_str());
+    CHECK(pickspy::calls.empty(), "a refused call reached the library: %s", pickspy::calls.c_str());
+    // The pick buffer starts at segment UINT32_MAX, and a pick that leaves it reads no segment.
+    cadaclysm::Result<std::optional<cadaclysm::ViewPick>> last = v.last_pick();
+    CHECK(pickspy::pick_segment_seen == 0xFFFFFFFFu, "last_pick's buffer starts at segment %u", pickspy::pick_segment_seen);
+    CHECK(last && *last && (*last)->item == 3 && !(*last)->segment && (*last)->distance_px == 0.0f,
+          "a pick with no segment: %s", refused(last).c_str());
+    // The event buffer starts at the none values too.
+    t.next_event = &pickspy::next_event;
+    cadaclysm::Result<std::optional<cadaclysm::InputEvent>> queued = v.next_event();
+    CHECK(queued && !*queued && pickspy::event_segment_seen == 0xFFFFFFFFu && pickspy::event_label_seen == -1,
+          "next_event's buffer starts at segment %u, label %d", pickspy::event_segment_seen, pickspy::event_label_seen);
+    pickspy::said = nullptr;
+    t = saved;
+    // The event tail, hand-filled: a face pick has no segment; a wire pick's segment and distance;
+    // a snap's label, lock and guide; a guide_count past 2 reads 2 guides, on the event and on a
+    // snap answer.
+    CadaclysmViewInputEvent face = raw_event(CADACLYSM_VIEW_INPUT_EVENT_PICK);
+    face.pick.item = 3;
+    cadaclysm::InputEvent fe = event_of(face);
+    CHECK(fe.pick && !fe.pick->segment && fe.pick->distance_px == 0.0f, "a face pick's event has no segment");
+    CadaclysmViewInputEvent wire = face;
+    wire.pick_segment = 2;
+    wire.pick_distance_px = 1.5f;
+    cadaclysm::InputEvent we = event_of(wire);
+    CHECK(we.pick && we.pick->segment == std::optional<std::uint32_t>(2) && we.pick->distance_px == 1.5f,
+          "a wire pick's event: its segment and distance");
+    CadaclysmViewInputEvent snapped = raw_event(CADACLYSM_VIEW_INPUT_EVENT_SNAP);
+    snapped.snap.kind = CADACLYSM_VIEW_SNAP_POINT;
+    snapped.snap.item = 3;
+    std::snprintf(snapped.snap_label, sizeof snapped.snap_label, "%s", "hole");
+    snapped.snap_locked = 1;
+    snapped.snap_locked_angle = 90.0f;
+    snapped.snap_guide_count = 1;
+    const double guides[12] = {0, 0, 0, 1, 1, 0, 2, 2, 0, 3, 3, 0};
+    std::memcpy(snapped.snap_guides, guides, sizeof guides);
+    cadaclysm::InputEvent se = event_of(snapped);
+    CHECK(se.snap && se.snap->kind == "point" && se.snap->label == "hole" && se.snap->locked_angle == std::optional<float>(90.0f) &&
+              se.snap->guides.size() == 1 && se.snap->guides[0][3] == 1.0 && se.snap->guides[0][4] == 1.0,
+          "a snap event's tail: %s", se.snap ? se.snap->label.c_str() : "none");
+    snapped.snap_locked = 0;
+    snapped.snap_guide_count = 3;
+    cadaclysm::InputEvent three = event_of(snapped);
+    CHECK(three.snap && !three.snap->locked_angle && three.snap->guides.size() == 2 && three.snap->guides[1][3] == 3.0,
+          "a snap event's guide_count 3 reads 2 guides");
+    CadaclysmViewSnap raw{};
+    raw.size = sizeof raw;
+    raw.kind = CADACLYSM_VIEW_SNAP_POINT;
+    raw.guide_count = 3;
+    std::memcpy(raw.guides, guides, sizeof guides);
+    cadaclysm::ViewSnap capped = cadaclysm::detail::snap_of(raw);
+    CHECK(capped.guides.size() == 2, "a snap's guide_count 3 reads %zu guides", capped.guides.size());
+    std::printf("view: picking and snapping calls checked (rigged)\n");
+}
+
+// 1.30 on the real library, the P3 scene on a 96x96 view of its own, its input queued through
+// the testing hook: the aperture, the pick sweep (a wire's segment, a face's none), the click's
+// pick event and last_pick, pick_rect with 80 short lines, a labelled snap point and its hover
+// event and last_snap, the points cleared, the label refusal, the angle lock and its clearing.
+static void picking_case() {
+    cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", "1");
+    cadaclysm::Result<View> made = View::offscreen(96, 96);
+    cvl_setenv("CADACLYSM_VIEW_TEST_QUEUE_INPUT", nullptr);
+    CHECK(made, "a view for picking: %s", refused(made).c_str());
+    if (!made) return;
+    View v = std::move(*made);
+    CHECK(v.set_layer(CADACLYSM_VIEW_LAYER_GRID, false), "grid off");
+    cadaclysm::Result<cadaclysm::Item> square =
+        v.show_mesh({-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0}, {0, 1, 2, 0, 2, 3}, {}, {}, "red");
+    cadaclysm::Result<cadaclysm::Item> line = v.show_lines({-0.8f, 0, 0.01f, 0.8f, 0, 0.01f}, "white");
+    CHECK(square && line, "the P3 scene: %s %s", refused(square).c_str(), refused(line).c_str());
+    if (!square || !line) return;
+    CHECK(line->set_snap_points(std::vector<double>{0.5, 0.5, 0.01}, "hole"), "set_snap_points");
+    CHECK(v.standard("top") && v.frame(), "the top view, framed");
+    CHECK(v.set_pick_aperture(0.0f), "set_pick_aperture(0)");
+    cadaclysm::Result<void> negative = v.set_pick_aperture(-1.0f);
+    CHECK(!negative && negative.error().origin == cadaclysm::Origin::view &&
+              has(negative.error().message, "is not a finite size of 0 or more points"),
+          "set_pick_aperture(-1): %s", refused(negative).c_str());
+    // The sweep: column 48, rows 36..59.
+    bool wire = false, face = false;
+    std::uint32_t y_line = 0;
+    for (std::uint32_t y = 36; y < 60; ++y) {
+        cadaclysm::Result<cadaclysm::ViewPick> p = v.pick(48, y);
+        CHECK(p, "pick 48 %u: %s", y, refused(p).c_str());
+        if (!p) continue;
+        if (p->item == line->id() && p->segment == std::optional<std::uint32_t>(0) && p->distance_px <= 4.0f) {
+            if (!wire) y_line = y;
+            wire = true;
+        }
+        if (p->item == square->id() && !p->segment && p->distance_px == 0.0f) face = true;
+    }
+    CHECK(wire, "some pick names the line with segment 0");
+    CHECK(face, "some pick names the square with no segment");
+    if (!wire) return;
+    // The event path: a click on the line queues a pick event with its segment; last_pick the same.
+    for (int guard = 0; guard < 64; ++guard) {
+        cadaclysm::Result<std::optional<cadaclysm::InputEvent>> next = v.next_event();
+        if (!next || !*next) break;
+    }
+    cadaclysm::ViewEvent e;
+    e.kind = CADACLYSM_VIEW_EVENT_DOWN;
+    e.x = 48;
+    e.y = static_cast<float>(y_line);
+    e.time_ms = 30000;
+    CHECK(v.input(e), "a press on the line");
+    e.kind = CADACLYSM_VIEW_EVENT_UP;
+    e.time_ms = 30010;
+    CHECK(v.input(e), "its release");
+    std::optional<cadaclysm::ViewPick> clicked;
+    for (int i = 0; i < 200 && !clicked; ++i) {
+        CHECK(v.draw(), "draw");
+        for (int guard = 0; guard < 64; ++guard) {
+            cadaclysm::Result<std::optional<cadaclysm::InputEvent>> next = v.next_event();
+            if (!next || !*next) break;
+            if ((*next)->kind == cadaclysm::InputKind::pick && (*next)->pick) clicked = (*next)->pick;
+        }
+    }
+    CHECK(clicked && clicked->item == line->id() && clicked->segment == std::optional<std::uint32_t>(0),
+          "a pick event's segment: item %u", clicked ? clicked->item : 0u);
+    cadaclysm::Result<std::optional<cadaclysm::ViewPick>> landed = v.last_pick();
+    CHECK(landed && *landed && (*landed)->item == line->id() && (*landed)->segment == std::optional<std::uint32_t>(0),
+          "last_pick's segment: %s", refused(landed).c_str());
+    // pick_rect over the whole view, with 80 short lines: more hits than its first buffer.
+    std::vector<float> many;
+    for (int i = 0; i < 80; ++i) {
+        const float x = -0.9f + 1.8f * static_cast<float>(i) / 79.0f;
+        const float seg[6] = {x, -0.6f, 0.01f, x, -0.5f, 0.01f};
+        many.insert(many.end(), seg, seg + 6);
+    }
+    cadaclysm::Result<cadaclysm::Item> lines80 = v.show_lines(many, "green");
+    CHECK(lines80, "80 short lines: %s", refused(lines80).c_str());
+    if (!lines80) return;
+    cadaclysm::Result<std::vector<cadaclysm::RectHit>> hits = v.pick_rect(0, 0, 96, 96);
+    CHECK(hits, "pick_rect: %s", refused(hits).c_str());
+    if (hits) {
+        bool line_hit = false, square_hit = false;
+        std::size_t short_hits = 0;
+        for (const cadaclysm::RectHit& h : *hits) {
+            if (h.item == line->id() && h.kind == cadaclysm::HitKind::Segment && h.index == 0) line_hit = true;
+            if (h.item == square->id() && h.kind == cadaclysm::HitKind::Node && h.index == 0) square_hit = true;
+            if (h.item == lines80->id()) ++short_hits;
+        }
+        CHECK(line_hit, "pick_rect finds the line's segment 0");
+        CHECK(square_hit, "pick_rect finds the square as a node");
+        CHECK(short_hits == 80, "pick_rect past the first buffer: %zu of the 80 short lines", short_hits);
+        cadaclysm::Result<std::vector<cadaclysm::RectHit>> window = v.pick_rect(0, 0, 96, 96, false);
+        CHECK(window && window->size() <= hits->size(), "a window answers no more than a crossing");
+    }
+    cadaclysm::Result<std::vector<cadaclysm::RectHit>> nan = v.pick_rect(0, 0, std::nanf(""), 10);
+    CHECK(!nan && nan.error().origin == cadaclysm::Origin::view && has(nan.error().message, "cadaclysm_view_pick_rect"),
+          "a rectangle that is not finite: %s", refused(nan).c_str());
+    CHECK(lines80->remove(), "the short lines removed");
+    // A labelled snap point, by the default kinds: rows 0..47, columns 48..95, step 2.
+    CHECK(v.set_snap(), "set_snap");
+    std::optional<cadaclysm::ViewSnap> point;
+    std::uint32_t px = 0, py = 0;
+    for (std::uint32_t y = 0; y < 48 && !point; y += 2)
+        for (std::uint32_t x = 48; x < 96 && !point; x += 2) {
+            cadaclysm::Result<cadaclysm::ViewSnap> s = v.snap(x, y);
+            if (s && s->kind == "point") {
+                point = *s;
+                px = x;
+                py = y;
+            }
+        }
+    CHECK(point && point->label == "hole" && !point->locked_angle && point->guides.empty(), "a snap point's label: %s",
+          point ? point->label.c_str() : "no point snap");
+    if (!point) return;
+    // The event path: a hover over the point queues a snap event with its label; last_snap the same.
+    for (int guard = 0; guard < 64; ++guard) {
+        cadaclysm::Result<std::optional<cadaclysm::InputEvent>> next = v.next_event();
+        if (!next || !*next) break;
+    }
+    CHECK(v.last_snap(), "last_snap drained");
+    e = cadaclysm::ViewEvent{};
+    e.kind = CADACLYSM_VIEW_EVENT_MOVE;
+    e.x = static_cast<float>(px);
+    e.y = static_cast<float>(py);
+    e.time_ms = 40000;
+    CHECK(v.input(e), "a hover over the point");
+    std::optional<cadaclysm::ViewSnap> hovered;
+    for (int i = 0; i < 200 && !hovered; ++i) {
+        CHECK(v.draw(), "draw");
+        for (int guard = 0; guard < 64; ++guard) {
+            cadaclysm::Result<std::optional<cadaclysm::InputEvent>> next = v.next_event();
+            if (!next || !*next) break;
+            if ((*next)->kind == cadaclysm::InputKind::snap && (*next)->snap && (*next)->snap->kind == "point")
+                hovered = (*next)->snap;
+        }
+    }
+    CHECK(hovered && hovered->label == "hole", "a snap event's label: %s", hovered ? hovered->label.c_str() : "none");
+    cadaclysm::Result<std::optional<cadaclysm::ViewSnap>> last_snap = v.last_snap();
+    CHECK(last_snap && *last_snap && (*last_snap)->label == "hole", "last_snap's label: %s", refused(last_snap).c_str());
+    CHECK(line->set_snap_points(std::vector<double>{}), "the points cleared");
+    cadaclysm::Result<cadaclysm::ViewSnap> cleared = v.snap(px, py);
+    CHECK(cleared && cleared->kind != "point", "the cleared points no longer snap: %s", refused(cleared).c_str());
+    cadaclysm::Result<void> long_label = line->set_snap_points(std::vector<double>{0, 0, 0}, std::string(32, 'x'));
+    CHECK(!long_label && long_label.error().origin == cadaclysm::Origin::view && has(long_label.error().message, "at most 31"),
+          "a 32-byte label: %s", refused(long_label).c_str());
+    // The lock: face snaps turn onto 45-degree steps about the origin, the lock's ray their guide.
+    CHECK(v.set_snap_base({0, 0, 0}, 45.0f), "set_snap_base");
+    CHECK(v.set_snap(std::vector<std::string>{"face", "plane"}), "set_snap face, plane");
+    std::size_t locked = 0, wrong = 0;
+    for (std::uint32_t y = 8; y < 40; y += 8)
+        for (std::uint32_t x = 56; x < 88; x += 8) {
+            cadaclysm::Result<cadaclysm::ViewSnap> s = v.snap(x, y);
+            if (!s || s->kind.empty()) continue;
+            ++locked;
+            if (s->kind != "plane" || !s->locked_angle || std::fmod(*s->locked_angle, 45.0f) != 0.0f || s->guides.size() != 1)
+                ++wrong;
+        }
+    CHECK(locked > 0 && wrong == 0, "the lock turns face snaps onto 45-degree steps: %zu of %zu not", wrong, locked);
+    // Clearing passes a NULL point: the same sweep is no longer locked (a zeroed point would lock
+    // about the origin).
+    CHECK(v.set_snap_base(nullptr, 15.0f), "set_snap_base(nullptr)");
+    std::size_t unlocked = 0, still = 0;
+    for (std::uint32_t y = 8; y < 40; y += 8)
+        for (std::uint32_t x = 56; x < 88; x += 8) {
+            cadaclysm::Result<cadaclysm::ViewSnap> s = v.snap(x, y);
+            if (!s || s->kind.empty()) continue;
+            ++unlocked;
+            if (s->locked_angle || !s->guides.empty()) ++still;
+        }
+    CHECK(unlocked > 0 && still == 0, "the cleared lock turns nothing: %zu of %zu still locked", still, unlocked);
+    CHECK(v.set_snap(std::nullopt), "snapping off");
+    std::printf("view: picking and snapping checked\n");
+}
+
 // A drawn frame (the timeline ticked by the draw), read back: Python's _frame.
 static ViewImage drawn_frame(View& v) {
     CHECK(v.draw(), "draw");
@@ -2826,6 +3425,10 @@ int main(int argc, char** argv) {
     events_case();
     animation_rigged_case(**wgpu);
     drafting_rigged_case(**wgpu);
+    live_rigged_case(**wgpu);
+    live_case();
+    picking_rigged_case(**wgpu);
+    picking_case();
     animation_case();
     plate_case(mechanism, ".");
 
@@ -2903,6 +3506,17 @@ int main(int argc, char** argv) {
     CHECK(view.set_lighting("headlight"), "lighting headlight");
     lit = view.lighting();
     CHECK(lit && *lit == "headlight", "lighting after headlight: %s", lit ? lit->c_str() : refused(lit).c_str());
+    // 1.33's textures: on by default, off set and read back, on again.
+    {
+        cadaclysm::Result<bool> textured = view.textures();
+        CHECK(textured && *textured, "textures at first: %s", textured ? "off" : refused(textured).c_str());
+        CHECK(view.set_textures(false), "textures off");
+        textured = view.textures();
+        CHECK(textured && !*textured, "textures after off: %s", textured ? "on" : refused(textured).c_str());
+        CHECK(view.set_textures(true), "textures on");
+        textured = view.textures();
+        CHECK(textured && *textured, "textures after on: %s", textured ? "off" : refused(textured).c_str());
+    }
     // 1.20's occluded style: the defaults first, a set one (with a colour) read back, a refused
     // one (a negative dash) leaving it as it was, and the defaults again.
     {
@@ -2928,9 +3542,154 @@ int main(int argc, char** argv) {
         back = view.occluded_style();
         CHECK(back && back->dash == 6.0f && !back->colour.has_value(), "the defaults were not restored");
     }
+    // 1.31's clip planes: every slot empty at first; a capped, hatched plane read back (the
+    // normal unit, the numbers as set) and a bare one with the defaults; the library's refusals
+    // (a hatch without a cap, a zero normal, a slot past the last) leaving the slots as they
+    // were; a ClipPlane set back as clip_plane answered it; and clearing.
+    {
+        for (std::uint32_t slot = 0; slot < CADACLYSM_VIEW_CLIP_PLANES; ++slot) {
+            cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> none = view.clip_plane(slot);
+            CHECK(none && !none->has_value(), "clip plane %u at first: %s", slot, none ? "set" : refused(none).c_str());
+        }
+        std::array<double, 3> point{1.0, 2.0, 3.0};
+        std::array<double, 3> normal{0.0, 0.0, 2.0};
+        CHECK(view.set_clip_plane(1, point, normal, cadaclysm::Colour(0.5f, 0.25f, 0.75f), cadaclysm::Colour("white"),
+                                  30.0f, 2.5f, 3.0f),
+              "a capped, hatched clip plane");
+        cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> back = view.clip_plane(1);
+        CHECK(back && back->has_value(), "clip plane 1: %s", back ? "empty" : refused(back).c_str());
+        if (back && back->has_value()) {
+            const cadaclysm::ClipPlane& p = **back;
+            CHECK(p.point == point && p.normal[0] == 0.0 && p.normal[1] == 0.0 && p.normal[2] == 1.0,
+                  "clip plane 1's point or unit normal: %g %g %g", p.normal[0], p.normal[1], p.normal[2]);
+            CHECK(p.cap.has_value() && (*p.cap)[0] == 0.5f && (*p.cap)[1] == 0.25f && (*p.cap)[2] == 0.75f,
+                  "clip plane 1's cap");
+            CHECK(p.hatch.has_value() && (*p.hatch)[0] == 1.0f && (*p.hatch)[1] == 1.0f && (*p.hatch)[2] == 1.0f &&
+                      p.hatch_angle == 30.0f && p.hatch_spacing == 2.5f && p.hatch_width == 3.0f,
+                  "clip plane 1's hatch: angle %g spacing %g width %g", p.hatch_angle, p.hatch_spacing, p.hatch_width);
+        }
+        CHECK(view.set_clip_plane(0, std::array<double, 3>{0.0, 0.0, 0.0}, std::array<double, 3>{1.0, 0.0, 0.0}),
+              "a bare clip plane");
+        back = view.clip_plane(0);
+        CHECK(back && back->has_value() && !(*back)->cap.has_value() && !(*back)->hatch.has_value() &&
+                  (*back)->hatch_angle == 45.0f && (*back)->hatch_spacing == 0.0f && (*back)->hatch_width == 1.0f,
+              "clip plane 0, bare: %s", back ? "other values" : refused(back).c_str());
+        cadaclysm::Result<void> no_cap = view.set_clip_plane(2, point, normal, std::nullopt, cadaclysm::Colour("black"));
+        CHECK(refused(no_cap) == "cadaclysm_view_set_clip_plane: hatch needs a cap", "%s", refused(no_cap).c_str());
+        cadaclysm::Result<void> zero = view.set_clip_plane(1, point, std::array<double, 3>{0.0, 0.0, 0.0});
+        CHECK(!zero && refused(zero).find("normal") != std::string::npos, "a zero normal: %s", refused(zero).c_str());
+        cadaclysm::Result<void> past = view.set_clip_plane(6, point, normal);
+        CHECK(refused(past) == "cadaclysm_view_set_clip_plane: slot 6 is past the last (5)", "%s", refused(past).c_str());
+        cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> past_read = view.clip_plane(6);
+        CHECK(!past_read && refused(past_read) == "cadaclysm_view_clip_plane: slot 6 is past the last (5)", "%s",
+              past_read ? "answered" : refused(past_read).c_str());
+        back = view.clip_plane(2);
+        CHECK(back && !back->has_value(), "a refused plane filled slot 2");
+        back = view.clip_plane(1);
+        CHECK(back && back->has_value() && (*back)->hatch_width == 3.0f, "a refused plane changed slot 1");
+        if (back && back->has_value()) {
+            cadaclysm::ClipPlane copy = **back;
+            CHECK(view.set_clip_plane(5, copy), "clip plane 5 from clip plane 1's answer");
+            cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> five = view.clip_plane(5);
+            CHECK(five && five->has_value() && (*five)->normal == copy.normal && (*five)->cap == copy.cap &&
+                      (*five)->hatch == copy.hatch && (*five)->hatch_spacing == copy.hatch_spacing,
+                  "clip plane 5 is not clip plane 1's");
+        }
+        for (std::uint32_t slot = 0; slot < CADACLYSM_VIEW_CLIP_PLANES; ++slot) {
+            CHECK(view.clear_clip_plane(slot), "clear clip plane %u", slot);
+            cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> cleared = view.clip_plane(slot);
+            CHECK(cleared && !cleared->has_value(), "clip plane %u after clearing", slot);
+        }
+        CHECK(view.clear_clip_plane(3), "clearing an empty slot");
+    }
+    // 1.32's clip sets: an outlined plane read back (width 0 as 1), a plane without one
+    // answering none, an outline width above 100 refused; the view-wide mode set and read, mode
+    // 3 and inherit refused; viewport 0 (the window, no viewports set) given a plane of its own,
+    // read back, its mode intersection, and inherit dropping it.
+    {
+        std::array<double, 3> point{0.0, 0.0, 1.0};
+        std::array<double, 3> normal{0.0, 0.0, 1.0};
+        const std::array<float, 3> red{1.0f, 0.0f, 0.0f};
+        const std::array<float, 3> blue{0.0f, 0.0f, 1.0f};
+        const std::array<float, 3> white{1.0f, 1.0f, 1.0f};
+        const std::array<double, 3> y_axis{0.0, 1.0, 0.0};
+        CHECK(view.set_clip_plane(0, point, normal, cadaclysm::Colour(0.5f, 0.5f, 0.5f), std::nullopt, 45.0f, 0.0f, 1.0f,
+                                  cadaclysm::Colour(1.0f, 0.0f, 0.0f), 0.0f),
+              "an outlined clip plane");
+        cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> back = view.clip_plane(0);
+        CHECK(back && back->has_value() && (*back)->outline == red &&
+                  (*back)->outline_width == 1.0f,
+              "clip plane 0's outline: %s", back ? "other values" : refused(back).c_str());
+        if (back && back->has_value()) {
+            cadaclysm::ClipPlane copy = **back;
+            copy.outline_width = 4.0f;
+            CHECK(view.set_clip_plane(1, copy), "clip plane 1 from clip plane 0's answer");
+            cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> one = view.clip_plane(1);
+            CHECK(one && one->has_value() && (*one)->outline == copy.outline && (*one)->outline_width == 4.0f,
+                  "clip plane 1's outline");
+        }
+        CHECK(view.set_clip_plane(2, point, normal), "a plane without an outline");
+        back = view.clip_plane(2);
+        CHECK(back && back->has_value() && !(*back)->outline.has_value() && (*back)->outline_width == 1.0f,
+              "clip plane 2 has an outline");
+        cadaclysm::Result<void> wide = view.set_clip_plane(3, point, normal, std::nullopt, std::nullopt, 45.0f, 0.0f, 1.0f,
+                                                           cadaclysm::Colour("black"), 200.0f);
+        CHECK(refused(wide) == "cadaclysm_view_set_clip_plane: outline width 200 is above 100 points", "%s",
+              refused(wide).c_str());
+        CHECK(view.clip_mode() && *view.clip_mode() == cadaclysm::ClipMode::intersection, "the default clip mode");
+        CHECK(view.set_clip_mode(cadaclysm::ClipMode::cutaway), "the cutaway");
+        CHECK(view.clip_mode() && *view.clip_mode() == cadaclysm::ClipMode::cutaway, "the cutaway read back");
+        cadaclysm::Result<void> three = view.set_clip_mode(static_cast<cadaclysm::ClipMode>(3));
+        CHECK(refused(three) == "cadaclysm_view_set_clip_mode: mode 3 is not a clip mode (0 intersection, 1 cutaway)",
+              "%s", refused(three).c_str());
+        cadaclysm::Result<void> inherit = view.set_clip_mode(cadaclysm::ClipMode::inherit);
+        CHECK(refused(inherit) == "cadaclysm_view_set_clip_mode: mode 2 (inherit) is a viewport's", "%s",
+              refused(inherit).c_str());
+        CHECK(view.clip_mode() && *view.clip_mode() == cadaclysm::ClipMode::cutaway, "a refused mode changed the mode");
+        CHECK(view.set_clip_mode(cadaclysm::ClipMode::intersection), "back to the intersection");
+        // Viewport 0's own set.
+        CHECK(view.viewport_clip_mode(0) && *view.viewport_clip_mode(0) == cadaclysm::ClipMode::inherit,
+              "viewport 0 inherits at first");
+        cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> none = view.viewport_clip_plane(0, 0);
+        CHECK(none && !none->has_value(), "viewport 0's plane before a set: %s", none ? "set" : refused(none).c_str());
+        CHECK(view.set_viewport_clip_plane(0, 4, std::array<double, 3>{0.0, 0.0, 0.0}, std::array<double, 3>{0.0, 3.0, 0.0},
+                                           cadaclysm::Colour(0.0f, 0.0f, 1.0f), std::nullopt, 45.0f, 0.0f, 1.0f,
+                                           cadaclysm::Colour("white"), 2.0f),
+              "viewport 0's own plane");
+        cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> own = view.viewport_clip_plane(0, 4);
+        CHECK(own && own->has_value() && (*own)->normal == y_axis && (*own)->cap == blue && (*own)->outline == white &&
+                  (*own)->outline_width == 2.0f,
+              "viewport 0's plane 4: %s", own ? "other values" : refused(own).c_str());
+        own = view.viewport_clip_plane(0, 0);
+        CHECK(own && !own->has_value(), "viewport 0's empty slot 0");
+        CHECK(view.viewport_clip_mode(0) && *view.viewport_clip_mode(0) == cadaclysm::ClipMode::intersection,
+              "viewport 0's own set's mode");
+        CHECK(view.set_viewport_clip_mode(0, cadaclysm::ClipMode::cutaway), "viewport 0's cutaway");
+        CHECK(view.viewport_clip_mode(0) && *view.viewport_clip_mode(0) == cadaclysm::ClipMode::cutaway,
+              "viewport 0's cutaway read back");
+        cadaclysm::Result<void> past = view.set_viewport_clip_plane(1, 0, point, normal);
+        CHECK(refused(past) == "cadaclysm_view_set_viewport_clip_plane: no viewport 1 (there are 1)", "%s",
+              refused(past).c_str());
+        cadaclysm::Result<std::optional<cadaclysm::ClipPlane>> past_slot = view.viewport_clip_plane(0, 6);
+        CHECK(!past_slot, "viewport 0's slot 6 answered");
+        CHECK(view.clear_viewport_clip_plane(0, 4), "clearing viewport 0's plane 4");
+        own = view.viewport_clip_plane(0, 4);
+        CHECK(own && !own->has_value(), "viewport 0's cleared plane 4");
+        CHECK(view.viewport_clip_mode(0) && *view.viewport_clip_mode(0) == cadaclysm::ClipMode::cutaway,
+              "clearing a plane dropped viewport 0's set");
+        CHECK(view.set_viewport_clip_plane(0, 4, std::array<double, 3>{0.0, 0.0, 0.0}, std::array<double, 3>{1.0, 0.0, 0.0}),
+              "viewport 0's plane again");
+        CHECK(view.set_viewport_clip_mode(0, cadaclysm::ClipMode::inherit), "viewport 0 inherits");
+        CHECK(view.viewport_clip_mode(0) && *view.viewport_clip_mode(0) == cadaclysm::ClipMode::inherit,
+              "inherit did not drop viewport 0's set");
+        own = view.viewport_clip_plane(0, 4);
+        CHECK(own && !own->has_value(), "viewport 0's plane 4 after inherit: %s", own ? "set" : refused(own).c_str());
+        for (std::uint32_t slot = 0; slot < CADACLYSM_VIEW_CLIP_PLANES; ++slot)
+            CHECK(view.clear_clip_plane(slot), "clear clip plane %u", slot);
+    }
     // 1.28's drafting styles.
     {
-        static_assert(sizeof(CadaclysmViewPick) == 44, "the 1.28 pick");
+        static_assert(sizeof(CadaclysmViewPick) == 52, "the 1.30 pick");
         static_assert(sizeof(CadaclysmViewEventPick) == 40, "the event's pick, frozen at 1.26");
         std::vector<float> seg{-1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
         cadaclysm::Result<cadaclysm::Item> line = view.show_lines(seg);

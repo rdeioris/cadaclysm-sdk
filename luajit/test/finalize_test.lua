@@ -57,6 +57,7 @@ return function(t)
       { "document", function() return handle_of(bs.Document.new()) end },
       { "hlr", function() return handle_of(bs.hlr({ a }, { direction = { -1, -1, -1 } })) end },
       { "page", function() return handle_of(bs.Page.new("mm")) end },
+      { "polygon_set", function() return handle_of(bs.PolygonSet.from_rings({ { 0, 0 }, { 1, 0 }, { 1, 1 } })) end },
     }
     for _, case in ipairs(cases) do dropped_are_freed(t, case[1], case[2]) end
     collider:close()

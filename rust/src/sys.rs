@@ -102,6 +102,7 @@ pub struct CadaclysmOpenOptions {
     pub pick: *const c_void,
     pub pick_user: *mut c_void,
     pub lightmap_resolution: u32,
+    pub recognize_tolerance: f64,
 }
 
 #[repr(C)]
@@ -197,6 +198,38 @@ pub struct CadaclysmCollision {
     pub error: f64,
     pub hull_vertex_count: u32,
     pub hull_index_count: u32,
+}
+
+/// `CadaclysmMaterial`: a glTF primitive's PBR material.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmMaterial {
+    pub name: *const c_char,
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub alpha_mode: u32,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
+    pub base_color_image: u32,
+    pub base_color_uv_set: u32,
+    pub uv_offset: [f32; 2],
+    pub uv_rotation: f32,
+    pub uv_scale: [f32; 2],
+    pub wrap_u: u32,
+    pub wrap_v: u32,
+    pub mag_filter: u32,
+    pub min_filter: u32,
+}
+
+/// `CadaclysmImage`: an image a material names, encoded.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmImage {
+    pub bytes: *const u8,
+    pub size: usize,
+    pub mime: *const c_char,
+    pub name: *const c_char,
 }
 
 #[repr(C)]
@@ -477,6 +510,9 @@ entry_points! {
     fn cadaclysm_node_mesh_lightmap_uvs(scene: *const CadaclysmScene, node: u32, out_vertex_count: *mut u32) -> *const f32;
     fn cadaclysm_node_lod_error(scene: *const CadaclysmScene, node: u32, level: u32) -> f32;
     fn cadaclysm_node_collision(scene: *const CadaclysmScene, node: u32, hull_budget: u32, out: *mut CadaclysmCollision) -> bool;
+    fn cadaclysm_node_material(scene: *const CadaclysmScene, node: u32, out: *mut CadaclysmMaterial) -> bool;
+    fn cadaclysm_image_count(scene: *const CadaclysmScene) -> u32;
+    fn cadaclysm_image(scene: *const CadaclysmScene, index: u32, out: *mut CadaclysmImage) -> bool;
     fn cadaclysm_node_collision_hull(scene: *const CadaclysmScene, node: u32, hull_budget: u32) -> CadaclysmCollisionHull;
     fn cadaclysm_node_bounds_placed(scene: *const CadaclysmScene, node: u32, placement: *const f64) -> CadaclysmBounds;
     fn cadaclysm_node_bounds_placed64(scene: *const CadaclysmScene, node: u32, placement: *const f64) -> CadaclysmBounds64;

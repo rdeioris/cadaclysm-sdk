@@ -73,8 +73,21 @@ typedef struct CadaclysmBlacksmithAnimation CadaclysmBlacksmithAnimation;
  * `CADACLYSM_VIEW_INPUT_EVENT_TIMELINE`: a kernel animation played on the view's timeline,
  * bound to shown items and nodes; an item hidden and shown whole; nodes drawn x-ray.
  * 1.28 appended cadaclysm_view_set_line_style, _set_point_style, _set_point_states, _set_point_state_colours, _set_viewport_label, _set_viewport_border and _set_on_top, the CADACLYSM_VIEW_POINT_* shapes and states, and CadaclysmViewPick.viewport_label: the View's 2D drafting styles.
+ * 1.29 appended cadaclysm_view_set_lines, _set_curves, _set_points, _set_mesh_positions and _show_glyphs, and the CADACLYSM_VIEW_GLYPH_* kinds: the View's live geometry and glyphs.
+ * 1.30: picking and snapping (P3): appended cadaclysm_view_set_pick_aperture, _pick_rect, _set_snap_points and _set_snap_base, CadaclysmViewRectHit, the CADACLYSM_VIEW_HIT_* kinds, and the snap kinds END, INTERSECTION, POINT and ALIGNMENT with CADACLYSM_VIEW_SNAP_DEFAULT. The pick grew (segment, distance_px), the snap grew (label, the lock, the guides), and the input event grew a tail for both, its snap frozen as CadaclysmViewEventSnap.
+ * 1.31 appended `cadaclysm_view_set_clip_plane` and `_clip_plane`, `CadaclysmViewClipPlane` and
+ * `CADACLYSM_VIEW_CLIP_PLANES`: six view-wide clip planes, each with an optional cap and hatch.
+ * 1.32 appended `cadaclysm_view_set_clip_mode`, `_clip_mode`, `_set_viewport_clip_plane`,
+ * `_viewport_clip_plane`, `_set_viewport_clip_mode` and `_viewport_clip_mode`, the
+ * `CADACLYSM_VIEW_CLIP_INTERSECTION`, `_CUTAWAY` and `_INHERIT` modes and
+ * `CADACLYSM_VIEW_CLIP_VIEWPORTS`, and grew `CadaclysmViewClipPlane` by the outline (120 bytes):
+ * per-viewport clip sets, the cutaway and the cut's outline.
+ * 1.33 appended `cadaclysm_view_set_textures` and `_textures`: a material's base-colour
+ * texture (a glTF's, `cadaclysm_node_material`) drawn on its part, on by default.
+ * 1.34 appended `cadaclysm_view_image_of`: one camera's picture drawn offscreen at a size of
+ * its own -- no grid, no overlays, a layer mask and a background -- the web View's `image`.
  */
-#define CADACLYSM_VIEW_ABI_MINOR 28
+#define CADACLYSM_VIEW_ABI_MINOR 34
 
 #define CADACLYSM_VIEW_WINDOW_WIN32 1
 
@@ -224,9 +237,68 @@ typedef struct CadaclysmBlacksmithAnimation CadaclysmBlacksmithAnimation;
 #define CADACLYSM_VIEW_SNAP_PLANE 128
 
 /**
- * Every kind.
+ * 1.30: an end of a `cadaclysm_view_show_lines` segment or a `cadaclysm_view_show_curves`
+ * Bezier, the joins inside a chained run included (which `VERTEX` never reaches).
  */
-#define CADACLYSM_VIEW_SNAP_ALL 255
+#define CADACLYSM_VIEW_SNAP_END 256
+
+/**
+ * 1.30: where two edges cross on screen. An edge never intersects itself: an edge crossing
+ * itself (a looping Bezier, a spiral chain) gives no intersection there.
+ */
+#define CADACLYSM_VIEW_SNAP_INTERSECTION 512
+
+/**
+ * 1.30: a point a host gave an item to snap to (`cadaclysm_view_set_snap_points`), answered
+ * with its label.
+ */
+#define CADACLYSM_VIEW_SNAP_POINT 1024
+
+/**
+ * 1.30: a point lined up with an earlier snap's point, along the work plane's directions or
+ * the screen's, with the guides it lies on.
+ */
+#define CADACLYSM_VIEW_SNAP_ALIGNMENT 2048
+
+/**
+ * Every kind: 4095 since 1.30. A 1.29 library refuses bits past 255, so a host built against
+ * 1.30 that may load an older library passes 255 (the 1.22 kinds) there, after checking the
+ * minor of `cadaclysm_view_abi_version()`: `CADACLYSM_VIEW_SNAP_DEFAULT` and this are for a
+ * 1.30 library only.
+ */
+#define CADACLYSM_VIEW_SNAP_ALL 4095
+
+/**
+ * The kinds a host passes for the library's default set (1.30): 1.22's eight and `POINT`,
+ * which fires only where `cadaclysm_view_set_snap_points` gave points. A view starts with
+ * snapping off; a wrapper's bare `set_snap()` passes this.
+ */
+#define CADACLYSM_VIEW_SNAP_DEFAULT 1279
+
+/**
+ * `CadaclysmViewRectHit.kind` (1.30): a face, as the pick numbers it.
+ */
+#define CADACLYSM_VIEW_HIT_FACE 1
+
+/**
+ * A node of an item with no face ranges (a mesh shown with `cadaclysm_view_show_mesh`).
+ */
+#define CADACLYSM_VIEW_HIT_NODE 2
+
+/**
+ * A `cadaclysm_view_show_lines` segment or a `cadaclysm_view_show_curves` Bezier, by its index.
+ */
+#define CADACLYSM_VIEW_HIT_SEGMENT 3
+
+/**
+ * A kernel solid's or a read scene's edge, by its kernel edge index (as the pick's `segment`).
+ */
+#define CADACLYSM_VIEW_HIT_EDGE 4
+
+/**
+ * A point's or a glyph's index.
+ */
+#define CADACLYSM_VIEW_HIT_POINT 5
 
 /**
  * `CadaclysmViewAnalysis.mode` (1.14): surfaces drawn as lit, the default.
@@ -262,6 +334,31 @@ typedef struct CadaclysmBlacksmithAnimation CadaclysmBlacksmithAnimation;
  * The larger principal curvature.
  */
 #define CADACLYSM_VIEW_ANALYSIS_MAX 6
+
+/**
+ * The number of clip-plane slots (1.31).
+ */
+#define CADACLYSM_VIEW_CLIP_PLANES 6
+
+/**
+ * A clip set's mode (1.32): drawn where every plane keeps (1.31's, the default).
+ */
+#define CADACLYSM_VIEW_CLIP_INTERSECTION 0
+
+/**
+ * A clip set's mode (1.32): hidden only where every plane hides (a cutaway).
+ */
+#define CADACLYSM_VIEW_CLIP_CUTAWAY 1
+
+/**
+ * A viewport's clip mode (1.32): no set of its own, the view-wide set.
+ */
+#define CADACLYSM_VIEW_CLIP_INHERIT 2
+
+/**
+ * The viewports that may have a clip set of their own (1.32).
+ */
+#define CADACLYSM_VIEW_CLIP_VIEWPORTS 8
 
 #define CADACLYSM_VIEW_BACKEND_ANY 0
 
@@ -346,6 +443,67 @@ typedef struct CadaclysmBlacksmithAnimation CadaclysmBlacksmithAnimation;
 #define CADACLYSM_VIEW_POINT_STATE_SELECTED 2
 
 #define CADACLYSM_VIEW_POINT_STATE_FIRST 3
+
+/**
+ * 1.29: a glyph's kind (`cadaclysm_view_show_glyphs`).
+ * ARROW: a filled arrowhead pointing along the glyph's direction, tip at the anchor.
+ */
+#define CADACLYSM_VIEW_GLYPH_ARROW 0
+
+/**
+ * TICK: a 45-degree slash, a dimension tick.
+ */
+#define CADACLYSM_VIEW_GLYPH_TICK 1
+
+/**
+ * CROSS: a diagonal cross, an X.
+ */
+#define CADACLYSM_VIEW_GLYPH_CROSS 2
+
+/**
+ * SQUARE: an outlined square.
+ */
+#define CADACLYSM_VIEW_GLYPH_SQUARE 3
+
+/**
+ * TRIANGLE: an outlined triangle.
+ */
+#define CADACLYSM_VIEW_GLYPH_TRIANGLE 4
+
+/**
+ * PARALLEL: the constraint mark, two parallel slashes.
+ */
+#define CADACLYSM_VIEW_GLYPH_PARALLEL 5
+
+/**
+ * PERPENDICULAR: the constraint mark, an upright on a base line.
+ */
+#define CADACLYSM_VIEW_GLYPH_PERPENDICULAR 6
+
+/**
+ * COINCIDENT: the constraint mark, a dot in a ring.
+ */
+#define CADACLYSM_VIEW_GLYPH_COINCIDENT 7
+
+/**
+ * TANGENT: the constraint mark, a ring on a line.
+ */
+#define CADACLYSM_VIEW_GLYPH_TANGENT 8
+
+/**
+ * FIXED: the constraint mark, a ground line with hatching.
+ */
+#define CADACLYSM_VIEW_GLYPH_FIXED 9
+
+/**
+ * HORIZONTAL: the constraint mark, a horizontal bar.
+ */
+#define CADACLYSM_VIEW_GLYPH_HORIZONTAL 10
+
+/**
+ * VERTICAL: the constraint mark, a vertical bar.
+ */
+#define CADACLYSM_VIEW_GLYPH_VERTICAL 11
 
 /**
  * Text alignment: which point of the text's box sits at `at` (labels: at the anchor plus
@@ -775,7 +933,7 @@ typedef struct CadaclysmViewPick {
    * `sizeof` the struct as the caller built it: the 1.0 struct's (16 bytes: `size` through
    * `face`) or the whole 1.8 struct. Fields past it are not written, so a size ending inside
    * `point` gets only part of the point. 1.24 grew it to 40 bytes and 1.28 to 44; a 40-byte
-   * struct gets no `viewport_label`.
+   * struct gets no `viewport_label`. 1.30 grew it to 52; a 44-byte struct gets no `segment`.
    */
   uint32_t size;
   /**
@@ -815,6 +973,19 @@ typedef struct CadaclysmViewPick {
    * -- `item` is 0 and nothing beneath it was picked -- else -1.
    */
   int32_t viewport_label;
+  /**
+   * 1.30: the wire hit's segment (a `show_lines` segment, a `show_curves` Bezier, a
+   * solid's or scene's snap edge); `0xFFFFFFFF` for a face, a point, a glyph or none. A
+   * kernel solid's edge (`cadaclysm_view_show_solid`, a read scene): its kernel edge index,
+   * the place of its polyline in `cadaclysm_blacksmith_edge_polylines`, the same in either
+   * surfaces mode; an edge of a mesh shown with edges but no edge order: the View's own edge
+   * number.
+   */
+  uint32_t segment;
+  /**
+   * 1.30: from the cursor to the hit in device pixels; 0 for a face.
+   */
+  float distance_px;
 } CadaclysmViewPick;
 
 /**
@@ -1641,7 +1812,8 @@ typedef struct CadaclysmViewSnapSettings {
  */
 typedef struct CadaclysmViewSnap {
   /**
-   * `sizeof` the struct as the caller built it; at least the 1.22 struct's.
+   * `sizeof` the struct as the caller built it; at least the 1.22 struct's. 1.30 grew it to
+   * 232; an 88-byte struct gets no `label`, lock or guides.
    */
   uint32_t size;
   /**
@@ -1667,7 +1839,9 @@ typedef struct CadaclysmViewSnap {
    */
   uint32_t face;
   /**
-   * The item's edge the snap landed on; `0xFFFFFFFF` for `FACE`, `GRID` and `PLANE`.
+   * The item's edge the snap landed on; `0xFFFFFFFF` for `FACE`, `GRID` and `PLANE`. 1.30:
+   * the number the pick answers as `segment` for the same edge (P3 plan D8): a lines item's
+   * segment, a curves item's Bezier, a solid's kernel edge.
    */
   uint32_t edge;
   /**
@@ -1691,6 +1865,30 @@ typedef struct CadaclysmViewSnap {
    * 0 for the host's own request or a hover, 1 for a click's snap, 2 for a double click's.
    */
   uint32_t clicks;
+  /**
+   * 1.30: the `POINT` snap's label, else the kind's name; zero-terminated UTF-8.
+   */
+  char label[32];
+  /**
+   * 1.30: 1 where the angle lock (`cadaclysm_view_set_snap_base`) turned the point.
+   */
+  uint32_t locked;
+  /**
+   * 1.30: the lock's angle in degrees, `0..360`; 0 unlocked.
+   */
+  float locked_angle;
+  /**
+   * 1.30: how many of `guides` are set: 0, 1 (a guide or the lock's ray) or 2 (a crossing).
+   */
+  uint32_t guide_count;
+  /**
+   * Zero; keeps `guides` on its 8 bytes.
+   */
+  uint32_t pad0;
+  /**
+   * 1.30: each guide's start then end (`point`), world coordinates.
+   */
+  double guides[12];
 } CadaclysmViewSnap;
 
 /**
@@ -1850,9 +2048,30 @@ typedef struct CadaclysmViewEventPick {
 } CadaclysmViewEventPick;
 
 /**
+ * The snap inside a [`CadaclysmViewInputEvent`], frozen at 1.22: the snap grew in 1.30, the event's copy did not (its tail carries
+ * the rest). 88 bytes, so the event's `camera` stays where 1.26 put it.
+ */
+typedef struct CadaclysmViewEventSnap {
+  uint32_t size;
+  uint32_t kind;
+  double point[3];
+  uint32_t item;
+  uint32_t node;
+  uint32_t face;
+  uint32_t edge;
+  float tangent[3];
+  float axis[3];
+  double radius;
+  float distance_px;
+  uint32_t clicks;
+} CadaclysmViewEventSnap;
+
+/**
  * One input event a view's own window handled (`cadaclysm_view_next_event`, 1.26). Laid out
  * with no implicit padding: 272 bytes, every field at its natural alignment. The fields a
- * kind does not use are zero.
+ * kind does not use are zero. 1.30 grew it to 424 bytes at its tail: check
+ * that `cadaclysm_view_abi_version()`'s minor is at least 30 before reading `pick_segment` and the `snap_*` fields; a
+ * 1.29 library leaves them as the caller filled them.
  */
 typedef struct CadaclysmViewInputEvent {
   /**
@@ -1923,9 +2142,10 @@ typedef struct CadaclysmViewInputEvent {
    */
   struct CadaclysmViewEventPick pick;
   /**
-   * A snap event's answer, as `cadaclysm_view_snap_result` fills it (its `size` the struct's).
+   * A snap event's answer, the 1.22 layout (its `size` 88); the 1.30 fields are the event's
+   * own `snap_*`.
    */
-  struct CadaclysmViewSnap snap;
+  struct CadaclysmViewEventSnap snap;
   /**
    * A close event's: the camera the window closed on, as `cadaclysm_view_run` fills its
    * `camera_out` (its `size` the struct's).
@@ -1939,7 +2159,114 @@ typedef struct CadaclysmViewInputEvent {
    * `cadaclysm_view_abi_version()`'s minor is at least 28 before reading it.
    */
   int32_t pick_viewport_label;
+  /**
+   * 1.30, as `CadaclysmViewPick.segment`: a pick event's wire segment; `0xFFFFFFFF` on every
+   * other event.
+   */
+  uint32_t pick_segment;
+  /**
+   * 1.30, as `CadaclysmViewPick.distance_px`.
+   */
+  float pick_distance_px;
+  /**
+   * 1.30, as `CadaclysmViewSnap.label`.
+   */
+  char snap_label[32];
+  /**
+   * 1.30, as `CadaclysmViewSnap.locked`.
+   */
+  uint32_t snap_locked;
+  /**
+   * 1.30, as `CadaclysmViewSnap.locked_angle`.
+   */
+  float snap_locked_angle;
+  /**
+   * 1.30, as `CadaclysmViewSnap.guide_count`.
+   */
+  uint32_t snap_guide_count;
+  /**
+   * Zero; keeps `snap_guides` on its 8 bytes.
+   */
+  uint32_t pad1;
+  /**
+   * 1.30, as `CadaclysmViewSnap.guides`.
+   */
+  double snap_guides[12];
 } CadaclysmViewInputEvent;
+
+/**
+ * One thing in a rectangle (`cadaclysm_view_pick_rect`, 1.30): its item, what it is
+ * (`CADACLYSM_VIEW_HIT_*`) and its index. 12 bytes, fixed: an array element, with no `size`.
+ */
+typedef struct CadaclysmViewRectHit {
+  uint32_t item;
+  uint32_t kind;
+  uint32_t index;
+} CadaclysmViewRectHit;
+
+/**
+ * A clip plane, its cap and the cap's hatch (`cadaclysm_view_set_clip_plane`, 1.31).
+ * 96 bytes, no padding.
+ */
+typedef struct CadaclysmViewClipPlane {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.31 struct's.
+   */
+  uint32_t size;
+  /**
+   * Nonzero: fill the cut with `cap_colour`.
+   */
+  uint32_t cap;
+  /**
+   * A point on the plane, in the scene's units.
+   */
+  double point[3];
+  /**
+   * The plane's normal, any nonzero length: the side it points to is hidden.
+   */
+  double normal[3];
+  /**
+   * 0..1 RGB; read only where `cap`.
+   */
+  float cap_colour[3];
+  /**
+   * Nonzero: hatch the cap (needs `cap`).
+   */
+  uint32_t hatch;
+  /**
+   * 0..1 RGB; read only where `hatch`.
+   */
+  float hatch_colour[3];
+  /**
+   * The lines' angle in degrees, from the plane's first axis: `normalize(cross(Z, n))`, or X
+   * where `|n.z| > 0.9999` (a level plane).
+   */
+  float hatch_angle;
+  /**
+   * The distance between lines, in the scene's units; 0: a fiftieth of the scene's size.
+   */
+  float hatch_spacing;
+  /**
+   * The lines' width in points (times the view's point scale); 0: 1.
+   */
+  float hatch_width;
+  /**
+   * 1.32: nonzero: draw the cut's outline. A 96-byte (1.31) struct: none.
+   */
+  uint32_t outline;
+  /**
+   * 1.32: 0..1 RGB; read only where `outline`.
+   */
+  float outline_colour[3];
+  /**
+   * 1.32: the outline's width in points (times the view's point scale); 0: 1; at most 100.
+   */
+  float outline_width;
+  /**
+   * 1.32: ignored; write 0 (the getter does).
+   */
+  uint32_t reserved;
+} CadaclysmViewClipPlane;
 
 #ifdef __cplusplus
 extern "C" {
@@ -2324,6 +2651,26 @@ bool cadaclysm_view_set_lighting(struct CadaclysmView *view, uint32_t lighting);
 uint32_t cadaclysm_view_lighting(const struct CadaclysmView *view);
 
 /**
+ * Whether parts whose material has a base-colour texture (1.33) -- a glTF's, opened through
+ * `cadaclysm_capi` (`cadaclysm_node_material`) -- draw it: on (the default), or off, every part
+ * then drawn in its colour (the material's base colour factor), as every CAD part is. A
+ * texture is drawn through the part's texture coordinates and `KHR_texture_transform`, times
+ * the colour, in linear light, mipped; an alpha-masked material cuts holes, a blended one is
+ * translucent by its alpha. False for a NULL or closed view.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_textures(struct CadaclysmView *view, bool on);
+
+/**
+ * Whether textures are drawn (1.33, `cadaclysm_view_set_textures`); true, the default, for a
+ * NULL view.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_textures(const struct CadaclysmView *view);
+
+/**
  * Draw every surface for judging it (1.14), in place of the lighting: `analysis->mode`
  * `CADACLYSM_VIEW_ANALYSIS_ZEBRA` (zebra stripes, fixed to the camera),
  * `_ISOPHOTES` (lines of equal angle to one light), `_GAUSSIAN`, `_MEAN`, `_MIN` or `_MAX`
@@ -2552,6 +2899,17 @@ void cadaclysm_view_request_pick_in(struct CadaclysmView *view,
  * 1.28: `viewport_label` is the viewport whose label (`cadaclysm_view_set_viewport_label`) was
  * under the pixel (`item` 0), else -1; a struct whose `size` ends before it does not get it.
  *
+ * 1.30: a pick reaches lines, curves, points and glyphs within the pick aperture
+ * (`cadaclysm_view_set_pick_aperture`, 4 points by default) of the pixel, ahead of the face
+ * under it; `point` is then the nearest point on the wire. `segment` names the wire's segment
+ * (`CadaclysmViewPick.segment`: a lines item's segment, a curves item's Bezier, a kernel
+ * solid's edge index) and `distance_px` how far it was, in device pixels; a face, a point, a
+ * glyph or nothing answers `segment` `0xFFFFFFFF`, and a face `distance_px` 0. A struct whose
+ * `size` ends before `segment` does not get them. Where the view could not draw the pick (no
+ * window to draw in, a pixel outside the viewport) it answers nothing: `item` 0, `segment`
+ * `0xFFFFFFFF`; a lost device drops the pick, as above. The terminal and render view libraries pick faces only:
+ * `segment` `0xFFFFFFFF`, `distance_px` 0.
+ *
  * Until this call takes a landed answer, `cadaclysm_view_needs_draw` stays true, so a host
  * that forwards input must call it after its draws once an input returned PICKED, even
  * where it does not use the answer. With `cadaclysm_view_set_double_click_frames(view,
@@ -2567,7 +2925,8 @@ void cadaclysm_view_request_pick_in(struct CadaclysmView *view,
  * `view` must be NULL or a live view; `out` must be NULL or point at a `CadaclysmViewPick` of
  * `out->size` bytes.
  */
-bool cadaclysm_view_pick_result(struct CadaclysmView *view, struct CadaclysmViewPick *out);
+bool cadaclysm_view_pick_result(struct CadaclysmView *view,
+                                struct CadaclysmViewPick *out);
 
 /**
  * Fits the camera to `node` of `item` and its subtree. False where the item is not a shown
@@ -2695,7 +3054,8 @@ uint32_t cadaclysm_view_show_lines(struct CadaclysmView *view,
 
 /**
  * Points, three floats each (x, y, z), drawn as one item: a disc of `size_px` device
- * pixels across (1 to 64, times the view's pixel ratio) in `rgb` (NULL: the edge colour),
+ * pixels across (1 to 64; device pixels at the host's screen density, which hosts that set
+ * one -- the web View, mobile -- scale) in `rgb` (NULL: the edge colour),
  * at each. They never pick; the item is framed by its points' box. The item's id, 0 on
  * failure -- a value not finite, a size out of range.
  *
@@ -2746,8 +3106,9 @@ uint32_t cadaclysm_view_show_image(struct CadaclysmView *view,
  * is not shown or `rgb` is NULL or not finite.
  *
  * Overlay text (`CADACLYSM_VIEW_TEXT_SCREEN`) takes the colour too, its glyphs recoloured in
- * place (its box keeps its own). An overlay shape or image is refused, the reason naming it:
- * a shape's fill and stroke are given when it is shown, an image draws its own pixels.
+ * place (its box keeps its own), and so does an overlay shape: its fill where it has one and
+ * its stroke where it has one, each keeping its alpha, under the same id and draw order.
+ * An overlay image is refused, the reason naming it: it draws its own pixels.
  *
  * `view` must be NULL or a live view; `rgb` NULL or three floats.
  */
@@ -2756,10 +3117,12 @@ bool cadaclysm_view_set_colour(struct CadaclysmView *view, uint32_t item, const 
 /**
  * Draws the item's triangles after everything else, depth-tested but without writing depth, so
  * an overlay shows through the parts in front of it (`on` true) -- or normally again (false).
- * Kept across uploads, removes of other items and surface switches. Exact surfaces and pick
- * treat the item as ordinary geometry. The terminal accepts it and draws the item as ordinary
- * geometry. False where the item is not shown, or is an overlay (it draws over everything
- * already), the reason naming it.
+ * Kept across uploads, removes of other items and surface switches. Exact surfaces and face
+ * picks treat the item as ordinary geometry. Since 1.30 its lines and points (its own edges
+ * included) are picked (`cadaclysm_view_pick` within the aperture,
+ * `cadaclysm_view_pick_rect`) and snapped through whatever covers them. The terminal
+ * accepts it and draws the item as ordinary geometry. False where the item is not shown, or
+ * is an overlay (it draws over everything already), the reason naming it.
  *
  * `view` must be NULL or a live view.
  */
@@ -2791,7 +3154,7 @@ bool cadaclysm_view_set_occluded(struct CadaclysmView *view, uint32_t item, uint
  * surface switches. No upload. The terminal library draws it too; the render view library
  * accepts NULL and refuses a colour: it draws no item's own line colour yet. False, with
  * `cadaclysm_view_last_error` naming the call, where the item is not shown, is an overlay
- * (it has none of those lines: an overlay shape's stroke colour is given when it is shown),
+ * (it has none of those lines: an overlay shape's stroke takes `cadaclysm_view_set_colour`),
  * the layer is not one of the three, a component is not finite, or the render view library
  * refuses it.
  *
@@ -2877,9 +3240,11 @@ bool cadaclysm_view_set_item_visible(struct CadaclysmView *view, uint32_t item, 
  * `cadaclysm_view_set_xray` draws a whole item -- replacing the item's earlier ghosts;
  * `nodes` NULL (`count` 0) clears them all. A node is the reader's node index, as
  * `cadaclysm_view_set_node_visible` takes it, and only that node is ghosted, not its
- * subtree. A plain item (a mesh, lines, a solid) has one node, 0. Kept across uploads;
- * picking does not see it. The terminal accepts it and draws the nodes as ordinary geometry.
- * The render view library differs: it ghosts each named node's whole subtree.
+ * subtree. A plain item (a mesh, lines, a solid) has one node, 0. Kept across uploads.
+ * Face picks ignore it; since 1.30 a ghosted node's lines and points are picked through
+ * what covers them, as an x-ray item's are. The terminal accepts it and draws the nodes as
+ * ordinary geometry. The render view library differs: it ghosts each named node's whole
+ * subtree.
  * False, with the reason, where the item is not shown ("set_node_ghosts: no item N") or a
  * node is past its nodes ("set_node_ghosts: item N has no node M (it has K)"), changing
  * nothing.
@@ -2942,11 +3307,103 @@ bool cadaclysm_view_set_point_states(struct CadaclysmView *view,
  * points draw through. Picked ahead of what is under it. Kept across uploads. The terminal
  * accepts it and draws the item in place. The render view library accepts false and refuses
  * true. False where the item is not shown, or is an overlay, text, an image, a body shown
- * with exact surfaces or exact parts (`cadaclysm_view_show_curves`), or a machining stock.
+ * with exact surfaces (a `cadaclysm_view_show_curves` item is accepted since 1.29: its exact
+ * edges draw on top), or a machining stock. Glyph items (1.29) are accepted.
  *
  * `view` must be NULL or a live view.
  */
 bool cadaclysm_view_set_on_top(struct CadaclysmView *view, uint32_t item, bool on);
+
+/**
+ * Replaces line item `item`'s segments (1.29): `segments` six floats a segment (two xyz
+ * points), `count` segments, under the same id -- colour, layer, dash, placement, on top kept,
+ * the camera not re-framed. Written in place, or appended to the item's own range, with no
+ * merge; a view drawing half precision, and the terminal library, merge and upload instead.
+ * The render view library refuses it. False where the item is not shown, is not a
+ * `cadaclysm_view_show_lines` item, or a value is not finite. NULL with `count` 0 is an empty
+ * list.
+ *
+ * `view` must be NULL or a live view; `segments` NULL (with `count` 0) or `count * 6` floats.
+ */
+bool cadaclysm_view_set_lines(struct CadaclysmView *view,
+                              uint32_t item,
+                              const float *segments,
+                              size_t count);
+
+/**
+ * Replaces curves item `item`'s Beziers (1.29): `beziers` sixteen floats a curve (four control
+ * points as x, y, z, weight), `count` curves, under the same id; kept as
+ * `cadaclysm_view_set_lines` keeps. The sampled polyline goes as `cadaclysm_view_set_lines`
+ * does; the exact curves are written in place for the same count, and another count sends the
+ * exact half again. The render view library refuses it. False where the item is not shown, is
+ * not a `cadaclysm_view_show_curves` item, or a value is not finite or a weight not positive.
+ * NULL with `count` 0 is an empty list.
+ *
+ * `view` must be NULL or a live view; `beziers` NULL (with `count` 0) or `count * 16` floats.
+ */
+bool cadaclysm_view_set_curves(struct CadaclysmView *view,
+                               uint32_t item,
+                               const float *beziers,
+                               size_t count);
+
+/**
+ * Replaces points item `item`'s positions (1.29): `positions` three floats a point, `count`
+ * points, under the same id. The same count keeps the states and writes in place; a new count
+ * sends the points again, keeping states, node colours, highlights and hidden flags by index,
+ * new points normal. The render view library and the terminal library draw no points, so no
+ * points item exists there. False where the item is not shown, is not a
+ * `cadaclysm_view_show_points` item, or a value is not finite. NULL with `count` 0 is an empty
+ * list.
+ *
+ * `view` must be NULL or a live view; `positions` NULL (with `count` 0) or `count * 3` floats.
+ */
+bool cadaclysm_view_set_points(struct CadaclysmView *view,
+                               uint32_t item,
+                               const float *positions,
+                               size_t count);
+
+/**
+ * Replaces mesh item `item`'s vertex positions (1.29): `positions` three floats a vertex,
+ * `normals` NULL or three floats a vertex, `count` vertices -- the count the item was shown
+ * with (`cadaclysm_view_show_mesh`), in the same order. NULL normals are recomputed, facet for a
+ * mesh shown without normals and smooth for one shown with. Written in place, the terminal
+ * library included, uploaded only under half precision; colour, paint, look and placement kept.
+ * It drops the mesh's simplified levels of detail until the next merge.
+ * The render view library refuses it. False where the item is not shown, was not shown with
+ * `cadaclysm_view_show_mesh`, was shown with edges, `count` is not its vertex count, or a value
+ * is not finite.
+ *
+ * `view` must be NULL or a live view; `positions` and `normals` (when not NULL) `count * 3`
+ * floats.
+ */
+bool cadaclysm_view_set_mesh_positions(struct CadaclysmView *view,
+                                       uint32_t item,
+                                       const float *positions,
+                                       const float *normals,
+                                       size_t count);
+
+/**
+ * Shows `count` glyphs of one `kind` (1.29, `CADACLYSM_VIEW_GLYPH_*`) as one item: at `at`
+ * (three floats each), turned to `dir` as projected on the screen (three floats each; NULL:
+ * all unturned; ARROW points along it), `size_pt` points across (1 to 128; device pixels at
+ * the host's screen density, which hosts that set one -- the web View, mobile -- scale) at any
+ * zoom, in `colour` (NULL: the edge colour, as `cadaclysm_view_show_points`). `kind` is one of
+ * ARROW 0, TICK 1, CROSS 2, SQUARE 3, TRIANGLE 4, PARALLEL 5, PERPENDICULAR 6, COINCIDENT 7,
+ * TANGENT 8, FIXED 9, HORIZONTAL 10, VERTICAL 11 (`CADACLYSM_VIEW_GLYPH_<NAME>`). Glyph `i` is node `i`:
+ * it picks as the item and node `i`, and the node calls reach it. Under the curves layer;
+ * hidden behind a surface at its anchor unless x-ray or on top. The item's id, 0 on failure.
+ * The terminal library and the render view library draw no glyphs and refuse it.
+ *
+ * `view` must be NULL or a live view; `at` NULL (with `count` 0) or `count * 3` floats; `dir`
+ * NULL or `count * 3` floats; `colour` NULL or three floats.
+ */
+uint32_t cadaclysm_view_show_glyphs(struct CadaclysmView *view,
+                                    const float *at,
+                                    const float *dir,
+                                    size_t count,
+                                    uint32_t kind,
+                                    float size_pt,
+                                    const float *colour);
 
 /**
  * Shows a CAM job (1.7): `machining`'s programs, played in order on a stock of its box, with
@@ -3582,6 +4039,10 @@ void cadaclysm_view_request_snap_in(struct CadaclysmView *view,
  * read once. Still answers once the view's window is closed, as `cadaclysm_view_pick_result`
  * does.
  *
+ * 1.30: `label`, `locked`/`locked_angle` and `guides`/`guide_count` for a struct of 232 bytes;
+ * with the angle lock (`cadaclysm_view_set_snap_base`) a snap that lands on no point kind
+ * answers `PLANE` with `locked` 1; `kind` 0 leaves `label` empty.
+ *
  * The terminal library refuses it: "snapping needs the wgpu view library".
  *
  * `view` must be NULL or a live view; `out` NULL or a `CadaclysmViewSnap` of at least
@@ -3627,6 +4088,36 @@ bool cadaclysm_view_set_work_plane(struct CadaclysmView *view,
  * `view` must be NULL or a live view.
  */
 bool cadaclysm_view_clear_work_plane(struct CadaclysmView *view);
+
+/**
+ * Points item `item` snaps to as `CADACLYSM_VIEW_SNAP_POINT`, in the coordinates it was
+ * shown in (`count` points, three floats each), moving with its node 0, labelled `label`
+ * (UTF-8, at most 31 bytes; NULL or an empty label answers "point"). A count of 0 clears them.
+ * False for an unknown item, with no error. Text, glyph, image and machining items are
+ * refused, as are a label past 31 bytes or not UTF-8, a value that is not finite, and a NULL
+ * `xyz` with a nonzero count. The points go with the item's removal. The terminal and render
+ * view libraries refuse it: snapping needs the wgpu view library (the render view library
+ * names an unknown item first). (1.30)
+ *
+ * `view` must be NULL or a live view; `xyz` NULL (with `count` 0) or `count * 3` floats;
+ * `label` NULL or zero-terminated.
+ */
+bool cadaclysm_view_set_snap_points(struct CadaclysmView *view,
+                                    uint32_t item,
+                                    const float *xyz,
+                                    size_t count,
+                                    const char *label);
+
+/**
+ * The angle lock: snaps that land on no point kind are turned about `xyz` (world) onto the
+ * nearest multiple of `step_deg` (0 < step <= 180), in the work plane's directions or the
+ * plane facing the eye; the answer is `PLANE` with `locked` 1. NULL clears it (`step_deg`
+ * then ignored). False, changing nothing, for a point that is not finite or a step out of
+ * range. The terminal and render view libraries refuse it. (1.30)
+ *
+ * `view` must be NULL or a live view; `xyz` NULL or three floats.
+ */
+bool cadaclysm_view_set_snap_base(struct CadaclysmView *view, const float *xyz, float step_deg);
 
 /**
  * A 2D shape over the window, as one item: `shape->beziers` (a blacksmith profile's,
@@ -3721,10 +4212,13 @@ bool cadaclysm_view_stats(struct CadaclysmView *view, struct CadaclysmViewStats 
  * - `RESIZE`: `width`, `height`, the drawing area's new physical size.
  * - `PICK`: a pick a click (or double click) asked has landed: `pick`, the same answer
  *   `cadaclysm_view_pick_result` then gives -- both see it, so a host reads either. A host's
- *   own `cadaclysm_view_request_pick` is not queued.
+ *   own `cadaclysm_view_request_pick` is not queued. 1.30: `pick_segment` and
+ *   `pick_distance_px` carry the pick's `segment` and `distance_px`.
  * - `SNAP`: with snapping on, a snap the window's input asked has landed -- a hover's
  *   (`clicks` 0) or a click's: `snap`, as `cadaclysm_view_snap_result` gives it. A host's
- *   own `cadaclysm_view_request_snap_in` is not queued.
+ *   own `cadaclysm_view_request_snap_in` is not queued. 1.30: `snap` keeps its 1.22 layout
+ *   (`size` 88); `snap_label`, `snap_locked`, `snap_locked_angle`, `snap_guide_count` and
+ *   `snap_guides` carry the rest.
  * - `CLOSE`: the window closed (Escape, its close button, `cadaclysm_view_close`) -- the last
  *   event, with `camera` the camera it closed on, as `cadaclysm_view_run` reports it; the
  *   queue is still read after `cadaclysm_view_pump` answers `CADACLYSM_VIEW_CLOSED`.
@@ -3758,6 +4252,194 @@ bool cadaclysm_view_next_event(struct CadaclysmView *view, struct CadaclysmViewI
  * `view` must be NULL or a live view.
  */
 bool cadaclysm_view_close(struct CadaclysmView *view);
+
+/**
+ * How far a pick reaches for lines, points and glyphs, in points (times the screen density):
+ * 0 restores the default, 4; others clamp to 1..32; negative or not finite is refused. The
+ * terminal library keeps it, but its picks reach no wires. The render view library keeps it
+ * too; its picks are face picks. (1.30)
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_pick_aperture(struct CadaclysmView *view, float aperture_pt);
+
+/**
+ * What lies in a rectangle of `viewport` (device pixels from its top left; a negative `w`
+ * or `h` flips it), CPU only: with `crossing`, everything with a visible part inside, else
+ * what lies wholly inside and is visible. Hidden things come only drawn x-ray or on top.
+ * Text, images, overlays, viewport labels, machining stocks and isocurves are left out.
+ * Answers how many there are, and writes at most `capacity` into `out` (NULL with 0 to
+ * count), sorted by item, kind, index; 0 with the last error set on a refusal. (1.30)
+ *
+ * A NULL `out` with a nonzero `capacity`, a rectangle that is not finite, and an unknown
+ * `viewport` are refused. The rectangle is clipped to the viewport: one wholly off it answers 0
+ * with no error.
+ *
+ * Each hit's `kind` is a `CADACLYSM_VIEW_HIT_*`: a face (numbered as the pick numbers it), a
+ * node of an item with no face ranges, a lines item's segment or a curves item's Bezier, a
+ * kernel solid's or read scene's edge (its kernel edge index, as the pick's `segment`), or a
+ * point's or glyph's index. An exact item shown with no mesh has no triangles, so its faces
+ * are never in the answer (its edges are). On a lost device it answers 0 with no error: nothing
+ * the screen shows is current there, as `cadaclysm_view_pick_result` and
+ * `cadaclysm_view_snap_result` answer nothing. The render view library refuses it.
+ *
+ * `view` must be NULL or a live view; `out` NULL or `capacity` `CadaclysmViewRectHit`s.
+ */
+size_t cadaclysm_view_pick_rect(struct CadaclysmView *view,
+                                uint32_t viewport,
+                                float x,
+                                float y,
+                                float w,
+                                float h,
+                                bool crossing,
+                                struct CadaclysmViewRectHit *out,
+                                size_t capacity);
+
+/**
+ * Sets clip-plane slot `slot` (0..CADACLYSM_VIEW_CLIP_PLANES-1) (1.31): what lies on the side
+ * `plane->normal` points to is hidden, and where `cap`, the cut of every body is filled, hatched
+ * where `hatch`; 1.32: where `outline`, the cut is drawn as a line. NULL clears the slot. A
+ * point is drawn only where every set plane keeps it -- or, in a cutaway
+ * (`cadaclysm_view_set_clip_mode`), hidden only where every plane hides it. These are the
+ * view-wide planes: a viewport with planes of its own (`cadaclysm_view_set_viewport_clip_plane`)
+ * draws with those instead. Clips the mesh and exact surfaces, the edges, curves, lines, points
+ * and glyphs, the picks and the snaps; not the grid, text, images, overlays or the machining
+ * stock. Kept across uploads, removes and surface switches. No upload. False, changing nothing,
+ * with `cadaclysm_view_last_error` naming the call and the field, for a NULL view, a slot past
+ * the last, a `size` below the 1.31 struct's, a point or normal not finite, a zero normal, a
+ * colour component outside 0..1 (where read), a hatch without a cap, an angle not finite, a
+ * spacing negative or not finite, or a hatch or outline width negative, not finite or above
+ * 100 points. A 96-byte (1.31) struct draws no outline.
+ *
+ * The terminal library and render-view draw no clip planes: false for a plane, true for NULL.
+ *
+ * `view` must be NULL or a live view; `plane` NULL or a `CadaclysmViewClipPlane` of
+ * `plane->size` bytes.
+ */
+bool cadaclysm_view_set_clip_plane(struct CadaclysmView *view,
+                                   uint32_t slot,
+                                   const struct CadaclysmViewClipPlane *plane);
+
+/**
+ * Clip-plane slot `slot` (1.31), as set but with the normal of unit length and a zero hatch
+ * or outline width resolved to 1 (a zero spacing stays 0: automatic); `cap`, `hatch` and
+ * `outline` 0 or 1, and the fields of a cap, hatch or outline that is off zero. Fills `out` up
+ * to `out->size` bytes (a 96-byte struct gets no outline). False for a NULL view or `out`, a
+ * `size` below the 1.31 struct's, a slot past the last, or an empty slot.
+ *
+ * `view` must be NULL or a live view; `out` NULL or a `CadaclysmViewClipPlane` of
+ * `out->size` bytes.
+ */
+bool cadaclysm_view_clip_plane(const struct CadaclysmView *view,
+                               uint32_t slot,
+                               struct CadaclysmViewClipPlane *out);
+
+/**
+ * How the view-wide planes combine (1.32): `CADACLYSM_VIEW_CLIP_INTERSECTION` (the default:
+ * drawn where every plane keeps) or `CADACLYSM_VIEW_CLIP_CUTAWAY` (hidden only where every
+ * plane hides: two planes cut a quarter away). Kept as the planes are. False, changing
+ * nothing, for a NULL view or any other mode (INHERIT is a viewport's).
+ *
+ * The terminal library and render-view: true for INTERSECTION, false for CUTAWAY.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_clip_mode(struct CadaclysmView *view, uint32_t mode);
+
+/**
+ * The view-wide planes' mode (1.32); `CADACLYSM_VIEW_CLIP_INTERSECTION` for a NULL view.
+ *
+ * `view` must be NULL or a live view.
+ */
+uint32_t cadaclysm_view_clip_mode(const struct CadaclysmView *view);
+
+/**
+ * Sets slot `slot` of viewport `viewport`'s own clip set (1.32), as
+ * `cadaclysm_view_set_clip_plane` sets the view-wide one, in that viewport only: the first
+ * gives the viewport a set of its own (every other slot empty, mode intersection), which it
+ * then draws, picks and snaps with instead of the view-wide set. With no viewports set,
+ * viewport 0 is the window. Kept while the viewport index exists: `cadaclysm_view_set_viewports`
+ * with fewer drops the sets past the last; NULL viewports keep viewport 0's. False, changing
+ * nothing, for what `cadaclysm_view_set_clip_plane` refuses, a viewport past the last ("no
+ * viewport 3 (there are 2)") or past CADACLYSM_VIEW_CLIP_VIEWPORTS - 1.
+ *
+ * The terminal library and render-view: false for a plane, true for NULL.
+ *
+ * `view` must be NULL or a live view; `plane` NULL or a `CadaclysmViewClipPlane` of
+ * `plane->size` bytes.
+ */
+bool cadaclysm_view_set_viewport_clip_plane(struct CadaclysmView *view,
+                                            uint32_t viewport,
+                                            uint32_t slot,
+                                            const struct CadaclysmViewClipPlane *plane);
+
+/**
+ * Slot `slot` of viewport `viewport`'s own clip set (1.32), as `cadaclysm_view_clip_plane`
+ * answers the view-wide one. False also where the viewport has no set of its own (it draws
+ * with the view-wide planes: read those) or is past the last.
+ *
+ * `view` must be NULL or a live view; `out` NULL or a `CadaclysmViewClipPlane` of
+ * `out->size` bytes.
+ */
+bool cadaclysm_view_viewport_clip_plane(const struct CadaclysmView *view,
+                                        uint32_t viewport,
+                                        uint32_t slot,
+                                        struct CadaclysmViewClipPlane *out);
+
+/**
+ * Viewport `viewport`'s clip mode (1.32): INTERSECTION or CUTAWAY sets its own set's mode,
+ * giving it a set of its own if it had none (with no planes: that viewport is then not
+ * clipped while the others are); `CADACLYSM_VIEW_CLIP_INHERIT` drops its set, back to the
+ * view-wide one (true for any viewport below CADACLYSM_VIEW_CLIP_VIEWPORTS, set or not). False,
+ * changing nothing, for a NULL view, another mode, or a viewport as
+ * `cadaclysm_view_set_viewport_clip_plane` refuses one.
+ *
+ * The terminal library and render-view: true for INHERIT and INTERSECTION, false for CUTAWAY.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_viewport_clip_mode(struct CadaclysmView *view,
+                                           uint32_t viewport,
+                                           uint32_t mode);
+
+/**
+ * Viewport `viewport`'s clip mode (1.32): its own set's, or `CADACLYSM_VIEW_CLIP_INHERIT`
+ * where it has none (and for a NULL view or a viewport past the last).
+ *
+ * `view` must be NULL or a live view.
+ */
+uint32_t cadaclysm_view_viewport_clip_mode(const struct CadaclysmView *view, uint32_t viewport);
+
+/**
+ * One camera's picture, drawn offscreen (1.34): `camera` (any `CADACLYSM_VIEW_CAMERA_*` kind,
+ * read as `cadaclysm_view_set_viewport_camera` reads it; an orbit camera takes the view's up
+ * axis) over the whole `width` x `height` picture, as one viewport of that size would draw it
+ * -- the items on the user layers `layer_mask` takes (bit n for layer n; 0 is every layer, as
+ * a viewport's), the view's surfaces, lighting, x-ray, occlusion and colours -- with no grid,
+ * no snap marker, no overlays, no text on the screen and no viewport labels, cleared to
+ * `background` (three floats, 0..1; NULL: the view's own). Writes `width * height * 4` bytes,
+ * RGBA8, rows from the top. Synchronous: it waits for the GPU. The items shown since the
+ * last frame are uploaded first.
+ *
+ * Not a frame: no viewport, camera or size of the view changes, no frame is counted
+ * (`cadaclysm_view_stats`), nothing owed to the screen is cleared. The picture's size is
+ * its own, not the view's. False for a `width` or `height` outside 1 to the device's
+ * largest drawing size, a camera refused as `cadaclysm_view_set_viewport_camera` refuses it,
+ * a background not finite, `capacity` too small (the reason says how many bytes are
+ * needed), `rgba` NULL, or a lost device. The terminal and render view libraries refuse
+ * it: they draw only their own camera. The web View's `image` is the same picture.
+ *
+ * `view` must be NULL or a live view; `camera` NULL or a struct of `camera->size` bytes;
+ * `background` NULL or three readable floats; `rgba` NULL or `capacity` writable bytes.
+ */
+bool cadaclysm_view_image_of(struct CadaclysmView *view,
+                             const struct CadaclysmViewViewportCamera *camera,
+                             uint32_t width,
+                             uint32_t height,
+                             uint32_t layer_mask,
+                             const float *background,
+                             uint8_t *rgba,
+                             size_t capacity);
 
 #ifdef __cplusplus
 }  // extern "C"

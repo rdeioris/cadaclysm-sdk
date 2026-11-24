@@ -242,6 +242,46 @@ typedef enum CadaclysmMeshColors {
 } CadaclysmMeshColors;
 
 /**
+ * How a material's alpha is used: the values of [`CadaclysmMaterial::alpha_mode`].
+ */
+typedef enum CadaclysmAlphaMode {
+  /**
+   * Alpha is ignored: opaque.
+   */
+  CADACLYSM_ALPHA_OPAQUE = 0,
+  /**
+   * A fragment whose alpha is below [`CadaclysmMaterial::alpha_cutoff`] is not drawn.
+   */
+  CADACLYSM_ALPHA_MASK = 1,
+  /**
+   * Translucent by its alpha.
+   */
+  CADACLYSM_ALPHA_BLEND = 2,
+} CadaclysmAlphaMode;
+
+/**
+ * How a texture coordinate outside 0..1 reads the image: the values of
+ * [`CadaclysmMaterial::wrap_u`] and `wrap_v`.
+ */
+typedef enum CadaclysmWrap {
+  CADACLYSM_WRAP_REPEAT = 0,
+  CADACLYSM_WRAP_MIRRORED_REPEAT = 1,
+  CADACLYSM_WRAP_CLAMP_TO_EDGE = 2,
+} CadaclysmWrap;
+
+/**
+ * How an image is filtered: the values of [`CadaclysmMaterial::mag_filter`] and
+ * `min_filter`.
+ */
+typedef enum CadaclysmFilter {
+  /**
+   * Linear between texels (and between mip levels, minified).
+   */
+  CADACLYSM_FILTER_LINEAR = 0,
+  CADACLYSM_FILTER_NEAREST = 1,
+} CadaclysmFilter;
+
+/**
  * A [`cadaclysm::PairKind`] value, for [`cadaclysm_joint_pair_kind`]. Struct fields and
  * returns carry this as a `uint32_t` rather than the enum itself -- the module doc's
  * note on [`CadaclysmConvention`] gives the reason -- so this exists to be documented
@@ -630,10 +670,21 @@ typedef struct CadaclysmOpenOptions {
    * [`cadaclysm_open_options_init`] sets) is off; under 16 is taken as 16.
    * Independent of `uvs`. A B-rep body whose charts do not fit at this
    * resolution hands back null, and [`cadaclysm_geometry_diagnostic`] says so
-   * once the body is meshed. Last, so a caller built before it passes a struct
+   * once the body is meshed. Appended, so a caller built before it passes a struct
    * whose `size` stops short of it and is read as off.
    */
   uint32_t lightmap_resolution;
+  /**
+   * Recognize every B-rep body this scene hands out (`cadaclysm_node_brep`) at this
+   * tolerance: a NURBS, revolution, extrusion or sum face that is a plane, cylinder, cone,
+   * sphere or torus within it, and an edge curve that is a line, circle or ellipse, comes
+   * back as that exact shape -- what [`cadaclysm_brep_recognized`] does, done for every body
+   * on first ask and kept. Meshes are the reader's and unchanged. `0` (what
+   * [`cadaclysm_open_options_init`] sets) is off; `1e-6` is the usual ask. Negative, NaN
+   * or infinite is refused. Last, so a caller built before it passes a struct whose `size`
+   * stops short of it and is read as off.
+   */
+  double recognize_tolerance;
 } CadaclysmOpenOptions;
 
 /**
@@ -1220,6 +1271,81 @@ typedef struct CadaclysmWindow {
   void *handle;
   void *display;
 } CadaclysmWindow;
+
+/**
+ * A PBR metallic-roughness material, as glTF 2.0 defines one -- see
+ * [`cadaclysm_node_material`].
+ *
+ * `base_color` is the base colour factor, RGBA, in **linear** light (glTF's own space):
+ * the texel, decoded from sRGB, is multiplied by it. The part's colour
+ * ([`cadaclysm_node_color`]) is the same factor in display space, which is what a caller
+ * drawing no texture draws.
+ *
+ * `base_color_image` is the image the base colour texture reads ([`cadaclysm_image`]),
+ * or [`CADACLYSM_NONE`] for an untextured material (and for a texture whose image this
+ * library does not read, such as AVIF: it falls back to the factor). The texture reads
+ * texture coordinates set `base_color_uv_set` (0 the mesh's `uvs`, 1 its lightmap
+ * coordinates, [`cadaclysm_node_mesh_lightmap_uvs`]) through `KHR_texture_transform`:
+ * `uv' = offset + R(rotation) * (scale * uv)`, `R` the extension's
+ * `[cos, sin; -sin, cos]`; the identity is offset 0, rotation 0, scale 1.
+ */
+typedef struct CadaclysmMaterial {
+  /**
+   * The material's name, never null (empty where unnamed). Borrowed from the scene.
+   */
+  const char *name;
+  float base_color[4];
+  float metallic;
+  float roughness;
+  /**
+   * A [`CadaclysmAlphaMode`].
+   */
+  uint32_t alpha_mode;
+  /**
+   * The mask's threshold; 0.5 where the file gave none. Meaningful under
+   * `CADACLYSM_ALPHA_MASK` only.
+   */
+  float alpha_cutoff;
+  /**
+   * Whether the back is drawn as well as the front.
+   */
+  bool double_sided;
+  uint32_t base_color_image;
+  uint32_t base_color_uv_set;
+  float uv_offset[2];
+  float uv_rotation;
+  float uv_scale[2];
+  /**
+   * [`CadaclysmWrap`]s.
+   */
+  uint32_t wrap_u;
+  uint32_t wrap_v;
+  /**
+   * [`CadaclysmFilter`]s.
+   */
+  uint32_t mag_filter;
+  uint32_t min_filter;
+} CadaclysmMaterial;
+
+/**
+ * An image a material names, **encoded** as the file held it -- see [`cadaclysm_image`].
+ */
+typedef struct CadaclysmImage {
+  /**
+   * The encoded bytes (PNG, JPEG, WebP or KTX2), `size` of them. Borrowed from the scene.
+   */
+  const uint8_t *bytes;
+  size_t size;
+  /**
+   * `"image/png"` or `"image/jpeg"`; for an image this library does not read, what the
+   * file declared (and `size` 0 where it could not be read at all). Never null.
+   */
+  const char *mime;
+  /**
+   * The image's name in the file, never null (empty where unnamed).
+   */
+  const char *name;
+} CadaclysmImage;
 
 /**
  * How a drawing is made: the camera in the viewer's words, the page, the
@@ -3991,7 +4117,7 @@ void cadaclysm_cancel(const struct CadaclysmScene *scene);
 /**
  * Write the whole scene -- every placement of every shape, named and placed
  * as the document's tree is, with a material per colour -- to `path` as glTF,
- * OBJ, OpenUSD, an OCCT `.brep` or a Rhino `.3dm`. False on failure, with
+ * OBJ, OpenUSD, 3MF, PLY, an OCCT `.brep` or a Rhino `.3dm`. False on failure, with
  * [`cadaclysm_last_error`] saying why.
  *
  * `format` is `"glb"` (binary, one file), `"gltf"` (JSON with the vertex
@@ -4002,7 +4128,13 @@ void cadaclysm_cancel(const struct CadaclysmScene *scene);
  * world matrix, a `UsdPreviewSurface` per colour, and a node's MaterialX or MDL
  * material (its `ExternalStyle.*` or `MaterialReference.*` properties) bound in
  * its own format -- `cadaclysm_usd` says exactly what it carries. The layer's
- * `upAxis` and `metersPerUnit` are the space the scene was opened into. These hold a scene where the
+ * `upAxis` and `metersPerUnit` are the space the scene was opened into.
+ * `"3mf"` is a 3MF package: each shape an object once, every placement a
+ * build item with its world matrix, a colour per object from the placing
+ * node or its shape (`cadaclysm_3mf::to_document_3mf_with`). `"ply"` (binary
+ * little-endian) and `"ply-ascii"` write PLY, which has no tree: every
+ * placement baked through its world matrix into one body, a colour a vertex
+ * where anything has one (`cadaclysm_ply::to_document_ply_with`). These hold a scene where the
  * [`cadaclysm_mesh_format`] rows write one node's mesh; the same names there
  * are the one-mesh forms. `"brep"` writes what the readers kept of the exact
  * geometry rather than the mesh: every face's surface whole, bounded by the
@@ -4200,6 +4332,44 @@ const char *cadaclysm_pick_file(const struct CadaclysmWindow *parent);
  * null-terminated C string. Neither is read when this build has no picker.
  */
 const char *cadaclysm_pick_save(const struct CadaclysmWindow *parent, const char *suggested_name);
+
+/**
+ * A part's PBR material, written to `out`: true where it has one, false (and `out`
+ * untouched) where it has none, which is every part of every format but glTF.
+ *
+ * Asked of a part or of a placement of it, as [`cadaclysm_node_color`] is: the node's
+ * own material, else its shape's. Unchanged by the scene's convention: a material holds
+ * no length.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out` null (only the answer
+ * is wanted) or writable. `out->name` borrows from the scene.
+ */
+bool cadaclysm_node_material(const struct CadaclysmScene *scene,
+                             uint32_t node,
+                             struct CadaclysmMaterial *out);
+
+/**
+ * How many images the scene's materials name: valid indices for [`cadaclysm_image`] are
+ * `0..count`. Zero for every format but glTF, and for a null scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_image_count(const struct CadaclysmScene *scene);
+
+/**
+ * Image `image`, written to `out`: its encoded bytes, MIME type and name. False past the
+ * last one (`out` untouched). The bytes are as the file held them -- this library decodes
+ * nothing; the View decodes PNG, JPEG, WebP and KTX2 (Basis Universal) itself.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out` null or writable. Every
+ * pointer written borrows from the scene.
+ */
+bool cadaclysm_image(const struct CadaclysmScene *scene,
+                     uint32_t image,
+                     struct CadaclysmImage *out);
 
 /**
  * Load a license from `text_or_path`: the certificate text itself, or the

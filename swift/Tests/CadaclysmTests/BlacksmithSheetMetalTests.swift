@@ -132,6 +132,30 @@ final class BlacksmithSheetMetalTests: XCTestCase {
         XCTAssertTrue(refusal { _ = try Solid.sphere(5).unroll() }?.hasPrefix("unroll: ") ?? false)
     }
 
+    func testRopeAndDoubleHems() throws {
+        let rule = SheetRule(1.0)
+        let plate = try Solid.sheetBase(try Profile.rect(60, 40), rule)
+        let top = try face(plate, facing: [0, 0, 1], atZ: 0)
+        let edge = try XCTUnwrap(try plate.edges.first { $0.faces.contains(top) })
+        let rope = try plate.sheetHem([edge], .rope, 0, rule, gap: 2)
+        XCTAssertEqual(try rope.sheetInfo().bends.count, 2, "a rope hem's curl in two halves")
+        let twice = try plate.sheetHem([edge], .double, 8, rule)
+        XCTAssertEqual(try twice.sheetInfo().bends.count, 2)
+    }
+
+    func testALoftedFlangeUnfolds() throws {
+        let rule = SheetRule(1.0)
+        let bottom: [SIMD3<Double>] = [[-10, -10, 0], [10, -10, 0], [10, 10, 0], [-10, 10, 0]]
+        let top: [SIMD3<Double>] = [[-15, -15, 20], [15, -15, 20], [15, 15, 20], [-15, 15, 20]]
+        let hopper = try Solid.sheetLoftedFlange(bottom, top, rule)
+        let info = try hopper.sheetInfo()
+        XCTAssertEqual(info.bends.count, 2)
+        let flat = try hopper.flatPattern(info.fixedFace, rule)
+        let again = try Solid.foldFlat(try flat.profile, flat.foldBends, rule, frame: flat.frame)
+        XCTAssertEqual(try volume(again), try volume(hopper), accuracy: 1e-6 * (try volume(hopper)))
+        XCTAssertTrue(refusal { _ = try Solid.sheetLoftedFlange([[0, 0, 0]], top, rule) }?.hasPrefix("sheet_lofted_flange: ") ?? false)
+    }
+
     func testRipsJoinsAndCornerBreaks() throws {
         let rule = SheetRule(1.0)
         let plate = try Solid.sheetBase(try Profile.rect(60, 40), rule)
@@ -155,3 +179,4 @@ final class BlacksmithSheetMetalTests: XCTestCase {
         XCTAssertTrue(refusal { _ = try plate.sheetJoin(e, e, rule) }?.hasPrefix("sheet_join: ") ?? false)
     }
 }
+

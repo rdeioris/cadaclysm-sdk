@@ -181,6 +181,8 @@ const CadaclysmOpenOptions = koffi.struct('CadaclysmOpenOptions', {
   pick: 'CadaclysmPick *',
   pick_user: 'void *',
   lightmap_resolution: 'uint32_t',
+  // Declared because init writes it; exposed on `open` in the next change.
+  recognize_tolerance: 'double',
 });
 const CadaclysmBounds = koffi.struct('CadaclysmBounds', {
   min: koffi.array('float', 3),
@@ -241,6 +243,30 @@ const CadaclysmCollisionHull = koffi.struct('CadaclysmCollisionHull', {
   indices: 'const uint32_t *',
   vertex_count: 'uint32_t',
   index_count: 'uint32_t',
+});
+const CadaclysmMaterial = koffi.struct('CadaclysmMaterial', {
+  name: 'const char *',
+  base_color: koffi.array('float', 4),
+  metallic: 'float',
+  roughness: 'float',
+  alpha_mode: 'uint32_t',
+  alpha_cutoff: 'float',
+  double_sided: 'bool',
+  base_color_image: 'uint32_t',
+  base_color_uv_set: 'uint32_t',
+  uv_offset: koffi.array('float', 2),
+  uv_rotation: 'float',
+  uv_scale: koffi.array('float', 2),
+  wrap_u: 'uint32_t',
+  wrap_v: 'uint32_t',
+  mag_filter: 'uint32_t',
+  min_filter: 'uint32_t',
+});
+const CadaclysmImage = koffi.struct('CadaclysmImage', {
+  bytes: 'const uint8_t *',
+  size: 'size_t',
+  mime: 'const char *',
+  name: 'const char *',
 });
 const CadaclysmPolylines = koffi.struct('CadaclysmPolylines', {
   positions: 'const float *',
@@ -511,6 +537,9 @@ function _lib() {
     node_kind: f('const char *cadaclysm_node_kind(const CadaclysmScene *scene, uint32_t node)'),
     node_id: f('const char *cadaclysm_node_id(const CadaclysmScene *scene, uint32_t node)'),
     node_color: f('bool cadaclysm_node_color(const CadaclysmScene *scene, uint32_t node, _Out_ float *rgba)'),
+    node_material: f('bool cadaclysm_node_material(const CadaclysmScene *scene, uint32_t node, _Out_ CadaclysmMaterial *out)'),
+    image_count: f('uint32_t cadaclysm_image_count(const CadaclysmScene *scene)'),
+    image: f('bool cadaclysm_image(const CadaclysmScene *scene, uint32_t index, _Out_ CadaclysmImage *out)'),
     node_transform: f('void cadaclysm_node_transform(const CadaclysmScene *scene, uint32_t node, _Out_ double *out)'),
     placement_count: f('uint32_t cadaclysm_placement_count(const CadaclysmScene *scene)'),
     placement_geometry: f('uint32_t cadaclysm_placement_geometry(const CadaclysmScene *scene, uint32_t placement)'),
@@ -1061,6 +1090,48 @@ class Collision {
   }
   /** 0 none, 1 box, 2 sphere, 3 capsule, 4 cylinder, 5 hull. */
   get shapeName() { return ['none', 'box', 'sphere', 'capsule', 'cylinder', 'hull'][this.shape] ?? String(this.shape); }
+}
+
+/**
+ * A part's PBR metallic-roughness material, as glTF 2.0 defines one (`Node.material`). Plain
+ * data, copied out. `baseColor` is the base colour factor, RGBA in **linear** light (glTF's own
+ * space; the node's `color` is the same factor in display space); `baseColorImage` the
+ * `Scene.image` index its base colour texture reads, or null for an untextured material. The
+ * texture reads texture coordinates set `baseColorUvSet` (0 the mesh's `uvs`) through
+ * `KHR_texture_transform`: `uvOffset`, `uvRotation` (radians), `uvScale`. `alphaMode` is
+ * 'opaque', 'mask' (cut below `alphaCutoff`) or 'blend'; `wrapU`/`wrapV` 'repeat',
+ * 'mirrored_repeat' or 'clamp_to_edge'; `magFilter`/`minFilter` 'linear' or 'nearest'.
+ */
+class Material {
+  constructor(raw) {
+    const named = (table, value) => table[value] ?? String(value);
+    this.name = _text(raw.name);
+    this.baseColor = Array.from(raw.base_color);
+    this.metallic = raw.metallic; this.roughness = raw.roughness;
+    this.alphaMode = named(['opaque', 'mask', 'blend'], raw.alpha_mode);
+    this.alphaCutoff = raw.alpha_cutoff;
+    this.doubleSided = Boolean(raw.double_sided);
+    this.baseColorImage = raw.base_color_image === NONE ? null : raw.base_color_image;
+    this.baseColorUvSet = raw.base_color_uv_set;
+    this.uvOffset = Array.from(raw.uv_offset);
+    this.uvRotation = raw.uv_rotation;
+    this.uvScale = Array.from(raw.uv_scale);
+    const wrap = ['repeat', 'mirrored_repeat', 'clamp_to_edge'], filter = ['linear', 'nearest'];
+    this.wrapU = named(wrap, raw.wrap_u); this.wrapV = named(wrap, raw.wrap_v);
+    this.magFilter = named(filter, raw.mag_filter); this.minFilter = named(filter, raw.min_filter);
+  }
+}
+
+/** An image a material names (`Scene.image`), **encoded** as the file held it: `data` the PNG or
+ *  JPEG bytes (a `Buffer`, copied out), `mime` 'image/png' or 'image/jpeg' (for an image the
+ *  library does not read, what the file declared), `name` its name in the file. */
+class Image {
+  constructor(raw) {
+    const size = Number(raw.size);
+    this.data = raw.bytes && size > 0 ? Buffer.from(koffi.decode(raw.bytes, 'uint8_t', size)) : Buffer.alloc(0);
+    this.mime = _text(raw.mime);
+    this.name = _text(raw.name);
+  }
 }
 
 class CollisionHull {
@@ -2210,6 +2281,12 @@ class Node {
     const rgba = new Float32Array(4);
     return _lib().node_color(this.scene._handle, this.index, rgba) ? Array.from(rgba) : null;
   }
+  /** This part's PBR material (a glTF primitive's; the node's own, else its shape's), or null --
+   *  every part of every other format. */
+  get material() {
+    const out = {};
+    return _lib().node_material(this.scene._handle, this.index, out) ? new Material(out) : null;
+  }
   /** Builds the geometry if it has not been built. */
   get bounds() { const b = _lib().node_bounds(this.scene._handle, this.index); return new Bounds(b.min, b.max); }
   /** `bounds` in `double`: the same extent, unnarrowed -- exact far from the origin. */
@@ -2616,6 +2693,18 @@ class Scene {
     return new Node(this, index);
   }
   nodes() { const out = []; for (let i = 0, n = this.nodeCount; i < n; i++) out.push(new Node(this, i)); return out; }
+  // -- images --
+  /** How many images the scene's materials name (`image`); 0 for every format but glTF. */
+  get imageCount() { return _lib().image_count(this._handle); }
+  /** Image `index` (0 to `imageCount - 1`), encoded as the file held it -- the `baseColorImage`
+   *  a `Material` names. Throws `CadaclysmError` past the last, as `node` does. */
+  image(index) {
+    const out = {};
+    if (!(Number.isInteger(index) && index >= 0 && index <= NONE && _lib().image(this._handle, index, out))) {
+      throw new CadaclysmError(`image ${index} of ${this.imageCount}`);
+    }
+    return new Image(out);
+  }
   _nodeOrNone(index) { return index === NONE ? null : new Node(this, index); }
   roots() {
     const l = _lib(); const h = this._handle; const out = [];
@@ -3162,8 +3251,9 @@ function resolveSchema(model, schema) {
   return { chosen: null, fallbacks: available };
 }
 
-/** A `CadaclysmOpenOptions` object from `{ schema, convention, colors, sourceMetersPerUnit, lightmapResolution }`. */
-function _options({ schema = null, convention = Convention.NATIVE, colors = false, sourceMetersPerUnit = 0, lightmapResolution = 0 } = {}) {
+/** A `CadaclysmOpenOptions` object from `{ schema, convention, colors, sourceMetersPerUnit, lightmapResolution, recognizeTolerance }`. */
+function _options({ schema = null, convention = Convention.NATIVE, colors = false, sourceMetersPerUnit = 0, lightmapResolution = 0,
+  recognizeTolerance = 0 } = {}) {
   const texels = Number(lightmapResolution);
   if (!Number.isInteger(texels) || texels < 0 || texels > 0xFFFFFFFF) {
     throw new RangeError(`lightmapResolution must be 0 (off) or a texel count in 32 bits, not ${lightmapResolution}`);
@@ -3177,6 +3267,8 @@ function _options({ schema = null, convention = Convention.NATIVE, colors = fals
   o.colors = colors ? 1 : 0;
   o.source_meters_per_unit = Number(sourceMetersPerUnit);
   o.lightmap_resolution = texels;
+  // Not checked here: the library refuses a negative, NaN or infinite tolerance by name.
+  o.recognize_tolerance = Number(recognizeTolerance);
   if (schema != null) { o.schemas = [String(schema)]; o.schema_count = 1; }
   return o;
 }
@@ -3205,7 +3297,9 @@ function _openRaw(filePath, options = {}) {
  * Open a CAD file. `options`: `schema` (an `.exp` file or a directory of them,
  * matched against what the file declares), `convention` (a `Convention`,
  * OR'd with `FILE_UNITS`/`UV_WORLD`), `colors`, `sourceMetersPerUnit`,
- * `lightmapResolution` (0 = off; else read `Node.lightmapUvs`).
+ * `lightmapResolution` (0 = off; else read `Node.lightmapUvs`),
+ * `recognizeTolerance` (0 = off; else every `Node.brep` comes back recognized
+ * at that tolerance, as `Brep.recognize` would; 1e-6 is the usual ask).
  * Throws `CadaclysmError` with the library's reason; never returns null.
  */
 function open(filePath, options = {}) {
@@ -3273,7 +3367,7 @@ module.exports = {
   _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage, _libraryNames: libraryNames,
   Bounds, Bounds64, Attribute, Brep, HealthReport, FreeEdge, FreeWire, SmallFeature, Cracks, HealReport, HealFix, HealRefusal,
   _healthReport, _healReport, _healFlags, RecognizeReport, RecognizedFace, RecognizeRefusal, RecognizedEdge, _recognizeReport, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Segment, Sequence, ElementState, TaskTime, TaskLink, Task, WorkSchedule, Recurrence, WorkTime, WorkCalendar, Pose, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
-  Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
+  Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Material, Image, Meshlets, pickFile, pickSave,
   FemMesh, FemEdge, FemVertex,
   _meshOf, _mesh64Of, _polylinesOf, _beziersOf, _beziers64Of, _surfacesOf, _svgOptions,
   _femEdgeOf, _femVertexOf, _censusRows, _femOptions,
