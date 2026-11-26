@@ -41,6 +41,8 @@ pub use text::{Align, Text, TextMode};
 pub use overlay::{Anchor, Overlay, OverlayStyle};
 pub use target::{RawWindow, WindowKind};
 pub use control::{Button, ClipMode, ClipPlane, Event, EventKind, Grid, CLIP_PLANES, HitKind, Image, Input, Layer, LineColour, Lod, LodMotion, Modifiers, OccludedStyle, Pointer, PointerPhase, RectHit, Shot, Snap, SnapKind, SnapLabel, Standard, Stats, ViewEvent, Viewport, WorkPlane};
+#[cfg(target_arch = "wasm32")]
+pub use control::Picture;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::ffi::OsString;

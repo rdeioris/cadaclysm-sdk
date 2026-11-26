@@ -10,6 +10,25 @@ minor release may change the API).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-25
+
+### Added
+
+- Pictures for a headset from a Web Worker: the Rust SDK's `View::picture_of(&Shot)` and `View::pictures_of(&[Shot])`, and the web View's `picture(options)`, draw one or more fixed cameras side by side into one transferable `ImageBitmap` with each shot's rect in it. On WebGPU the shots are drawn into a canvas of the View's own and handed over with no readback (two 2198 x 2304 eyes in about 15 ms on a desktop GPU, against about 240 ms through `image_of`); on WebGL2 they are read back as `image_of`'s. The shots share one background and are anti-aliased under `Style::anti_alias`. `Worker::post_with_transfer` and `PageWorker::post_with_transfer` post a message with a transfer list, so the bitmap reaches the page without a copy. No C ABI change.
+- A headset drawn straight into its own textures: the View's `draw_into` (cadaclysm-view) and the web View's `drawXR`, with `View.create({ xr })`, `gpuDevice()` (for an `XRGPUBinding`) and `pauseCanvas`, which keeps the loop stepping but draws nothing on the canvas. On a Quest 2 a scene runs at 90 fps at full resolution.
+- `xr.js` (with `xr.d.ts`) in every web folder with the viewer: `XRDirect` runs a WebXR session that draws each eye straight into the headset's textures; `XRPresenter` runs one on the page's thread, asks a worker for each frame's eyes, and blits the answer turned for the head's rotation since it was asked for.
+
+### Changed
+
+- Texture mipmaps are made by halving 2x2 blocks: a large texture's mip chain on a Quest 2 went from 7.3 s to about 1 s.
+- The solid mesh pipelines no longer discard fragments, so mobile GPUs keep their early depth test.
+
+### Fixed
+
+- Booleans and intersections between bilinear patches find the edge two faces share again when it lies on a face's clamped rim; 0.16.0 found nothing along it and reported a piece near the trim (a varying chamfer, for one).
+- Drawing pictures no longer makes a new depth buffer and background gradient on every call: a headset session on the web leaked about 1 GB a second.
+- The web build no longer calls the deprecated `Object.hasOwnProperty` binding.
+
 ## [0.16.0] - 2026-11-24
 
 ### Added
